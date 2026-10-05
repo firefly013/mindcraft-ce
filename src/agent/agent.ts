@@ -3,7 +3,7 @@ import type { HistorySaveData } from './history.js';
 import { VisionInterpreter } from './vision/vision_interpreter.js';
 import { Prompter } from '../models/prompter.js';
 import { initBot } from '../utils/mcdata.js';
-import { executeToolCall, getOpenAITools, isActionTool, validateToolCall, formatSay } from './commands/to_openai_tools.js';
+import { executeToolCall, getOpenAITools, isActionTool, validateToolCall, validateUpdatePlan, formatSay } from './commands/to_openai_tools.js';
 import { stopPvp, consume } from './library/skills.js';
 import pf from 'mineflayer-pathfinder';
 import { isHostile } from '../utils/mcdata.js';
@@ -15,6 +15,7 @@ import type { LoopModelResponse, LoopRunner, LoopToolResult } from './loop.js';
 import { sampleLiveState, renderLiveState } from './live_state.js';
 import { runEmergency, shouldTriggerEmergency, FOOD_VALUE } from './emergency.js';
 import type { ThreatEntity } from './emergency.js';
+import { PlanStore } from './plan.js';
 import { createEdgeWatcher, resolvePriority, schedulerLevelFor, snapshotFromBot } from './edges.js';
 import { createRequestLog } from './requestLog.js';
 import type { RequestLog } from './requestLog.js';
@@ -52,6 +53,7 @@ export class Agent {
     scheduler!: Scheduler;
     loop!: AgentLoop;
     loopLog: Array<{ kind: string; level: number; payload: unknown }> = [];
+    plan: PlanStore = new PlanStore();
     edgeWatcher: EdgeWatcher | null = null;
     requestLog: RequestLog | null = null;
     toolHandlers = new Map<string, (args: unknown) => Promise<LoopToolResult>>();
@@ -316,6 +318,23 @@ export class Agent {
             this.routeResponse(this.currentSource, shaped.line);
             return Promise.resolve({ status: 'completed', data: shaped.full } as LoopToolResult);
         });
+        // UpdatePlan：模型自己写计划，整单替换进存储，下一轮快照即见。
+        this.toolHandlers.set('UpdatePlan', (args: unknown) => {
+            const checked = validateUpdatePlan(args);
+            if (!checked.ok) {
+                return Promise.resolve({
+                    status: 'rejected',
+                    code: checked.code ?? 'BAD_ARGS',
+                    reason: checked.errors?.join('; ') ?? 'Bad arguments.',
+                } as LoopToolResult);
+            }
+            const a = (args ?? {}) as { goal?: string | null; todos?: string[] | null };
+            const snap = this.plan.update(a.goal, a.todos);
+            const summary =
+                `Plan updated. Goal: ${snap.goal ?? 'none'}. ` +
+                `Todos: ${snap.todos.length > 0 ? snap.todos.join('; ') : 'none'}.`;
+            return Promise.resolve({ status: 'completed', data: summary } as LoopToolResult);
+        });
     }
 
     /** 全部停下：动作停、日志清、续跑取消、回到 idle。 */
@@ -370,11 +389,12 @@ export class Agent {
     /** 每轮现采 Live State（原文给模型层，由它追加在消息列最后）。 */
     private assembleContext(): { text: string; tools: unknown } {
         const task = this.task as { goal?: unknown } | null;
+        const plan = this.plan.snapshot();
         const live = sampleLiveState({
             bot: this.bot,
             vision: this.vision_interpreter,
-            goal: typeof task?.goal === 'string' ? task.goal : null,
-            todos: [],
+            goal: plan.goal ?? (typeof task?.goal === 'string' ? task.goal : null),
+            todos: plan.todos,
             currentAction: this.actions.currentActionLabel,
         });
         const text = renderLiveState(live);

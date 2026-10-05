@@ -236,6 +236,10 @@ export const TOOL_TEXT: Record<string, { description: string; params: Record<str
     description: '在游戏公聊里说一句话，玩家能直接看到。想让玩家听见什么就调它；模型正文不会自动发出，说话必须走这个工具。超长会被截断，空话会被拒绝。',
     params: { text: '要说的话。' },
   },
+  UpdatePlan: {
+    description: '更新你自己的计划：当前目标和待办清单。整单替换，不传的字段不动，目标传空串表示清空。计划会出现在每轮的世界快照里。',
+    params: { goal: '当前目标，空串清空。', todos: '待办清单（整单替换）。' },
+  },
 };
 
 /** 取工具描述 */

@@ -3,7 +3,7 @@
  * Stop/Finish 是控制信号，不占通道。
  */
 import { describe, expect, it } from 'vitest';
-import { isActionTool, stripBang, toolExists, validateToolCall, formatSay, getOpenAITools } from '../src/agent/commands/to_openai_tools.js';
+import { isActionTool, stripBang, toolExists, validateToolCall, validateUpdatePlan, formatSay, getOpenAITools } from '../src/agent/commands/to_openai_tools.js';
 
 describe('isActionTool', () => {
   it('action tools claim the body channel', () => {
@@ -95,5 +95,18 @@ describe('Say isolation', () => {
     const names = tools.map((t) => t.function.name);
     expect(names).toContain('Say');
     expect(names).toContain('Finish');
+  });
+
+  it('UpdatePlan is a control tool with whole-replace shape', () => {
+    expect(toolExists('UpdatePlan')).toBe(true);
+    expect(isActionTool('UpdatePlan')).toBe(false);
+    expect(validateToolCall('UpdatePlan', { goal: 'build', todos: ['wood'] }).ok).toBe(true);
+    expect(validateToolCall('UpdatePlan', {}).ok).toBe(true);
+    expect(validateUpdatePlan({ goal: 42 }).ok).toBe(false);
+    expect(validateUpdatePlan({ todos: 'wood' }).ok).toBe(false);
+    expect(validateUpdatePlan({ todos: ['wood', 7] }).ok).toBe(false);
+    expect(validateUpdatePlan({ nope: 1 }).ok).toBe(false);
+    const tools = getOpenAITools({ blocked_actions: [] });
+    expect(tools.map((t) => t.function.name)).toContain('UpdatePlan');
   });
 });

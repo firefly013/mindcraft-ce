@@ -92,6 +92,22 @@ export function getOpenAITools(agent: any): OpenAITool[] {
             },
         },
     });
+    tools.push({
+        type: 'function',
+        function: {
+            name: 'UpdatePlan',
+            description: td('UpdatePlan'),
+            parameters: {
+                type: 'object',
+                properties: {
+                    goal: { type: 'string', description: tp('UpdatePlan', 'goal') },
+                    todos: { type: 'array', items: { type: 'string' }, description: tp('UpdatePlan', 'todos') },
+                },
+                required: [],
+                additionalProperties: false,
+            },
+        },
+    });
     return tools;
 }
 
@@ -116,9 +132,31 @@ export async function executeToolCall(agent: any, toolName: string, args: Record
     }
 }
 
+/** UpdatePlan 形状校验：goal 可选字符串，todos 可选字符串数组（整单替换）。 */
+export function validateUpdatePlan(args: unknown): ToolValidation {
+    if (args == null || typeof args !== 'object' || Array.isArray(args)) {
+        return { ok: false, code: 'BAD_ARGS', errors: ['$: expected object'] };
+    }
+    const given = args as Record<string, unknown>;
+    const errors: string[] = [];
+    for (const key of Object.keys(given)) {
+        if (key !== 'goal' && key !== 'todos') errors.push(`$: unknown property '${key}'`);
+    }
+    if (given['goal'] !== undefined && given['goal'] !== null && typeof given['goal'] !== 'string') {
+        errors.push('$.goal: expected string');
+    }
+    if (given['todos'] !== undefined && given['todos'] !== null) {
+        if (!Array.isArray(given['todos']) || !(given['todos'] as unknown[]).every((t) => typeof t === 'string')) {
+            errors.push('$.todos: expected string[]');
+        }
+    }
+    if (errors.length > 0) return { ok: false, code: 'BAD_ARGS', errors };
+    return { ok: true };
+}
+
 /** 兼容检查：tool 名是否存在（不带 ! 也行） */
 export function toolExists(toolName: string): boolean {
-    if (toolName === 'Finish' || toolName === 'Stop' || toolName === 'Say') return true;
+    if (CONTROL_TOOLS.has(toolName)) return true;
     const commandName = toolName.startsWith('!') ? toolName : '!' + toolName;
     return commandMap[commandName] !== undefined;
 }
@@ -152,6 +190,7 @@ function checkParamType(type: string, value: unknown, path: string): string | nu
  */
 export function validateToolCall(toolName: string, args: unknown): ToolValidation {
     if (toolName === 'Finish' || toolName === 'Stop' || toolName === 'Say') return { ok: true };
+    if (toolName === 'UpdatePlan') return validateUpdatePlan(args);
     const commandName = toolName.startsWith('!') ? toolName : '!' + toolName;
     const command = commandMap[commandName];
     if (!command) return { ok: false, code: 'UNKNOWN_TOOL', errors: [`No such tool: ${toolName}.`] };
@@ -180,8 +219,8 @@ export function validateToolCall(toolName: string, args: unknown): ToolValidatio
 
 const actionNames = new Set(actionsList.map((c) => stripBang(c.name)));
 
-/** 控制类工具（循环/说话），走注册 handler，不占身体通道。 */
-const CONTROL_TOOLS = new Set(['Finish', 'Stop', 'Say']);
+/** 控制类工具（循环/说话/计划），走注册 handler，不占身体通道。 */
+const CONTROL_TOOLS = new Set(['Finish', 'Stop', 'Say', 'UpdatePlan']);
 
 /**
  * 该工具是否占用身体动作通道。动作类工具一次只能跑一个
