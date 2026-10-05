@@ -454,10 +454,10 @@ export interface SnapshotExtra {
  * 从 mineflayer bot 现拼边沿快照。全部防御性读取；读不到的
  * 保持 undefined（检测器把缺值当"没触发"，不瞎报）。
  *
- * 诚实缺口（host 还没接传感）：onFire、fallLethal、trapped、
- * belowVoid、nextIsLava ——对应 L5 检测器平时静默，等 host
- * 补上传感再亮。溺水走氧气+水 flag；虚空目前靠死亡事件
- * 重规划兜底。
+ * 诚实缺口（host 还没接传感）：onFire（着火读实体元数据，
+ * 版本相关，先空着）、trapped（被围困要结合移动史，轮询层
+ * 以后再做）——对应 L5 检测器平时静默，等补上传感再亮。
+ * belowVoid/fallLethal/nextIsLava 已从位置/朝向算出来。
  */
 export function snapshotFromBot(bot: unknown, extra: SnapshotExtra = {}): EdgeSnapshot {
   const snap: EdgeSnapshot = {};
@@ -535,6 +535,25 @@ export function snapshotFromBot(bot: unknown, extra: SnapshotExtra = {}): EdgeSn
         snap.inWater = feetName === 'water' ? true : undefined;
         const biome = feetBlock['biome'] as { name?: unknown } | string | null | undefined;
         snap.biome = typeof biome === 'string' ? biome : strOf(biome?.name);
+
+        // 虚空：主世界/末地掉到 -60 以下就是往虚空里掉（下界没虚空，到不了）。
+        const feetY = num(pos.y);
+        snap.belowVoid = feetY != null && feetY < -60 ? true : undefined;
+
+        // 高坠：下落距离 8 格以上视为致命风险（保守，含摔残；无保护假设）。
+        const fallDistance = num((entity as { fallDistance?: unknown }).fallDistance);
+        snap.fallLethal = fallDistance != null && fallDistance >= 8 ? true : undefined;
+
+        // 前方岩浆：移动方向上两格内脚下是岩浆。
+        const yaw = num((entity as { yaw?: unknown }).yaw);
+        if (yaw != null && snap.moving === true) {
+          const ahead = at({
+            x: Math.floor(feet.x - Math.sin((yaw * Math.PI) / 180) * 2),
+            y: feet.y,
+            z: Math.floor(feet.z + Math.cos((yaw * Math.PI) / 180) * 2),
+          });
+          snap.nextIsLava = ahead['name'] === 'lava' ? true : undefined;
+        }
       }
     } catch {
       // 环境读不到就空着。

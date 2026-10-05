@@ -5,7 +5,7 @@ import { mkdtempSync, readFileSync, readdirSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import { describe, expect, it } from 'vitest';
-import { snapshotFromBot } from '../src/agent/edges.js';
+import { snapshotFromBot, createEdgeWatcher } from '../src/agent/edges.js';
 import { createRequestLog } from '../src/agent/requestLog.js';
 
 function stubBot(overrides: Record<string, unknown> = {}): Record<string, unknown> {
@@ -69,6 +69,45 @@ describe('snapshotFromBot', () => {
     expect(s.isNight).toBe(true);
     expect(s.inLava).toBe(true);
     expect(s.light).toBeUndefined();
+  });
+
+  it('computes void, lethal fall and lava-ahead from position and facing', () => {
+    // 脚下 -70：虚空。
+    expect(snapshotFromBot(stubBot({ entity: { position: { x: 0, y: -70, z: 0 } } })).belowVoid).toBe(true);
+    expect(snapshotFromBot(stubBot()).belowVoid).toBeUndefined();
+
+    // 下落 8 格以上：致命风险；3 格：不算。
+    const falling = (d: number): Record<string, unknown> =>
+      stubBot({ entity: { position: { x: 0, y: 64, z: 0 }, fallDistance: d } });
+    expect(snapshotFromBot(falling(9)).fallLethal).toBe(true);
+    expect(snapshotFromBot(falling(3)).fallLethal).toBeUndefined();
+
+    // 朝南（yaw=0）移动，前方两格是岩浆。
+    const s = snapshotFromBot(
+      stubBot({
+        entity: {
+          position: { x: 0, y: 64, z: 0 },
+          velocity: { x: 0, y: 0, z: 1 },
+          yaw: 0,
+        },
+        blockAt: (p: { x: number; y: number; z: number }) =>
+          p.x === 0 && p.z === 2 ? { name: 'lava' } : { name: 'air' },
+      }),
+    );
+    expect(s.moving).toBe(true);
+    expect(s.nextIsLava).toBe(true);
+
+    // 没动：不预判。
+    const still = snapshotFromBot(stubBot({ entity: { position: { x: 0, y: 64, z: 0 }, yaw: 0 } }));
+    expect(still.nextIsLava).toBeUndefined();
+  });
+
+  it('computed flags drive their L5 detectors through the watcher', () => {
+    const w = createEdgeWatcher();
+    // 快照→检测器端到端：脚下 -70 直接打出虚空 L5。
+    const snap = snapshotFromBot(stubBot({ entity: { position: { x: 0, y: -70, z: 0 } } }));
+    const types = w.poll(snap).map((e) => e.type);
+    expect(types).toContain('world.void.falling');
   });
 
   it('never throws on garbage and leaves honest gaps', () => {
