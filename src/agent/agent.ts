@@ -3,7 +3,7 @@ import type { HistorySaveData } from './history.js';
 import { VisionInterpreter } from './vision/vision_interpreter.js';
 import { Prompter } from '../models/prompter.js';
 import { initBot } from '../utils/mcdata.js';
-import { executeToolCall, getOpenAITools, isActionTool, toolExists } from './commands/to_openai_tools.js';
+import { executeToolCall, getOpenAITools, isActionTool, validateToolCall } from './commands/to_openai_tools.js';
 import { stopPvp, consume } from './library/skills.js';
 import pf from 'mineflayer-pathfinder';
 import { isHostile } from '../utils/mcdata.js';
@@ -306,8 +306,13 @@ export class Agent {
     private async runTool(name: string, args: unknown): Promise<LoopToolResult> {
         const handler = this.toolHandlers.get(name);
         if (handler) return handler(args);
-        if (!toolExists(name)) {
-            return { status: 'rejected', code: 'UNKNOWN_TOOL', reason: `No such tool: ${name}.` };
+        const checked = validateToolCall(name, args);
+        if (!checked.ok) {
+            return {
+                status: 'rejected',
+                code: checked.code ?? 'BAD_ARGS',
+                reason: checked.errors?.join('; ') ?? 'Bad arguments.',
+            };
         }
         if (isActionTool(name)) {
             const claim = this.scheduler.startAction(name);

@@ -109,6 +109,61 @@ export function toolExists(toolName: string): boolean {
     return commandMap[commandName] !== undefined;
 }
 
+export interface ToolValidation {
+    ok: boolean;
+    code?: 'UNKNOWN_TOOL' | 'BAD_ARGS';
+    errors?: string[];
+}
+
+function checkParamType(type: string, value: unknown, path: string): string | null {
+    switch (type) {
+        case 'int':
+            return Number.isInteger(value) ? null : `${path}: expected integer, got ${JSON.stringify(value)}`;
+        case 'float':
+            return typeof value === 'number' && Number.isFinite(value)
+                ? null
+                : `${path}: expected number, got ${JSON.stringify(value)}`;
+        case 'boolean':
+            return typeof value === 'boolean' ? null : `${path}: expected boolean, got ${JSON.stringify(value)}`;
+        default:
+            // string / BlockName / ItemName / BlockOrItemName 都是字符串
+            return typeof value === 'string' ? null : `${path}: expected string, got ${JSON.stringify(value)}`;
+    }
+}
+
+/**
+ * 严格校验一次工具调用：未知工具、未知参数、缺必填、类型不对
+ * 都变成带路径的 verdict，而不是抛错。null 视为"没给"：
+ * 有 optional/default 的可缺，否则按缺失算。
+ */
+export function validateToolCall(toolName: string, args: unknown): ToolValidation {
+    if (toolName === 'Finish' || toolName === 'Stop') return { ok: true };
+    const commandName = toolName.startsWith('!') ? toolName : '!' + toolName;
+    const command = commandMap[commandName];
+    if (!command) return { ok: false, code: 'UNKNOWN_TOOL', errors: [`No such tool: ${toolName}.`] };
+    if (args == null || typeof args !== 'object' || Array.isArray(args)) {
+        return { ok: false, code: 'BAD_ARGS', errors: [`$: expected object, got ${Array.isArray(args) ? 'array' : typeof args}`] };
+    }
+    const params = command.params ?? {};
+    const given = args as Record<string, unknown>;
+    const errors: string[] = [];
+    for (const key of Object.keys(given)) {
+        if (!(key in params)) errors.push(`$: unknown property '${key}'`);
+    }
+    for (const [name, def] of Object.entries(params)) {
+        const value = given[name];
+        const canOmit = def.optional === true || def.default !== undefined;
+        if (value === undefined || value === null) {
+            if (!canOmit) errors.push(`$: missing required property '${name}'`);
+            continue;
+        }
+        const bad = checkParamType(def.type, value, `$.${name}`);
+        if (bad) errors.push(bad);
+    }
+    if (errors.length > 0) return { ok: false, code: 'BAD_ARGS', errors };
+    return { ok: true };
+}
+
 const actionNames = new Set(actionsList.map((c) => stripBang(c.name)));
 
 /**
