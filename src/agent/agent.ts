@@ -283,6 +283,13 @@ export class Agent {
         this.bot.collectBlock.cancelTask();
         this.bot.pathfinder.stop();
         stopPvp(this.bot);
+        // 通用刹车必须包含 Baritone：保命逃亡时它在抢方向盘，
+        // 掐不死它，L5 的 fleeTo 就是白定。
+        try {
+            this.baritone?.getCommandManager?.()?.execute('forcecancel');
+        } catch (err: unknown) {
+            console.warn('baritone forcecancel failed:', err instanceof Error ? err.message : String(err));
+        }
     }
 
     clearBotLogs(): void {
@@ -380,6 +387,17 @@ export class Agent {
 
     private actionRunner: ActionRunner | null = null;
 
+    /** 回执正文：对象 data 用 JSON 序列化，别再 [object Object] 了。 */
+    private outcomeText(data: unknown): string {
+        if (data == null) return '(no output)';
+        if (typeof data === 'string') return data === '' ? '(no output)' : data;
+        try {
+            return JSON.stringify(data) ?? String(data);
+        } catch {
+            return String(data);
+        }
+    }
+
     /** 非控制工具走 ActionRunner：动作类即时回 accepted，查询类阻塞回内容。 */
     private async runTool(name: string, args: unknown): Promise<LoopToolResult> {
         const handler = this.toolHandlers.get(name);
@@ -390,7 +408,7 @@ export class Agent {
             const result = await handler(args);
             const outcome =
                 result.status === 'completed'
-                    ? String(result.data ?? '(no output)')
+                    ? this.outcomeText(result.data)
                     : `rejected: ${(result.reason ?? result.code ?? 'unknown') as string}`;
             await this.history.add('system', MESSAGES.toolOutcome(name, args, outcome), {
                 kind: 'tool',
