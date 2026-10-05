@@ -1,6 +1,5 @@
 import * as world from '../library/world.js';
 import * as mc from '../../utils/mcdata.js';
-import { getCommandDocs } from './index.js';
 import convoManager from '../conversation.js';
 import { checkLevelBlueprint, checkBlueprint } from '../tasks/construction_tasks.js';
 import { load } from 'cheerio';
@@ -339,9 +338,10 @@ export const queryList = [
     },
     {
         name: '!help',
-        description: 'Lists all available commands and their descriptions.',
+        description: 'Lists all available tools and their descriptions.',
         perform: async function (agent) {
-            return getCommandDocs(agent);
+            const { getToolDocs } = await import('./to_openai_tools.js');
+            return getToolDocs(agent);
         }
     },
 ];

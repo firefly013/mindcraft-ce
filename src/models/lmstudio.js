@@ -61,14 +61,4 @@ export class LMStudio {
         return this.sendRequest(imageMessages, systemMessage);
     }
 
-    async embed(text) {
-        if (text.length > 8191)
-            text = text.slice(0, 8191);
-        const embedding = await this.openai.embeddings.create({
-            model: this.model_name || 'text-embedding-nomic-embed-text-v1.5',
-            input: text,
-            encoding_format: 'float',
-        });
-        return embedding.data[0].embedding;
-    }
 }

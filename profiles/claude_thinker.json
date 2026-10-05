@@ -1,6 +1,5 @@
 {
     "name": "claude_thinker",
-
     "model": {
         "model": "claude-sonnet-4-6",
         "params": {
@@ -9,7 +8,5 @@
                 "budget_tokens": 4000
             }
         }
-    },
-    
-    "embedding": "openai"
+    }
 }

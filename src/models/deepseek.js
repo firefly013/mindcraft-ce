@@ -50,9 +50,6 @@ export class DeepSeek {
         return res;
     }
 
-    async embed(text) {
-        throw new Error('Embeddings are not supported by Deepseek.');
-    }
 }
 
 

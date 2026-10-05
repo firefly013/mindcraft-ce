@@ -108,14 +108,6 @@ export class Gemini {
         return res;
     }
 
-    async embed(text) {
-        const result = await this.genAI.models.embedContent({
-            model: this.model_name || "gemini-embedding-001",
-            contents: text,
-        })
-
-        return result.embeddings;
-    }
 }
 
 const sendAudioRequest = async (text, model, voice, url) => {

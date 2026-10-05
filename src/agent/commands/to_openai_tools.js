@@ -12,7 +12,7 @@ export function stripBang(name) {
     return String(name).startsWith('!') ? String(name).slice(1) : String(name);
 }
 
-/** '!xxx' 文本命令参数类型 -> JSON Schema 类型 */
+/** 命令参数类型 -> JSON Schema 类型 */
 function paramToSchema(param) {
     const desc = param.description || '';
     switch (param.type) {
@@ -32,8 +32,8 @@ function paramToSchema(param) {
 }
 
 /**
- * 单个 !Command -> OpenAI function tool（non-strict，兼容 picking）。
- * 参数顺序按 Object.keys(command.params) 保持，与 executeCommand 一致。
+ * 单个命令 -> OpenAI function tool。
+ * 参数顺序按 Object.keys(command.params) 保持，与旧文本解析一致。
  */
 export function commandToTool(command) {
     const properties = {};
@@ -94,4 +94,20 @@ export async function executeToolCall(agent, toolName, args = {}) {
 export function toolExists(toolName) {
     const commandName = toolName.startsWith('!') ? toolName : '!' + toolName;
     return commandMap[commandName] !== undefined;
+}
+
+/** 给 help 工具用的人类可读工具清单（替代旧文本命令文档） */
+export function getToolDocs(agent) {
+    const blocked = agent?.blocked_actions || [];
+    let docs = 'Native tools. Call them via function calling with a JSON arguments object.\n';
+    for (const command of commandList) {
+        if (blocked.includes(command.name)) continue;
+        docs += `${stripBang(command.name)}: ${command.description || ''}\n`;
+        if (command.params) {
+            for (const param in command.params) {
+                docs += `  ${param}: ${command.params[param].description || ''}\n`;
+            }
+        }
+    }
+    return docs;
 }

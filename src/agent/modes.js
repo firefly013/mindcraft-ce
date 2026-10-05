@@ -23,39 +23,6 @@ async function say(agent, message) {
 // to perform longer actions, use the execute function which won't block the update loop
 const modes_list = [
     {
-        name: 'self_preservation',
-        description: '已退役：保命响应改由 @nxg-org/mineflayer-common-sense 插件处理。本 mode 不再执行任何动作，仅保留注册以兼容旧调用。',
-        interrupts: ['all'],
-        on: false,
-        active: false,
-        update: async function (agent) {}
-    },
-    {
-        name: 'unstuck',
-        description: '已退役：不再自主脱困喊话（原 I\'m stuck!/I\'m free. 已删除）。仅保留注册以兼容旧调用。',
-        interrupts: ['all'],
-        on: false,
-        active: false,
-        update: async function (agent) {},
-        unpause: function () {}
-    },
-    {
-        name: 'cowardice',
-        description: '已退役：不再自主逃跑，战斗决策交由模型工具调用。仅保留注册以兼容旧调用。',
-        interrupts: ['all'],
-        on: false,
-        active: false,
-        update: async function (agent) {}
-    },
-    {
-        name: 'self_defense',
-        description: '已退役：不再自主攻击，战斗决策交由模型工具调用。仅保留注册以兼容旧调用。',
-        interrupts: ['all'],
-        on: false,
-        active: false,
-        update: async function (agent) {}
-    },
-    {
         name: 'hunting',
         description: 'Hunt nearby animals when idle.',
         interrupts: ['action:followPlayer'],

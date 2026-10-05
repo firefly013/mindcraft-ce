@@ -29,7 +29,6 @@ export class Coder {
     }
 
     async generateCode(agent_history) {
-        this.agent.bot.modes.pause('unstuck');
         lockdown();
         // this message history is transient and only maintained in this function
         let messages = agent_history.getHistory(); 

@@ -1,5 +1,5 @@
 import { readFileSync , writeFileSync, existsSync} from 'fs';
-import { executeCommand } from '../commands/index.js';
+import { executeToolCall } from '../commands/to_openai_tools.js';
 import { getPosition } from '../library/world.js';
 import { ConstructionTaskValidator, Blueprint } from './construction_tasks.js';
 import { CookingTaskInitiator } from './cooking_tasks.js';
@@ -266,13 +266,6 @@ export class Task {
 
             // do goal initialization here
 
-            // let agentGoal = this.getAgentGoal();
-            // if (agentGoal) {
-            //     agentGoal += "You have to collaborate with other agents/bots, namely " + this.available_agents.filter(n => n !== this.name).join(', ') + " to complete the task as soon as possible by dividing the work among yourselves.";
-            //     console.log(`Setting goal for agent ${this.agent.count_id}: ${agentGoal}`);
-            //     await executeCommand(this.agent, `!goal("${agentGoal}")`);
-            // }
-
             if (this.task_type === 'construction') {
                 this.validator = new ConstructionTaskValidator(this.data, this.agent);
             } else if (this.task_type === 'cooking' || this.task_type === 'techtree') {
@@ -402,7 +395,7 @@ export class Task {
             agentGoal += "You have to collaborate with other agents/bots, namely " + this.available_agents.filter(n => n !== this.name).join(', ') + " to complete the task as soon as possible by dividing the work among yourselves.";
             console.log(`Setting goal for agent ${this.agent.count_id}: ${agentGoal}`);
         }
-        await executeCommand(this.agent, `!goal("${agentGoal}")`);
+        await executeToolCall(this.agent, 'goal', { selfPrompt: agentGoal });
     }
 
     async initBotTask() {
@@ -503,7 +496,7 @@ export class Task {
                 console.log('No other agents found. Task unsuccessful.');
                 this.agent.killAll();
             }
-            await executeCommand(this.agent, `!startConversation("${other_name}", "${this.data.conversation}")`);
+            await executeToolCall(this.agent, 'startConversation', { player_name: other_name, message: this.data.conversation });
         }
         await this.setAgentGoal();
     }

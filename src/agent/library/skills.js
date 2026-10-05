@@ -177,7 +177,6 @@ export async function smeltItem(bot, itemName, num=1) {
     if (bot.entity.position.distanceTo(furnaceBlock.position) > 4) {
         await goToNearestBlock(bot, 'furnace', 4, furnaceRange);
     }
-    bot.modes.pause('unstuck');
     await bot.lookAt(furnaceBlock.position);
 
     console.log('smelting...');
@@ -320,9 +319,6 @@ export async function attackNearest(bot, mobType, kill=true) {
      * @example
      * await skills.attackNearest(bot, "zombie", true);
      **/
-    bot.modes.pause('cowardice');
-    if (mobType === 'drowned' || mobType === 'cod' || mobType === 'salmon' || mobType === 'tropical_fish' || mobType === 'squid')
-        bot.modes.pause('self_preservation'); // so it can go underwater. TODO: have an drowning mode so we don't turn off all self_preservation
     const mob = world.getNearbyEntities(bot, 24).find(entity => entity.name === mobType);
     if (mob) {
         return await attackEntity(bot, mob, kill);
@@ -376,8 +372,6 @@ export async function defendSelf(bot, range=9) {
      * @example
      * await skills.defendSelf(bot);
      * **/
-    bot.modes.pause('self_defense');
-    bot.modes.pause('cowardice');
     let attacked = false;
     let enemy = world.getNearestEntityWhere(bot, entity => mc.isHostile(entity), range);
     while (enemy) {
@@ -1311,8 +1305,6 @@ export async function goToPlayer(bot, username, distance=3) {
         return true;
     }
 
-    bot.modes.pause('self_defense');
-    bot.modes.pause('cowardice');
     let player = bot.players[username].entity
     if (!player) {
         log(bot, `Could not find ${username}.`);
@@ -1378,14 +1370,12 @@ export async function followPlayer(bot, username, distance=4) {
         if (distance_from_player <= nearby_distance) {
             clearInterval(doorCheckInterval);
             doorCheckInterval = null;
-            bot.modes.pause('unstuck');
             bot.modes.pause('elbow_room');
         }
         else {
             if (!doorCheckInterval) {
                 doorCheckInterval = startDoorInterval(bot);
             }
-            bot.modes.unpause('unstuck');
             bot.modes.unpause('elbow_room');
         }
     }
@@ -1451,7 +1441,6 @@ export async function avoidEnemies(bot, distance=16) {
      * @example
      * await skills.avoidEnemies(bot, 8);
      **/
-    bot.modes.pause('self_preservation'); // prevents damage-on-low-health from interrupting the bot
     let enemy = world.getNearestEntityWhere(bot, entity => mc.isHostile(entity), distance);
     while (enemy) {
         const follow = new pf.goals.GoalFollow(enemy, distance+1); // move a little further away
@@ -1481,10 +1470,6 @@ export async function stay(bot, seconds=30) {
      * @example
      * await skills.stay(bot);
      **/
-    bot.modes.pause('self_preservation');
-    bot.modes.pause('unstuck');
-    bot.modes.pause('cowardice');
-    bot.modes.pause('self_defense');
     bot.modes.pause('hunting');
     bot.modes.pause('torch_placing');
     bot.modes.pause('item_collecting');
@@ -1564,7 +1549,6 @@ export async function goToBed(bot) {
     const bed = bot.blockAt(loc);
     await bot.sleep(bed);
     log(bot, `You are in bed.`);
-    bot.modes.pause('unstuck');
     while (bot.isSleeping) {
         await new Promise(resolve => setTimeout(resolve, 500));
     }
@@ -1719,7 +1703,6 @@ async function findAndGoToVillager(bot, id) {
     if (distance > 4) {
         log(bot, `Villager is ${distance.toFixed(1)} blocks away, moving closer...`);
         try {
-            bot.modes.pause('unstuck');
             const goal = new pf.goals.GoalFollow(entity, 2);
             await goToGoal(bot, goal);
             
@@ -1729,8 +1712,6 @@ async function findAndGoToVillager(bot, id) {
             log(bot, 'Failed to reach villager - pathfinding error or villager moved');
             console.log(err);
             return null;
-        } finally {
-            bot.modes.unpause('unstuck');
         }
     }
     

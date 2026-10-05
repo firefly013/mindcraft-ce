@@ -42,14 +42,11 @@ const settings = {
 
     "allow_insecure_coding": false, // allows newAction command and model can write/run code on your computer. enable at own risk
     "allow_vision": false, // allows vision model to interpret screenshots as inputs
-    "blocked_actions" : ["!checkBlueprint", "!checkBlueprintLevel", "!getBlueprint", "!getBlueprintLevel"] , // commands to disable and remove from docs. Ex: ["!setMode"]
+    "blocked_actions" : ["!checkBlueprint", "!checkBlueprintLevel", "!getBlueprint", "!getBlueprintLevel"] , // tools to disable. Ex: ["!setMode"]
     "code_timeout_mins": -1, // minutes code is allowed to run. -1 for no timeout
-    // RAG 已移除：不再做 embedding 相关检索，固定取全量/零示例，保证确定性
-    "relevant_docs_count": -1, // -1 for all docs, no embedding ranking
+
     "max_messages": 15, // max number of messages to keep in context
-    "num_examples": 0, // 0 = 不再注入对话示例，移除示例 RAG
-    "max_commands": -1, // max number of commands that can be used in consecutive responses. -1 for no limit
-    "show_command_syntax": "full", // "full", "shortened", or "none"
+    "max_commands": -1, // max number of consecutive tool-calling rounds. -1 for no limit
     "narrate_behavior": true, // chat simple automatic actions ('Picking up item!')
     "chat_bot_messages": true, // publicly chat messages to other bots
 

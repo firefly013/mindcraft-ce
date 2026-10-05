@@ -73,9 +73,6 @@ export class Grok {
         return this.sendRequest(imageMessages, systemMessage);
     }
     
-    async embed(text) {
-        throw new Error('Embeddings are not supported by Grok.');
-    }
 }
 
 

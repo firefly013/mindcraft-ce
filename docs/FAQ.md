@@ -25,7 +25,7 @@ hide:
 
 - `My brain disconnected, try again`: Something is wrong with the LLM api. You may have the wrong API key, exceeded your rate limits, or other. Check the program outputs for more details.
   
-- `I'm stuck!` or other issues with constantly getting stuck:
+- Bot constantly getting stuck:
   - Mineflayer's pathfinder is imperfect. We have improved upon it with patches, but these might not have been applied properly. Make sure your code is up to date with the repository and run `npm run reinstall`.
   - The bot will still get stuck occasionally, but not constantly.
     

@@ -56,9 +56,6 @@ if (process.env.BLOCKED_ACTIONS) {
 if (process.env.MAX_MESSAGES) {
     settings.max_messages = process.env.MAX_MESSAGES;
 }
-if (process.env.NUM_EXAMPLES) {
-    settings.num_examples = process.env.NUM_EXAMPLES;
-}
 if (process.env.LOG_ALL) {
     settings.log_all_prompts = process.env.LOG_ALL;
 }

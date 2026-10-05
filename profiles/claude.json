@@ -1,7 +1,4 @@
 {
     "name": "claude",
-
-    "model": "claude-sonnet-4-6",
-    
-    "embedding": "openai"
+    "model": "claude-sonnet-4-6"
 }

@@ -1,7 +1,4 @@
 {
     "name": "deepseek",
-
-    "model": "deepseek-chat",
-
-    "embedding": "openai"
+    "model": "deepseek-chat"
 }

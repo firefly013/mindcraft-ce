@@ -26,7 +26,7 @@ export class History {
         // and improves the quality of the memory summary
     }
 
-    getHistory() { // expects an Examples object
+    getHistory() {
         return JSON.parse(JSON.stringify(this.turns));
     }
 

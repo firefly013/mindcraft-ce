@@ -108,7 +108,4 @@ export class Hyperbolic {
         return finalRes;
     }
 
-    async embed(text) {
-        throw new Error('Embeddings are not supported by Hyperbolic.');
-    }
 }

@@ -327,7 +327,7 @@ Bot profiles are json files (such as `andy.json`) that define:
 
 LLM models can be specified simply as `"model": "gpt-5.4"`, or more specifically with `"{api}/{model}"`, like `"openrouter/google/gemini-2.5-pro"`. See all supported APIs [here](#model-customization).
 
-The `model` field can be a string or an object. A model object must specify an `api`, and optionally a `model`, `url`, and additional `params`. You can also use different models/providers for chatting, coding, vision, embedding, and voice synthesis. See the example below.
+The `model` field can be a string or an object. A model object must specify an `api`, and optionally a `model`, `url`, and additional `params`. You can also use different models/providers for chatting, coding, vision, and voice synthesis. See the example below.
 
 ```json
 "model": {
@@ -349,25 +349,12 @@ The `model` field can be a string or an object. A model object must specify an `
   "model": "gpt-5.4",
   "url": "https://api.openai.com/v1/"
 },
-"embedding": {
-  "api": "openai",
-  "url": "https://api.openai.com/v1/",
-  "model": "text-embedding-3-small"
-},
 "speak_model": "openai/tts-1/echo"
 ```
 
-`model` is used for chat, `code_model` is used for newAction coding, `vision_model` is used for image interpretation, `embedding` is used to embed text for example selection, and `speak_model` is used for voice synthesis. `model` will be used by default for all other models if not specified. Not all APIs support embeddings, vision, or voice synthesis.
+`model` is used for chat, `code_model` is used for newAction coding, `vision_model` is used for image interpretation, and `speak_model` is used for voice synthesis. `model` will be used by default for all other models if not specified. Not all APIs support vision or voice synthesis.
 
-All apis have default models and urls, so those fields are optional. The `params` field is optional and can be used to specify additional parameters for the model. It accepts any key-value pairs supported by the api. Is not supported for embedding models.
-
-## Embedding Models
-
-Embedding models are used to embed and efficiently select relevant examples for conversation and coding.
-
-Supported Embedding APIs: `openai`, `google`, `replicate`, `huggingface`, `novita`
-
-If you try to use an unsupported model, then it will default to a simple word-overlap method. Expect reduced performance. We recommend using supported embedding APIs.
+All apis have default models and urls, so those fields are optional. The `params` field is optional and can be used to specify additional parameters for the model. It accepts any key-value pairs supported by the api.
 
 ## Voice Synthesis Models
 

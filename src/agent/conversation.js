@@ -1,6 +1,10 @@
 import settings from './settings.js';
-import { containsCommand } from './commands/index.js';
 import { sendBotChatToServer } from './mindserver_proxy.js';
+
+/** 对方 bot 是否正在执行工具（新协议广播 *used <tool>* 标记） */
+function isOtherAgentBusy(message) {
+    return typeof message === 'string' && message.includes('*used ');
+}
 
 let agent;
 let agent_names = [];
@@ -273,7 +277,7 @@ const longDelay = 5000;
 async function _scheduleProcessInMessage(sender, received, convo) {
     if (convo.inMessageTimer)
         clearTimeout(convo.inMessageTimer);
-    let otherAgentBusy = containsCommand(received.message);
+    let otherAgentBusy = isOtherAgentBusy(received.message);
 
     const scheduleResponse = (delay) => convo.inMessageTimer = setTimeout(() => _processInMessageQueue(sender), delay);
 

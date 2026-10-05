@@ -84,11 +84,4 @@ export class Mistral {
         return this.sendRequest(imageMessages, systemMessage);
     }
 
-    async embed(text) {
-        const embedding = await this.#client.embeddings.create({
-            model: "mistral-embed",
-            inputs: text
-        });
-        return embedding.data[0].embedding;
-    }
 }

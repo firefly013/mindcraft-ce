@@ -3,9 +3,5 @@
     "model": {
         "api": "lmstudio",
         "model": "andy-4.2"
-    },
-    "embedding": {
-        "api": "lmstudio",
-        "model": "text-embedding-nomic-embed-text-v1.5"
     }
 }

@@ -1,10 +1,6 @@
 import { readFileSync, mkdirSync, writeFileSync} from 'fs';
-import { Examples } from '../utils/examples.js';
-import { getCommandDocs } from '../agent/commands/index.js';
-import { getOpenAITools } from '../agent/commands/to_openai_tools.js';
-import { SkillLibrary } from "../agent/library/skill_library.js";
+import { executeToolCall, getOpenAITools } from '../agent/commands/to_openai_tools.js';
 import { stringifyTurns } from '../utils/text.js';
-import { getCommand } from '../agent/commands/index.js';
 import settings from '../agent/settings.js';
 import { promises as fs } from 'fs';
 import path from 'path';
@@ -44,9 +40,6 @@ export class Prompter {
         }
         // base overrides default, individual overrides base
 
-        this.convo_examples = null;
-        this.coding_examples = null;
-        
         let name = this.profile.name;
         this.cooldown = this.profile.cooldown ? this.profile.cooldown : 0;
         this.last_prompt_time = 0;
@@ -76,11 +69,8 @@ export class Prompter {
             this.vision_model = this.chat_model;
         }
 
-        
-        // RAG 已移除：不再创建 embedding 模型，传 null 走确定性逻辑（全量 docs / 零示例）
-        this.embedding_model = null;
+        // RAG 已彻底移除：不再有 embedding 模型、示例检索与 skill 文档检索
 
-        this.skill_libary = new SkillLibrary(agent, null);
         mkdirSync(`./bots/${name}`, { recursive: true });
         writeFileSync(`./bots/${name}/last_profile.json`, JSON.stringify(this.profile, null, 4), (err) => {
             if (err) {
@@ -98,59 +88,22 @@ export class Prompter {
         return this.profile.modes;
     }
 
-    async initExamples() {
-        try {
-            // RAG 已移除：Examples 传 null model + 0 数量，不再做 embedding 排序与注入
-            this.convo_examples = new Examples(null, 0);
-            this.coding_examples = new Examples(null, 0);
-            
-            // Wait for both examples to load before proceeding
-            await Promise.all([
-                this.convo_examples.load(this.profile.conversation_examples),
-                this.coding_examples.load(this.profile.coding_examples),
-                this.skill_libary.initSkillLibrary()
-            ]).catch(error => {
-                // Preserve error details
-                console.error('Failed to initialize examples. Error details:', error);
-                console.error('Stack trace:', error.stack);
-                throw error;
-            });
-
-            console.log('Examples initialized.');
-        } catch (error) {
-            console.error('Failed to initialize examples:', error);
-            console.error('Stack trace:', error.stack);
-            throw error; // Re-throw with preserved details
-        }
-    }
-
-    async replaceStrings(prompt, messages, examples=null, to_summarize=[], last_goals=null) {
+    async replaceStrings(prompt, messages, to_summarize=[], last_goals=null) {
         prompt = prompt.replaceAll('$NAME', this.agent.name);
 
         if (prompt.includes('$STATS')) {
-            let stats = await getCommand('!stats').perform(this.agent) + '\n';
-            stats += await getCommand('!entities').perform(this.agent) + '\n';
-            stats += await getCommand('!nearbyBlocks').perform(this.agent);
+            let stats = await executeToolCall(this.agent, 'stats', {}) + '\n';
+            stats += await executeToolCall(this.agent, 'entities', {}) + '\n';
+            stats += await executeToolCall(this.agent, 'nearbyBlocks', {});
             prompt = prompt.replaceAll('$STATS', stats);
         }
         if (prompt.includes('$INVENTORY')) {
-            let inventory = await getCommand('!inventory').perform(this.agent);
+            let inventory = await executeToolCall(this.agent, 'inventory', {});
             prompt = prompt.replaceAll('$INVENTORY', inventory);
         }
         if (prompt.includes('$ACTION')) {
             prompt = prompt.replaceAll('$ACTION', this.agent.actions.currentActionLabel);
         }
-        if (prompt.includes('$COMMAND_DOCS'))
-            prompt = prompt.replaceAll('$COMMAND_DOCS', getCommandDocs(this.agent));
-        if (prompt.includes('$CODE_DOCS')) {
-            // RAG 已移除：固定取全量 docs，不再按任务内容做 embedding 排序
-            prompt = prompt.replaceAll(
-                '$CODE_DOCS',
-                await this.skill_libary.getRelevantSkillDocs('', -1)
-            );
-        }
-        if (prompt.includes('$EXAMPLES') && examples !== null)
-            prompt = prompt.replaceAll('$EXAMPLES', await examples.createExampleMessage(messages));
         if (prompt.includes('$MEMORY'))
             prompt = prompt.replaceAll('$MEMORY', this.agent.history.memory);
         if (prompt.includes('$TO_SUMMARIZE'))
@@ -198,60 +151,10 @@ export class Prompter {
         this.last_prompt_time = Date.now();
     }
 
-    async promptConvo(messages) {
-        this.most_recent_msg_time = Date.now();
-        let current_msg_time = this.most_recent_msg_time;
-
-        for (let i = 0; i < 3; i++) { // try 3 times to avoid hallucinations
-            await this.checkCooldown();
-            if (current_msg_time !== this.most_recent_msg_time) {
-                return '';
-            }
-
-            let prompt = this.profile.conversing;
-            prompt = await this.replaceStrings(prompt, messages, this.convo_examples);
-            let generation;
-
-            try {
-                generation = await this.chat_model.sendRequest(messages, prompt);
-                if (typeof generation !== 'string') {
-                    console.error('Error: Generated response is not a string', generation);
-                    throw new Error('Generated response is not a string');
-                }
-                console.log("Generated response:", generation);
-                await this._saveLog(prompt, messages, generation, 'conversation');
-
-            } catch (error) {
-                console.error('Error during message generation or file writing:', error);
-                continue;
-            }
-
-            // Check for hallucination or invalid output
-            if (generation?.includes('(FROM OTHER BOT)')) {
-                console.warn('LLM hallucinated message as another bot. Trying again...');
-                continue;
-            }
-
-            if (current_msg_time !== this.most_recent_msg_time) {
-                console.warn(`${this.agent.name} received new message while generating, discarding old response.`);
-                return '';
-            }
-
-            if (generation?.includes('</think>')) {
-                const [_, afterThink] = generation.split('</think>')
-                generation = afterThink
-            }
-
-            return generation;
-        }
-
-        return '';
-    }
-
     /**
-     * 原生工具调用版对话：tools 由全部 !Command 转换而来，模型直接返回
-     * tool_calls 而不是文本 !command。返回 { text, tool_calls }，
-     * 模型不支持时返回 null，由调用方回落到文本 promptConvo。
+     * 原生工具调用版对话：tools 由全部命令转换而来，模型直接返回
+     * tool_calls。返回 { text, tool_calls }，
+     * 模型不支持时返回 null。
      */
     async promptConvoTools(messages) {
         if (typeof this.chat_model.sendRequestWithTools !== 'function')
@@ -263,7 +166,7 @@ export class Prompter {
             return { text: '', tool_calls: [] };
 
         let prompt = this.profile.conversing;
-        prompt = await this.replaceStrings(prompt, messages, this.convo_examples);
+        prompt = await this.replaceStrings(prompt, messages);
         const tools = getOpenAITools(this.agent);
         try {
             const res = await this.chat_model.sendRequestWithTools(messages, prompt, tools, 'auto');
@@ -288,7 +191,7 @@ export class Prompter {
         this.awaiting_coding = true;
         await this.checkCooldown();
         let prompt = this.profile.coding;
-        prompt = await this.replaceStrings(prompt, messages, this.coding_examples);
+        prompt = await this.replaceStrings(prompt, messages);
 
         let resp = await this.code_model.sendRequest(messages, prompt);
         this.awaiting_coding = false;
@@ -299,7 +202,7 @@ export class Prompter {
     async promptMemSaving(to_summarize) {
         await this.checkCooldown();
         let prompt = this.profile.saving_memory;
-        prompt = await this.replaceStrings(prompt, null, null, to_summarize);
+        prompt = await this.replaceStrings(prompt, null, to_summarize);
         let resp = await this.chat_model.sendRequest([], prompt);
         await this._saveLog(prompt, to_summarize, resp, 'memSaving');
         if (resp?.includes('</think>')) {
@@ -314,7 +217,7 @@ export class Prompter {
         let prompt = this.profile.bot_responder;
         let messages = this.agent.history.getHistory();
         messages.push({role: 'user', content: new_message});
-        prompt = await this.replaceStrings(prompt, null, null, messages);
+        prompt = await this.replaceStrings(prompt, null, messages);
         let res = await this.chat_model.sendRequest([], prompt);
         return res.trim().toLowerCase() === 'respond';
     }
@@ -322,7 +225,7 @@ export class Prompter {
     async promptVision(messages, imageBuffer) {
         await this.checkCooldown();
         let prompt = this.profile.image_analysis;
-        prompt = await this.replaceStrings(prompt, messages, null, null, null);
+        prompt = await this.replaceStrings(prompt, messages);
         return await this.vision_model.sendVisionRequest(messages, prompt, imageBuffer);
     }
 
@@ -333,7 +236,7 @@ export class Prompter {
 
         let user_message = 'Use the below info to determine what goal to target next\n\n';
         user_message += '$LAST_GOALS\n$STATS\n$INVENTORY\n$CONVO'
-        user_message = await this.replaceStrings(user_message, messages, null, null, last_goals);
+        user_message = await this.replaceStrings(user_message, messages, [], last_goals);
         let user_messages = [{role: 'user', content: user_message}];
 
         let res = await this.chat_model.sendRequest(user_messages, system_message);

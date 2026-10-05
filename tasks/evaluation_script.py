@@ -254,7 +254,6 @@ def launch_parallel_experiments(task_path,
                                 insecure_coding=False, 
                                 url="http://127.0.0.1:8000/v1", 
                                 max_messages=15,
-                                num_examples=2, 
                                 no_pruning=False,
                                 block_conversation=False, 
                                 run_in_tmux=True):
@@ -313,7 +312,6 @@ def launch_parallel_experiments(task_path,
                                  task_type=task_type, 
                                  s3_path=s3_path, 
                                  max_messages=max_messages,
-                                 num_examples=num_examples, 
                                  no_pruning=no_pruning,
                                  block_conversation=block_conversation, 
                                  run_in_tmux=run_in_tmux)
@@ -335,7 +333,6 @@ def launch_parallel_experiments(task_path,
         results["task_path"] = task_path
         results["task_type"] = task_type
         results["max_messages"] = max_messages
-        results["num_examples"] = num_examples
         with open(f"{experiments_folder}/results.txt", "w") as file:
             file.write(str(results))
         if s3: 
@@ -362,7 +359,6 @@ def launch_server_experiment(task_path,
                              task_type="techtree", 
                              s3_path="", 
                              max_messages=15, 
-                             num_examples=2, 
                              no_pruning=False,
                              block_conversation=False, 
                              run_in_tmux=True):
@@ -429,7 +425,6 @@ def launch_server_experiment(task_path,
         set_environment_variable_tmux_session(session_name, "MINDSERVER_PORT", mindserver_port)
         set_environment_variable_tmux_session(session_name, "PROFILES", agent_profiles_str)
         set_environment_variable_tmux_session(session_name, "MAX_MESSAGES", str(max_messages))
-        set_environment_variable_tmux_session(session_name, "NUM_EXAMPLES", str(num_examples))
         set_environment_variable_tmux_session(session_name, "LOG_ALL", "true")
         if insecure_coding:
             set_environment_variable_tmux_session(session_name, "INSECURE_CODING", "true")
@@ -442,7 +437,6 @@ def launch_server_experiment(task_path,
         # print(agent_profiles_str)
         os.environ["PROFILES"] = agent_profiles_str
         os.environ["MAX_MESSAGES"] = str(max_messages)
-        os.environ["NUM_EXAMPLES"] = str(num_examples)
         os.environ["LOG_ALL"] = "true"
     
     run_script(task_path, 
@@ -573,8 +567,7 @@ def make_profiles(agent_names, models, apis, template_profile="profiles/collab_p
         elif apis[index] == "ollama":
             profile["model"] = {
                 "api": "ollama",
-                "model": models[index],
-                "embedding": "ollama"
+                "model": models[index]
             }
         else: 
             profile["model"] = models[index]
@@ -746,7 +739,6 @@ def main():
     parser.add_argument('--insecure_coding', action='store_true', help='Enable insecure coding')
     parser.add_argument('--url', default="http://127.0.0.1:8000/v1")
     parser.add_argument('--max_messages', default=15, type=int, help='Maximum number of messages before summarizing')
-    parser.add_argument('--num_examples', default=2, type=int, help='Maximum number of turns before summarizing')
     parser.add_argument('--no-pruning', action='store_true', help='Disable pruning of the actions')
     parser.add_argument('--block_conversation', action='store_true', help='Block conversation actions')
     parser.add_argument('--check', metavar='FOLDER_PATH', help='Check and evaluate results in the specified folder without running experiments')
@@ -803,7 +795,6 @@ def main():
                                 num_agents=args.num_agents, 
                                 url=args.url, 
                                 max_messages=args.max_messages,
-                                num_examples=args.num_examples, 
                                 no_pruning=args.no_pruning, 
                                 block_conversation=args.block_conversation,
                                 run_in_tmux=not args.no_launch_world)

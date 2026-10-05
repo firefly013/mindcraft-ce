@@ -89,7 +89,4 @@ export class GroqCloudAPI {
         return this.sendRequest(imageMessages);
     }
 
-    async embed(_) {
-        throw new Error('Embeddings are not supported by Groq.');
-    }
 }

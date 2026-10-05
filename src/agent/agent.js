@@ -4,7 +4,6 @@ import { VisionInterpreter } from './vision/vision_interpreter.js';
 import { Prompter } from '../models/prompter.js';
 import { initModes } from './modes.js';
 import { initBot } from '../utils/mcdata.js';
-import { containsCommand, commandExists, executeCommand, truncCommandMessage, isAction, blacklistCommands } from './commands/index.js';
 import { executeToolCall } from './commands/to_openai_tools.js';
 import { ActionManager } from './action_manager.js';
 import { NPCContoller } from './npc/controller.js';
@@ -45,7 +44,6 @@ export class Agent {
         this.memory_bank = new MemoryBank();
         this.self_prompter = new SelfPrompter(this);
         convoManager.initAgent(this);
-        await this.prompter.initExamples();
 
         // load mem first before doing task
         let save_data = null;
@@ -59,8 +57,8 @@ export class Agent {
             taskStart = Date.now();
         }
         this.task = new Task(this, settings.task, taskStart);
+        // 原生工具黑名单：getOpenAITools 按此过滤，不再需要文本命令黑名单
         this.blocked_actions = settings.blocked_actions.concat(this.task.blocked_actions || []);
-        blacklistCommands(this.blocked_actions);
 
         console.log(this.name, 'logging into minecraft...');
         this.bot = initBot(this.name);
@@ -282,26 +280,6 @@ export class Agent {
         const self_prompt = source === 'system' || source === this.name;
         const from_other_bot = convoManager.isOtherAgent(source);
 
-        if (!self_prompt && !from_other_bot) { // from user, check for forced commands
-            const user_command_name = containsCommand(message);
-            if (user_command_name) {
-                if (!commandExists(user_command_name)) {
-                    this.routeResponse(source, `Command '${user_command_name}' does not exist.`);
-                    return false;
-                }
-                this.routeResponse(source, `*${source} used ${user_command_name.substring(1)}*`);
-                if (user_command_name === '!newAction') {
-                    // all user-initiated commands are ignored by the bot except for this one
-                    // add the preceding message to the history to give context for newAction
-                    this.history.add(source, message);
-                }
-                let execute_res = await executeCommand(this, message);
-                if (execute_res) 
-                    this.routeResponse(source, execute_res);
-                return true;
-            }
-        }
-
         if (from_other_bot)
             this.last_sender = source;
 
@@ -309,7 +287,7 @@ export class Agent {
         console.log('received message from', source, ':', message);
 
         const checkInterrupt = () => this.self_prompter.shouldInterrupt(self_prompt) || this.shut_up || convoManager.responseScheduledFor(source);
-        
+
         let behavior_log = this.bot.modes.flushBehaviorLog().trim();
         if (behavior_log.length > 0) {
             const MAX_LOG = 500;
@@ -326,103 +304,43 @@ export class Agent {
 
         if (!self_prompt && this.self_prompter.isActive()) // message is from user during self-prompting
             max_responses = 1; // force only respond to this message, then let self-prompting take over
+        if (typeof this.prompter.chat_model.sendRequestWithTools !== 'function') {
+            const err = `Model ${this.prompter.chat_model.constructor?.name ?? 'unknown'} does not support native tool calling.`;
+            console.error(err);
+            this.routeResponse(source, '我的模型不支持原生工具调用，换个 OpenAI 兼容模型再试。');
+            return false;
+        }
         for (let i=0; i<max_responses; i++) {
             if (checkInterrupt()) break;
             let history = this.history.getHistory();
 
-            // 原生工具优先：模型直接返回 tool_calls，不再拼文本 !command
-            let toolRes = null;
-            try {
-                toolRes = await this.prompter.promptConvoTools(history);
-            } catch (err) {
-                console.warn('Tool call path failed, falling back to text commands:', err?.message ?? err);
-                toolRes = null;
+            // 原生工具调用：模型直接返回 tool_calls
+            const toolRes = await this.prompter.promptConvoTools(history);
+            if (!toolRes || (!toolRes.tool_calls?.length && !toolRes.text?.trim())) {
+                console.warn('no response');
+                break;
             }
-            if (toolRes && (toolRes.tool_calls?.length > 0 || toolRes.text?.trim())) {
-                if (toolRes.text?.trim()) {
-                    console.log(`${this.name} full response to ${source}: ""${toolRes.text}""`);
-                    this.history.add(this.name, toolRes.text);
-                    this.routeResponse(source, toolRes.text);
-                }
-                if (toolRes.tool_calls?.length > 0) {
-                    for (const tc of toolRes.tool_calls) {
-                        if (checkInterrupt()) break;
-                        this.self_prompter.handleUserPromptedCmd(self_prompt, true);
-                        this.routeResponse(source, `*used ${tc.name}*`);
-                        let execute_res = await executeToolCall(this, tc.name, tc.args);
-                        console.log('Agent executed tool:', tc.name, 'and got:', execute_res);
-                        used_command = true;
-                        if (execute_res)
-                            this.history.add('system', execute_res);
-                        else
-                            break;
-                    }
-                    this.history.save();
-                    continue;
-                }
+            if (toolRes.text?.trim()) {
+                console.log(`${this.name} full response to ${source}: ""${toolRes.text}""`);
+                this.history.add(this.name, toolRes.text);
+                this.routeResponse(source, toolRes.text);
+            }
+            if (!toolRes.tool_calls?.length) {
                 this.history.save();
                 break;
             }
-
-            // 回落：legacy 文本 !Command（模型不支持 tools 或网关未返回时）
-            let res = await this.prompter.promptConvo(history);
-
-            console.log(`${this.name} full response to ${source}: ""${res}""`);
-
-            if (res.trim().length === 0) {
-                console.warn('no response')
-                break; // empty response ends loop
-            }
-
-            let command_name = containsCommand(res);
-
-            if (command_name) { // contains query or command
-                res = truncCommandMessage(res); // everything after the command is ignored
-                this.history.add(this.name, res);
-                
-                if (!commandExists(command_name)) {
-                    this.history.add('system', `Command ${command_name} does not exist.`);
-                    console.warn('Agent hallucinated command:', command_name)
-                    continue;
-                }
-
+            for (const tc of toolRes.tool_calls) {
                 if (checkInterrupt()) break;
-                this.self_prompter.handleUserPromptedCmd(self_prompt, isAction(command_name));
-
-                if (settings.show_command_syntax === "full") {
-                    this.routeResponse(source, res);
-                }
-                else if (settings.show_command_syntax === "shortened") {
-                    // show only "used !commandname"
-                    let pre_message = res.substring(0, res.indexOf(command_name)).trim();
-                    let chat_message = `*used ${command_name.substring(1)}*`;
-                    if (pre_message.length > 0)
-                        chat_message = `${pre_message}  ${chat_message}`;
-                    this.routeResponse(source, chat_message);
-                }
-                else {
-                    // no command at all
-                    let pre_message = res.substring(0, res.indexOf(command_name)).trim();
-                    if (pre_message.trim().length > 0)
-                        this.routeResponse(source, pre_message);
-                }
-
-                let execute_res = await executeCommand(this, res);
-
-                console.log('Agent executed:', command_name, 'and got:', execute_res);
+                this.self_prompter.handleUserPromptedCmd(self_prompt, true);
+                this.routeResponse(source, `*used ${tc.name}*`);
+                const execute_res = await executeToolCall(this, tc.name, tc.args);
+                console.log('Agent executed tool:', tc.name, 'and got:', execute_res);
                 used_command = true;
-
                 if (execute_res)
                     this.history.add('system', execute_res);
                 else
                     break;
             }
-            else { // conversation response
-                this.history.add(this.name, res);
-                this.routeResponse(source, res);
-                break;
-            }
-            
             this.history.save();
         }
 
