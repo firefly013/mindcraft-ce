@@ -3,6 +3,7 @@ import { executeToolCall } from '../commands/to_openai_tools.js';
 import { getPosition } from '../library/world.js';
 import { ConstructionTaskValidator, Blueprint } from './construction_tasks.js';
 import { CookingTaskInitiator } from './cooking_tasks.js';
+import { MESSAGES } from '../../prompts.js';
 
 const PROGRESS_FILE = './hells_kitchen_progress.json';
 
@@ -390,9 +391,9 @@ export class Task {
     async setAgentGoal() {
         const agentGoal = this.getAgentGoal();
         if (!agentGoal) return;
-        let msg = `你的任务目标：${agentGoal}`;
+        let msg = MESSAGES.taskGoal(agentGoal);
         if (this.data.agent_count + this.data.human_count > 1) {
-            msg += "You have to collaborate with other agents/bots, namely " + this.available_agents.filter(n => n !== this.name).join(', ') + " to complete the task as soon as possible by dividing the work among yourselves.";
+            msg += MESSAGES.taskCollab(this.available_agents.filter(n => n !== this.name).join(', '));
             console.log(`Setting goal for agent ${this.agent.count_id}: ${agentGoal}`);
         }
         // 无 goal 模式：目标作为系统消息进入 ReAct 循环，做到 Finish 为止

@@ -1,5 +1,6 @@
 import { actionsList } from './actions.js';
 import { queryList } from './queries.js';
+import { td } from '../../prompts.js';
 
 const commandList = queryList.concat(actionsList);
 const commandMap = {};
@@ -72,7 +73,7 @@ export function getOpenAITools(agent) {
         type: 'function',
         function: {
             name: 'Finish',
-            description: '当前工作完成时调用，结束本轮推理循环。正在执行的动作不受影响。',
+            description: td('Finish'),
             parameters: { type: 'object', properties: {}, required: [], additionalProperties: false },
         },
     });

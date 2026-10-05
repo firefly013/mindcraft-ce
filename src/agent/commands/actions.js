@@ -1,6 +1,7 @@
 import * as skills from '../library/skills.js';
 import settings from '../settings.js';
 import convoManager from '../conversation.js';
+import { td, tp, MESSAGES } from '../../prompts.js';
 
 
 function runAsAction (actionFn, resume = false, timeout = -1) {
@@ -28,14 +29,14 @@ function runAsAction (actionFn, resume = false, timeout = -1) {
 export const actionsList = [
     {
         name: '!newAction',
-        description: 'Perform new and unknown custom behaviors that are not available as a command.', 
+        description: td('newAction'), 
         params: {
-            'prompt': { type: 'string', description: 'A natural language prompt to guide code generation. Make a detailed step-by-step plan.' }
+            'prompt': { type: 'string', description: tp('newAction', 'prompt') }
         },
         perform: async function(agent, prompt) {
             // just ignore prompt - it is now in context in chat history
             if (!settings.allow_insecure_coding) { 
-                agent.openChat('newAction is disabled. Enable with allow_insecure_coding=true in settings.js');
+                agent.openChat(MESSAGES.newActionDisabled);
                 return "newAction not allowed! Code writing is disabled in settings. Notify the user.";
             }
             let result = "";
@@ -52,7 +53,7 @@ export const actionsList = [
     },
     {
         name: '!stop',
-        description: 'Force stop all actions and commands that are currently executing.',
+        description: td('stop'),
         perform: async function (agent) {
             await agent.actions.stop();
             agent.clearBotLogs();
@@ -63,23 +64,23 @@ export const actionsList = [
     },
     {
         name: '!stfu',
-        description: 'Stop all chatting, but continue current action.',
+        description: td('stfu'),
         perform: async function (agent) {
-            agent.openChat('Shutting up.');
+            agent.openChat(MESSAGES.shuttingUp);
             agent.shutUp();
             return;
         }
     },
     {
         name: '!restart',
-        description: 'Restart the agent process.',
+        description: td('restart'),
         perform: async function (agent) {
             agent.cleanKill();
         }
     },
     {
         name: '!clearChat',
-        description: 'Clear the chat history.',
+        description: td('clearChat'),
         perform: async function (agent) {
             agent.history.clear();
             return agent.name + "'s chat history was cleared, starting new conversation from scratch.";
@@ -87,10 +88,10 @@ export const actionsList = [
     },
     {
         name: '!goToPlayer',
-        description: 'Go to the given player.',
+        description: td('goToPlayer'),
         params: {
-            'player_name': {type: 'string', description: 'The name of the player to go to.'},
-            'closeness': {type: 'float', description: 'How close to get to the player.', domain: [0, Infinity]}
+            'player_name': {type: 'string', description: tp('goToPlayer', 'player_name')},
+            'closeness': {type: 'float', description: tp('goToPlayer', 'closeness'), domain: [0, Infinity]}
         },
         perform: runAsAction(async (agent, player_name, closeness) => {
             await skills.goToPlayer(agent.bot, player_name, closeness);
@@ -98,10 +99,10 @@ export const actionsList = [
     },
     {
         name: '!followPlayer',
-        description: 'Endlessly follow the given player.',
+        description: td('followPlayer'),
         params: {
-            'player_name': {type: 'string', description: 'name of the player to follow.'},
-            'follow_dist': {type: 'float', description: 'The distance to follow from.', domain: [0, Infinity]}
+            'player_name': {type: 'string', description: tp('followPlayer', 'player_name')},
+            'follow_dist': {type: 'float', description: tp('followPlayer', 'follow_dist'), domain: [0, Infinity]}
         },
         perform: runAsAction(async (agent, player_name, follow_dist) => {
             await skills.followPlayer(agent.bot, player_name, follow_dist);
@@ -109,12 +110,12 @@ export const actionsList = [
     },
     {
         name: '!goToCoordinates',
-        description: 'Go to the given x, y, z location.',
+        description: td('goToCoordinates'),
         params: {
-            'x': {type: 'float', description: 'The x coordinate.', domain: [-Infinity, Infinity]},
-            'y': {type: 'float', description: 'The y coordinate.', domain: [-64, 320]},
-            'z': {type: 'float', description: 'The z coordinate.', domain: [-Infinity, Infinity]},
-            'closeness': {type: 'float', description: 'How close to get to the location.', domain: [0, Infinity]}
+            'x': {type: 'float', description: tp('goToCoordinates', 'x'), domain: [-Infinity, Infinity]},
+            'y': {type: 'float', description: tp('goToCoordinates', 'y'), domain: [-64, 320]},
+            'z': {type: 'float', description: tp('goToCoordinates', 'z'), domain: [-Infinity, Infinity]},
+            'closeness': {type: 'float', description: tp('goToCoordinates', 'closeness'), domain: [0, Infinity]}
         },
         perform: runAsAction(async (agent, x, y, z, closeness) => {
             await skills.goToPosition(agent.bot, x, y, z, closeness);
@@ -122,10 +123,10 @@ export const actionsList = [
     },
     {
         name: '!searchForBlock',
-        description: 'Find and go to the nearest block of a given type in a given range.',
+        description: td('searchForBlock'),
         params: {
-            'type': { type: 'BlockName', description: 'The block type to go to.' },
-            'search_range': { type: 'float', description: 'The range to search for the block. Minimum 32.', domain: [10, 512] }
+            'type': { type: 'BlockName', description: tp('searchForBlock', 'type') },
+            'search_range': { type: 'float', description: tp('searchForBlock', 'search_range'), domain: [10, 512] }
         },
         perform: runAsAction(async (agent, block_type, range) => {
             if (range < 32) {
@@ -137,10 +138,10 @@ export const actionsList = [
     },
     {
         name: '!searchForEntity',
-        description: 'Find and go to the nearest entity of a given type in a given range.',
+        description: td('searchForEntity'),
         params: {
-            'type': { type: 'string', description: 'The type of entity to go to.' },
-            'search_range': { type: 'float', description: 'The range to search for the entity.', domain: [32, 512] }
+            'type': { type: 'string', description: tp('searchForEntity', 'type') },
+            'search_range': { type: 'float', description: tp('searchForEntity', 'search_range'), domain: [32, 512] }
         },
         perform: runAsAction(async (agent, entity_type, range) => {
             await skills.goToNearestEntity(agent.bot, entity_type, 4, range);
@@ -148,16 +149,16 @@ export const actionsList = [
     },
     {
         name: '!moveAway',
-        description: 'Move away from the current location in any direction by a given distance.',
-        params: {'distance': { type: 'float', description: 'The distance to move away.', domain: [0, Infinity] }},
+        description: td('moveAway'),
+        params: {'distance': { type: 'float', description: tp('moveAway', 'distance'), domain: [0, Infinity] }},
         perform: runAsAction(async (agent, distance) => {
             await skills.moveAway(agent.bot, distance);
         })
     },
     {
         name: '!rememberHere',
-        description: 'Save the current location with a given name.',
-        params: {'name': { type: 'string', description: 'The name to remember the location as.' }},
+        description: td('rememberHere'),
+        params: {'name': { type: 'string', description: tp('rememberHere', 'name') }},
         perform: async function (agent, name) {
             const pos = agent.bot.entity.position;
             agent.memory_bank.rememberPlace(name, pos.x, pos.y, pos.z);
@@ -166,8 +167,8 @@ export const actionsList = [
     },
     {
         name: '!goToRememberedPlace',
-        description: 'Go to a saved location.',
-        params: {'name': { type: 'string', description: 'The name of the location to go to.' }},
+        description: td('goToRememberedPlace'),
+        params: {'name': { type: 'string', description: tp('goToRememberedPlace', 'name') }},
         perform: runAsAction(async (agent, name) => {
             const pos = agent.memory_bank.recallPlace(name);
             if (!pos) {
@@ -179,11 +180,11 @@ export const actionsList = [
     },
     {
         name: '!givePlayer',
-        description: 'Give the specified item to the given player.',
+        description: td('givePlayer'),
         params: { 
-            'player_name': { type: 'string', description: 'The name of the player to give the item to.' }, 
-            'item_name': { type: 'ItemName', description: 'The name of the item to give.' },
-            'num': { type: 'int', description: 'The number of items to give.', domain: [1, Number.MAX_SAFE_INTEGER] }
+            'player_name': { type: 'string', description: tp('givePlayer', 'player_name') }, 
+            'item_name': { type: 'ItemName', description: tp('givePlayer', 'item_name') },
+            'num': { type: 'int', description: tp('givePlayer', 'num'), domain: [1, Number.MAX_SAFE_INTEGER] }
         },
         perform: runAsAction(async (agent, player_name, item_name, num) => {
             await skills.giveToPlayer(agent.bot, item_name, player_name, num);
@@ -191,26 +192,26 @@ export const actionsList = [
     },
     {
         name: '!consume',
-        description: 'Eat/drink the given item.',
-        params: {'item_name': { type: 'ItemName', description: 'The name of the item to consume.' }},
+        description: td('consume'),
+        params: {'item_name': { type: 'ItemName', description: tp('consume', 'item_name') }},
         perform: runAsAction(async (agent, item_name) => {
             await skills.consume(agent.bot, item_name);
         })
     },
     {
         name: '!equip',
-        description: 'Equip the given item.',
-        params: {'item_name': { type: 'ItemName', description: 'The name of the item to equip.' }},
+        description: td('equip'),
+        params: {'item_name': { type: 'ItemName', description: tp('equip', 'item_name') }},
         perform: runAsAction(async (agent, item_name) => {
             await skills.equip(agent.bot, item_name);
         })
     },
     {
         name: '!putInChest',
-        description: 'Put the given item in the nearest chest.',
+        description: td('putInChest'),
         params: {
-            'item_name': { type: 'ItemName', description: 'The name of the item to put in the chest.' },
-            'num': { type: 'int', description: 'The number of items to put in the chest.', domain: [1, Number.MAX_SAFE_INTEGER] }
+            'item_name': { type: 'ItemName', description: tp('putInChest', 'item_name') },
+            'num': { type: 'int', description: tp('putInChest', 'num'), domain: [1, Number.MAX_SAFE_INTEGER] }
         },
         perform: runAsAction(async (agent, item_name, num) => {
             await skills.putInChest(agent.bot, item_name, num);
@@ -218,10 +219,10 @@ export const actionsList = [
     },
     {
         name: '!takeFromChest',
-        description: 'Take the given items from the nearest chest.',
+        description: td('takeFromChest'),
         params: {
-            'item_name': { type: 'ItemName', description: 'The name of the item to take.' },
-            'num': { type: 'int', description: 'The number of items to take.', domain: [1, Number.MAX_SAFE_INTEGER] }
+            'item_name': { type: 'ItemName', description: tp('takeFromChest', 'item_name') },
+            'num': { type: 'int', description: tp('takeFromChest', 'num'), domain: [1, Number.MAX_SAFE_INTEGER] }
         },
         perform: runAsAction(async (agent, item_name, num) => {
             await skills.takeFromChest(agent.bot, item_name, num);
@@ -229,7 +230,7 @@ export const actionsList = [
     },
     {
         name: '!viewChest',
-        description: 'View the items/counts of the nearest chest.',
+        description: td('viewChest'),
         params: { },
         perform: runAsAction(async (agent) => {
             await skills.viewChest(agent.bot);
@@ -237,10 +238,10 @@ export const actionsList = [
     },
     {
         name: '!discard',
-        description: 'Discard the given item from the inventory.',
+        description: td('discard'),
         params: {
-            'item_name': { type: 'ItemName', description: 'The name of the item to discard.' },
-            'num': { type: 'int', description: 'The number of items to discard.', domain: [1, Number.MAX_SAFE_INTEGER] }
+            'item_name': { type: 'ItemName', description: tp('discard', 'item_name') },
+            'num': { type: 'int', description: tp('discard', 'num'), domain: [1, Number.MAX_SAFE_INTEGER] }
         },
         perform: runAsAction(async (agent, item_name, num) => {
             const start_loc = agent.bot.entity.position;
@@ -251,10 +252,10 @@ export const actionsList = [
     },
     {
         name: '!collectBlocks',
-        description: 'Collect the nearest blocks of a given type.',
+        description: td('collectBlocks'),
         params: {
-            'type': { type: 'BlockName', description: 'The block type to collect.' },
-            'num': { type: 'int', description: 'The number of blocks to collect.', domain: [1, Number.MAX_SAFE_INTEGER] }
+            'type': { type: 'BlockName', description: tp('collectBlocks', 'type') },
+            'num': { type: 'int', description: tp('collectBlocks', 'num'), domain: [1, Number.MAX_SAFE_INTEGER] }
         },
         perform: runAsAction(async (agent, type, num) => {
             await skills.collectBlock(agent.bot, type, num);
@@ -262,10 +263,10 @@ export const actionsList = [
     },
     {
         name: '!craftRecipe',
-        description: 'Craft the given recipe a given number of times.',
+        description: td('craftRecipe'),
         params: {
-            'recipe_name': { type: 'ItemName', description: 'The name of the output item to craft.' },
-            'num': { type: 'int', description: 'The number of times to craft the recipe. This is NOT the number of output items, as it may craft many more items depending on the recipe.', domain: [1, Number.MAX_SAFE_INTEGER] }
+            'recipe_name': { type: 'ItemName', description: tp('craftRecipe', 'recipe_name') },
+            'num': { type: 'int', description: tp('craftRecipe', 'num'), domain: [1, Number.MAX_SAFE_INTEGER] }
         },
         perform: runAsAction(async (agent, recipe_name, num) => {
             await skills.craftRecipe(agent.bot, recipe_name, num);
@@ -273,10 +274,10 @@ export const actionsList = [
     },
     {
         name: '!smeltItem',
-        description: 'Smelt the given item the given number of times.',
+        description: td('smeltItem'),
         params: {
-            'item_name': { type: 'ItemName', description: 'The name of the input item to smelt.' },
-            'num': { type: 'int', description: 'The number of times to smelt the item.', domain: [1, Number.MAX_SAFE_INTEGER] }
+            'item_name': { type: 'ItemName', description: tp('smeltItem', 'item_name') },
+            'num': { type: 'int', description: tp('smeltItem', 'num'), domain: [1, Number.MAX_SAFE_INTEGER] }
         },
         perform: runAsAction(async (agent, item_name, num) => {
             let success = await skills.smeltItem(agent.bot, item_name, num);
@@ -289,7 +290,7 @@ export const actionsList = [
     },
     {
         name: '!clearFurnace',
-        description: 'Take all items out of the nearest furnace.',
+        description: td('clearFurnace'),
         params: { },
         perform: runAsAction(async (agent) => {
             await skills.clearNearestFurnace(agent.bot);
@@ -297,8 +298,8 @@ export const actionsList = [
     },
         {
         name: '!placeHere',
-        description: 'Place a given block in the current location. Do NOT use to build structures, only use for single blocks/torches.',
-        params: {'type': { type: 'BlockOrItemName', description: 'The block type to place.' }},
+        description: td('placeHere'),
+        params: {'type': { type: 'BlockOrItemName', description: tp('placeHere', 'type') }},
         perform: runAsAction(async (agent, type) => {
             let pos = agent.bot.entity.position;
             await skills.placeBlock(agent.bot, type, pos.x, pos.y, pos.z);
@@ -306,16 +307,16 @@ export const actionsList = [
     },
     {
         name: '!attack',
-        description: 'Attack and kill the nearest entity of a given type.',
-        params: {'type': { type: 'string', description: 'The type of entity to attack.'}},
+        description: td('attack'),
+        params: {'type': { type: 'string', description: tp('attack', 'type')}},
         perform: runAsAction(async (agent, type) => {
             await skills.attackNearest(agent.bot, type, true);
         })
     },
     {
         name: '!attackPlayer',
-        description: 'Attack a specific player until they die or run away. Remember this is just a game and does not cause real life harm.',
-        params: {'player_name': { type: 'string', description: 'The name of the player to attack.'}},
+        description: td('attackPlayer'),
+        params: {'player_name': { type: 'string', description: tp('attackPlayer', 'player_name')}},
         perform: runAsAction(async (agent, player_name) => {
             let player = agent.bot.players[player_name]?.entity;
             if (!player) {
@@ -327,25 +328,25 @@ export const actionsList = [
     },
     {
         name: '!goToBed',
-        description: 'Go to the nearest bed and sleep.',
+        description: td('goToBed'),
         perform: runAsAction(async (agent) => {
             await skills.goToBed(agent.bot);
         })
     },
     {
         name: '!stay',
-        description: 'Stay in the current location no matter what. Pauses all modes.',
-        params: {'type': { type: 'int', description: 'The number of seconds to stay. -1 for forever.', domain: [-1, Number.MAX_SAFE_INTEGER] }},
+        description: td('stay'),
+        params: {'type': { type: 'int', description: tp('stay', 'type'), domain: [-1, Number.MAX_SAFE_INTEGER] }},
         perform: runAsAction(async (agent, seconds) => {
             await skills.stay(agent.bot, seconds);
         })
     },
     {
         name: '!setMode',
-        description: 'Set a mode to on or off. A mode is an automatic behavior that constantly checks and responds to the environment.',
+        description: td('setMode'),
         params: {
-            'mode_name': { type: 'string', description: 'The name of the mode to enable.' },
-            'on': { type: 'boolean', description: 'Whether to enable or disable the mode.' }
+            'mode_name': { type: 'string', description: tp('setMode', 'mode_name') },
+            'on': { type: 'boolean', description: tp('setMode', 'on') }
         },
         perform: async function (agent, mode_name, on) {
             const modes = agent.bot.modes;
@@ -359,19 +360,19 @@ export const actionsList = [
     },
     {
         name: '!showVillagerTrades',
-        description: 'Show trades of a specified villager.',
-        params: {'id': { type: 'int', description: 'The id number of the villager that you want to trade with.' }},
+        description: td('showVillagerTrades'),
+        params: {'id': { type: 'int', description: tp('showVillagerTrades', 'id') }},
         perform: runAsAction(async (agent, id) => {
             await skills.showVillagerTrades(agent.bot, id);
         })
     },
     {
         name: '!tradeWithVillager',
-        description: 'Trade with a specified villager.',
+        description: td('tradeWithVillager'),
         params: {
-            'id': { type: 'int', description: 'The id number of the villager that you want to trade with.' },
-            'index': { type: 'int', description: 'The index of the trade you want executed (1-indexed).', domain: [1, Number.MAX_SAFE_INTEGER] },
-            'count': { type: 'int', description: 'How many times that trade should be executed.', domain: [1, Number.MAX_SAFE_INTEGER] },
+            'id': { type: 'int', description: tp('tradeWithVillager', 'id') },
+            'index': { type: 'int', description: tp('tradeWithVillager', 'index'), domain: [1, Number.MAX_SAFE_INTEGER] },
+            'count': { type: 'int', description: tp('tradeWithVillager', 'count'), domain: [1, Number.MAX_SAFE_INTEGER] },
         },
         perform: runAsAction(async (agent, id, index, count) => {
             await skills.tradeWithVillager(agent.bot, id, index, count);
@@ -379,10 +380,10 @@ export const actionsList = [
     },
     {
         name: '!startConversation',
-        description: 'Start a conversation with a bot. (FOR OTHER BOTS ONLY)',
+        description: td('startConversation'),
         params: {
-            'player_name': { type: 'string', description: 'The name of the player to send the message to.' },
-            'message': { type: 'string', description: 'The message to send.' },
+            'player_name': { type: 'string', description: tp('startConversation', 'player_name') },
+            'message': { type: 'string', description: tp('startConversation', 'message') },
         },
         perform: async function (agent, player_name, message) {
             if (!convoManager.isOtherAgent(player_name))
@@ -390,15 +391,15 @@ export const actionsList = [
             if (convoManager.inConversation() && !convoManager.inConversation(player_name)) 
                 convoManager.forceEndCurrentConversation();
             else if (convoManager.inConversation(player_name))
-                agent.history.add('system', 'You are already in conversation with ' + player_name + '. Don\'t use this command to talk to them.');
+                agent.history.add('system', MESSAGES.alreadyInConversation(player_name));
             convoManager.startConversation(player_name, message);
         }
     },
     {
         name: '!endConversation',
-        description: 'End the conversation with the given bot. (FOR OTHER BOTS ONLY)',
+        description: td('endConversation'),
         params: {
-            'player_name': { type: 'string', description: 'The name of the player to end the conversation with.' }
+            'player_name': { type: 'string', description: tp('endConversation', 'player_name') }
         },
         perform: async function (agent, player_name) {
             if (!convoManager.inConversation(player_name))
@@ -409,12 +410,12 @@ export const actionsList = [
     },
     {
         name: '!lookAtPlayer',
-        description: 'Look at a player or look in the same direction as the player.',
+        description: td('lookAtPlayer'),
         params: {
-            'player_name': { type: 'string', description: 'Name of the target player' },
+            'player_name': { type: 'string', description: tp('lookAtPlayer', 'player_name') },
             'direction': {
                 type: 'string',
-                description: 'How to look ("at": look at the player, "with": look in the same direction as the player)',
+                description: tp('lookAtPlayer', 'direction'),
             }
         },
         perform: async function(agent, player_name, direction) {
@@ -431,11 +432,11 @@ export const actionsList = [
     },
     {
         name: '!lookAtPosition',
-        description: 'Look at specified coordinates.',
+        description: td('lookAtPosition'),
         params: {
-            'x': { type: 'int', description: 'x coordinate' },
-            'y': { type: 'int', description: 'y coordinate' },
-            'z': { type: 'int', description: 'z coordinate' }
+            'x': { type: 'int', description: tp('lookAtPosition', 'x') },
+            'y': { type: 'int', description: tp('lookAtPosition', 'y') },
+            'z': { type: 'int', description: tp('lookAtPosition', 'z') }
         },
         perform: async function(agent, x, y, z) {
             let result = "";
@@ -448,15 +449,15 @@ export const actionsList = [
     },
     {
         name: '!digDown',
-        description: 'Digs down a specified distance. Will stop if it reaches lava, water, or a fall of >=4 blocks below the bot.',
-        params: {'distance': { type: 'int', description: 'Distance to dig down', domain: [1, Number.MAX_SAFE_INTEGER] }},
+        description: td('digDown'),
+        params: {'distance': { type: 'int', description: tp('digDown', 'distance'), domain: [1, Number.MAX_SAFE_INTEGER] }},
         perform: runAsAction(async (agent, distance) => {
             await skills.digDown(agent.bot, distance)
         })
     },
     {
         name: '!goToSurface',
-        description: 'Moves the bot to the highest block above it (usually the surface).',
+        description: td('goToSurface'),
         params: {},
         perform: runAsAction(async (agent) => {
             await skills.goToSurface(agent.bot);
@@ -464,10 +465,10 @@ export const actionsList = [
     },
     {
         name: '!useOn',
-        description: 'Use (right click) the given tool on the nearest target of the given type.',
+        description: td('useOn'),
         params: {
-            'tool_name': { type: 'string', description: 'Name of the tool to use, or "hand" for no tool.' },
-            'target': { type: 'string', description: 'The target as an entity type, block type, or "nothing" for no target.' }
+            'tool_name': { type: 'string', description: tp('useOn', 'tool_name') },
+            'target': { type: 'string', description: tp('useOn', 'target') }
         },
         perform: runAsAction(async (agent, tool_name, target) => {
             await skills.useToolOn(agent.bot, tool_name, target);

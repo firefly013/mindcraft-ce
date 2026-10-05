@@ -1,3 +1,5 @@
+import { MESSAGES } from '../prompts.js';
+
 export class ActionManager {
     constructor(agent) {
         this.agent = agent;
@@ -167,9 +169,9 @@ export class ActionManager {
 
     _startTimeout(TIMEOUT_MINS = 10) {
         return setTimeout(async () => {
-            console.warn(`Code execution timed out after ${TIMEOUT_MINS} minutes. Attempting force stop.`);
+            console.warn(MESSAGES.codeTimeout(TIMEOUT_MINS));
             this.timedout = true;
-            this.agent.history.add('system', `Code execution timed out after ${TIMEOUT_MINS} minutes. Attempting force stop.`);
+            this.agent.history.add('system', MESSAGES.codeTimeout(TIMEOUT_MINS));
             await this.stop(); // last attempt to stop
         }, TIMEOUT_MINS * 60 * 1000);
     }

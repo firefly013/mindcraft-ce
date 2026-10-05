@@ -2,6 +2,7 @@ import { readFileSync, mkdirSync, writeFileSync} from 'fs';
 import { executeToolCall, getOpenAITools } from '../agent/commands/to_openai_tools.js';
 import { stringifyTurns } from '../utils/text.js';
 import settings from '../agent/settings.js';
+import { resolvePromptSet, MESSAGES } from '../prompts.js';
 import { promises as fs } from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
@@ -39,6 +40,9 @@ export class Prompter {
                 this.profile[key] = base_profile[key];
         }
         // base overrides default, individual overrides base
+
+        // 系统提示词统一来自 src/prompts.js（profile 可按同名键覆盖）
+        this.prompts = resolvePromptSet(this.profile);
 
         let name = this.profile.name;
         this.cooldown = this.profile.cooldown ? this.profile.cooldown : 0;
@@ -109,14 +113,14 @@ export class Prompter {
         if (prompt.includes('$TO_SUMMARIZE'))
             prompt = prompt.replaceAll('$TO_SUMMARIZE', stringifyTurns(to_summarize));
         if (prompt.includes('$CONVO'))
-            prompt = prompt.replaceAll('$CONVO', 'Recent conversation:\n' + stringifyTurns(messages));
+            prompt = prompt.replaceAll('$CONVO', MESSAGES.recentConvoPrefix + stringifyTurns(messages));
         if (prompt.includes('$LAST_GOALS')) {
             let goal_text = '';
             for (let goal in last_goals) {
                 if (last_goals[goal])
-                    goal_text += `You recently successfully completed the goal ${goal}.\n`
+                    goal_text += MESSAGES.goalDone(goal) + '\n'
                 else
-                    goal_text += `You recently failed to complete the goal ${goal}.\n`
+                    goal_text += MESSAGES.goalFailed(goal) + '\n'
             }
             prompt = prompt.replaceAll('$LAST_GOALS', goal_text.trim());
         }
@@ -160,7 +164,7 @@ export class Prompter {
         if (current_msg_time !== this.most_recent_msg_time)
             return { text: '', tool_calls: [] };
 
-        let prompt = this.profile.conversing;
+        let prompt = this.prompts.conversing;
         prompt = await this.replaceStrings(prompt, messages);
         const tools = getOpenAITools(this.agent);
         try {
@@ -185,7 +189,7 @@ export class Prompter {
         }
         this.awaiting_coding = true;
         await this.checkCooldown();
-        let prompt = this.profile.coding;
+        let prompt = this.prompts.coding;
         prompt = await this.replaceStrings(prompt, messages);
 
         let resp = await this.code_model.sendRequest(messages, prompt);
@@ -196,7 +200,7 @@ export class Prompter {
 
     async promptMemSaving(to_summarize) {
         await this.checkCooldown();
-        let prompt = this.profile.saving_memory;
+        let prompt = this.prompts.saving_memory;
         prompt = await this.replaceStrings(prompt, null, to_summarize);
         let resp = await this.chat_model.sendRequest([], prompt);
         await this._saveLog(prompt, to_summarize, resp, 'memSaving');
@@ -209,7 +213,7 @@ export class Prompter {
 
     async promptShouldRespondToBot(new_message) {
         await this.checkCooldown();
-        let prompt = this.profile.bot_responder;
+        let prompt = this.prompts.bot_responder;
         let messages = this.agent.history.getHistory();
         messages.push({role: 'user', content: new_message});
         prompt = await this.replaceStrings(prompt, null, messages);
@@ -219,7 +223,7 @@ export class Prompter {
 
     async promptVision(messages, imageBuffer) {
         await this.checkCooldown();
-        let prompt = this.profile.image_analysis;
+        let prompt = this.prompts.image_analysis;
         prompt = await this.replaceStrings(prompt, messages);
         return await this.vision_model.sendVisionRequest(messages, prompt, imageBuffer);
     }

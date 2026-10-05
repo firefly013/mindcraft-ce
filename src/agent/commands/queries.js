@@ -3,6 +3,7 @@ import * as mc from '../../utils/mcdata.js';
 import convoManager from '../conversation.js';
 import { checkLevelBlueprint, checkBlueprint } from '../tasks/construction_tasks.js';
 import { load } from 'cheerio';
+import { td, tp } from '../../prompts.js';
 
 const pad = (str) => {
     return '\n' + str + '\n';
@@ -12,7 +13,7 @@ const pad = (str) => {
 export const queryList = [
     {
         name: "!stats",
-        description: "Get your bot's location, health, hunger, and time of day.", 
+        description: td('stats'), 
         perform: function (agent) {
             let bot = agent.bot;
             let res = 'STATS';
@@ -64,7 +65,7 @@ export const queryList = [
     },
     {
         name: "!inventory",
-        description: "Get your bot's inventory.",
+        description: td('inventory'),
         perform: function (agent) {
             let bot = agent.bot;
             let inventory = world.getInventoryCounts(bot);
@@ -101,7 +102,7 @@ export const queryList = [
     },
     {
         name: "!nearbyBlocks",
-        description: "Get the blocks near the bot.",
+        description: td('nearbyBlocks'),
         perform: function (agent) {
             let bot = agent.bot;
             let res = 'NEARBY_BLOCKS';
@@ -130,7 +131,7 @@ export const queryList = [
     },
     {
         name: "!craftable",
-        description: "Get the craftable items with the bot's inventory.",
+        description: td('craftable'),
         perform: function (agent) {
             let craftable = world.getCraftableItems(agent.bot);
             let res = 'CRAFTABLE_ITEMS';
@@ -145,7 +146,7 @@ export const queryList = [
     },
     {
         name: "!entities",
-        description: "Get the nearby players and entities.",
+        description: td('entities'),
         perform: function (agent) {
             let bot = agent.bot;
             let res = 'NEARBY_ENTITIES';
@@ -213,23 +214,23 @@ export const queryList = [
     },
     {
         name: "!modes",
-        description: "Get all available modes and their docs and see which are on/off.",
+        description: td('modes'),
         perform: function (agent) {
             return agent.bot.modes.getDocs();
         }
     },
     {
         name: '!savedPlaces',
-        description: 'List all saved locations.',
+        description: td('savedPlaces'),
         perform: async function (agent) {
             return "Saved place names: " + agent.memory_bank.getKeys();
         }
     }, 
     {
         name: '!checkBlueprintLevel',
-        description: 'Check if the level is complete and what blocks still need to be placed for the blueprint',
+        description: td('checkBlueprintLevel'),
         params: {
-            'levelNum': { type: 'int', description: 'The level number to check.', domain: [0, Number.MAX_SAFE_INTEGER] }
+            'levelNum': { type: 'int', description: tp('checkBlueprintLevel', 'levelNum'), domain: [0, Number.MAX_SAFE_INTEGER] }
         },
         perform: function (agent, levelNum) {
             let res = checkLevelBlueprint(agent, levelNum);
@@ -239,7 +240,7 @@ export const queryList = [
     }, 
     {
         name: '!checkBlueprint',
-        description: 'Check what blocks still need to be placed for the blueprint',
+        description: td('checkBlueprint'),
         perform: function (agent) {
             let res = checkBlueprint(agent);
             return pad(res);
@@ -247,7 +248,7 @@ export const queryList = [
     }, 
     {
         name: '!getBlueprint',
-        description: 'Get the blueprint for the building',
+        description: td('getBlueprint'),
         perform: function (agent) {
             let res = agent.task.blueprint.explain();
             return pad(res);
@@ -255,9 +256,9 @@ export const queryList = [
     }, 
     {
         name: '!getBlueprintLevel',
-        description: 'Get the blueprint for the building',
+        description: td('getBlueprintLevel'),
         params: {
-            'levelNum': { type: 'int', description: 'The level number to check.', domain: [0, Number.MAX_SAFE_INTEGER] }
+            'levelNum': { type: 'int', description: tp('getBlueprintLevel', 'levelNum'), domain: [0, Number.MAX_SAFE_INTEGER] }
         },
         perform: function (agent, levelNum) {
             let res = agent.task.blueprint.explainLevel(levelNum);
@@ -267,15 +268,15 @@ export const queryList = [
     },
     {
         name: '!getCraftingPlan',
-        description: "Provides a comprehensive crafting plan for a specified item. This includes a breakdown of required ingredients, the exact quantities needed, and an analysis of missing ingredients or extra items needed based on the bot's current inventory.",
+        description: td('getCraftingPlan'),
         params: {
             targetItem: { 
                 type: 'string', 
-                description: 'The item that we are trying to craft' 
+                description: tp('getCraftingPlan', 'targetItem') 
             },
             quantity: { 
                 type: 'int',
-                description: 'The quantity of the item that we are trying to craft',
+                description: tp('getCraftingPlan', 'quantity'),
                 optional: true,
                 domain: [1, Infinity, '[)'], // Quantity must be at least 1,
                 default: 1
@@ -309,9 +310,9 @@ export const queryList = [
     },
     {
         name: '!searchWiki',
-        description: 'Search the Minecraft Wiki for the given query.',
+        description: td('searchWiki'),
         params: {
-            'query': { type: 'string', description: 'The query to search for.' }
+            'query': { type: 'string', description: tp('searchWiki', 'query') }
         },
         perform: async function (agent, query) {
             const url = `https://minecraft.wiki/w/${query}`
@@ -338,7 +339,7 @@ export const queryList = [
     },
     {
         name: '!help',
-        description: 'Lists all available tools and their descriptions.',
+        description: td('help'),
         perform: async function (agent) {
             const { getToolDocs } = await import('./to_openai_tools.js');
             return getToolDocs(agent);

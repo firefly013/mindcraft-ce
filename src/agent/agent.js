@@ -12,6 +12,7 @@ import convoManager from './conversation.js';
 import { addBrowserViewer } from './vision/browser_viewer.js';
 import { serverProxy, sendOutputToServer } from './mindserver_proxy.js';
 import settings from './settings.js';
+import { MESSAGES } from '../prompts.js';
 import { Task } from './tasks/tasks.js';
 import { speak } from './speak.js';
 import { log, validateNameFormat, handleDisconnection } from './connection_handler.js';
@@ -210,7 +211,7 @@ export class Agent {
             this.last_sender = save_data.last_sender;
             if (convoManager.otherAgentInGame(this.last_sender)) {
                 const msg_package = {
-                    message: `You have restarted and this message is auto-generated. Continue the conversation with me.`,
+                    message: MESSAGES.convoRestart,
                     start: true
                 };
                 convoManager.receiveFromBot(this.last_sender, msg_package);
@@ -220,7 +221,7 @@ export class Agent {
             await this.handleMessage('system', init_message);
         }
         else {
-            this.openChat("Hello world! I am "+this.name);
+            this.openChat(MESSAGES.hello(this.name));
         }
     }
 
@@ -279,7 +280,7 @@ export class Agent {
             if (behavior_log.length > MAX_LOG) {
                 behavior_log = '...' + behavior_log.substring(behavior_log.length - MAX_LOG);
             }
-            behavior_log = 'Recent behaviors log: \n' + behavior_log;
+            behavior_log = MESSAGES.behaviorLogPrefix + behavior_log;
             await this.history.add('system', behavior_log);
         }
 
@@ -290,7 +291,7 @@ export class Agent {
         if (typeof this.prompter.chat_model.sendRequestWithTools !== 'function') {
             const err = `Model ${this.prompter.chat_model.constructor?.name ?? 'unknown'} does not support native tool calling.`;
             console.error(err);
-            this.routeResponse(source, '我的模型不支持原生工具调用，换个 OpenAI 兼容模型再试。');
+            this.routeResponse(source, MESSAGES.modelUnsupported);
             return false;
         }
         for (;;) {
@@ -319,7 +320,7 @@ export class Agent {
                     finished = true;
                     break;
                 }
-                this.routeResponse(source, `*used ${tc.name}*`);
+                this.routeResponse(source, MESSAGES.usedMarker(tc.name));
                 const execute_res = await executeToolCall(this, tc.name, tc.args);
                 console.log('Agent executed tool:', tc.name, 'and got:', execute_res);
                 if (execute_res)
@@ -426,8 +427,8 @@ export class Agent {
                 if (death_pos) {
                     death_pos_text = `x: ${death_pos.x.toFixed(2)}, y: ${death_pos.y.toFixed(2)}, z: ${death_pos.z.toFixed(2)}`;
                 }
-                let dimention = this.bot.game.dimension;
-                this.handleMessage('system', `You died at position ${death_pos_text || "unknown"} in the ${dimention} dimension with the final message: '${message}'. Your place of death is saved as 'last_death_position' if you want to return. Previous actions were stopped and you have respawned.`);
+                const dimention = this.bot.game.dimension;
+                this.handleMessage('system', MESSAGES.death(death_pos_text || 'unknown', dimention, message));
             }
         });
         this.bot.on('idle', () => {
@@ -474,7 +475,7 @@ export class Agent {
 
     cleanKill(msg='Killing agent process...', code=1) {
         this.history.add('system', msg);
-        this.bot.chat(code > 1 ? 'Restarting.': 'Exiting.');
+        this.bot.chat(code > 1 ? MESSAGES.restarting : MESSAGES.exiting);
         this.history.save();
         process.exit(code);
     }
@@ -482,7 +483,7 @@ export class Agent {
         if (this.task.data) {
             let res = this.task.isDone();
             if (res) {
-                await this.history.add('system', `Task ended with score : ${res.score}`);
+                await this.history.add('system', MESSAGES.taskEnded(res.score));
                 await this.history.save();
                 // await new Promise(resolve => setTimeout(resolve, 3000)); // Wait 3 second for save to complete
                 console.log('Task finished:', res.message);

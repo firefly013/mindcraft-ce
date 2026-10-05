@@ -3,6 +3,7 @@ import * as world from './library/world.js';
 import * as mc from '../utils/mcdata.js';
 import settings from './settings.js'
 import convoManager from './conversation.js';
+import { MESSAGES, MODE_TEXT } from '../prompts.js';
 
 async function say(agent, message) {
     agent.bot.modes.behavior_log += message + '\n';
@@ -24,7 +25,7 @@ async function say(agent, message) {
 const modes_list = [
     {
         name: 'hunting',
-        description: 'Hunt nearby animals when idle.',
+        description: MODE_TEXT.hunting,
         interrupts: ['action:followPlayer'],
         on: true,
         active: false,
@@ -32,7 +33,7 @@ const modes_list = [
             const huntable = world.getNearestEntityWhere(agent.bot, entity => mc.isHuntable(entity), 8);
             if (huntable && await world.isClearPath(agent.bot, huntable)) {
                 execute(this, agent, async () => {
-                    say(agent, `Hunting ${huntable.name}!`);
+                    say(agent, MESSAGES.hunting(huntable.name));
                     await skills.attackEntity(agent.bot, huntable);
                 });
             }
@@ -40,7 +41,7 @@ const modes_list = [
     },
     {
         name: 'item_collecting',
-        description: 'Collect nearby items when idle.',
+        description: MODE_TEXT.item_collecting,
         interrupts: ['action:followPlayer'],
         on: true,
         active: false,
@@ -56,7 +57,7 @@ const modes_list = [
                     this.noticed_at = Date.now();
                 }
                 if (Date.now() - this.noticed_at > this.wait * 1000) {
-                    say(agent, `Picking up item!`);
+                    say(agent, MESSAGES.pickingUp);
                     this.prev_item = item;
                     execute(this, agent, async () => {
                         await skills.pickupNearbyItems(agent.bot);
@@ -71,7 +72,7 @@ const modes_list = [
     },
     {
         name: 'torch_placing',
-        description: 'Place torches when idle and there are no torches nearby.',
+        description: MODE_TEXT.torch_placing,
         interrupts: ['action:followPlayer'],
         on: true,
         active: false,
@@ -90,7 +91,7 @@ const modes_list = [
     },
     {
         name: 'elbow_room',
-        description: 'Move away from nearby players when idle.',
+        description: MODE_TEXT.elbow_room,
         interrupts: ['action:followPlayer'],
         on: true,
         active: false,
@@ -111,7 +112,7 @@ const modes_list = [
     },
     {
         name: 'idle_staring',
-        description: 'Animation to look around at entities when idle.',
+        description: MODE_TEXT.idle_staring,
         interrupts: [],
         on: true,
         active: false,
@@ -148,7 +149,7 @@ const modes_list = [
     },
     {
         name: 'cheat',
-        description: 'Use cheats to instantly place blocks and teleport.',
+        description: MODE_TEXT.cheat,
         interrupts: [],
         on: false,
         active: false,
@@ -174,8 +175,7 @@ async function execute(mode, agent, func, timeout=-1) {
         // auto prompt to respond to the interruption
         let role = convoManager.inConversation() ? agent.last_sender : 'system';
         let logs = agent.bot.modes.flushBehaviorLog();
-        agent.handleMessage(role, `(AUTO MESSAGE)Your previous action '${interrupted_action}' was interrupted by ${mode.name}.
-        Your behavior log: ${logs}\nRespond accordingly.`);
+        agent.handleMessage(role, MESSAGES.modeInterrupted(interrupted_action, mode.name, logs));
     }
 }
 

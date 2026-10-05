@@ -1,5 +1,6 @@
 import settings from './settings.js';
 import { sendBotChatToServer } from './mindserver_proxy.js';
+import { MESSAGES } from '../prompts.js';
 
 /** 对方 bot 是否正在执行工具（新协议广播 *used <tool>* 标记） */
 function isOtherAgentBusy(message) {
@@ -82,7 +83,7 @@ class ConversationManager {
             if (this.awaiting_response && agent.isIdle()) {
                 wait_time += delta;
                 if (wait_time > this.wait_time_limit) {
-                    agent.handleMessage('system', `${convo_partner} hasn't responded in ${this.wait_time_limit/1000} seconds, respond with a message to them or your own action.`);
+                    agent.handleMessage('system', MESSAGES.convoNoResponse(convo_partner, this.wait_time_limit / 1000));
                     wait_time = 0;
                     this.wait_time_limit*=2;
                 }
@@ -99,7 +100,7 @@ class ConversationManager {
                         return;
                     }
                     this.endConversation(convo_partner);
-                    agent.handleMessage('system', `${convo_partner} disconnected, conversation has ended.`);
+                    agent.handleMessage('system', MESSAGES.convoDisconnected(convo_partner));
                 }, 10000);
             }
         }, 1000);
@@ -169,7 +170,7 @@ class ConversationManager {
 
         // check if any convo is active besides the sender
         if (this.inConversation() && !this.inConversation(sender)) {
-            this.sendToBot(sender, `I'm talking to someone else, try again later. [CONVO_END]`, false, false);
+            this.sendToBot(sender, MESSAGES.convoBusyReject, false, false);
             this.endConversation(sender);
             return;
         }
@@ -316,7 +317,7 @@ function _handleFullInMessage(sender, received) {
     let message = _tagMessage(received.message);
     if (received.end) {
         convoManager.endConversation(sender);
-        message = `Conversation with ${sender} ended with message: "${message}"`;
+        message = MESSAGES.convoEndedWith(sender, message);
         sender = 'system'; // bot will respond to system instead of the other bot
     }
     else if (received.start)
