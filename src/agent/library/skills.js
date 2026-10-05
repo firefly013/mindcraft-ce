@@ -327,6 +327,12 @@ export async function attackNearest(bot, mobType, kill=true) {
     return false;
 }
 
+export function stopPvp(bot) {
+    // @nxg-org/mineflayer-custom-pvp：近战 swordpvp + 远程 bowpvp 都要停
+    try { bot?.swordpvp?.stop?.(); } catch {}
+    try { bot?.bowpvp?.stop?.(); } catch {}
+}
+
 export async function attackEntity(bot, entity, kill=true) {
     /**
      * Attack mob of the given type.
@@ -349,11 +355,15 @@ export async function attackEntity(bot, entity, kill=true) {
         await bot.attack(entity);
     }
     else {
-        bot.pvp.attack(entity);
+        // 用手里已装备的精确武器名，避免插件按子串拿错武器；空手则不指定
+        if (bot.heldItem?.name) {
+            bot.swordpvp.weaponOfChoice = bot.heldItem.name;
+        }
+        await bot.swordpvp.attack(entity);
         while (world.getNearbyEntities(bot, 24).includes(entity)) {
             await new Promise(resolve => setTimeout(resolve, 1000));
             if (bot.interrupt_code) {
-                bot.pvp.stop();
+                stopPvp(bot);
                 return false;
             }
         }
@@ -389,16 +399,19 @@ export async function defendSelf(bot, range=9) {
                 await bot.pathfinder.goto(inverted_goal, true);
             } catch (err) {/* might error if entity dies, ignore */}
         }
-        bot.pvp.attack(enemy);
+        if (bot.heldItem?.name) {
+            bot.swordpvp.weaponOfChoice = bot.heldItem.name;
+        }
+        await bot.swordpvp.attack(enemy);
         attacked = true;
         await new Promise(resolve => setTimeout(resolve, 500));
         enemy = world.getNearestEntityWhere(bot, entity => mc.isHostile(entity), range);
         if (bot.interrupt_code) {
-            bot.pvp.stop();
+            stopPvp(bot);
             return false;
         }
     }
-    bot.pvp.stop();
+    stopPvp(bot);
     if (attacked)
         log(bot, `Successfully defended self.`);
     else

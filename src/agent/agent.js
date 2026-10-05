@@ -5,6 +5,7 @@ import { Prompter } from '../models/prompter.js';
 import { initModes } from './modes.js';
 import { initBot } from '../utils/mcdata.js';
 import { executeToolCall } from './commands/to_openai_tools.js';
+import { stopPvp } from './library/skills.js';
 import { ActionManager } from './action_manager.js';
 import { NPCContoller } from './npc/controller.js';
 import { MemoryBank } from './memory_bank.js';
@@ -209,7 +210,7 @@ export class Agent {
         this.bot.stopDigging();
         this.bot.collectBlock.cancelTask();
         this.bot.pathfinder.stop();
-        this.bot.pvp.stop();
+        stopPvp(this.bot);
     }
 
     clearBotLogs() {

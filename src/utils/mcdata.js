@@ -3,7 +3,7 @@ import settings from '../agent/settings.js';
 import { createBot } from 'mineflayer';
 import prismarine_items from 'prismarine-item';
 import { pathfinder } from 'mineflayer-pathfinder';
-import { plugin as pvp } from 'mineflayer-pvp';
+import * as customPvpMod from '@nxg-org/mineflayer-custom-pvp';
 import { plugin as collectblock } from 'mineflayer-collectblock';
 import { loader as autoEat } from 'mineflayer-auto-eat';
 import commonSense from '@nxg-org/mineflayer-common-sense';
@@ -155,7 +155,7 @@ export function initBot(username) {
     };
 
     bot.loadPlugin(pathfinder);
-    bot.loadPlugin(pvp);
+    bot.loadPlugin(customPvpMod.default ?? customPvpMod); // bot.swordpvp 近战 + bot.bowpvp 远程
     bot.loadPlugin(collectblock);
     bot.loadPlugin(autoEat);
     bot.loadPlugin(commonSense); // 保命应急：着火/摔落等基础响应，替代自研 modes
