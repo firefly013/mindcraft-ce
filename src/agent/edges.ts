@@ -619,4 +619,47 @@ function strOf(value: unknown): string | null {
   return typeof value === 'string' && value !== '' ? value : null;
 }
 
+/** 受伤防抖：着火/中毒是持续掉血，1.5 秒内只报一次。 */
+export const HURT_DEBOUNCE_MS = 1500;
+
+/**
+ * 掉血即发（带伤害量），防抖内免发。阈值越线是另一组检测器的事，
+ * 这里只管"挨打了"这个事实——20→18 也要让模型知道。
+ */
+export function shouldEmitHurt(
+  prevHealth: number | null | undefined,
+  health: number | null | undefined,
+  lastEmitAt: number,
+  now: number,
+): { fire: boolean; damage: number } {
+  if (prevHealth == null || health == null) return { fire: false, damage: 0 };
+  const damage = prevHealth - health;
+  if (!(damage > 0)) return { fire: false, damage: 0 };
+  if (now - lastEmitAt < HURT_DEBOUNCE_MS) return { fire: false, damage };
+  return { fire: true, damage: Math.round(damage * 100) / 100 };
+}
+
+/** 卡住判定：有动作在跑，但位置超过阈值没动。 */
+export const STUCK_MS = 60000;
+
+export function isStuck(
+  lastPos: string | null | undefined,
+  pos: string | null | undefined,
+  since: number,
+  now: number,
+  actionRunning: boolean,
+  thresholdMs: number = STUCK_MS,
+): boolean {
+  if (!actionRunning) return false;
+  if (lastPos == null || pos == null || lastPos !== pos) return false;
+  return now - since >= thresholdMs;
+}
+
+/** 心跳：空闲超过间隔就醒一次做反思，防睡死。 */
+export const HEARTBEAT_MS = 5 * 60 * 1000;
+
+export function isHeartbeatDue(lastAt: number, now: number, intervalMs: number = HEARTBEAT_MS): boolean {
+  return now - lastAt >= intervalMs;
+}
+
 export default { createEdgeWatcher, resolvePriority, classifyToolFailure, schedulerLevelFor, snapshotFromBot, DETECTORS };

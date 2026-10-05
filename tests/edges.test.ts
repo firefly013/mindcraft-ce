@@ -8,8 +8,14 @@ import { describe, expect, it } from 'vitest';
 import {
   classifyToolFailure,
   createEdgeWatcher,
+  isHeartbeatDue,
+  isStuck,
   resolvePriority,
   schedulerLevelFor,
+  shouldEmitHurt,
+  HEARTBEAT_MS,
+  HURT_DEBOUNCE_MS,
+  STUCK_MS,
 } from '../src/agent/edges.js';
 import type { EdgeSnapshot } from '../src/agent/edges.js';
 import { LEVEL } from '../src/agent/scheduler.js';
@@ -186,5 +192,38 @@ describe('event shape: delta plus action context, no Live State repeat', () => {
       position: '10,64,-3',
       dimension: 'overworld',
     });
+  });
+});
+
+describe('shouldEmitHurt', () => {
+  it('fires on any decrease with the damage amount, debounced', () => {
+    expect(shouldEmitHurt(20, 18, 0, HURT_DEBOUNCE_MS + 1)).toEqual({ fire: true, damage: 2 });
+    // 防抖内免发（着火/中毒是持续掉血）。
+    expect(shouldEmitHurt(18, 17, 1000, 1000 + HURT_DEBOUNCE_MS - 1).fire).toBe(false);
+    // 回血/无变化不发。
+    expect(shouldEmitHurt(18, 19, 0, 99999).fire).toBe(false);
+    expect(shouldEmitHurt(18, 18, 0, 99999).fire).toBe(false);
+    // 读不到不瞎发。
+    expect(shouldEmitHurt(null, 18, 0, 99999).fire).toBe(false);
+    expect(shouldEmitHurt(20, null, 0, 99999).fire).toBe(false);
+  });
+});
+
+describe('isStuck', () => {
+  it('needs a running action, a fixed position and a full window', () => {
+    const now = 100000;
+    expect(isStuck('a', 'a', now - STUCK_MS, now, true)).toBe(true);
+    expect(isStuck('a', 'a', now - STUCK_MS + 1, now, true)).toBe(false);
+    expect(isStuck('a', 'a', now - STUCK_MS, now, false)).toBe(false);
+    expect(isStuck('a', 'b', now - STUCK_MS, now, true)).toBe(false);
+    expect(isStuck(null, 'b', now - STUCK_MS, now, true)).toBe(false);
+  });
+});
+
+describe('isHeartbeatDue', () => {
+  it('fires once the idle interval passes', () => {
+    const now = 1000000;
+    expect(isHeartbeatDue(now - HEARTBEAT_MS, now)).toBe(true);
+    expect(isHeartbeatDue(now - HEARTBEAT_MS + 1, now)).toBe(false);
   });
 });

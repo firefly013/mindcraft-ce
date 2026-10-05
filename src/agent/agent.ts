@@ -10,7 +10,10 @@ import pf from 'mineflayer-pathfinder';
 import { isHostile } from '../utils/mcdata.js';
 import { Scheduler, KIND, LEVEL } from './scheduler.js';
 import type { Kind, Level } from './scheduler.js';
-import { STOP_WORDS } from './edges.js';
+import { STOP_WORDS, shouldEmitHurt, isStuck, isHeartbeatDue } from './edges.js';
+import { attachBaritone } from './baritone_loader.js';
+import type { BaritoneHandle } from './baritone_loader.js';
+import { createBaritoneTool } from './baritone_tool.js';
 import { AgentLoop } from './loop.js';
 import type { LoopModelResponse, LoopRunner, LoopToolResult } from './loop.js';
 import { sampleLiveState, renderLiveState } from './live_state.js';
@@ -55,6 +58,12 @@ export class Agent {
     loop!: AgentLoop;
     loopLog: Array<{ kind: string; level: number; payload: unknown }> = [];
     plan: PlanStore = new PlanStore();
+    baritone: BaritoneHandle | null = null;
+    private lastHurtEmitAt: number = 0;
+    private lastCollectEmitAt: number = 0;
+    private stuckPos: string | null = null;
+    private stuckSince: number = 0;
+    private lastHeartbeatAt: number = Date.now();
     edgeWatcher: EdgeWatcher | null = null;
     requestLog: RequestLog | null = null;
     toolHandlers = new Map<string, (args: unknown) => Promise<LoopToolResult>>();
@@ -156,6 +165,8 @@ export class Agent {
                 addBrowserViewer(this.bot, count_id);
                 console.log('Initializing vision intepreter...');
                 this.vision_interpreter = new VisionInterpreter(this, settings.allow_vision);
+                console.log('Attaching baritone...');
+                this.baritone = await attachBaritone(this.bot);
 
                 // wait for a bit so stats are not undefined
                 await new Promise<void>((resolve) => setTimeout(resolve, 1000));
@@ -339,10 +350,28 @@ export class Agent {
                 `Todos: ${snap.todos.length > 0 ? snap.todos.join('; ') : 'none'}.`;
             return Promise.resolve({ status: 'completed', data: summary } as LoopToolResult);
         });
+        // Baritone：一条机器人命令行。查询直返，动作占通道后台盯，
+        // 控制命令被 handler 拦截（停机走 Stop）。
+        this.toolHandlers.set(
+            'Baritone',
+            createBaritoneTool({
+                getBaritone: () => this.baritone,
+                scheduler: this.scheduler,
+                notify: (payload: { call: string; result: LoopToolResult }): void => {
+                    const verdict = this.loop.notify({ kind: KIND.TOOL, level: LEVEL.WAKE, payload });
+                    void this.loop.handleDecision(verdict.decision);
+                },
+            }),
+        );
     }
 
-    /** 全部停下：动作停、日志清、续跑取消、回到 idle。 */
+    /** 全部停下：Baritone 任务先掐，动作停、日志清、续跑取消、回到 idle。 */
     private async fullStop(): Promise<void> {
+        try {
+            this.baritone?.getCommandManager?.()?.execute('forcecancel');
+        } catch (err: unknown) {
+            console.warn('baritone forcecancel failed:', err instanceof Error ? err.message : String(err));
+        }
         await this.actions.stop();
         this.clearBotLogs();
         this.actions.cancelResume();
@@ -577,6 +606,20 @@ export class Agent {
             if (this.bot.health < prev_health) {
                 this.bot.lastDamageTime = Date.now();
                 this.bot.lastDamageTaken = prev_health - this.bot.health;
+                // 挨打即事件（带伤害量）：阈值越线是另一组检测器的事，
+                // 这里只管"挨打了"这个事实；持续掉血 1.5 秒只报一次。
+                const hurt = shouldEmitHurt(prev_health, this.bot.health, this.lastHurtEmitAt, Date.now());
+                if (hurt.fire) {
+                    this.lastHurtEmitAt = Date.now();
+                    const verdict = this.loop.notify({
+                        kind: KIND.WORLD,
+                        level: LEVEL.WAKE,
+                        payload: { type: 'bot.hurt', health: this.bot.health, damage: hurt.damage },
+                    });
+                    void this.loop.handleDecision(verdict.decision).catch((err: unknown) => {
+                        console.error('hurt decision failed:', err instanceof Error ? err.message : String(err));
+                    });
+                }
             }
             prev_health = this.bot.health;
             // 低血边沿：掉进线以下发一次 L5，回到 12 以上才重新 armed。
@@ -643,6 +686,37 @@ export class Agent {
                 }
             }, 1000);
         });
+        // 拾取：自己捡起掉落物。连捡时 2 秒只报一次，免得刷屏开轮。
+        this.bot.on('playerCollect', (collector: any, collected: any) => {
+            try {
+                if (!collector || collector.id !== this.bot?.entity?.id) return;
+                const now = Date.now();
+                if (now - this.lastCollectEmitAt < 2000) return;
+                this.lastCollectEmitAt = now;
+                const name = collected?.name ?? collected?.displayName ?? 'item';
+                const verdict = this.loop.notify({
+                    kind: KIND.WORLD,
+                    level: LEVEL.WAKE,
+                    payload: { type: 'inventory.collected', item: String(name) },
+                });
+                void this.loop.handleDecision(verdict.decision);
+            } catch (err: unknown) {
+                console.error('collect event failed:', err instanceof Error ? err.message : String(err));
+            }
+        });
+        // 开箱：容器界面打开即事件（关箱不报，没信息量）。
+        this.bot.on('windowOpen', (window: any) => {
+            try {
+                const verdict = this.loop.notify({
+                    kind: KIND.WORLD,
+                    level: LEVEL.WAKE,
+                    payload: { type: 'inventory.container', title: String(window?.title ?? 'container') },
+                });
+                void this.loop.handleDecision(verdict.decision);
+            } catch (err: unknown) {
+                console.error('container event failed:', err instanceof Error ? err.message : String(err));
+            }
+        });
 
         // Init NPC controller
         this.npc.init();
@@ -694,6 +768,36 @@ export class Agent {
         } catch {
             return;
         }
+        // 卡住：有动作在跑但位置 60 秒没动（动了就重算；报一次后再等 60 秒）。
+        const now = Date.now();
+        const pos = snapshot.position ?? null;
+        if (pos !== this.stuckPos) {
+            this.stuckPos = pos;
+            this.stuckSince = now;
+        } else if (
+            isStuck(this.stuckPos, pos, this.stuckSince, now, this.scheduler.describe().actionId != null)
+        ) {
+            this.stuckSince = now;
+            const verdict = this.loop.notify({
+                kind: KIND.WORLD,
+                level: LEVEL.PREEMPT,
+                payload: { type: 'task.stuck', position: pos, action: snapshot.currentAction ?? null },
+            });
+            await this.loop.handleDecision(verdict.decision);
+        }
+        // 心跳：5 分钟无动作无请求，醒一次做反思，防睡死。
+        if (
+            isHeartbeatDue(this.lastHeartbeatAt, now) &&
+            this.scheduler.describe().actionId == null
+        ) {
+            this.lastHeartbeatAt = now;
+            const heartbeat = this.loop.notify({
+                kind: KIND.WORLD,
+                level: LEVEL.WAKE,
+                payload: { type: 'system.heartbeat' },
+            });
+            await this.loop.handleDecision(heartbeat.decision);
+        }
         if (events.length === 0) return;
         events.sort((a, b) => b.level - a.level);
         for (const event of events) {
@@ -730,6 +834,14 @@ export class Agent {
         if (this.task.data) {
             const res = this.task.isDone();
             if (res) {
+                // 任务完成/失败先进调度（失败 L4，成功 L3），再收尾退出。
+                const failed = typeof res.score === 'number' && res.score < 1;
+                const verdict = this.loop.notify({
+                    kind: KIND.WORLD,
+                    level: failed ? LEVEL.PREEMPT : LEVEL.WAKE,
+                    payload: { type: failed ? 'task.failed' : 'task.done', score: res.score },
+                });
+                await this.loop.handleDecision(verdict.decision);
                 await this.history.add('system', MESSAGES.taskEnded(res.score));
                 await this.history.save();
                 // await new Promise(resolve => setTimeout(resolve, 3000)); // Wait 3 second for save to complete

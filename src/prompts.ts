@@ -7,6 +7,7 @@
 // =============================================================
 
 import type { AgentProfile } from './types/common.js';
+import { BARITONE_TUTORIAL } from './agent/baritone_tutorial.js';
 
 export interface PromptSet {
     conversing: string;
@@ -226,6 +227,10 @@ export const TOOL_TEXT: Record<string, { description: string; params: Record<str
   UpdatePlan: {
     description: '更新你自己的计划：当前目标和待办清单。整单替换，不传的字段不动，目标传空串表示清空。计划会出现在每轮的世界快照里。',
     params: { goal: '当前目标，空串清空。', todos: '待办清单（整单替换）。' },
+  },
+  Baritone: {
+    description: BARITONE_TUTORIAL,
+    params: { command: '完整命令行，不带 # 前缀，如 goto 100 64 200。' },
   },
 };
 
