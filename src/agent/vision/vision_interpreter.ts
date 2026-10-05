@@ -20,13 +20,20 @@ export class VisionInterpreter {
     }
 
     /**
-     * 现拍一张返回 base64（主循环 Live State 用）。相机没开/拍失败
-     * 返回 null，调用方直接跳过图片——永不炸轮次。
+     * 现拍一张返回 base64（主循环 Live State 用）。相机没开/没就绪/
+     * 拍失败返回 null，调用方直接跳过图片——永不炸轮次。
      */
     async captureBase64(): Promise<string | null> {
         if (!this.allow_vision || !this.camera) return null;
         try {
-            const filename = await this.camera.capture();
+            // 相机 init 是异步的（worldView 就绪才放行）：最多等 10 秒。
+            const camera = this.camera;
+            const deadline = Date.now() + 10000;
+            while ((camera as { worldView?: unknown }).worldView == null && Date.now() < deadline) {
+                await new Promise<void>((r) => setTimeout(r, 200));
+            }
+            if ((camera as { worldView?: unknown }).worldView == null) return null;
+            const filename = await camera.capture();
             this.lastScreenshot = { file: filename, takenAt: Date.now() };
             return fs.readFileSync(`${this.fp}/${filename}.jpg`).toString('base64');
         } catch (err: unknown) {
