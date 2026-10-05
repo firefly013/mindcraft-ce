@@ -351,12 +351,22 @@ export class Agent {
     private actionRunner: ActionRunner | null = null;
 
     /** 非控制工具走 ActionRunner：动作类即时回 accepted，查询类阻塞回内容。 */
-    private runTool(name: string, args: unknown): Promise<LoopToolResult> {
+    private async runTool(name: string, args: unknown): Promise<LoopToolResult> {
         const handler = this.toolHandlers.get(name);
         if (handler) {
-            // 控制类调用也广播（Say 除外：它自己已经说话了）。
+            // 控制类调用也广播（Say 除外：它自己已经说话了），
+            // 回执同样记账：每次调用必有 outcome，模型才能对上号。
             if (name !== 'Say') this.routeResponse(this.currentSource, MESSAGES.usedMarker(name));
-            return handler(args);
+            const result = await handler(args);
+            const outcome =
+                result.status === 'completed'
+                    ? String(result.data ?? '(no output)')
+                    : `rejected: ${(result.reason ?? result.code ?? 'unknown') as string}`;
+            await this.history.add('system', MESSAGES.toolOutcome(name, args, outcome), {
+                kind: 'tool',
+                level: 2,
+            });
+            return result;
         }
         if (!this.actionRunner) {
             this.actionRunner = new ActionRunner({

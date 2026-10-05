@@ -9,15 +9,14 @@ import type { ChatMessage } from '../src/types/common.js';
 
 interface Seen {
   body: Record<string, unknown>;
-  opts?: Record<string, unknown>;
 }
 
 function stubbed(seen: Seen[]): OpenCodeClient {
   return {
     chat: {
       completions: {
-        create: (body: Record<string, unknown>, opts?: Record<string, unknown>) => {
-          seen.push({ body, opts });
+        create: (body: Record<string, unknown>) => {
+          seen.push({ body });
           return Promise.resolve({
             choices: [
               {
@@ -37,7 +36,7 @@ function stubbed(seen: Seen[]): OpenCodeClient {
 }
 
 describe('OpenCode', () => {
-  it('defaults to deepseek-v4.1-flash and disables thinking via extra_body', async () => {
+  it('defaults to deepseek-v4.1-flash and disables thinking top-level', async () => {
     const seen: Seen[] = [];
     const model = new OpenCode(null, undefined, undefined, stubbed(seen));
     const res = await model.sendRequestWithTools([{ role: 'user', content: 'hi' }], 'SYS', [], 'auto', '');
@@ -45,10 +44,9 @@ describe('OpenCode', () => {
     expect(res.tool_calls).toEqual([{ id: '1', name: 'Finish', args: {} }]);
     const body = seen[0]?.body as Record<string, unknown>;
     expect(body['model']).toBe(OPENCODE_DEFAULT_MODEL);
-    const extra = seen[0]?.opts?.['extra_body'] as { thinking?: { type?: string } };
-    expect(extra.thinking?.type).toBe('disabled');
-    // thinking 开关只走 extra_body，不进正文 body。
-    expect('thinking' in (body as object)).toBe(false);
+    // 思考关闭走顶层直传（网关拒绝 extra_body 包裹，实测）。
+    expect(body['thinking']).toEqual({ type: 'disabled' });
+    expect('extra_body' in (body as object)).toBe(false);
   });
 
   it('appends the live snapshot last', async () => {

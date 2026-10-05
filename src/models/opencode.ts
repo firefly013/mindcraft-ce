@@ -1,13 +1,14 @@
 /*
  * OpenCode Zen 网关（OpenAI 兼容）：默认 `deepseek-v4.1-flash`，思考全关。
  *
- * 接线依据（均为公开文档，不是猜的）：
- *   - 模型 ID 与 chat/completions 入口：https://opencode.ai/docs/zen/
- *     （DeepSeek V4.1 Flash → `deepseek-v4.1-flash`，
- *     `https://opencode.ai/zen/v1/chat/completions`）
- *   - 思考开关：DeepSeek API 文档 thinking_mode
- *     （OpenAI 格式走 extra_body `{"thinking": {"type": "disabled"}}`，
- *     默认开启，不关就一直想）
+ * 接线依据（均为实测/公开文档，不是猜的）：
+ *   - Go 入口与模型 ID：`https://opencode.ai/zen/go/v1/chat/completions`，
+ *     DeepSeek V4.1 Flash → `deepseek-v4.1-flash`
+ *     （Zen 文档模型表同款 ID；Go 路径由网关设计确认）
+ *   - 思考开关：实测网关拒绝 `extra_body` 包裹
+ *     （"Extra inputs are not permitted"），顶层直传
+ *     `{"thinking": {"type": "disabled"}}` 返回 200 且零思考
+ *     token。DeepSeek 官方文档同款字段。
  *   - `x-opencode-session` 会话路由头：网关按会话路由，
  *     每个进程一个，OPENCODE_SESSION_ID 可覆盖。
  *
@@ -27,17 +28,14 @@ import type {
   ToolResponse,
 } from '../types/common.js';
 
-export const OPENCODE_BASE_URL = 'https://opencode.ai/zen/v1';
+export const OPENCODE_BASE_URL = 'https://opencode.ai/zen/go/v1';
 export const OPENCODE_DEFAULT_MODEL = 'deepseek-v4.1-flash';
 
 /** 最小的可注入 client 形状：不断网单测用。 */
 export interface OpenCodeClient {
   chat: {
     completions: {
-      create: (
-        body: Record<string, unknown>,
-        opts?: Record<string, unknown>,
-      ) => Promise<{
+      create: (body: Record<string, unknown>) => Promise<{
         choices: Array<{
           finish_reason?: string;
           message: {
@@ -90,9 +88,9 @@ export class OpenCode implements AIModel {
     };
   }
 
-  /** 思考硬关闭的 extra_body（DeepSeek 文档格式）。 */
+  /** 思考硬关闭：顶层直传（网关拒绝 extra_body 包裹，实测）。 */
   private noThink(): Record<string, unknown> {
-    return { extra_body: { thinking: { type: 'disabled' } } };
+    return { thinking: { type: 'disabled' } };
   }
 
   async sendRequest(turns: ChatMessage[], systemMessage: string): Promise<string> {
@@ -100,10 +98,10 @@ export class OpenCode implements AIModel {
     const model = this.model_name || OPENCODE_DEFAULT_MODEL;
     try {
       console.log(`Awaiting opencode response... (model: ${model})`);
-      const completion = await this.openai.chat.completions.create(
-        this.bodyBase(model, messages),
-        this.noThink(),
-      );
+      const completion = await this.openai.chat.completions.create({
+        ...this.bodyBase(model, messages),
+        ...this.noThink(),
+      });
       if (completion.choices[0]?.finish_reason == 'length') throw new Error('Context length exceeded');
       console.log('Received.');
       return completion.choices[0]?.message.content ?? '';
@@ -136,10 +134,12 @@ export class OpenCode implements AIModel {
     }
     const model = this.model_name || OPENCODE_DEFAULT_MODEL;
     console.log(`Awaiting opencode tool response... (model: ${model})`);
-    const completion = await this.openai.chat.completions.create(
-      { ...this.bodyBase(model, messages), tools, tool_choice },
-      this.noThink(),
-    );
+    const completion = await this.openai.chat.completions.create({
+      ...this.bodyBase(model, messages),
+      tools,
+      tool_choice,
+      ...this.noThink(),
+    });
     const msg = completion.choices[0]?.message ?? { content: '' };
     let tool_calls: ToolResponse['tool_calls'];
     try {
