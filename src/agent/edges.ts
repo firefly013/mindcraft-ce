@@ -27,6 +27,7 @@ export interface EdgeEntity {
   distance?: number | null;
   hostile?: boolean | null;
   isPlayer?: boolean | null;
+  health?: number | null;
   swelling?: boolean | null;
   primed?: boolean | null;
   heldWeapon?: boolean | null;
@@ -443,4 +444,150 @@ function deltaFor(detector: Detector, key: string | number | null, snapshot: Edg
   return delta;
 }
 
-export default { createEdgeWatcher, resolvePriority, classifyToolFailure, schedulerLevelFor, DETECTORS };
+export interface SnapshotExtra {
+  currentAction?: string | null;
+  goal?: string | null;
+  foodNames?: string[];
+}
+
+/**
+ * 从 mineflayer bot 现拼边沿快照。全部防御性读取；读不到的
+ * 保持 undefined（检测器把缺值当"没触发"，不瞎报）。
+ *
+ * 诚实缺口（host 还没接传感）：onFire、fallLethal、trapped、
+ * belowVoid、nextIsLava ——对应 L5 检测器平时静默，等 host
+ * 补上传感再亮。溺水走氧气+水 flag；虚空目前靠死亡事件
+ * 重规划兜底。
+ */
+export function snapshotFromBot(bot: unknown, extra: SnapshotExtra = {}): EdgeSnapshot {
+  const snap: EdgeSnapshot = {};
+  if (bot == null || typeof bot !== 'object') return snap;
+  const b = bot as Record<string, unknown>;
+  try {
+    snap.health = num(b['health']);
+    snap.food = num(b['food']);
+    snap.oxygen = num((b as { oxygenLevel?: unknown }).oxygenLevel);
+
+    const entity = (b['entity'] ?? {}) as Record<string, unknown>;
+    const pos = (entity['position'] ?? {}) as { x?: unknown; y?: unknown; z?: unknown };
+    const feet = { x: num(pos.x) ?? 0, y: num(pos.y) ?? 0, z: num(pos.z) ?? 0 };
+    const vel = (entity['velocity'] ?? {}) as { x?: unknown; y?: unknown; z?: unknown };
+    snap.moving =
+      num(vel.x) != null && (Math.abs(num(vel.x) as number) + Math.abs(num(vel.y) as number) + Math.abs(num(vel.z) as number) > 0.1);
+    snap.alive = snap.health != null ? snap.health > 0 : undefined;
+
+    const slots = ((b['inventory'] as { slots?: unknown } | undefined)?.slots ?? []) as Array<{
+      name?: unknown;
+      count?: unknown;
+    }>;
+    if (Array.isArray((b['inventory'] as { slots?: unknown } | undefined)?.slots)) {
+      let free = 0;
+      for (let i = 9; i <= 35; i++) {
+        if (slots[i] == null) free++;
+      }
+      snap.freeSlots = free;
+    }
+    try {
+      const items = ((b['inventory'] as { items?: () => unknown }).items?.() ?? []) as Array<{
+        name?: unknown;
+        count?: unknown;
+      }>;
+      const foods = new Set(extra.foodNames ?? []);
+      let foodCount = 0;
+      for (const item of items) {
+        const n = typeof item?.name === 'string' ? item.name : '';
+        if (foods.has(n)) foodCount += typeof item?.count === 'number' ? item.count : 1;
+      }
+      if (foods.size > 0 || foodCount > 0) snap.foodCount = foodCount;
+    } catch {
+      // 背包读不到就不报食物数。
+    }
+
+    const held = (b['heldItem'] ?? null) as { durabilityUsed?: unknown; maxDurability?: unknown } | null;
+    const used = num(held?.durabilityUsed);
+    const max = num(held?.maxDurability);
+    if (held != null && used != null && max != null && max > 0) {
+      snap.heldSlots = [{ slot: 'hand', fraction: 1 - used / max }];
+    }
+
+    const time = num((b['time'] as { timeOfDay?: unknown } | undefined)?.timeOfDay);
+    snap.isNight = time != null ? time >= 12542 && time < 23460 : undefined;
+    snap.isThunder = (b['thunderState'] as boolean | undefined) === true ? true : undefined;
+    const rain = b['rainState'] as unknown;
+    snap.isRain = rain === true || rain === 1 ? true : undefined;
+    snap.dimension = strOf((b['game'] as { dimension?: unknown } | undefined)?.dimension);
+
+    try {
+      const blockAt = b['blockAt'] as ((p: unknown) => unknown) | undefined;
+      if (typeof blockAt === 'function') {
+        const at = (p: unknown): Record<string, unknown> => {
+          try {
+            return (blockAt.call(b, p) ?? {}) as Record<string, unknown>;
+          } catch {
+            return {};
+          }
+        };
+        const feetBlock = at(feet);
+        const light = num(feetBlock['light'] ?? feetBlock['skyLight']);
+        if (light != null) snap.light = light;
+        const feetName = feetBlock['name'];
+        snap.inLava = feetName === 'lava' ? true : undefined;
+        snap.inWater = feetName === 'water' ? true : undefined;
+        const biome = feetBlock['biome'] as { name?: unknown } | string | null | undefined;
+        snap.biome = typeof biome === 'string' ? biome : strOf(biome?.name);
+      }
+    } catch {
+      // 环境读不到就空着。
+    }
+
+    const rawEntities = (b['entities'] ?? {}) as Record<string, unknown>;
+    const list: EdgeSnapshot['entities'] = [];
+    try {
+      const selfId = (entity as { id?: unknown }).id;
+      for (const raw of Object.values(rawEntities)) {
+        const e = raw as {
+          id?: unknown;
+          name?: unknown;
+          displayName?: unknown;
+          type?: unknown;
+          kind?: unknown;
+          position?: unknown;
+          health?: unknown;
+        };
+        if (e == null || e.id === selfId) continue;
+        const ep = (e.position ?? {}) as { x?: unknown; y?: unknown; z?: unknown };
+        const ex = num(ep.x);
+        const ey = num(ep.y);
+        const ez = num(ep.z);
+        if (ex == null || ey == null || ez == null) continue;
+        const d = Math.hypot(ex - feet.x, ey - feet.y, ez - feet.z);
+        const type = typeof e.type === 'string' ? e.type : typeof e.kind === 'string' ? e.kind : '';
+        list.push({
+          id: typeof e.id === 'number' ? e.id : -1,
+          name: typeof e.name === 'string' ? e.name : typeof e.displayName === 'string' ? e.displayName : 'unknown',
+          kind: type !== '' ? type : undefined,
+          distance: Math.round(d * 10) / 10,
+          isPlayer: type.toLowerCase() === 'player',
+          health: num(e.health) ?? undefined,
+        });
+      }
+    } catch {
+      // 实体表读不到就当没看见。
+    }
+    if (list.length > 0) snap.entities = list;
+
+    snap.currentAction = extra.currentAction ?? null;
+    snap.goal = extra.goal ?? null;
+    snap.position = `${feet.x},${feet.y},${feet.z}`;
+    snap.dimension = snap.dimension ?? strOf((b['game'] as { dimension?: unknown } | undefined)?.dimension) ?? null;
+  } catch {
+    // 拼快照永不抛错：半截也比没有强。
+  }
+  return snap;
+}
+
+function strOf(value: unknown): string | null {
+  return typeof value === 'string' && value !== '' ? value : null;
+}
+
+export default { createEdgeWatcher, resolvePriority, classifyToolFailure, schedulerLevelFor, snapshotFromBot, DETECTORS };

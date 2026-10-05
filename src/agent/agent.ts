@@ -13,8 +13,13 @@ import { STOP_WORDS } from './edges.js';
 import { AgentLoop } from './loop.js';
 import type { LoopModelResponse, LoopRunner, LoopToolResult } from './loop.js';
 import { sampleLiveState, renderLiveState } from './live_state.js';
-import { runEmergency, shouldTriggerEmergency } from './emergency.js';
+import { runEmergency, shouldTriggerEmergency, FOOD_VALUE } from './emergency.js';
 import type { ThreatEntity } from './emergency.js';
+import { createEdgeWatcher, resolvePriority, schedulerLevelFor, snapshotFromBot } from './edges.js';
+import { createRequestLog } from './requestLog.js';
+import type { RequestLog } from './requestLog.js';
+
+type EdgeWatcher = ReturnType<typeof createEdgeWatcher>;
 import { ActionManager } from './action_manager.js';
 import { NPCContoller } from './npc/controller.js';
 import { MemoryBank } from './memory_bank.js';
@@ -47,6 +52,8 @@ export class Agent {
     scheduler!: Scheduler;
     loop!: AgentLoop;
     loopLog: Array<{ kind: string; level: number; payload: unknown }> = [];
+    edgeWatcher: EdgeWatcher | null = null;
+    requestLog: RequestLog | null = null;
     toolHandlers = new Map<string, (args: unknown) => Promise<LoopToolResult>>();
     lowHpArmed: boolean = false;
 
@@ -78,6 +85,7 @@ export class Agent {
         this.history = new History(this);
         this.npc = new NPCContoller(this);
         this.memory_bank = new MemoryBank();
+        this.requestLog = createRequestLog({ dir: `./bots/${this.name}` });
 
         // load mem first before doing task
         let save_data: HistorySaveData | null = null;
@@ -272,6 +280,7 @@ export class Agent {
 
     private buildLoop(): void {
         this.scheduler = new Scheduler();
+        this.edgeWatcher = createEdgeWatcher();
         const runner: LoopRunner = {
             register: (name: string, handler: (args: unknown) => Promise<LoopToolResult>) => {
                 this.toolHandlers.set(name, handler);
@@ -340,7 +349,7 @@ export class Agent {
         return { status: 'completed', data };
     }
 
-    /** 每轮现采 Live State，渲成追加在正文末尾的文本块。 */
+    /** 每轮现采 Live State，渲成追加在正文末尾的文本块，同时记一笔请求日志。 */
     private assembleContext(): { text: string; tools: unknown } {
         const task = this.task as { goal?: unknown } | null;
         const live = sampleLiveState({
@@ -350,7 +359,12 @@ export class Agent {
             todos: [],
             currentAction: this.actions.currentActionLabel,
         });
-        return { text: `## 当前世界快照\n${renderLiveState(live)}`, tools: getOpenAITools(this) };
+        const tools = getOpenAITools(this);
+        this.requestLog?.logRequest({
+            text: `## 当前世界快照\n${renderLiveState(live)}`,
+            tools: tools.map((t) => t.function.name),
+        });
+        return { text: `## 当前世界快照\n${renderLiveState(live)}`, tools };
     }
 
     private async modelCall(liveText: string, tools: unknown): Promise<LoopModelResponse> {
@@ -601,6 +615,51 @@ export class Agent {
     async update(delta: number): Promise<void> {
         void delta;
         await this.checkTaskDone();
+        await this.pollEdges();
+    }
+
+    /**
+     * 边沿轮询（300ms 一次）：现拼快照，过检测器，定级后泵入调度。
+     * 等级高的先处理；顺序执行，一次只跑一轮（update 本来就是串行的）。
+     */
+    private async pollEdges(): Promise<void> {
+        if (!this.edgeWatcher || !this.loop || !this.bot) return;
+        let snapshot;
+        try {
+            const task = this.task as { goal?: unknown } | null;
+            snapshot = snapshotFromBot(this.bot, {
+                currentAction: this.actions?.currentActionLabel ?? null,
+                goal: typeof task?.goal === 'string' ? task.goal : null,
+                foodNames: Object.keys(FOOD_VALUE),
+            });
+        } catch {
+            return;
+        }
+        let events;
+        try {
+            events = this.edgeWatcher.poll(snapshot);
+        } catch {
+            return;
+        }
+        if (events.length === 0) return;
+        events.sort((a, b) => b.level - a.level);
+        for (const event of events) {
+            const edgeLevel = resolvePriority(
+                { type: event.type, level: event.level, key: event.key },
+                snapshot,
+            );
+            const verdict = this.loop.notify({
+                kind: KIND.WORLD,
+                level: schedulerLevelFor(edgeLevel),
+                payload: {
+                    type: event.type,
+                    key: event.key,
+                    delta: event.delta,
+                    actionContext: event.actionContext,
+                },
+            });
+            await this.loop.handleDecision(verdict.decision);
+        }
     }
 
     isIdle(): boolean {
