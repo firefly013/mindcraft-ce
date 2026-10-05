@@ -3,12 +3,28 @@ import settings from '../agent/settings.js';
 import { createBot } from 'mineflayer';
 import prismarine_items from 'prismarine-item';
 import { pathfinder } from 'mineflayer-pathfinder';
-import * as customPvpMod from '@nxg-org/mineflayer-custom-pvp';
+import { createRequire } from 'module';
 import { plugin as collectblock } from 'mineflayer-collectblock';
 import { loader as autoEat } from 'mineflayer-auto-eat';
-import commonSense from '@nxg-org/mineflayer-common-sense';
 import plugin from 'mineflayer-armor-manager';
 const armorManager = plugin;
+
+const require = createRequire(import.meta.url);
+
+/**
+ * @nxg-org 的包是 CJS 且把插件挂在 `exports.default` 上，
+ * ESM import 拿到的 namespace.default 是一层对象不是函数。
+ * 这里走 require 精确取到 module.exports，启动期就断言是函数，
+ * 免得进游戏才炸。
+ */
+function loadNxgPlugin(name: string): (bot: unknown) => void {
+    const mod = require(name) as { default?: unknown } | ((bot: unknown) => void);
+    const plugin = typeof mod === 'function' ? mod : (mod as { default?: unknown }).default;
+    if (typeof plugin !== 'function') {
+        throw new Error(`${name} did not export a mineflayer plugin function`);
+    }
+    return plugin as (bot: unknown) => void;
+}
 let mc_version = settings.minecraft_version;
 // minecraft-data / prismarine-item ship no usable types here; treat registries as any
 let mcdata: any = null;
@@ -161,10 +177,10 @@ export function initBot(username: string): any {
     };
 
     bot.loadPlugin(pathfinder);
-    bot.loadPlugin((customPvpMod as any).default ?? customPvpMod); // bot.swordpvp 近战 + bot.bowpvp 远程
+    bot.loadPlugin(loadNxgPlugin('@nxg-org/mineflayer-custom-pvp')); // bot.swordpvp 近战 + bot.bowpvp 远程
     bot.loadPlugin(collectblock);
     bot.loadPlugin(autoEat);
-    bot.loadPlugin(commonSense); // 保命应急：着火/摔落等基础响应
+    bot.loadPlugin(loadNxgPlugin('@nxg-org/mineflayer-common-sense')); // 保命应急：着火/摔落等基础响应
     bot.loadPlugin(armorManager); // auto equip armor
     bot.once('resourcePack', () => {
         bot.acceptResourcePack();
