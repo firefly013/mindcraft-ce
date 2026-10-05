@@ -14,7 +14,7 @@ const profile = (over: Record<string, unknown> = {}): AgentProfile =>
 
 describe('td/tp', () => {
   it('returns descriptions for known tools', () => {
-    expect(td('stop')).toBe(TOOL_TEXT.stop.description);
+    expect(td('stfu')).toBe(TOOL_TEXT.stfu.description);
     expect(tp('goToPlayer', 'player_name')).toBe(TOOL_TEXT.goToPlayer.params.player_name);
   });
 

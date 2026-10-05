@@ -45,17 +45,8 @@ function runAsAction (actionFn: AgentActionFn, resume = false, timeout = -1): Ag
 }
 
 export const actionsList: AgentCommand[] = [
-    {
-        name: '!stop',
-        description: td('stop'),
-        perform: async function (agent: any): Promise<string> {
-            await agent.actions.stop();
-            agent.clearBotLogs();
-            agent.actions.cancelResume();
-            agent.bot.emit('idle');
-            return 'Agent stopped.';
-        }
-    },
+    // 注：停下走循环 Stop 工具（不占通道，忙时也能调）；
+    // 旧 !stop 命令已删，避免跟 Stop 重名混淆。
     {
         name: '!stfu',
         description: td('stfu'),

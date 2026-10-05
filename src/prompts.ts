@@ -23,10 +23,6 @@ export const PROMPT_SETS: Record<string, Record<string, string>> = {
 
 // 工具描述与参数描述。键为去 ! 的工具名；类型/domain 留在命令定义处（代码约束）。
 export const TOOL_TEXT: Record<string, { description: string; params: Record<string, string> }> = {
-  stop: {
-    description: '强制停下所有正在执行的动作。',
-    params: {},
-  },
   stfu: {
     description: '闭嘴别聊，但手头动作继续。',
     params: {},
