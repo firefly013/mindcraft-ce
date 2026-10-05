@@ -4,9 +4,6 @@ import pf from 'mineflayer-pathfinder';
 import Vec3 from 'vec3';
 import settings from "../../../settings.js";
 
-const blockPlaceDelay: number = (settings.block_place_delay as number | null | undefined) ?? 0;
-const useDelay: boolean = blockPlaceDelay > 0;
-
 export function log(bot: any, ...messages: any[]): void {
     bot.output += messages.join(' ') + '\n';
 }
@@ -45,7 +42,7 @@ export async function craftRecipe(bot: any, itemName: string, num: number = 1): 
     let placedTable = false;
 
     if ((mc as any).getItemCraftingRecipes(itemName).length == 0) {
-        log(bot, `${itemName} is either not an item, or it does not have a crafting recipe!`);
+        log(bot, `${itemName} is either not an item, or it does not have a crafting recipe`);
         return false;
     }
 
@@ -62,7 +59,7 @@ export async function craftRecipe(bot: any, itemName: string, num: number = 1): 
         if (craftingTable === null){
 
             // Try to place crafting table
-            const hasTable: boolean = world.getInventoryCounts(bot)['crafting_table']! > 0;
+            const hasTable: boolean = world.getInventoryCounts(bot)['crafting_table'] > 0;
             if (hasTable) {
                 const pos: any = world.getNearestFreeSpace(bot, 1, 6);
                 await placeBlock(bot, 'crafting_table', pos.x, pos.y, pos.z);
@@ -162,7 +159,7 @@ export async function smeltItem(bot: any, itemName: string, num: number = 1): Pr
     furnaceBlock = world.getNearestBlock(bot, 'furnace', furnaceRange);
     if (!furnaceBlock){
         // Try to place furnace
-        const hasFurnace: boolean = world.getInventoryCounts(bot)['furnace']! > 0;
+        const hasFurnace: boolean = world.getInventoryCounts(bot)['furnace'] > 0;
         if (hasFurnace) {
             const pos: any = world.getNearestFreeSpace(bot, 1, furnaceRange);
             await placeBlock(bot, 'furnace', pos.x, pos.y, pos.z);
@@ -321,7 +318,7 @@ export async function attackNearest(bot: any, mobType: string, kill: boolean = t
      **/
     const mob: any = world.getNearbyEntities(bot, 24).find((entity: any) => entity.name === mobType);
     if (mob) {
-        const res: boolean | void = await attackEntity(bot, mob, kill);
+        const res: boolean | undefined = await attackEntity(bot, mob, kill);
         return res === true;
     }
     log(bot, 'Could not find any '+mobType+' to attack.');
@@ -334,7 +331,7 @@ export function stopPvp(bot: any): void {
     try { bot?.bowpvp?.stop?.(); } catch { /* best-effort: bot may lack pvp plugins */ }
 }
 
-export async function attackEntity(bot: any, entity: any, kill: boolean = true): Promise<boolean | void> {
+export async function attackEntity(bot: any, entity: any, kill: boolean = true): Promise<boolean | undefined> {
     /**
      * Attack mob of the given type.
      * @param {MinecraftBot} bot, reference to the minecraft bot.
@@ -584,7 +581,6 @@ export async function breakBlockAt(bot: any, x: number, y: number, z: number): P
     const block: any = bot.blockAt((Vec3 as any)(x, y, z));
     if (block.name !== 'air' && block.name !== 'water' && block.name !== 'lava') {
         if (settings.cheat) {
-            if (useDelay) { await new Promise(resolve => setTimeout(resolve, blockPlaceDelay)); }
             const msg: string = '/setblock ' + Math.floor(x) + ' ' + Math.floor(y) + ' ' + Math.floor(z) + ' air';
             bot.chat(msg);
             log(bot, `Used /setblock to break block at ${x}, ${y}, ${z}.`);
@@ -676,14 +672,11 @@ export async function placeBlock(bot: any, blockType: string, x: number, y: numb
         if (blockType.includes('stairs')) {
             blockType += `[facing=${face}]`;
         }
-        if (useDelay) { await new Promise(resolve => setTimeout(resolve, blockPlaceDelay)); }
         const msg: string = '/setblock ' + Math.floor(x) + ' ' + Math.floor(y) + ' ' + Math.floor(z) + ' ' + blockType;
         bot.chat(msg);
         if (blockType.includes('door'))
-            if (useDelay) { await new Promise(resolve => setTimeout(resolve, blockPlaceDelay)); }
             bot.chat('/setblock ' + Math.floor(x) + ' ' + Math.floor(y+1) + ' ' + Math.floor(z) + ' ' + blockType + '[half=upper]');
         if (blockType.includes('bed'))
-            if (useDelay) { await new Promise(resolve => setTimeout(resolve, blockPlaceDelay)); }
             bot.chat('/setblock ' + Math.floor(x) + ' ' + Math.floor(y) + ' ' + Math.floor(z-1) + ' ' + blockType + '[part=head]');
         log(bot, `Used /setblock to place ${blockType} at ${target_dest}.`);
         return true;
@@ -1306,7 +1299,7 @@ export async function goToNearestEntity(bot: any, entityType: string, min_distan
     return true;
 }
 
-export async function goToPlayer(bot: any, username: string, distance: number = 3): Promise<boolean | void> {
+export async function goToPlayer(bot: any, username: string, distance: number = 3): Promise<boolean | undefined> {
     /**
      * Navigate to the given player.
      * @param {MinecraftBot} bot, reference to the minecraft bot.

@@ -10,7 +10,6 @@ import type { AgentProfile } from './types/common.js';
 
 export interface PromptSet {
     conversing: string;
-    coding: string;
     saving_memory: string;
     image_analysis: string;
     [k: string]: string;
@@ -19,7 +18,6 @@ export interface PromptSet {
 export const PROMPT_SETS: Record<string, Record<string, string>> = {
   "default": {
     "conversing": "【语言要求：始终用简体中文回复玩家，简短、口语化。】\nYou are an AI Minecraft bot named $NAME that can converse with players, see, move, mine, build, and interact with the world by calling native tools (function calling).\nWhen the player asks you to do something, call the appropriate tool immediately instead of just talking about it. Do NOT output text commands like !likeThis; always use tool calls.\nBe a friendly, casual, effective, and efficient robot. Be very brief in your responses, don't apologize constantly, don't give instructions or make lists unless asked, and don't refuse requests.\nRespond only as $NAME, never output '(FROM OTHER BOT)' or pretend to be someone else. If you have nothing to say or do, respond with just a tab.\nThis is extremely important to me, take a deep breath and have fun :)\nSummarized memory:'$MEMORY'\n$STATS\n$INVENTORY\n当前工作完成时调用 Finish 工具结束本轮循环；没做完就继续调用工具，不要空等。\nConversation Begin:",
-    "coding": "You are an intelligent mineflayer bot $NAME that plays minecraft by writing javascript codeblocks.\nGiven the conversation, use the provided skills and world functions to write a js codeblock that controls the mineflayer bot ``` // using this syntax ```.\nThe code will be executed and you will receive its output. If an error occurs, write another codeblock and try to fix the problem. Be maximally efficient, creative, and correct. Be mindful of previous actions.\nThe code is asynchronous and MUST USE AWAIT for all async function calls, and must contain at least one await. You have Vec3, skills, and world imported, and the mineflayer bot is given. Do not import other libraries. Do not use setTimeout or setInterval. Do not speak conversationally, only use codeblocks. Do any planning in comments.\nThis is extremely important to me, think step-by-step, take a deep breath and good luck!\nSummarized memory:'$MEMORY'\n$STATS\n$INVENTORY\nConversation:",
     "saving_memory": "【语言要求：用简体中文总结记忆。】\nYou are a minecraft bot named $NAME that has been talking and playing minecraft by using tools.\nUpdate your memory by summarizing the following conversation and your old memory in your next response. Prioritize preserving important facts, things you've learned, useful tips, and long term reminders. Do Not record stats, inventory, or docs! Only save transient information from your chat history. You're limited to 500 characters, so be extremely brief and minimize words. Compress useful information.\nOld Memory: '$MEMORY'\nRecent conversation:\n$TO_SUMMARIZE\nSummarize your old memory and recent conversation into a new memory, and respond only with the unwrapped memory text:",
     "image_analysis": "You are a Minecraft bot named $NAME that has been given a screenshot of your current view. Analyze and summarize the view; describe terrain, blocks, entities, structures, and notable features. Focus on details relevant to the conversation. Note: the sky is always blue regardless of weather or time, dropped items are small pink cubes, and blocks below y=0 do not render. Be extremely concise and correct, respond only with your analysis, not conversationally. $STATS"
   },
@@ -38,10 +36,6 @@ export const PROMPT_SETS: Record<string, Record<string, string>> = {
 
 // 工具描述与参数描述。键为去 ! 的工具名；类型/domain 留在命令定义处（代码约束）。
 export const TOOL_TEXT: Record<string, { description: string; params: Record<string, string> }> = {
-  newAction: {
-    description: 'Perform new and unknown custom behaviors that are not available as a command.',
-    params: { prompt: 'A natural language prompt to guide code generation. Make a detailed step-by-step plan.' },
-  },
   stop: {
     description: 'Force stop all actions that are currently executing.',
     params: {},
@@ -259,8 +253,7 @@ export const MESSAGES = {
   death: (posText: string, dimension: string, msg: string): string => `You died at position ${posText} in the ${dimension} dimension with the final message: '${msg}'. Your place of death is saved as 'last_death_position' if you want to return. Previous actions were stopped and you have respawned.`,
   taskGoal: (goal: string): string => `你的任务目标：${goal}`,
   taskEnded: (score: number | string): string => `Task ended with score : ${score}`,
-  codeTimeout: (mins: number): string => `Code execution timed out after ${mins} minutes. Attempting force stop.`,
-  newActionDisabled: 'newAction is disabled. Enable with allow_insecure_coding=true in settings.js',
+  actionTimeout: (mins: number): string => `Action timed out after ${mins} minutes. Attempting force stop.`,
   shuttingUp: 'Shutting up.',
   restarting: 'Restarting.',
   exiting: 'Exiting.',
@@ -273,7 +266,7 @@ export function resolvePromptSet(profile: AgentProfile = {} as AgentProfile): Pr
   const setKey = typeof profile.prompt_set === 'string' ? profile.prompt_set : undefined;
   const base: Record<string, string> = (setKey && PROMPT_SETS[setKey]) || {};
   const merged = { ...PROMPT_SETS.default, ...base } as PromptSet;
-  for (const key of ['conversing', 'coding', 'saving_memory', 'image_analysis'] as const) {
+  for (const key of ['conversing', 'saving_memory', 'image_analysis'] as const) {
     const override = profile[key];
     if (typeof override === 'string') merged[key] = override;
   }

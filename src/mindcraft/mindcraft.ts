@@ -111,7 +111,7 @@ export function stopAgent(agentName: string): void {
 export function destroyAgent(agentName: string): void {
     if (agent_processes[agentName]) {
         agent_processes[agentName]?.stop();
-        delete agent_processes[agentName];
+        Reflect.deleteProperty(agent_processes, agentName);
     }
 }
 

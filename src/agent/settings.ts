@@ -6,7 +6,7 @@ export default settings;
 
 export function setSettings(new_settings: Settings): void {
   for (const key of Object.keys(settings)) {
-    delete (settings as Record<string, unknown>)[key];
+    Reflect.deleteProperty(settings as Record<string, unknown>, key);
   }
   Object.assign(settings, new_settings);
 }

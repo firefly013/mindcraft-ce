@@ -2,6 +2,7 @@
 .idea/
 node_modules/
 dist/
+coverage/
 code_records/
 scratch.js
 bots/**/action-code/**

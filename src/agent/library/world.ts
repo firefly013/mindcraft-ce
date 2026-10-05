@@ -207,7 +207,7 @@ export function getNearbyEntities(bot: any, maxDistance: number = 16): any[] {
     entities.sort((a, b) => a.distance - b.distance);
     const res: any[] = [];
     for (let i = 0; i < entities.length; i++) {
-        res.push(entities[i]!.entity);
+        res.push(entities[i].entity);
     }
     return res;
 }
@@ -230,7 +230,7 @@ export function getNearbyPlayers(bot: any, maxDistance?: number): any[] {
     players.sort((a, b) => a.distance - b.distance);
     const res: any[] = [];
     for (let i = 0; i < players.length; i++) {
-        res.push(players[i]!.entity);
+        res.push(players[i].entity);
     }
     return res;
 }

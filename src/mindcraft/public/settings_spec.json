@@ -86,16 +86,6 @@
         "description": "Whether to render bot view for user observation. Does not give bot vision.",
         "default": false
     },
-    "allow_insecure_coding": {
-        "type": "boolean",
-        "description": "Whether to allow newAction command that let's LLM write/run code on host computer. Despite sandboxxing, it is potentially insecure.",
-        "default": false
-    },
-    "code_timeout_mins": {
-        "type": "number",
-        "description": "Number of minutes to allow code execution. -1 for no timeout",
-        "default": -1
-    },
     "task": {
         "type": "object",
         "description": "The task object to give the agent on start. If null, the agent will not have a task.",

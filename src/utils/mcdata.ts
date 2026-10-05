@@ -320,8 +320,8 @@ export function getItemCraftingRecipes(itemName: string): Array<[Record<string, 
     // sort recipes by if their ingredients include common items
     const commonItems = ['oak_planks', 'oak_log', 'coal', 'cobblestone'];
     recipes.sort((a, b) => {
-        const commonCountA = Object.keys(a[0]).filter(key => commonItems.includes(key)).reduce((acc, key) => acc + a[0][key]!, 0);
-        const commonCountB = Object.keys(b[0]).filter(key => commonItems.includes(key)).reduce((acc, key) => acc + b[0][key]!, 0);
+        const commonCountA = Object.keys(a[0]).filter(key => commonItems.includes(key)).reduce((acc, key) => acc + a[0][key], 0);
+        const commonCountB = Object.keys(b[0]).filter(key => commonItems.includes(key)).reduce((acc, key) => acc + b[0][key], 0);
         return commonCountB - commonCountA;
     });
 
@@ -407,7 +407,7 @@ export function getBlockTool(blockName: string): string | null {
     if (!block || !block.harvestTools) {
         return null;
     }
-    return getItemName(Object.keys(block.harvestTools)[0]!);  // Double check first tool is always simplest
+    return getItemName(Object.keys(block.harvestTools)[0]);  // Double check first tool is always simplest
 }
 
 export function makeItem(name: string, amount = 1): any {
@@ -424,14 +424,14 @@ export function ingredientsFromPrismarineRecipe(recipe: any): Record<string, num
             if (ingredient.id < 0) continue; //prismarine-recipe uses id -1 as an empty crafting slot
             const ingredientName = String(getItemName(ingredient.id));
             requiredIngedients[ingredientName] ??= 0;
-            requiredIngedients[ingredientName]! += ingredient.count;
+            requiredIngedients[ingredientName] += ingredient.count;
         }
     if (recipe.ingredients)
         for (const ingredient of recipe.ingredients) {
             if (ingredient.id < 0) continue;
             const ingredientName = String(getItemName(ingredient.id));
             requiredIngedients[ingredientName] ??= 0;
-            requiredIngedients[ingredientName]! -= ingredient.count;
+            requiredIngedients[ingredientName] -= ingredient.count;
             //Yes, the `-=` is intended.
             //prismarine-recipe uses positive numbers for the shaped ingredients but negative for unshaped.
             //Why this is the case is beyond my understanding.
@@ -455,9 +455,9 @@ export function calculateLimitingResource(
     let limitingResource: string | null = null;
     let num = Infinity;
     for (const itemType in requiredItems) {
-        if (availableItems[itemType]! < requiredItems[itemType]! * num) {
+        if (availableItems[itemType] < requiredItems[itemType] * num) {
             limitingResource = itemType;
-            num = availableItems[itemType]! / requiredItems[itemType]!;
+            num = availableItems[itemType] / requiredItems[itemType];
         }
     }
     if (discrete) num = Math.floor(num);
@@ -523,7 +523,7 @@ export function getDetailedCraftingPlan(
 
     if (isBaseItem(targetItem)) {
         const available = current_inventory[targetItem] || 0;
-        if (available >= count) return 'You have all required items already in your inventory!';
+        if (available >= count) return 'You have all required items already in your inventory';
         return `${targetItem} is a base item, you need to find ${count - available} more in the world`;
     }
 
@@ -617,7 +617,7 @@ function formatPlan(targetItem: string, { required, steps, leftovers }: CraftPla
             lines.push(`- ${count} ${item}`));
         lines.push('\nOnce you have these items, here\'s your crafting plan:');
     } else {
-        lines.push('You have all items required to craft this item!');
+        lines.push('You have all items required to craft this item');
         lines.push('Here\'s your crafting plan:');
     }
 

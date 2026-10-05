@@ -559,7 +559,7 @@ export class Task {
         const commands = result.commands;
         const nearbyPosition = result.nearbyPosition;
         console.log('nearby position', nearbyPosition);
-        const first_coord = (this.data as TaskData & { blueprint: { levels: Array<{ coordinates: number[] }> } }).blueprint.levels[0]!.coordinates;
+        const first_coord = (this.data as TaskData & { blueprint: { levels: Array<{ coordinates: number[] }> } }).blueprint.levels[0].coordinates;
         bot.chat(`/tp @a ${first_coord[0]} ${first_coord[1]} ${first_coord[2]}`);
         if (this.agent.agent_id === 0 && (this.data as TaskData).human_count > 0) {
           for (let i = 0; i < ((this.data as TaskData).human_count as number); i++) {

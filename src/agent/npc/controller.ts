@@ -44,11 +44,11 @@ export class NPCContoller {
     getBuiltPositions(): BuiltPosition[] {
         const positions: BuiltPosition[] = [];
         for (const name in this.data.built) {
-            const position: BuiltPosition = this.data.built[name]!.position;
-            const offset: number = this.constructions[name]!.offset;
-            const sizex: number = (this.constructions[name]!.blocks[0] as string[][])[0]!.length;
-            const sizez: number = (this.constructions[name]!.blocks[0] as string[][]).length;
-            const sizey: number = this.constructions[name]!.blocks.length;
+            const position: BuiltPosition = this.data.built[name].position;
+            const offset: number = this.constructions[name].offset;
+            const sizex: number = (this.constructions[name].blocks[0] as string[][])[0].length;
+            const sizez: number = (this.constructions[name].blocks[0] as string[][]).length;
+            const sizey: number = this.constructions[name].blocks.length;
             for (let y = offset; y < sizey+offset; y++) {
                 for (let z = 0; z < sizez; z++) {
                     for (let x = 0; x < sizex; x++) {
@@ -72,16 +72,16 @@ export class NPCContoller {
         }
 
         for (const name in this.constructions) {
-            const sizez: number = (this.constructions[name]!.blocks[0] as string[][]).length;
-            const sizex: number = (this.constructions[name]!.blocks[0] as string[][])[0]!.length;
+            const sizez: number = (this.constructions[name].blocks[0] as string[][]).length;
+            const sizex: number = (this.constructions[name].blocks[0] as string[][])[0].length;
             const max_size: number = Math.max(sizex, sizez);
-            for (let y = 0; y < this.constructions[name]!.blocks.length; y++) {
+            for (let y = 0; y < this.constructions[name].blocks.length; y++) {
                 for (let z = 0; z < max_size; z++) {
-                    if (z >= this.constructions[name]!.blocks[y]!.length)
-                        this.constructions[name]!.blocks[y]!.push([]);
+                    if (z >= this.constructions[name].blocks[y].length)
+                        this.constructions[name].blocks[y].push([]);
                     for (let x = 0; x < max_size; x++) {
-                        if (x >= (this.constructions[name]!.blocks[y] as string[][])[z]!.length)
-                            (this.constructions[name]!.blocks[y] as string[][])[z]!.push('');
+                        if (x >= (this.constructions[name].blocks[y] as string[][])[z].length)
+                            (this.constructions[name].blocks[y] as string[][])[z].push('');
                     }
                 }
             }
@@ -198,12 +198,12 @@ export class NPCContoller {
                 let res: BuildGoalResult;
                 if (Object.hasOwn(this.data.built, goal.name)) {
                     res = await this.build_goal.executeNext(
-                        this.constructions[goal.name]!,
-                        this.data.built[goal.name]!.position,
-                        this.data.built[goal.name]!.orientation
+                        this.constructions[goal.name],
+                        this.data.built[goal.name].position,
+                        this.data.built[goal.name].orientation
                     );
                 } else {
-                    res = await this.build_goal.executeNext(this.constructions[goal.name]!);
+                    res = await this.build_goal.executeNext(this.constructions[goal.name]);
                     this.data.built[goal.name] = {
                         name: goal.name,
                         position: res.position,
@@ -234,12 +234,12 @@ export class NPCContoller {
     currentBuilding(): string | null {
         const bot_pos: any = this.agent.bot.entity.position;
         for (const name in this.data.built) {
-            const pos: BuiltPosition = this.data.built[name]!.position;
-            const offset: number = this.constructions[name]!.offset;
-            let sizex: number = (this.constructions[name]!.blocks[0] as string[][])[0]!.length;
-            let sizez: number = (this.constructions[name]!.blocks[0] as string[][]).length;
-            const sizey: number = this.constructions[name]!.blocks.length;
-            if (this.data.built[name]!.orientation % 2 === 1) [sizex, sizez] = [sizez, sizex];
+            const pos: BuiltPosition = this.data.built[name].position;
+            const offset: number = this.constructions[name].offset;
+            let sizex: number = (this.constructions[name].blocks[0] as string[][])[0].length;
+            let sizez: number = (this.constructions[name].blocks[0] as string[][]).length;
+            const sizey: number = this.constructions[name].blocks.length;
+            if (this.data.built[name].orientation % 2 === 1) [sizex, sizez] = [sizez, sizex];
             if (bot_pos.x >= pos.x && bot_pos.x < pos.x + sizex &&
                 bot_pos.y >= pos.y + offset && bot_pos.y < pos.y + sizey + offset &&
                 bot_pos.z >= pos.z && bot_pos.z < pos.z + sizez) {
@@ -256,11 +256,11 @@ export class NPCContoller {
         let door_x: number | null = null;
         let door_z: number | null = null;
         let door_y: number | null = null;
-        for (let y = 0; y < this.constructions[name]!.blocks.length; y++) {
-            for (let z = 0; z < (this.constructions[name]!.blocks[y] as string[][]).length; z++) {
-                for (let x = 0; x < (this.constructions[name]!.blocks[y] as string[][])[z]!.length; x++) {
-                    if ((this.constructions[name]!.blocks[y] as string[][])[z]![x] !== null &&
-                        ((this.constructions[name]!.blocks[y] as string[][])[z]![x] as string).includes('door')) {
+        for (let y = 0; y < this.constructions[name].blocks.length; y++) {
+            for (let z = 0; z < (this.constructions[name].blocks[y] as string[][]).length; z++) {
+                for (let x = 0; x < (this.constructions[name].blocks[y] as string[][])[z].length; x++) {
+                    if ((this.constructions[name].blocks[y] as string[][])[z][x] !== null &&
+                        ((this.constructions[name].blocks[y] as string[][])[z][x] as string).includes('door')) {
                         door_x = x;
                         door_z = z;
                         door_y = y;
@@ -273,12 +273,12 @@ export class NPCContoller {
         }
         if (door_x === null) return null;
 
-        const sizex: number = (this.constructions[name]!.blocks[0] as string[][])[0]!.length;
-        const sizez: number = (this.constructions[name]!.blocks[0] as string[][]).length;
+        const sizex: number = (this.constructions[name].blocks[0] as string[][])[0].length;
+        const sizez: number = (this.constructions[name].blocks[0] as string[][]).length;
         let orientation: number = 4 - built.orientation; // this conversion is opposite
         if (orientation == 4) orientation = 0;
         [door_x, door_z] = rotateXZ(door_x, door_z as number, orientation, sizex, sizez);
-        door_y = (door_y as number) + this.constructions[name]!.offset;
+        door_y = (door_y as number) + this.constructions[name].offset;
 
         return {
             x: built.position.x + (door_x as number),

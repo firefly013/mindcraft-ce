@@ -19,14 +19,14 @@ BLOCKED_ACTIONS_COOKING = [
     '!activate', '!attackPlayer', '!checkBlueprint', '!checkBlueprintLevel',
     '!clearChat', '!clearFurnace', '!consume', '!craftable', '!discard',
     '!entities', '!equip', '!followPlayer', '!getBlueprint', '!getBlueprintLevel',
-    '!goToBed', '!help', '!moveAway', '!newAction', '!placeHere', '!putInChest',
+    '!goToBed', '!help', '!moveAway', '!placeHere', '!putInChest',
     '!restart', '!stay', '!stfu', '!stop'
 ]
 BLOCKED_ACTIONS_CRAFTING = [
     '!activate', '!attack', '!attackPlayer', '!checkBlueprint', '!checkBlueprintLevel',
     '!clearChat', '!clearFurnace', '!consume', '!craftable', '!discard', '!endConversation',
     '!entities', '!followPlayer', '!getBlueprint', '!getBlueprintLevel',
-    '!goToBed', '!help', '!newAction', '!putInChest', '!restart',
+    '!goToBed', '!help', '!putInChest', '!restart',
     '!searchForEntity', '!stay', '!stfu', '!stop', '!takeFromChest',
     '!viewChest'
 ]
@@ -34,7 +34,7 @@ BLOCKED_ACTIONS_CONSTRUCTION = [
     '!activate', '!attackPlayer', '!clearChat', '!clearFurnace', '!collectBlocks',
     '!consume', '!craftable', '!discard', '!endConversation', '!entities',
     '!equip', '!followPlayer', '!getBlueprint', '!getBlueprintLevel', '!goToBed',
-    '!help', '!moveAway', '!newAction', '!placeHere', '!putInChest',
+    '!help', '!moveAway', '!placeHere', '!putInChest',
     '!restart', '!searchForBlock', '!searchForEntity', '!stay', '!stfu',
     '!stop', '!takeFromChest', '!viewChest', '!craftRecipe', '!smeltItem'
 ]
@@ -251,8 +251,7 @@ def launch_parallel_experiments(task_path,
                                 s3=False, 
                                 bucket_name="mindcraft-experiments", 
                                 template_profile="profiles/tasks/collab_profile.json", 
-                                insecure_coding=False, 
-                                url="http://127.0.0.1:8000/v1", 
+                                  url="http://127.0.0.1:8000/v1", 
                                 max_messages=15,
                                 no_pruning=False,
                                 block_conversation=False, 
@@ -304,10 +303,9 @@ def launch_parallel_experiments(task_path,
                                  s3=s3, 
                                  bucket_name=bucket_name, 
                                  template_profile=template_profile, 
-                                 model=model, 
-                                 api=api, 
-                                 insecure_coding=insecure_coding,
-                                 num_agents=num_agents, 
+                                 model=model,
+                                 api=api,
+                                 num_agents=num_agents,
                                  url=url, 
                                  task_type=task_type, 
                                  s3_path=s3_path, 
@@ -353,9 +351,8 @@ def launch_server_experiment(task_path,
                              api="openai", 
                              s3=False, 
                              bucket_name="mindcraft-experiments", 
-                             template_profile="profiles/tasks/collab_profile.json", 
-                             insecure_coding=False, 
-                             url="http://127.0.0.1:8000/v1", 
+                             template_profile="profiles/tasks/collab_profile.json",
+                             url="http://127.0.0.1:8000/v1",
                              task_type="techtree", 
                              s3_path="", 
                              max_messages=15, 
@@ -426,8 +423,6 @@ def launch_server_experiment(task_path,
         set_environment_variable_tmux_session(session_name, "PROFILES", agent_profiles_str)
         set_environment_variable_tmux_session(session_name, "MAX_MESSAGES", str(max_messages))
         set_environment_variable_tmux_session(session_name, "LOG_ALL", "true")
-        if insecure_coding:
-            set_environment_variable_tmux_session(session_name, "INSECURE_CODING", "true")
         make_ops(agent_names, session_name)
     else: 
         agent_profiles_str = "["
@@ -736,7 +731,6 @@ def main():
     parser.add_argument('--model', default="gpt-4o-mini", help='Model to use for the agents')
     parser.add_argument('--api', default="openai", help='API to use for the agents')
     # parser.add_argument('--world_name', default="Forest", help='Name of the world')
-    parser.add_argument('--insecure_coding', action='store_true', help='Enable insecure coding')
     parser.add_argument('--url', default="http://127.0.0.1:8000/v1")
     parser.add_argument('--max_messages', default=15, type=int, help='Maximum number of messages before summarizing')
     parser.add_argument('--no-pruning', action='store_true', help='Disable pruning of the actions')
@@ -789,10 +783,9 @@ def main():
                                 s3=args.s3, 
                                 bucket_name=args.bucket_name, 
                                 template_profile=args.template_profile, 
-                                model=args.model, 
-                                api=args.api, 
-                                insecure_coding=args.insecure_coding,
-                                num_agents=args.num_agents, 
+                                model=args.model,
+                                api=args.api,
+                                num_agents=args.num_agents,
                                 url=args.url, 
                                 max_messages=args.max_messages,
                                 no_pruning=args.no_pruning, 

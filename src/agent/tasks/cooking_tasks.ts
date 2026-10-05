@@ -101,8 +101,8 @@ export class CookingTaskInitiator {
         for (let i = 0; i < regionsToPlace.length; i++) {
             const region: Region = regionsToPlace[i] as Region;
             const { width, depth } = region;
-            regionsToPlace[i]!.width = width + 4;
-            regionsToPlace[i]!.depth = depth + 4;
+            regionsToPlace[i].width = width + 4;
+            regionsToPlace[i].depth = depth + 4;
         }
 
         const occupiedRegions: OccupiedRegion[] = [{
@@ -143,14 +143,14 @@ export class CookingTaskInitiator {
         await this.plantCrops((regionPositions.pumpkins as RegionStart).xStart, (regionPositions.pumpkins as RegionStart).zStart, 'pumpkin', false);
         await this.plantSugarCane(regionPositions.sugar_cane as RegionStart[]);
         await new Promise(resolve => setTimeout(resolve, 300));
-        console.log("planted crops!");
+        console.log("planted crops");
         // await plantPumpkins(regionPositions.pumpkins.xStart, regionPositions.pumpkins.zStart);
         // await new Promise(resolve => setTimeout(resolve, 300));
 
 
         await this.buildHouse((regionPositions.house as RegionStart).xStart, (regionPositions.house as RegionStart).zStart);
 
-        console.log("House built!");
+        console.log("House built");
 
         // Add a chest with cooking items near the bot
         // const addChestWithItems = async () => {
@@ -231,14 +231,14 @@ export class CookingTaskInitiator {
         await this.killEntities(animals);
         await this.killEntities(["item"]);
 
-        console.log("killed entities!");
+        console.log("killed entities");
 
         await new Promise(resolve => setTimeout(resolve, 300));
 
         // Summon new animals
 
         await this.summonAnimals(animals, 8);
-        console.log("summoned animals!");
+        console.log("summoned animals");
     }
 
     async plantCrops(xStart: number, zStart: number, crop_and_age: string, till: boolean = true): Promise<void> {

@@ -1,5 +1,5 @@
 import mineflayer from 'mineflayer';
-import { worldToBlueprint, blueprintToTask } from '../../src/agent/tasks/construction_tasks.js';
+import { worldToBlueprint, blueprintToTask } from '../../src/agent/tasks/construction_generation.js';
 import fs from 'fs';
 
 const bot = mineflayer.createBot({

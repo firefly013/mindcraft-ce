@@ -51,7 +51,6 @@ export interface AgentProfile {
   api?: string;
   url?: string;
   params?: Record<string, unknown>;
-  code_model?: string;
   vision_model?: string;
   cooldown?: number;
   max_tokens?: number;
@@ -77,14 +76,11 @@ export interface Settings {
   speak: boolean | string;
   chat_ingame: boolean;
   render_bot_view: boolean;
-  allow_insecure_coding: boolean;
   allow_vision: boolean;
   blocked_actions: string[];
-  code_timeout_mins: number;
   cheat: boolean;
   max_messages: number;
   spawn_timeout: number;
-  block_place_delay: number;
   log_all_prompts: boolean | string;
   task?: unknown;
   [key: string]: unknown;

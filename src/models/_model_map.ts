@@ -20,7 +20,14 @@ const apiMap: Record<string, ModelConstructor> = await (async (): Promise<
 > => {
   const map: Record<string, ModelConstructor> = {};
   const files = (await fs.readdir(__dirname)).filter(
-    (f) => f.endsWith('.js') && f !== '_model_map.js' && f !== 'prompter.js',
+    // Source tree holds `.ts`, compiled `dist` holds `.js`; accept both so
+    // model discovery works under `tsx` and from a `tsc` build alike.
+    (f) =>
+      (f.endsWith('.js') || f.endsWith('.ts')) &&
+      f !== '_model_map.js' &&
+      f !== '_model_map.ts' &&
+      f !== 'prompter.js' &&
+      f !== 'prompter.ts',
   );
   for (const file of files) {
     try {

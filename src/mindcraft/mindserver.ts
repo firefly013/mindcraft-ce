@@ -69,7 +69,7 @@ export function registerAgent(settings: Settings, viewer_port: number): void {
 
 export function logoutAgent(agentName: string): void {
     if (agent_connections[agentName]) {
-        agent_connections[agentName]!.in_game = false;
+        agent_connections[agentName].in_game = false;
         agentsStatusUpdate();
     }
 }
@@ -175,7 +175,7 @@ export function createMindServer(
             }
             for (const key in settings) {
                 if (!(key in settings_spec)) {
-                    delete (settings as Record<string, unknown>)[key];
+                    Reflect.deleteProperty(settings as Record<string, unknown>, key);
                 }
             }
             if (settings.profile?.name) {
@@ -188,7 +188,7 @@ export function createMindServer(
                 const name = settings.profile.name as string;
                 if (!returned.success && agent_connections[name]) {
                     mindcraft.destroyAgent(name);
-                    delete agent_connections[name];
+                    Reflect.deleteProperty(agent_connections, name);
                 }
                 agentsStatusUpdate();
             } else {
@@ -202,7 +202,7 @@ export function createMindServer(
             callback: (result: { settings?: Settings; error?: string }) => void,
         ) => {
             if (agent_connections[agentName]) {
-                callback({ settings: agent_connections[agentName]!.settings });
+                callback({ settings: agent_connections[agentName].settings });
             } else {
                 callback({ error: `Agent '${agentName}' not found.` });
             }
@@ -210,15 +210,15 @@ export function createMindServer(
 
         socket.on('connect-agent-process', (agentName: string) => {
             if (agent_connections[agentName]) {
-                agent_connections[agentName]!.socket = socket;
+                agent_connections[agentName].socket = socket;
                 agentsStatusUpdate();
             }
         });
 
         socket.on('login-agent', (agentName: string) => {
             if (agent_connections[agentName]) {
-                agent_connections[agentName]!.socket = socket;
-                agent_connections[agentName]!.in_game = true;
+                agent_connections[agentName].socket = socket;
+                agent_connections[agentName].in_game = true;
                 curAgentName = agentName;
                 agentsStatusUpdate();
             } else {
@@ -229,8 +229,8 @@ export function createMindServer(
         socket.on('disconnect', () => {
             if (curAgentName && agent_connections[curAgentName]) {
                 console.log(`Agent ${curAgentName} disconnected`);
-                agent_connections[curAgentName]!.in_game = false;
-                agent_connections[curAgentName]!.socket = null;
+                agent_connections[curAgentName].in_game = false;
+                agent_connections[curAgentName].socket = null;
                 agentsStatusUpdate();
             }
             if (agent_listeners.includes(socket)) {
@@ -244,7 +244,7 @@ export function createMindServer(
                 return;
             }
             console.log(`${curAgentName} sending message to ${agentName}: ${json.message}`);
-            agent_connections[agentName]!.socket?.emit('chat-message', curAgentName, json);
+            agent_connections[agentName].socket?.emit('chat-message', curAgentName, json);
         });
 
         socket.on('set-agent-settings', (agentName: string, settings: Settings) => {
@@ -271,7 +271,7 @@ export function createMindServer(
         socket.on('destroy-agent', (agentName: string) => {
             if (agent_connections[agentName]) {
                 mindcraft.destroyAgent(agentName);
-                delete agent_connections[agentName];
+                Reflect.deleteProperty(agent_connections, agentName);
             }
             agentsStatusUpdate();
         });
@@ -301,7 +301,7 @@ export function createMindServer(
                 return;
             }
             try {
-                agent_connections[agentName]!.socket?.emit('send-message', data);
+                agent_connections[agentName].socket?.emit('send-message', data);
             } catch (error: unknown) {
                 console.error('Error: ', error);
             }
@@ -331,7 +331,7 @@ function agentsStatusUpdate(socket?: Socket | Server): void {
     const target: Socket | Server = socket ?? io;
     const agents: AgentStatusEntry[] = [];
     for (const agentName in agent_connections) {
-        const conn = agent_connections[agentName]!;
+        const conn = agent_connections[agentName];
         agents.push({
             name: agentName,
             in_game: conn.in_game,
@@ -351,7 +351,7 @@ function addListener(listener_socket: Socket): void {
             void (async () => {
                 const states: Record<string, unknown> = {};
                 for (const agentName in agent_connections) {
-                    const agent = agent_connections[agentName]!;
+                    const agent = agent_connections[agentName];
                     if (agent.in_game) {
                         try {
                             const state: unknown = await new Promise((resolve) => {

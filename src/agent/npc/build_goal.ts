@@ -30,8 +30,8 @@ export class BuildGoal {
     }
 
     async executeNext(goal: ConstructionGoal, position: any = null, orientation: number | null = null): Promise<BuildGoalResult> {
-        const sizex: number = goal.blocks[0]![0]!.length;
-        const sizez: number = goal.blocks[0]!.length;
+        const sizex: number = goal.blocks[0][0].length;
+        const sizez: number = goal.blocks[0].length;
         const sizey: number = goal.blocks.length;
         if (!position) {
             for (let x = 0; x < sizex - 1; x++) {
@@ -55,7 +55,7 @@ export class BuildGoal {
 
                     const [rx, rz]: [number, number] = rotateXZ(x, z, orient, sizex, sizez);
                     const ry: number = y - goal.offset;
-                    const block_name: string = goal.blocks[ry]![rz]![rx] as string;
+                    const block_name: string = goal.blocks[ry][rz][rx] as string;
                     if (block_name === null || block_name === '') continue;
 
                     const world_pos: any = new (Vec3 as any)(position.x + x, position.y + y, position.z + z);

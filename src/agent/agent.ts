@@ -1,6 +1,5 @@
 import { History } from './history.js';
 import type { HistorySaveData } from './history.js';
-import { Coder } from './coder.js';
 import { VisionInterpreter } from './vision/vision_interpreter.js';
 import { Prompter } from '../models/prompter.js';
 import { initBot } from '../utils/mcdata.js';
@@ -27,7 +26,6 @@ export class Agent {
     prompter: any; // 未迁移模块，交叉引用统一 any
     name: string = '';
     history!: History;
-    coder!: Coder;
     npc: any; // 未迁移模块，统一 any
     memory_bank!: MemoryBank;
     task: any; // 未迁移模块，统一 any
@@ -43,8 +41,13 @@ export class Agent {
 
         // Initialize components
         this.actions = new ActionManager(this);
-        // settings.profile 在 Agent 启动前必已加载，这里断言非空
-        this.prompter = new Prompter(this, settings.profile!);
+        const profile = settings.profile;
+        if (!profile) {
+            log(this.name || 'unknown', 'Agent profile is not loaded.');
+            process.exit(1);
+            return;
+        }
+        this.prompter = new Prompter(this, profile);
         this.name = (this.prompter.getName() || '').trim();
         console.log(`Initializing agent ${this.name}...`);
 
@@ -58,7 +61,6 @@ export class Agent {
         }
 
         this.history = new History(this);
-        this.coder = new Coder(this);
         this.npc = new NPCContoller(this);
         this.memory_bank = new MemoryBank();
 
@@ -106,7 +108,7 @@ export class Agent {
         });
 
         this.bot.on('login', () => {
-            console.log(this.name, 'logged in!');
+            console.log(this.name, 'logged in');
             serverProxy.login();
 
             // Set skin for profile, requires Fabric Tailor. (https://modrinth.com/mod/fabrictailor)
@@ -358,7 +360,7 @@ export class Agent {
         });
         // Logging callbacks
         this.bot.on('error' , (err: unknown) => {
-            console.error('Error event!', err);
+            console.error('Error event', err);
         });
         // Use connection handler for runtime disconnects
         this.bot.on('end', (reason: unknown) => {

@@ -123,7 +123,7 @@ java -jar server.jar
 
 If you want to run with vllm be sure to run with `--api vllm --url {your_url_for_vllm} --model {model_name}`, by default vllm will use http://127.0.0.1:8000/v1 as the url for quering the model!
 
-When running with construction tasks, make sure to set the flag `--insecure_coding` so that the agents can be allowed to write freeform javascript code to complete the tasks. However, when using insecure coding it is **highly recommended** to use a docker container to avoid damage to your computer. 
+Construction tasks run with native tools only; no freeform code generation is used. 
 
 When running an experiment that requires more than 2 agents, use the `--num_agents` flag to match the number of agents in your task file. For example, if you are running a task file with 3 agents, use `--num_agents 3`. 
 
@@ -142,7 +142,7 @@ For cooking and construction
 ```sh
 $ python tasks/evaluation_script.py --task_path {path_to_two_agent_cooking_tasks} --model gpt-4o-mini --template_profile profiles/tasks/cooking_profile.json 
 
-$ python tasks/evaluation_script.py --task_path {path_to_two_agent_construction_tasks} --model gpt-4o-mini --template_profile profiles/tasks/construction_profile.json --insecure_coding
+$ python tasks/evaluation_script.py --task_path {path_to_two_agent_construction_tasks} --model gpt-4o-mini --template_profile profiles/tasks/construction_profile.json
 ```
 
 When you launch the evaluation script, you will see the minecraft server being launched. If you want to join this world, you can connect to it on the port localhost:55916 the way you would a standard Minecraft world (go to single player -> direct connection -> type in localhost:55916) It may take a few minutes for everything to be properly loaded - as first the agents need to be added to the world and given the correct permissions to use cheats and add inventory. After about 5 minutes everything should be loaded and working. If you wish to kill the experiment run `tmux kill-server`. Sometimes there will be issues copying the files, if this happens you can run the python file twice. 

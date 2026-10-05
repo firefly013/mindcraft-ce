@@ -29,14 +29,18 @@ export class VisionInterpreter {
         }
 
         let filename: string;
+        const camera = this.camera;
+        if (!camera) {
+            return "Vision is disabled. Use other methods to describe the environment.";
+        }
         if (direction === 'with') {
             await bot.look(player.yaw, player.pitch);
             result = `Looking in the same direction as ${player_name}\n`;
-            filename = await this.camera!.capture();
+            filename = await camera.capture();
         } else {
             await bot.lookAt(new Vec3(player.position.x, player.position.y + player.height, player.position.z));
             result = `Looking at player ${player_name}\n`;
-            filename = await this.camera!.capture();
+            filename = await camera.capture();
 
         }
 
@@ -51,7 +55,11 @@ export class VisionInterpreter {
         await bot.lookAt(new Vec3(x, y + 2, z));
         const result = `Looking at coordinate ${x}, ${y}, ${z}\n`;
 
-        const filename = await this.camera!.capture();
+        const camera = this.camera;
+        if (!camera) {
+            return "Vision is disabled. Use other methods to describe the environment.";
+        }
+        const filename = await camera.capture();
 
         return result + `Image analysis: "${await this.analyzeImage(filename)}"`;
     }

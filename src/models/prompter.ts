@@ -25,10 +25,8 @@ export class Prompter {
   private prompts: Record<string, string>;
   private cooldown: number;
   private last_prompt_time: number;
-  private awaiting_coding: boolean;
   private most_recent_msg_time: number;
   private chat_model: AIModel;
-  private code_model: AIModel;
   private vision_model: AIModel;
 
   constructor(agent: any, profile: AgentProfile) {
@@ -68,7 +66,6 @@ export class Prompter {
     this.cooldown = this.profile.cooldown ? this.profile.cooldown : 0;
     this.last_prompt_time = 0;
     this.most_recent_msg_time = 0;
-    this.awaiting_coding = false;
 
     // for backwards compatibility, move max_tokens to params
     let max_tokens: unknown = null;
@@ -77,13 +74,6 @@ export class Prompter {
 
     const chat_model_profile = selectAPI(this.profile.model);
     this.chat_model = createModel(chat_model_profile);
-
-    if (this.profile.code_model) {
-      const code_model_profile = selectAPI(this.profile.code_model as string);
-      this.code_model = createModel(code_model_profile);
-    } else {
-      this.code_model = this.chat_model;
-    }
 
     if (this.profile.vision_model) {
       const vision_model_profile = selectAPI(this.profile.vision_model as string);
@@ -199,22 +189,6 @@ export class Prompter {
       );
       return null;
     }
-  }
-
-  async promptCoding(messages: ChatMessage[]): Promise<string> {
-    if (this.awaiting_coding) {
-      console.warn('Already awaiting coding response, returning no response.');
-      return '```//no response```';
-    }
-    this.awaiting_coding = true;
-    await this.checkCooldown();
-    let prompt = this.prompts.coding;
-    prompt = await this.replaceStrings(prompt, messages);
-
-    const resp = await this.code_model.sendRequest(messages, prompt);
-    this.awaiting_coding = false;
-    await this._saveLog(prompt, messages, resp, 'coding');
-    return resp;
   }
 
   async promptMemSaving(to_summarize: ChatMessage[]): Promise<string> {

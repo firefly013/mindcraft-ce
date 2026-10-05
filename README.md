@@ -18,8 +18,8 @@
 </p>
 </div>
 
-> [!Caution]
-Do not connect this bot to public servers with coding enabled. This project allows an LLM to write/execute code on your computer. The code is sandboxed, but still vulnerable to injection attacks. Code writing is disabled by default, you can enable it by setting `allow_insecure_coding` to `true` in `settings.js`. Ye be warned.
+> [!NOTE]
+> 本分支已彻底移除大模型生成代码/代码执行（newAction/Coder/SES沙箱/execTemplate/lintTemplate），Bot 仅通过原生工具调用行动，不再在宿主机写码/跑码。
 
 # New Experimental Features
 
@@ -71,7 +71,7 @@ You can access this on the [agent-system](https://github.com/mindcraft-ce/mindcr
 
 ### 🛠️ Tool-Based Prompting
 - Modular prompt system with separate XML templates:
-  - `conversing.xml`, `coding.xml`, `bot_responder.xml`
+  - `conversing.xml`, `bot_responder.xml`
   - `image_analysis.xml`, `saving_memory.xml`
 - `_default.tools.json` — New tool-based profile configuration
 - `_default.commands.json` — Legacy command-based system (still supported)
@@ -297,7 +297,7 @@ If you want more optimization and automatic launching of the minecraft world, yo
 
 ## Docker Container
 
-If you intend to `allow_insecure_coding`, it is a good idea to run the app in a docker container to reduce risks of running unknown code. This is strongly recommended before connecting to remote servers, although still does not guarantee complete safety.
+Run the app in a docker container when connecting to remote servers.
 
 ```bash
 docker build -t mindcraft . && docker run --rm --add-host=host.docker.internal:host-gateway -p 8080:8080 -p 3000-3003:3000-3003 -e SETTINGS_JSON='{"auto_open_ui":false,"profiles":["./profiles/gemini.json"],"host":"host.docker.internal"}' --volume ./keys.json:/app/keys.json --name mindcraft mindcraft
@@ -319,7 +319,7 @@ To connect to an unsupported minecraft version, you can try to use [viaproxy](se
 
 Bot profiles are json files (such as `andy.json`) that define:
 
-1. Bot backend LLMs to use for talking, coding, and embedding.
+1. Bot backend LLMs to use for talking and embedding.
 2. Prompts used to influence the bot's behavior.
 3. Examples help the bot perform tasks.
 
@@ -327,7 +327,7 @@ Bot profiles are json files (such as `andy.json`) that define:
 
 LLM models can be specified simply as `"model": "gpt-5.4"`, or more specifically with `"{api}/{model}"`, like `"openrouter/google/gemini-2.5-pro"`. See all supported APIs [here](#model-customization).
 
-The `model` field can be a string or an object. A model object must specify an `api`, and optionally a `model`, `url`, and additional `params`. You can also use different models/providers for chatting, coding, vision, and voice synthesis. See the example below.
+The `model` field can be a string or an object. A model object must specify an `api`, and optionally a `model`, `url`, and additional `params`. You can also use different models/providers for chatting, vision, and voice synthesis. See the example below.
 
 ```json
 "model": {
@@ -339,11 +339,6 @@ The `model` field can be a string or an object. A model object must specify an `
     "temperature": 1
   }
 },
-"code_model": {
-  "api": "openai",
-  "model": "gpt-5.4-mini",
-  "url": "https://api.openai.com/v1/"
-},
 "vision_model": {
   "api": "openai",
   "model": "gpt-5.4",
@@ -352,7 +347,7 @@ The `model` field can be a string or an object. A model object must specify an `
 "speak_model": "openai/tts-1/echo"
 ```
 
-`model` is used for chat, `code_model` is used for newAction coding, `vision_model` is used for image interpretation, and `speak_model` is used for voice synthesis. `model` will be used by default for all other models if not specified. Not all APIs support vision or voice synthesis.
+`model` is used for chat, `vision_model` is used for image interpretation, and `speak_model` is used for voice synthesis. `model` will be used by default for all other models if not specified. Not all APIs support vision or voice synthesis.
 
 All apis have default models and urls, so those fields are optional. The `params` field is optional and can be used to specify additional parameters for the model. It accepts any key-value pairs supported by the api.
 

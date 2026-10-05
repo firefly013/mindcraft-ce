@@ -42,16 +42,13 @@ const settings: Settings = {
 
     "render_bot_view": false, // show bot's view in browser at localhost:3000, 3001...
 
-    "allow_insecure_coding": false, // allows newAction command and model can write/run code on your computer. enable at own risk
     "allow_vision": false, // allows vision model to interpret screenshots as inputs
     "blocked_actions" : ["!checkBlueprint", "!checkBlueprintLevel", "!getBlueprint", "!getBlueprintLevel"] , // tools to disable.
-    "code_timeout_mins": -1, // minutes code is allowed to run. -1 for no timeout
     "cheat": false, // allow server-cheat shortcuts (/tp, /setblock, instant place) in skills. Requires OP.
 
     "max_messages": 15, // max number of messages to keep in context
 
     "spawn_timeout": 30, // num seconds allowed for the bot to spawn before throwing error. Increase when spawning takes a while.
-    "block_place_delay": 0, // delay between placing blocks (ms) if using newAction. helps avoid bot being kicked by anti-cheat mechanisms on servers.
 
     "log_all_prompts": false, // log ALL prompts to file
 };

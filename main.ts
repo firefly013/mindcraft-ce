@@ -68,9 +68,6 @@ if (process.env.PROFILES) {
         settings.profiles = parsedProfiles.map(String);
     }
 }
-if (process.env.INSECURE_CODING) {
-    settings.allow_insecure_coding = true;
-}
 if (process.env.BLOCKED_ACTIONS) {
     const parsedBlocked: unknown = JSON.parse(process.env.BLOCKED_ACTIONS);
     if (Array.isArray(parsedBlocked)) {

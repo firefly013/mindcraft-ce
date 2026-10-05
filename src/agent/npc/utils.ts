@@ -16,7 +16,7 @@ export function getTypeOfGeneric(bot: any, block_name: string): string {
                 if (item.includes(wood)) {
                     if (type_count[wood] === undefined)
                         type_count[wood] = 0;
-                    type_count[wood]! += inventory[item] as number;
+                    type_count[wood] += inventory[item] as number;
                     if ((type_count[wood] as number) > max_count) {
                         max_count = type_count[wood] as number;
                         max_type = wood;
@@ -52,7 +52,7 @@ export function getTypeOfGeneric(bot: any, block_name: string): string {
                 if (item === color + '_wool') {
                     if (type_count[color] === undefined)
                         type_count[color] = 0;
-                    type_count[color]! += inventory[item] as number;
+                    type_count[color] += inventory[item] as number;
                     if ((type_count[color] as number) > max_count) {
                         max_count = type_count[color] as number;
                         max_type = color;

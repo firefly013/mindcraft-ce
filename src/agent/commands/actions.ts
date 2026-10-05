@@ -1,5 +1,4 @@
 import * as skills from '../library/skills.js';
-import settings from '../settings.js';
 import { td, tp, MESSAGES } from '../../prompts.js';
 
 // 命令参数定义（domain / optional / default 等保留原样透传）
@@ -46,31 +45,6 @@ function runAsAction (actionFn: AgentActionFn, resume = false, timeout = -1): Ag
 }
 
 export const actionsList: AgentCommand[] = [
-    {
-        name: '!newAction',
-        description: td('newAction'),
-        params: {
-            'prompt': { type: 'string', description: tp('newAction', 'prompt') }
-        },
-        perform: async function(agent: any, prompt: string): Promise<string> {
-            void prompt;
-            // just ignore prompt - it is now in context in chat history
-            if (!settings.allow_insecure_coding) {
-                agent.openChat(MESSAGES.newActionDisabled);
-                return "newAction not allowed! Code writing is disabled in settings. Notify the user.";
-            }
-            let result = "";
-            const actionFn = async (): Promise<void> => {
-                try {
-                    result = await agent.coder.generateCode(agent.history);
-                } catch (e: unknown) {
-                    result = 'Error generating code: ' + String(e);
-                }
-            };
-            await agent.actions.runAction('action:newAction', actionFn, {timeout: settings.code_timeout_mins});
-            return result;
-        }
-    },
     {
         name: '!stop',
         description: td('stop'),

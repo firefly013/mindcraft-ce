@@ -69,13 +69,13 @@ export function strictFormat(turns: ChatMessage[]): ChatMessage[] {
       messages.push(msg);
     } else if (msg.role === prev_role) {
       // combine new message with previous message instead of adding a new one
-      messages[messages.length - 1]!.content += '\n' + msg.content;
+      messages[messages.length - 1].content += '\n' + msg.content;
     } else {
       messages.push(msg);
     }
     prev_role = msg.role;
   }
-  if (messages.length > 0 && messages[0]!.role !== 'user') {
+  if (messages.length > 0 && messages[0].role !== 'user') {
     messages.unshift(filler); // anthropic requires user message to start
   }
   if (messages.length === 0) {

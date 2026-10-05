@@ -1,7 +1,7 @@
 import assert from 'node:assert';
 import { MESSAGES } from '../prompts.js';
 
-export type ActionFn = () => void | Promise<unknown>;
+export type ActionFn = () => unknown;
 
 export interface ActionResult {
     success: boolean;
@@ -57,11 +57,11 @@ export class ActionManager {
     async stop(): Promise<void> {
         if (!this.executing) return;
         const timeout = setTimeout(() => {
-            this.agent.cleanKill('Code execution refused stop after 10 seconds. Killing process.');
+            this.agent.cleanKill('Action refused stop after 10 seconds. Killing process.');
         }, 10000);
         while (this.executing) {
             this.agent.requestInterrupt();
-            console.log('waiting for code to finish executing...');
+            console.log('waiting for action to finish executing...');
             await new Promise<void>(resolve => setTimeout(resolve, 300));
         }
         clearTimeout(timeout);
@@ -111,7 +111,7 @@ export class ActionManager {
                 }
             }
             this.last_action_time = Date.now();
-            console.log('executing code...\n');
+            console.log('executing action...\n');
 
             // await current action to finish (executing=false), with 10 seconds timeout
             // also tell agent.bot to stop various actions
@@ -160,7 +160,7 @@ export class ActionManager {
             this.currentActionFn = null;
             if (TIMEOUT !== undefined) clearTimeout(TIMEOUT);
             this.cancelResume();
-            console.error("Code execution triggered catch:", err);
+            console.error("Action triggered catch:", err);
             // Log the full stack trace
             console.error(err instanceof Error ? err.stack : err);
             await this.stop();
@@ -168,7 +168,7 @@ export class ActionManager {
             const errStack = err instanceof Error ? err.stack : undefined;
 
             const message = this.getBotOutputSummary() +
-                '!!Code threw exception!!\n' +
+                '!!Action threw exception!!\n' +
                 'Error: ' + errStr + '\n' +
                 'Stack trace:\n' + errStack + '\n';
 
@@ -199,9 +199,9 @@ export class ActionManager {
 
     _startTimeout(TIMEOUT_MINS = 10): ReturnType<typeof setTimeout> {
         return setTimeout(async () => {
-            console.warn(MESSAGES.codeTimeout(TIMEOUT_MINS));
+            console.warn(MESSAGES.actionTimeout(TIMEOUT_MINS));
             this.timedout = true;
-            this.agent.history.add('system', MESSAGES.codeTimeout(TIMEOUT_MINS));
+            this.agent.history.add('system', MESSAGES.actionTimeout(TIMEOUT_MINS));
             await this.stop(); // last attempt to stop
         }, TIMEOUT_MINS * 60 * 1000);
     }

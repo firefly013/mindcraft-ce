@@ -6,12 +6,8 @@ import noFloatingPromise from "eslint-plugin-no-floating-promise";
 
 /** @type {import('eslint').Linter.Config[]} */
 export default [
-  // Runtime code templates: coder.ts reads bots/*.js *as text* and injects
-  // generated code at /* CODE HERE */ (`log` is sandbox-provided). They are
-  // intentionally not valid standalone modules; their .ts twins carry the
-  // type-checked equivalents, so the .js originals are excluded from lint.
   {
-    ignores: ["bots/execTemplate.js", "bots/lintTemplate.js", "dist/**"],
+    ignores: ["dist/**", "coverage/**"],
   },
 
   // First, import the recommended configuration
@@ -19,7 +15,9 @@ export default [
 
   // Type-aware linting for the TypeScript migration (no type-checking
   // required, so `tsc` project service setup is unnecessary here).
-  ...tseslint.configs.recommended,
+  // `strict` = recommended + no-non-null-assertion / no-dynamic-delete /
+  // no-invalid-void-type 等，全仓零报错是合并门禁。
+  ...tseslint.configs.strict,
 
   // Then override or customize specific rules
   {

@@ -174,14 +174,14 @@ class ItemNode {
         if (this.type === 'block') {
             await skills.collectBlock(this.manager.agent.bot, this.source as string, quantity, this.manager.agent.npc.getBuiltPositions());
         } else if (this.type === 'smelt') {
-            const to_smelt_name: string = this.recipe[0]!.node.name;
+            const to_smelt_name: string = this.recipe[0].node.name;
             const to_smelt_quantity: number = Math.min(quantity, inventory[to_smelt_name] || 1);
             await skills.smeltItem(this.manager.agent.bot, to_smelt_name, to_smelt_quantity);
         } else if (this.type === 'hunt') {
             for (let i=0; i<quantity; i++) {
                 // NOTE: original code assigned to an undeclared `res` global here;
                 // declared locally to satisfy strict mode without behavior change.
-                const res: boolean | void = await skills.attackNearest(this.manager.agent.bot, this.source as string);
+                const res: boolean | undefined = await skills.attackNearest(this.manager.agent.bot, this.source as string);
                 if (!res || this.manager.agent.bot.interrupt_code)
                     break;
             }

@@ -36,7 +36,9 @@
     "scripts/**/*.ts",
     "bots/**/*.ts",
     "tasks/**/*.ts",
-    "services/**/*.ts"
+    "services/**/*.ts",
+    "tests/**/*.ts",
+    "vitest.config.ts"
   ],
   "exclude": ["node_modules", "dist", "bots/**/logs", "bots/**/histories"]
 }
