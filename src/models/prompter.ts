@@ -18,6 +18,18 @@ import type {
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
+/**
+ * 400 类网关拒绝（不支持 required 等参数形状）：特征是 status 400
+ * 或错误体里点名参数。命中就回落 auto 重试，其他错误直接判失败。
+ */
+export function isBadRequest(error: unknown): boolean {
+  if (error == null) return false;
+  const status = (error as { status?: unknown }).status;
+  if (status === 400) return true;
+  const msg = error instanceof Error ? error.message : String(error);
+  return msg.includes('400') || /tool_choice/i.test(msg);
+}
+
 export class Prompter {
   // `agent` stays `any` to avoid a circular dependency with the Agent class.
   private agent: any;
@@ -163,6 +175,9 @@ export class Prompter {
    * tool_calls。extraTail 是现采的 Live State 文本，追加在正文最后
    * （放末尾，不破坏前缀缓存）。返回 { text, tool_calls }，
    * 模型不支持时返回 null。
+   *
+   * tool_choice 默认 required：每轮至少调一个工具（想说话调 Say，
+   * 收工调 Finish）。个别网关拒绝 required（400）时回落 auto 再试一次。
    */
   async promptConvoTools(messages: ChatMessage[], extraTail = ''): Promise<ToolResponse | null> {
     if (typeof this.chat_model.sendRequestWithTools !== 'function') return null;
@@ -174,8 +189,9 @@ export class Prompter {
     let prompt = this.prompts.conversing;
     prompt = await this.replaceStrings(prompt, messages);
     const tools: OpenAITool[] = getOpenAITools(this.agent);
+    const send = this.chat_model.sendRequestWithTools.bind(this.chat_model);
     try {
-      const res = await this.chat_model.sendRequestWithTools(messages, prompt, tools, 'auto', extraTail);
+      const res = await send(messages, prompt, tools, 'required', extraTail);
       console.log('Generated tool response:', JSON.stringify(res.tool_calls?.map((t) => t.name)));
       await this._saveLog(prompt, messages, JSON.stringify(res), 'conversation-tools');
       let text = res.text ?? '';
@@ -184,6 +200,24 @@ export class Prompter {
       }
       return { text, tool_calls: res.tool_calls ?? [] };
     } catch (error) {
+      if (isBadRequest(error)) {
+        // 网关不吃 required：回落 auto 重试一次，不断轮次。
+        console.warn('Tool choice required rejected, retrying with auto.');
+        try {
+          const res = await send(messages, prompt, tools, 'auto', extraTail);
+          let text = res.text ?? '';
+          if (text.includes('</think>')) {
+            text = text.split('</think>')[1] ?? '';
+          }
+          return { text, tool_calls: res.tool_calls ?? [] };
+        } catch (retryError) {
+          console.error(
+            'Tool request failed:',
+            retryError instanceof Error ? retryError.message : String(retryError),
+          );
+          return null;
+        }
+      }
       console.error(
         'Tool request failed, falling back to text commands:',
         error instanceof Error ? error.message : String(error),

@@ -418,8 +418,9 @@ export class Agent {
         const res = await this.prompter.promptConvoTools(history, liveText);
         if (!res) return { text: null, calls: [] };
         if (res.text?.trim()) {
-            // Say 隔离：正文只记历史不发言，想说话模型必须调 Say。
+            // 双通道发言：正文自动进聊天，Say 工具同样可用。先都留着看效果。
             await this.history.add(this.name, res.text, { kind: 'model', level: 2 });
+            this.routeResponse(this.currentSource, res.text);
         }
         return {
             text: res.text,
