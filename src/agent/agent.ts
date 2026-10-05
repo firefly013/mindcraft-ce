@@ -299,7 +299,8 @@ export class Agent {
                 },
             },
             assemble: () => this.assembleContext(),
-            model: (text: string, tools: unknown) => this.modelCall(text, tools),
+            model: (text: string, tools: unknown, choice: string, image?: string | null) =>
+                this.modelCall(text, tools, choice, image),
             stopExecutor: async () => {
                 await this.fullStop();
             },
@@ -391,8 +392,8 @@ export class Agent {
         return this.actionRunner.run(name, args);
     }
 
-    /** 每轮现采 Live State（原文给模型层，由它追加在消息列最后）。 */
-    private assembleContext(): { text: string; tools: unknown } {
+    /** 每轮现采 Live State + 现拍示意图（原文与图都给模型层，由它追加在消息列最后）。 */
+    private async assembleContext(): Promise<{ text: string; tools: unknown; image?: string | null }> {
         const task = this.task as { goal?: unknown } | null;
         const plan = this.plan.snapshot();
         const live = sampleLiveState({
@@ -404,18 +405,25 @@ export class Agent {
         });
         const text = renderLiveState(live);
         const tools = getOpenAITools(this);
+        let image: string | null;
+        try {
+            image = (await this.vision_interpreter?.captureBase64?.()) ?? null;
+        } catch {
+            image = null;
+        }
         this.requestLog?.logRequest({
             text,
             tools: tools.map((t) => t.function.name),
         });
-        return { text, tools };
+        return { text, tools, image: image ?? null };
     }
 
-    private async modelCall(liveText: string, tools: unknown): Promise<LoopModelResponse> {
+    private async modelCall(liveText: string, tools: unknown, _choice: unknown, image?: string | null): Promise<LoopModelResponse> {
         void tools;
+        void _choice;
         if (this.shut_up) return { text: null, calls: [] };
         const history = this.history.getHistory();
-        const res = await this.prompter.promptConvoTools(history, liveText);
+        const res = await this.prompter.promptConvoTools(history, liveText, image ?? null);
         if (!res) return { text: null, calls: [] };
         if (res.text?.trim()) {
             // 双通道发言：正文自动进聊天，Say 工具同样可用。先都留着看效果。

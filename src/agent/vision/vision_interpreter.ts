@@ -19,8 +19,24 @@ export class VisionInterpreter {
         }
     }
 
+    /**
+     * 现拍一张返回 base64（主循环 Live State 用）。相机没开/拍失败
+     * 返回 null，调用方直接跳过图片——永不炸轮次。
+     */
+    async captureBase64(): Promise<string | null> {
+        if (!this.allow_vision || !this.camera) return null;
+        try {
+            const filename = await this.camera.capture();
+            this.lastScreenshot = { file: filename, takenAt: Date.now() };
+            return fs.readFileSync(`${this.fp}/${filename}.jpg`).toString('base64');
+        } catch (err: unknown) {
+            console.warn('Screenshot capture failed:', err instanceof Error ? err.message : String(err));
+            return null;
+        }
+    }
+
     async lookAtPlayer(player_name: string, direction: string): Promise<string> {
-        if (!this.allow_vision || !this.agent.prompter.vision_model.sendVisionRequest) {
+        if (!this.allow_vision) {
             return "Vision is disabled. Use other methods to describe the environment.";
         }
         let result: string;
@@ -30,43 +46,28 @@ export class VisionInterpreter {
             return `Could not find player ${player_name}`;
         }
 
-        let filename: string;
-        const camera = this.camera;
-        if (!camera) {
-            return "Vision is disabled. Use other methods to describe the environment.";
-        }
         if (direction === 'with') {
             await bot.look(player.yaw, player.pitch);
             result = `Looking in the same direction as ${player_name}\n`;
-            filename = await camera.capture();
-            this.lastScreenshot = { file: filename, takenAt: Date.now() };
         } else {
             await bot.lookAt(new Vec3(player.position.x, player.position.y + player.height, player.position.z));
             result = `Looking at player ${player_name}\n`;
-            filename = await camera.capture();
-            this.lastScreenshot = { file: filename, takenAt: Date.now() };
 
         }
 
-        return result + `Image analysis: "${await this.analyzeImage(filename)}"`;
+        // 分析走主循环截图直看，这里只给准星方块文本（下一轮截图即见所看）。
+        return result + this.getCenterBlockInfo();
     }
 
     async lookAtPosition(x: number, y: number, z: number): Promise<string> {
-        if (!this.allow_vision || !this.agent.prompter.vision_model.sendVisionRequest) {
+        if (!this.allow_vision) {
             return "Vision is disabled. Use other methods to describe the environment.";
         }
         const bot = this.agent.bot;
         await bot.lookAt(new Vec3(x, y + 2, z));
         const result = `Looking at coordinate ${x}, ${y}, ${z}\n`;
 
-        const camera = this.camera;
-        if (!camera) {
-            return "Vision is disabled. Use other methods to describe the environment.";
-        }
-        const filename = await camera.capture();
-        this.lastScreenshot = { file: filename, takenAt: Date.now() };
-
-        return result + `Image analysis: "${await this.analyzeImage(filename)}"`;
+        return result + this.getCenterBlockInfo();
     }
 
     getCenterBlockInfo(): string {
@@ -78,21 +79,6 @@ export class VisionInterpreter {
             return `Block at center view: ${targetBlock.name} at (${targetBlock.position.x}, ${targetBlock.position.y}, ${targetBlock.position.z})`;
         } else {
             return "No block in center view";
-        }
-    }
-
-    async analyzeImage(filename: string): Promise<string> {
-        try {
-            const imageBuffer = fs.readFileSync(`${this.fp}/${filename}.jpg`);
-            const messages = this.agent.history.getHistory();
-
-            const blockInfo = this.getCenterBlockInfo();
-            const result = await this.agent.prompter.promptVision(messages, imageBuffer);
-            return result + `\n${blockInfo}`;
-
-        } catch (error: unknown) {
-            console.warn('Error reading image:', error);
-            return `Error reading image: ${error instanceof Error ? error.message : String(error)}`;
         }
     }
 }

@@ -54,6 +54,11 @@ export interface AIModel {
      * 不能并进 system——常变部分不能前移破坏前缀缓存。
      */
     liveTail?: string,
+    /**
+     * 本轮现拍示意图（base64 JPEG）。只有看得懂图的实现需要处理，
+     * 看不懂的直接忽略——文字快照永远都在。
+     */
+    liveImage?: string | null,
   ): Promise<ToolResponse>;
 }
 

@@ -42,7 +42,7 @@ const settings: Settings = {
 
     "render_bot_view": false, // show bot's view in browser at localhost:3000, 3001...
 
-    "allow_vision": false, // allows vision model to interpret screenshots as inputs
+    "allow_vision": true, // 每轮现拍示意图进 Live State 主循环（粗略重绘，大概看布局）
     "blocked_actions" : ["!checkBlueprint", "!checkBlueprintLevel", "!getBlueprint", "!getBlueprintLevel"] , // tools to disable.
     "cheat": false, // allow server-cheat shortcuts (/tp, /setblock, instant place) in skills. Requires OP.
 

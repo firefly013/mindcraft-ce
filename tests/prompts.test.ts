@@ -62,8 +62,8 @@ describe('resolvePromptSet', () => {
   it('merges a task variant over defaults', () => {
     const set = resolvePromptSet(profile({ prompt_set: 'cooking' }));
     expect(set.conversing).toBe(PROMPT_SETS.cooking.conversing);
-    // keys missing from the variant inherit defaults
-    expect(set.image_analysis).toBe(PROMPT_SETS.default.image_analysis);
+    // the variant defines its own saving_memory, so it wins over defaults
+    expect(set.saving_memory).toBe(PROMPT_SETS.cooking.saving_memory);
   });
 
   it('ignores unknown variant names', () => {

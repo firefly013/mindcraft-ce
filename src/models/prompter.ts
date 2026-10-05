@@ -39,7 +39,6 @@ export class Prompter {
   private last_prompt_time: number;
   private most_recent_msg_time: number;
   private chat_model: AIModel;
-  private vision_model: AIModel;
 
   constructor(agent: any, profile: AgentProfile) {
     this.agent = agent;
@@ -87,12 +86,8 @@ export class Prompter {
     const chat_model_profile = selectAPI(this.profile.model);
     this.chat_model = createModel(chat_model_profile);
 
-    if (this.profile.vision_model) {
-      const vision_model_profile = selectAPI(this.profile.vision_model as string);
-      this.vision_model = createModel(vision_model_profile);
-    } else {
-      this.vision_model = this.chat_model;
-    }
+    // 截图直看走主循环（liveTail 图片），独立理解链已拆：
+    // 不再有 vision_model，profile.vision_model 配了也忽略。
 
     // RAG 已彻底移除：不再有 embedding 模型、示例检索与 skill 文档检索
 
@@ -179,7 +174,7 @@ export class Prompter {
    * tool_choice 默认 required：每轮至少调一个工具（想说话调 Say，
    * 收工调 Finish）。个别网关拒绝 required（400）时回落 auto 再试一次。
    */
-  async promptConvoTools(messages: ChatMessage[], extraTail = ''): Promise<ToolResponse | null> {
+  async promptConvoTools(messages: ChatMessage[], extraTail = '', liveImage: string | null = null): Promise<ToolResponse | null> {
     if (typeof this.chat_model.sendRequestWithTools !== 'function') return null;
     this.most_recent_msg_time = Date.now();
     const current_msg_time = this.most_recent_msg_time;
@@ -191,7 +186,7 @@ export class Prompter {
     const tools: OpenAITool[] = getOpenAITools(this.agent);
     const send = this.chat_model.sendRequestWithTools.bind(this.chat_model);
     try {
-      const res = await send(messages, prompt, tools, 'required', extraTail);
+      const res = await send(messages, prompt, tools, 'required', extraTail, liveImage);
       console.log('Generated tool response:', JSON.stringify(res.tool_calls?.map((t) => t.name)));
       await this._saveLog(prompt, messages, JSON.stringify(res), 'conversation-tools');
       let text = res.text ?? '';
@@ -204,7 +199,7 @@ export class Prompter {
         // 网关不吃 required：回落 auto 重试一次，不断轮次。
         console.warn('Tool choice required rejected, retrying with auto.');
         try {
-          const res = await send(messages, prompt, tools, 'auto', extraTail);
+          const res = await send(messages, prompt, tools, 'auto', extraTail, liveImage);
           let text = res.text ?? '';
           if (text.includes('</think>')) {
             text = text.split('</think>')[1] ?? '';
@@ -237,17 +232,6 @@ export class Prompter {
       resp = afterThink ?? resp;
     }
     return resp;
-  }
-
-  async promptVision(messages: ChatMessage[], imageBuffer: Buffer): Promise<string> {
-    await this.checkCooldown();
-    let prompt = this.prompts.image_analysis;
-    prompt = await this.replaceStrings(prompt, messages);
-    const sendVisionRequest = this.vision_model.sendVisionRequest;
-    if (typeof sendVisionRequest !== 'function') {
-      throw new Error('Vision model does not support sendVisionRequest.');
-    }
-    return await sendVisionRequest.call(this.vision_model, messages, prompt, imageBuffer);
   }
 
   async promptGoalSetting(

@@ -53,8 +53,30 @@ describe('OpenCode', () => {
     const seen: Seen[] = [];
     const model = new OpenCode('deepseek-v4.1-flash', undefined, undefined, stubbed(seen));
     await model.sendRequestWithTools([], 'SYS', [], 'auto', 'SNAP');
-    const messages = (seen[0]?.body as Record<string, unknown>)['messages'] as ChatMessage[];
-    expect(messages[messages.length - 1]?.content).toContain('SNAP');
+    const messages = (seen[0]?.body as Record<string, unknown>)['messages'] as Array<{
+      role: string;
+      content: unknown;
+    }>;
+    const last = messages[messages.length - 1]?.content as Array<Record<string, unknown>>;
+    expect(Array.isArray(last)).toBe(true);
+    expect(String(last[0]?.['text'])).toContain('SNAP');
+  });
+
+  it('attaches the round screenshot as image_url in the same tail message', async () => {
+    const seen: Seen[] = [];
+    const model = new OpenCode('deepseek-v4.1-flash', undefined, undefined, stubbed(seen));
+    await model.sendRequestWithTools([], 'SYS', [], 'auto', 'SNAP', 'QUJD');
+    const messages = (seen[0]?.body as Record<string, unknown>)['messages'] as Array<{
+      role: string;
+      content: unknown;
+    }>;
+    const last = messages[messages.length - 1]?.content as Array<Record<string, unknown>>;
+    expect(Array.isArray(last)).toBe(true);
+    expect(last[0]).toMatchObject({ type: 'text' });
+    expect(String((last[0] as Record<string, unknown>)['text'])).toContain('SNAP');
+    const img = last[1] as { type?: string; image_url?: { url?: string } };
+    expect(img.type).toBe('image_url');
+    expect(img.image_url?.url).toBe('data:image/jpeg;base64,QUJD');
   });
 
   it('mints a session id per process, env wins', () => {

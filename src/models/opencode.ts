@@ -123,14 +123,22 @@ export class OpenCode implements AIModel {
     tools: OpenAITool[],
     tool_choice = 'auto',
     liveTail = '',
+    liveImage: string | null = null,
   ): Promise<ToolResponse> {
     const messages: ChatMessage[] = [
       { role: 'system', content: systemMessage },
       ...strictFormat(turns),
     ];
     // Live 快照放最后单独发：常变部分永不前移，前缀缓存才保得住。
-    if (liveTail.trim() !== '') {
-      messages.push({ role: 'user', content: `## 当前世界快照\n${liveTail}` });
+    // 有现拍示意图就把图附在同一条消息里（粗略重绘，大概看布局）。
+    // ChatMessage.content 类型是 string，多模态数组 cast 一下——网关认。
+    if (liveTail.trim() !== '' || liveImage) {
+      const parts: Array<Record<string, unknown>> = [];
+      if (liveTail.trim() !== '') parts.push({ type: 'text', text: `## 当前世界快照\n${liveTail}` });
+      if (liveImage) {
+        parts.push({ type: 'image_url', image_url: { url: `data:image/jpeg;base64,${liveImage}` } });
+      }
+      messages.push({ role: 'user', content: parts } as unknown as ChatMessage);
     }
     const model = this.model_name || OPENCODE_DEFAULT_MODEL;
     console.log(`Awaiting opencode tool response... (model: ${model})`);
