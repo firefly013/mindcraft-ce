@@ -24,6 +24,29 @@ export interface Compactable {
   kind?: string;
   level?: number;
   at?: number;
+  role?: string;
+  content?: string;
+}
+
+/** 没有配置窗口时的 fallback（主流模型的常见量级，往小了估更安全）。 */
+export const FALLBACK_CONTEXT_WINDOW = 128_000;
+
+/**
+ * 从 profile 读上下文窗口：profile.context_window > 0 就用，
+ * 否则回退。回退值故意取常见下限——估大了会晚压仓。
+ */
+export function resolveContextWindow(profile: unknown): number {
+  const w = (profile as { context_window?: unknown } | null)?.context_window;
+  return typeof w === 'number' && Number.isFinite(w) && w > 0 ? w : FALLBACK_CONTEXT_WINDOW;
+}
+
+/** 一组条目的 token 粗估（role+content；compaction 预算用）。 */
+export function entriesTokens(entries: Compactable[]): number {
+  let n = 0;
+  for (const e of entries) {
+    n += estimateTokens(`${e.role ?? ''}:${typeof e.content === 'string' ? e.content : ''}`);
+  }
+  return n;
 }
 
 /**

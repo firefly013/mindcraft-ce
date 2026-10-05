@@ -6,8 +6,11 @@ import { describe, expect, it } from 'vitest';
 import {
   COMPACT_AT,
   DEFAULT_KEEP_LAST,
+  entriesTokens,
   estimateTokens,
+  FALLBACK_CONTEXT_WINDOW,
   maybeCompact,
+  resolveContextWindow,
   WORLD_TTL_MS,
 } from '../src/agent/compaction.js';
 import type { Compactable } from '../src/agent/compaction.js';
@@ -25,6 +28,24 @@ describe('estimateTokens', () => {
     expect(estimateTokens('你好')).toBe(2);
     expect(estimateTokens('')).toBe(0);
     expect(estimateTokens('abc你好')).toBeGreaterThanOrEqual(3);
+  });
+});
+
+describe('resolveContextWindow', () => {
+  it('uses a positive configured window, else the conservative fallback', () => {
+    expect(resolveContextWindow({ context_window: 64000 })).toBe(64000);
+    expect(resolveContextWindow({})).toBe(FALLBACK_CONTEXT_WINDOW);
+    expect(resolveContextWindow(null)).toBe(FALLBACK_CONTEXT_WINDOW);
+    expect(resolveContextWindow({ context_window: -5 })).toBe(FALLBACK_CONTEXT_WINDOW);
+    expect(resolveContextWindow({ context_window: 'big' })).toBe(FALLBACK_CONTEXT_WINDOW);
+  });
+});
+
+describe('entriesTokens', () => {
+  it('sums role+content estimates, tolerates missing fields', () => {
+    expect(entriesTokens([])).toBe(0);
+    expect(entriesTokens([{ role: 'user', content: 'hi' }])).toBeGreaterThan(0);
+    expect(entriesTokens([{}])).toBeGreaterThanOrEqual(0);
   });
 });
 

@@ -2,7 +2,7 @@ import { writeFileSync, readFileSync, mkdirSync, existsSync } from 'fs';
 import { NPCData } from './npc/data.js';
 import settings from './settings.js';
 import type { ChatMessage } from '../types/common.js';
-import { maybeCompact } from './compaction.js';
+import { entriesTokens, maybeCompact, resolveContextWindow, COMPACT_AT } from './compaction.js';
 
 // history.load() 从 memory.json 读出的数据形状
 export interface HistorySaveData {
@@ -103,10 +103,14 @@ export class History {
         turn.at = Date.now();
         this.turns.push(turn);
 
-        if (this.turns.length >= this.max_messages) {
+        // 真实压力线：估算 token / 上下文窗口。window 取自 profile，
+        // 配了就用配的，没配回退 128k（往小估，早压比晚压安全）。
+        // 条数上限是硬顶，两条线谁先到谁触发 level-1 删除。
+        const usageRatio = entriesTokens(this.turns) / resolveContextWindow(this.agent?.prompter?.profile);
+        if (this.turns.length >= this.max_messages || usageRatio >= COMPACT_AT) {
             // 先做无害的 level-1 删除（过期 world 噪声）：删得动就省一次总结。
-            // 满载即视为有压力（usageRatio=1），不注入总结器，只删不过期的不动。
-            const compacted = await maybeCompact({ entries: this.turns, usageRatio: 1, summarize: null });
+            // 这里不注入总结器，删不动的走下面的分块总结。
+            const compacted = await maybeCompact({ entries: this.turns, usageRatio, summarize: null });
             if (compacted.compacted) this.turns = compacted.entries;
         }
 
