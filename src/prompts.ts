@@ -249,6 +249,17 @@ export const MESSAGES = {
   hello: (name: string): string => `Hello world! I am ${name}`,
   modelUnsupported: '我的模型不支持原生工具调用，换个 OpenAI 兼容模型再试。',
   usedMarker: (tool: string): string => `*used ${tool}*`,
+  toolOutcome: (tool: string, args: unknown, outcome: string): string => {
+    let argText: string;
+    try {
+      argText = JSON.stringify(args) ?? '{}';
+    } catch {
+      argText = '{}';
+    }
+    if (argText.length > 500) argText = `${argText.slice(0, 500)}…[truncated]`;
+    const out = outcome === '' ? '(no output)' : outcome;
+    return `Tool ${tool} ${argText} → ${out}`;
+  },
   recentConvoPrefix: 'Recent conversation:\n',
   death: (posText: string, dimension: string, msg: string): string => `You died at position ${posText} in the ${dimension} dimension with the final message: '${msg}'. Your place of death is saved as 'last_death_position' if you want to return. Previous actions were stopped and you have respawned.`,
   taskGoal: (goal: string): string => `你的任务目标：${goal}`,

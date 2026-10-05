@@ -2,6 +2,7 @@ import { writeFileSync, readFileSync, mkdirSync, existsSync } from 'fs';
 import { NPCData } from './npc/data.js';
 import settings from './settings.js';
 import type { ChatMessage } from '../types/common.js';
+import { maybeCompact } from './compaction.js';
 
 // history.load() 从 memory.json 读出的数据形状
 export interface HistorySaveData {
@@ -87,7 +88,7 @@ export class History {
         }
     }
 
-    async add(name: string, content: string): Promise<void> {
+    async add(name: string, content: string, meta?: { kind?: string; level?: number }): Promise<void> {
         let role: ChatMessage['role'] = 'assistant';
         if (name === 'system') {
             role = 'system';
@@ -96,7 +97,18 @@ export class History {
             role = 'user';
             content = `${name}: ${content}`;
         }
-        this.turns.push({role, content});
+        const turn: ChatMessage = { role, content };
+        if (meta?.kind !== undefined) turn.kind = meta.kind;
+        if (meta?.level !== undefined) turn.level = meta.level;
+        turn.at = Date.now();
+        this.turns.push(turn);
+
+        if (this.turns.length >= this.max_messages) {
+            // 先做无害的 level-1 删除（过期 world 噪声）：删得动就省一次总结。
+            // 满载即视为有压力（usageRatio=1），不注入总结器，只删不过期的不动。
+            const compacted = await maybeCompact({ entries: this.turns, usageRatio: 1, summarize: null });
+            if (compacted.compacted) this.turns = compacted.entries;
+        }
 
         if (this.turns.length >= this.max_messages) {
             const chunk = this.turns.splice(0, this.summary_chunk_size);

@@ -7,6 +7,14 @@ export interface ChatMessage {
   content: string;
   /** Optional name prefix already merged into content by History.add(). */
   name?: string;
+  /**
+   * 可选的事件分级元数据（compaction 用，缺了就当不可删除）：
+   * kind 取 user/world/tool/model/system，level 取 1-5。
+   */
+  kind?: string;
+  level?: number;
+  /** 写入时间戳（ms），World 条目过期用。 */
+  at?: number;
 }
 
 /** OpenAI-style tool definition passed to models. */

@@ -306,26 +306,29 @@ export class Agent {
     private async runTool(name: string, args: unknown): Promise<LoopToolResult> {
         const handler = this.toolHandlers.get(name);
         if (handler) return handler(args);
+        const record = async (outcome: string): Promise<void> => {
+            await this.history.add('system', MESSAGES.toolOutcome(name, args, outcome), {
+                kind: 'tool',
+                level: 2,
+            });
+        };
         const checked = validateToolCall(name, args);
         if (!checked.ok) {
-            return {
-                status: 'rejected',
-                code: checked.code ?? 'BAD_ARGS',
-                reason: checked.errors?.join('; ') ?? 'Bad arguments.',
-            };
+            const reason = checked.errors?.join('; ') ?? 'Bad arguments.';
+            await record(`rejected: ${reason}`);
+            return { status: 'rejected', code: checked.code ?? 'BAD_ARGS', reason };
         }
         if (isActionTool(name)) {
             const claim = this.scheduler.startAction(name);
             if (!claim.accepted) {
-                return {
-                    status: 'rejected',
-                    code: claim.code ?? 'ACTION_BUSY',
-                    reason: 'An action is already running. Stop() first, then retry.',
-                };
+                const reason = 'An action is already running. Stop() first, then retry.';
+                await record(`rejected: ${reason}`);
+                return { status: 'rejected', code: claim.code ?? 'ACTION_BUSY', reason };
             }
             try {
                 this.routeResponse(this.currentSource, MESSAGES.usedMarker(name));
                 const data = await executeToolCall(this, name, args as Record<string, unknown>);
+                await record(data);
                 return { status: 'completed', data };
             } finally {
                 this.scheduler.releaseAction();
@@ -333,6 +336,7 @@ export class Agent {
         }
         this.routeResponse(this.currentSource, MESSAGES.usedMarker(name));
         const data = await executeToolCall(this, name, args as Record<string, unknown>);
+        await record(data);
         return { status: 'completed', data };
     }
 
@@ -356,7 +360,7 @@ export class Agent {
         const res = await this.prompter.promptConvoTools(history, liveText);
         if (!res) return { text: null, calls: [] };
         if (res.text?.trim()) {
-            await this.history.add(this.name, res.text);
+            await this.history.add(this.name, res.text, { kind: 'model', level: 2 });
             this.routeResponse(this.currentSource, res.text);
         }
         return {
@@ -443,7 +447,10 @@ export class Agent {
         console.log('received message from', source, ':', message);
 
         // Handle other user messages
-        await this.history.add(source, message);
+        await this.history.add(source, message, {
+            kind: source === 'system' ? 'world' : 'user',
+            level: 3,
+        });
         this.history.save();
 
         if (typeof this.prompter.chat_model.sendRequestWithTools !== 'function') {
