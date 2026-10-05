@@ -76,22 +76,10 @@ export class Prompter {
         }
 
         
-        let embedding_model_profile = null;
-        if (this.profile.embedding) {
-            try {
-                embedding_model_profile = selectAPI(this.profile.embedding);
-            } catch (e) {
-                embedding_model_profile = null;
-            }
-        }
-        if (embedding_model_profile) {
-            this.embedding_model = createModel(embedding_model_profile);
-        }
-        else {
-            this.embedding_model = createModel({api: chat_model_profile.api});
-        }
+        // RAG 已移除：不再创建 embedding 模型，传 null 走确定性逻辑（全量 docs / 零示例）
+        this.embedding_model = null;
 
-        this.skill_libary = new SkillLibrary(agent, this.embedding_model);
+        this.skill_libary = new SkillLibrary(agent, null);
         mkdirSync(`./bots/${name}`, { recursive: true });
         writeFileSync(`./bots/${name}/last_profile.json`, JSON.stringify(this.profile, null, 4), (err) => {
             if (err) {
@@ -111,8 +99,9 @@ export class Prompter {
 
     async initExamples() {
         try {
-            this.convo_examples = new Examples(this.embedding_model, settings.num_examples);
-            this.coding_examples = new Examples(this.embedding_model, settings.num_examples);
+            // RAG 已移除：Examples 传 null model + 0 数量，不再做 embedding 排序与注入
+            this.convo_examples = new Examples(null, 0);
+            this.coding_examples = new Examples(null, 0);
             
             // Wait for both examples to load before proceeding
             await Promise.all([
@@ -153,13 +142,10 @@ export class Prompter {
         if (prompt.includes('$COMMAND_DOCS'))
             prompt = prompt.replaceAll('$COMMAND_DOCS', getCommandDocs(this.agent));
         if (prompt.includes('$CODE_DOCS')) {
-            const code_task_content = messages.slice().reverse().find(msg =>
-                msg.role !== 'system' && msg.content.includes('!newAction(')
-            )?.content?.match(/!newAction\((.*?)\)/)?.[1] || '';
-
+            // RAG 已移除：固定取全量 docs，不再按任务内容做 embedding 排序
             prompt = prompt.replaceAll(
                 '$CODE_DOCS',
-                await this.skill_libary.getRelevantSkillDocs(code_task_content, settings.relevant_docs_count)
+                await this.skill_libary.getRelevantSkillDocs('', -1)
             );
         }
         if (prompt.includes('$EXAMPLES') && examples !== null)

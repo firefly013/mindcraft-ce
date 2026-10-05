@@ -39,7 +39,7 @@
     "init_message": {
         "type": "string",
         "description": "The initial message to send to the bot",
-        "default": "Respond with hello world and your name"
+        "default": "用中文回复hello world和你的名字"
     },
     "only_chat_with": {
         "type": "array",
@@ -50,11 +50,6 @@
         "type": "boolean",
         "description": "Whether to enable text-to-speech reading on the host machine",
         "default": false
-    },
-    "language": {
-        "type": "string",
-        "description": "The language to automatically translate to and from using google translate",
-        "default": "en"
     },
     "allow_vision": {
         "type": "boolean",
@@ -68,8 +63,8 @@
     },
     "relevant_docs_count": {
         "type": "number",
-        "description": "Number of relevant function documents to include in the prompt for LLM code writing",
-        "default": 5
+        "description": "Number of function documents to include (RAG已移除，固定-1全量，不做embedding排序)",
+        "default": -1
     },
     "max_messages": {
         "type": "number",
@@ -78,8 +73,8 @@
     },
     "num_examples": {
         "type": "number",
-        "description": "Number of examples to select to help prompt better LLM responses",
-        "default": 2
+        "description": "Number of examples to select (RAG已移除，固定0，不再注入示例)",
+        "default": 0
     },
     "max_commands": {
         "type": "number",

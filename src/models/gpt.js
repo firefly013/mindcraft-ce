@@ -87,6 +87,37 @@ export class GPT {
         return res;
     }
 
+    /**
+     * OpenAI 原生工具调用：把 !Command 转换后的 tools 直接透传给 chat.completions。
+     * 返回 { text, tool_calls: [{ id, name, args }] }，调用方用 executeToolCall 执行。
+     * legacy 文本 !Command 仍保留为 fallback，本方法只新增不替换。
+     */
+    async sendRequestWithTools(turns, systemMessage, tools, tool_choice = 'auto') {
+        const messages = [{'role': 'system', 'content': systemMessage}].concat(strictFormat(turns));
+        const model = this.model_name || "gpt-5.4-mini";
+        try {
+            console.log('Awaiting openai tool response from model', model);
+            const completion = await this.openai.chat.completions.create({
+                model,
+                messages,
+                tools,
+                tool_choice,
+                ...(this.params || {})
+            });
+            const msg = completion.choices[0].message;
+            const tool_calls = (msg.tool_calls || []).map((tc) => {
+                let args = {};
+                try { args = JSON.parse(tc.function?.arguments ?? '{}') ?? {}; }
+                catch { args = {}; }
+                return { id: tc.id, name: tc.function?.name ?? '', args };
+            });
+            return { text: msg.content ?? '', tool_calls };
+        } catch (err) {
+            console.log(err);
+            return { text: 'My brain disconnected, try again.', tool_calls: [] };
+        }
+    }
+
     async sendVisionRequest(messages, systemMessage, imageBuffer) {
         const imageMessages = [...messages];
         imageMessages.push({
