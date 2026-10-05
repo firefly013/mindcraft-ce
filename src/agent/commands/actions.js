@@ -341,23 +341,6 @@ export const actionsList = [
         })
     },
     {
-        name: '!setMode',
-        description: td('setMode'),
-        params: {
-            'mode_name': { type: 'string', description: tp('setMode', 'mode_name') },
-            'on': { type: 'boolean', description: tp('setMode', 'on') }
-        },
-        perform: async function (agent, mode_name, on) {
-            const modes = agent.bot.modes;
-            if (!modes.exists(mode_name))
-            return `Mode ${mode_name} does not exist.` + modes.getDocs();
-            if (modes.isOn(mode_name) === on)
-            return `Mode ${mode_name} is already ${on ? 'on' : 'off'}.`;
-            modes.setOn(mode_name, on);
-            return `Mode ${mode_name} is now ${on ? 'on' : 'off'}.`;
-        }
-    },
-    {
         name: '!showVillagerTrades',
         description: td('showVillagerTrades'),
         params: {'id': { type: 'int', description: tp('showVillagerTrades', 'id') }},

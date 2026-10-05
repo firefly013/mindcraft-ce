@@ -41,14 +41,13 @@ const collect = (d) => {
 };
 collect('./src');
 const msgKeys = new Set(Object.keys(P.MESSAGES));
-const modeKeys = new Set(Object.keys(P.MODE_TEXT));
 for (const fp of files) {
   const src = readFileSync(fp, 'utf8');
   for (const m of src.matchAll(/MESSAGES\.(\w+)/g)) {
     if (!msgKeys.has(m[1])) { console.log('MISSING MESSAGE:', m[1], 'in', fp); fail++; }
   }
   for (const m of src.matchAll(/MODE_TEXT\.(\w+)/g)) {
-    if (!modeKeys.has(m[1])) { console.log('MISSING MODE_TEXT:', m[1], 'in', fp); fail++; }
+    console.log('STALE MODE_TEXT ref:', m[1], 'in', fp); fail++;
   }
 }
 console.log(fail === 0 ? 'ALL PROMPT REFS OK' : 'FAILURES: ' + fail);

@@ -2,7 +2,6 @@ import { History } from './history.js';
 import { Coder } from './coder.js';
 import { VisionInterpreter } from './vision/vision_interpreter.js';
 import { Prompter } from '../models/prompter.js';
-import { initModes } from './modes.js';
 import { initBot } from '../utils/mcdata.js';
 import { executeToolCall } from './commands/to_openai_tools.js';
 import { stopPvp } from './library/skills.js';
@@ -82,8 +81,6 @@ export class Agent {
                  log(this.name, `[LoginGuard] Connection Error: ${String(err)}`);
             }
         });
-
-        initModes(this);
 
         this.bot.on('login', () => {
             console.log(this.name, 'logged in!');
@@ -236,16 +233,6 @@ export class Agent {
 
         const checkInterrupt = () => this.shut_up;
 
-        let behavior_log = this.bot.modes.flushBehaviorLog().trim();
-        if (behavior_log.length > 0) {
-            const MAX_LOG = 500;
-            if (behavior_log.length > MAX_LOG) {
-                behavior_log = '...' + behavior_log.substring(behavior_log.length - MAX_LOG);
-            }
-            behavior_log = MESSAGES.behaviorLogPrefix + behavior_log;
-            await this.history.add('system', behavior_log);
-        }
-
         // Handle other user messages
         await this.history.add(source, message);
         this.history.save();
@@ -381,7 +368,6 @@ export class Agent {
         this.bot.on('idle', () => {
             this.bot.clearControlStates();
             this.bot.pathfinder.stop(); // clear any lingering pathfinder
-            this.bot.modes.unPauseAll();
             setTimeout(() => {
                 if (this.isIdle()) {
                     this.actions.resumeAction();
@@ -411,7 +397,6 @@ export class Agent {
     }
 
     async update(delta) {
-        await this.bot.modes.update();
         await this.checkTaskDone();
     }
 

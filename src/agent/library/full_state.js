@@ -85,9 +85,6 @@ export function getFullState(agent) {
         nearby: {
             players,
             entityTypes: getNearbyEntityTypes(bot).filter(t => t !== 'player' && t !== 'item'),
-        },
-        modes: {
-            summary: bot.modes.getMiniDocs()
         }
     };
 

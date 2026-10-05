@@ -19,23 +19,23 @@ BLOCKED_ACTIONS_COOKING = [
     '!activate', '!attackPlayer', '!checkBlueprint', '!checkBlueprintLevel',
     '!clearChat', '!clearFurnace', '!consume', '!craftable', '!discard',
     '!entities', '!equip', '!followPlayer', '!getBlueprint', '!getBlueprintLevel',
-    '!goToBed', '!help', '!modes', '!moveAway', '!newAction', '!placeHere', '!putInChest',
-    '!restart', '!setMode', '!stay', '!stfu', '!stop'
+    '!goToBed', '!help', '!moveAway', '!newAction', '!placeHere', '!putInChest',
+    '!restart', '!stay', '!stfu', '!stop'
 ]
 BLOCKED_ACTIONS_CRAFTING = [
     '!activate', '!attack', '!attackPlayer', '!checkBlueprint', '!checkBlueprintLevel',
     '!clearChat', '!clearFurnace', '!consume', '!craftable', '!discard', '!endConversation',
     '!entities', '!followPlayer', '!getBlueprint', '!getBlueprintLevel',
-    '!goToBed', '!help', '!modes', '!newAction', '!putInChest', '!restart',
-    '!searchForEntity', '!setMode', '!stay', '!stfu', '!stop', '!takeFromChest',
+    '!goToBed', '!help', '!newAction', '!putInChest', '!restart',
+    '!searchForEntity', '!stay', '!stfu', '!stop', '!takeFromChest',
     '!viewChest'
 ]
 BLOCKED_ACTIONS_CONSTRUCTION = [
     '!activate', '!attackPlayer', '!clearChat', '!clearFurnace', '!collectBlocks',
     '!consume', '!craftable', '!discard', '!endConversation', '!entities',
     '!equip', '!followPlayer', '!getBlueprint', '!getBlueprintLevel', '!goToBed',
-    '!help', '!modes', '!moveAway', '!newAction', '!placeHere', '!putInChest',
-    '!restart', '!searchForBlock', '!searchForEntity', '!setMode', '!stay', '!stfu',
+    '!help', '!moveAway', '!newAction', '!placeHere', '!putInChest',
+    '!restart', '!searchForBlock', '!searchForEntity', '!stay', '!stfu',
     '!stop', '!takeFromChest', '!viewChest', '!craftRecipe', '!smeltItem'
 ]
 

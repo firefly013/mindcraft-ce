@@ -580,7 +580,7 @@ export async function breakBlockAt(bot, x, y, z) {
     if (x == null || y == null || z == null) throw new Error('Invalid position to break block at.');
     let block = bot.blockAt(Vec3(x, y, z));
     if (block.name !== 'air' && block.name !== 'water' && block.name !== 'lava') {
-        if (bot.modes.isOn('cheat')) {
+        if (settings.cheat) {
             if (useDelay) { await new Promise(resolve => setTimeout(resolve, blockPlaceDelay)); }
             let msg = '/setblock ' + Math.floor(x) + ' ' + Math.floor(y) + ' ' + Math.floor(z) + ' air';
             bot.chat(msg);
@@ -638,7 +638,7 @@ export async function placeBlock(bot, blockType, x, y, z, placeOn='bottom', dont
         return await breakBlockAt(bot, x, y, z);
     }
 
-    if (bot.modes.isOn('cheat') && !dontCheat) {
+    if (settings.cheat && !dontCheat) {
         if (bot.restrict_to_inventory) {
             let block = bot.inventory.findInventoryItem(blockType);
             if (!block) {
@@ -1202,7 +1202,7 @@ export async function goToPosition(bot, x, y, z, min_distance=2) {
         log(bot, `Missing coordinates, given x:${x} y:${y} z:${z}`);
         return false;
     }
-    if (bot.modes.isOn('cheat')) {
+    if (settings.cheat) {
         bot.chat('/tp @s ' + x + ' ' + y + ' ' + z);
         log(bot, `Teleported to ${x}, ${y}, ${z}.`);
         return true;
@@ -1312,7 +1312,7 @@ export async function goToPlayer(bot, username, distance=3) {
         log(bot, `You are already at ${username}.`);
         return true;
     }
-    if (bot.modes.isOn('cheat')) {
+    if (settings.cheat) {
         bot.chat('/tp @s ' + username);
         log(bot, `Teleported to ${username}.`);
         return true;
@@ -1357,39 +1357,25 @@ export async function followPlayer(bot, username, distance=4) {
 
     while (!bot.interrupt_code) {
         await new Promise(resolve => setTimeout(resolve, 500));
-        // in cheat mode, if the distance is too far, teleport to the player
+        // with cheat enabled, if the distance is too far, teleport to the player
         const distance_from_player = bot.entity.position.distanceTo(player.position);
 
         const teleport_distance = 100;
-        const ignore_modes_distance = 30; 
         const nearby_distance = distance + 2;
 
-        if (distance_from_player > teleport_distance && bot.modes.isOn('cheat')) {
-            // teleport with cheat mode
+        if (distance_from_player > teleport_distance && settings.cheat) {
+            // teleport with cheat enabled
             await goToPlayer(bot, username);
-        }
-        else if (distance_from_player > ignore_modes_distance) {
-            // these modes slow down the bot, and we want to catch up
-            bot.modes.pause('item_collecting');
-            bot.modes.pause('hunting');
-            bot.modes.pause('torch_placing');
-        }
-        else if (distance_from_player <= ignore_modes_distance) {
-            bot.modes.unpause('item_collecting');
-            bot.modes.unpause('hunting');
-            bot.modes.unpause('torch_placing');
         }
 
         if (distance_from_player <= nearby_distance) {
             clearInterval(doorCheckInterval);
             doorCheckInterval = null;
-            bot.modes.pause('elbow_room');
         }
         else {
             if (!doorCheckInterval) {
                 doorCheckInterval = startDoorInterval(bot);
             }
-            bot.modes.unpause('elbow_room');
         }
     }
     clearInterval(doorCheckInterval);
@@ -1411,7 +1397,7 @@ export async function moveAway(bot, distance) {
     let inverted_goal = new pf.goals.GoalInvert(goal);
     bot.pathfinder.setMovements(new pf.Movements(bot));
 
-    if (bot.modes.isOn('cheat')) {
+    if (settings.cheat) {
         const move = new pf.Movements(bot);
         const path = await bot.pathfinder.getPathTo(move, inverted_goal, 10000);
         let last_move = path.path[path.path.length-1];
@@ -1476,16 +1462,13 @@ export async function avoidEnemies(bot, distance=16) {
 
 export async function stay(bot, seconds=30) {
     /**
-     * Stay in the current position until interrupted. Disables all modes.
+     * Stay in the current position until interrupted.
      * @param {MinecraftBot} bot, reference to the minecraft bot.
      * @param {number} seconds, the number of seconds to stay. Defaults to 30. -1 for indefinite.
      * @returns {Promise<boolean>} true if the bot stayed, false otherwise.
      * @example
      * await skills.stay(bot);
      **/
-    bot.modes.pause('hunting');
-    bot.modes.pause('torch_placing');
-    bot.modes.pause('item_collecting');
     let start = Date.now();
     while (!bot.interrupt_code && (seconds === -1 || Date.now() - start < seconds*1000)) {
         await new Promise(resolve => setTimeout(resolve, 500));
@@ -1586,7 +1569,7 @@ export async function tillAndSow(bot, x, y, z, seedType=null) {
     let block = bot.blockAt(pos);
     log(bot, `Planting ${seedType} at x:${x.toFixed(1)}, y:${y.toFixed(1)}, z:${z.toFixed(1)}.`);
 
-    if (bot.modes.isOn('cheat')) {
+    if (settings.cheat) {
         let to_remove = ['_seed', '_seeds'];
         for (let remove of to_remove) {
             if (seedType.endsWith(remove)) {

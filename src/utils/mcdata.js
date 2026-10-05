@@ -158,7 +158,7 @@ export function initBot(username) {
     bot.loadPlugin(customPvpMod.default ?? customPvpMod); // bot.swordpvp 近战 + bot.bowpvp 远程
     bot.loadPlugin(collectblock);
     bot.loadPlugin(autoEat);
-    bot.loadPlugin(commonSense); // 保命应急：着火/摔落等基础响应，替代自研 modes
+    bot.loadPlugin(commonSense); // 保命应急：着火/摔落等基础响应
     bot.loadPlugin(armorManager); // auto equip armor
     bot.once('resourcePack', () => {
         bot.acceptResourcePack();

@@ -88,10 +88,6 @@ export class Prompter {
         return this.profile.name;
     }
 
-    getInitModes() {
-        return this.profile.modes;
-    }
-
     async replaceStrings(prompt, messages, to_summarize=[], last_goals=null) {
         prompt = prompt.replaceAll('$NAME', this.agent.name);
 

@@ -55,7 +55,6 @@ export const queryList = [
 
             res += '\n- Nearby Players: ' + (players.length > 0 ? players.join(', ') : 'None.');
 
-            res += '\n' + agent.bot.modes.getMiniDocs() + '\n';
             return pad(res);
         }
     },
@@ -201,13 +200,6 @@ export const queryList = [
                 res += ': none';
             }
             return pad(res);
-        }
-    },
-    {
-        name: "!modes",
-        description: td('modes'),
-        perform: function (agent) {
-            return agent.bot.modes.getDocs();
         }
     },
     {

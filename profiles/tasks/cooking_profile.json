@@ -1,10 +1,5 @@
 {
     "name": "andy",
     "model": "claude-3-5-sonnet-latest",
-    "modes": {
-        "hunting": false,
-        "item_collecting": true,
-        "elbow_room": false
-    },
     "prompt_set": "cooking"
 }

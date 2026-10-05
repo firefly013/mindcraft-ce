@@ -1,9 +1,5 @@
 {
     "name": "andy",
     "model": "claude-3-5-sonnet-latest",
-    "modes": {
-        "hunting": false,
-        "elbow_room": false
-    },
     "prompt_set": "crafting"
 }

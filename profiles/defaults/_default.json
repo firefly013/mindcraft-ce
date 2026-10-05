@@ -1,12 +1,4 @@
 {
     "cooldown": 3000,
-    "speak_model": "openai/tts-1/echo",
-    "modes": {
-        "hunting": true,
-        "item_collecting": true,
-        "torch_placing": true,
-        "elbow_room": true,
-        "idle_staring": true,
-        "cheat": false
-    }
+    "speak_model": "openai/tts-1/echo"
 }

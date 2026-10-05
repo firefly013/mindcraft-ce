@@ -141,12 +141,8 @@ export const TOOL_TEXT = {
     params: {},
   },
   stay: {
-    description: 'Stay in the current location no matter what. Pauses all modes.',
+    description: 'Stay in the current location no matter what.',
     params: { type: 'The number of seconds to stay. -1 for forever.' },
-  },
-  setMode: {
-    description: 'Set a mode to on or off. A mode is an automatic behavior that constantly checks and responds to the environment.',
-    params: { mode_name: 'The name of the mode to enable.', on: 'Whether to enable or disable the mode.' },
   },
   showVillagerTrades: {
     description: 'Show trades of a specified villager.',
@@ -194,10 +190,6 @@ export const TOOL_TEXT = {
   },
   entities: {
     description: 'Get the nearby players and entities.',
-    params: {},
-  },
-  modes: {
-    description: 'Get all available modes and their docs and see which are on/off.',
     params: {},
   },
   savedPlaces: {
@@ -248,27 +240,15 @@ export function tp(key, name) {
   return TOOL_TEXT[key]?.params?.[name] ?? '';
 }
 
-// 自动行为（modes）描述：经 !modes / !stats 进模型
-export const MODE_TEXT = {
-  hunting: 'Hunt nearby animals when idle.',
-  item_collecting: 'Collect nearby items when idle.',
-  torch_placing: 'Place torches when idle and there are no torches nearby.',
-  elbow_room: 'Move away from nearby players when idle.',
-  idle_staring: 'Animation to look around at entities when idle.',
-  cheat: 'Use cheats to instantly place blocks and teleport.',
-};
-
 // 代码里拼进上下文的消息模板：改文案只改这里
 export const MESSAGES = {
   hello: (name) => `Hello world! I am ${name}`,
   modelUnsupported: '我的模型不支持原生工具调用，换个 OpenAI 兼容模型再试。',
   usedMarker: (tool) => `*used ${tool}*`,
-  behaviorLogPrefix: 'Recent behaviors log: \n',
   recentConvoPrefix: 'Recent conversation:\n',
   death: (posText, dimension, msg) => `You died at position ${posText} in the ${dimension} dimension with the final message: '${msg}'. Your place of death is saved as 'last_death_position' if you want to return. Previous actions were stopped and you have respawned.`,
   taskGoal: (goal) => `你的任务目标：${goal}`,
   taskEnded: (score) => `Task ended with score : ${score}`,
-  modeInterrupted: (action, mode, logs) => `(AUTO MESSAGE)Your previous action '${action}' was interrupted by ${mode}.\nYour behavior log: ${logs}\nRespond accordingly.`,
   codeTimeout: (mins) => `Code execution timed out after ${mins} minutes. Attempting force stop.`,
   newActionDisabled: 'newAction is disabled. Enable with allow_insecure_coding=true in settings.js',
   shuttingUp: 'Shutting up.',
@@ -276,8 +256,6 @@ export const MESSAGES = {
   exiting: 'Exiting.',
   goalDone: (goal) => `You recently successfully completed the goal ${goal}.`,
   goalFailed: (goal) => `You recently failed to complete the goal ${goal}.`,
-  hunting: (name) => `Hunting ${name}!`,
-  pickingUp: 'Picking up item!',
 };
 
 /** 按 profile 选提示词集：profile.prompt_set 指定任务变体，同名键可覆盖 */

@@ -404,7 +404,7 @@ export async function isClearPath(bot, target) {
 }
 
 export function shouldPlaceTorch(bot) {
-    if (!bot.modes.isOn('torch_placing') || bot.interrupt_code) return false;
+    if (bot.interrupt_code) return false;
     const pos = getPosition(bot);
     // TODO: check light level instead of nearby torches, block.light is broken
     let nearest_torch = getNearestBlock(bot, 'torch', 6);
