@@ -3,7 +3,7 @@ import type { HistorySaveData } from './history.js';
 import { VisionInterpreter } from './vision/vision_interpreter.js';
 import { Prompter } from '../models/prompter.js';
 import { initBot } from '../utils/mcdata.js';
-import { executeToolCall, getOpenAITools, isActionTool, validateToolCall } from './commands/to_openai_tools.js';
+import { executeToolCall, getOpenAITools, isActionTool, validateToolCall, formatSay } from './commands/to_openai_tools.js';
 import { stopPvp, consume } from './library/skills.js';
 import pf from 'mineflayer-pathfinder';
 import { isHostile } from '../utils/mcdata.js';
@@ -302,6 +302,20 @@ export class Agent {
             },
             emergencyHandler: () => this.runEmergency(),
         });
+        // Say 隔离：说话唯一通道。正文不再自动进聊天（见 modelCall），
+        // 模型想让玩家听见必须调 Say；空话拒绝，超长截断但记全文。
+        this.toolHandlers.set('Say', (args: unknown) => {
+            const shaped = formatSay((args as { text?: unknown } | null)?.text);
+            if (!shaped.ok || shaped.line == null) {
+                return Promise.resolve({
+                    status: 'rejected',
+                    code: 'BAD_ARGS',
+                    reason: shaped.reason ?? 'Bad arguments.',
+                } as LoopToolResult);
+            }
+            this.routeResponse(this.currentSource, shaped.line);
+            return Promise.resolve({ status: 'completed', data: shaped.full } as LoopToolResult);
+        });
     }
 
     /** 全部停下：动作停、日志清、续跑取消、回到 idle。 */
@@ -375,8 +389,8 @@ export class Agent {
         const res = await this.prompter.promptConvoTools(history, liveText);
         if (!res) return { text: null, calls: [] };
         if (res.text?.trim()) {
+            // Say 隔离：正文只记历史不发言，想说话模型必须调 Say。
             await this.history.add(this.name, res.text, { kind: 'model', level: 2 });
-            this.routeResponse(this.currentSource, res.text);
         }
         return {
             text: res.text,

@@ -1,7 +1,7 @@
 import { actionsList } from './actions.js';
 import type { AgentCommand, CommandParamDef } from './actions.js';
 import { queryList } from './queries.js';
-import { td } from '../../prompts.js';
+import { td, tp } from '../../prompts.js';
 import type { OpenAITool } from '../../types/common.js';
 
 const commandList: AgentCommand[] = queryList.concat(actionsList);
@@ -64,7 +64,7 @@ export function commandToTool(command: AgentCommand): OpenAITool {
 
 /**
  * 按 blocked_actions 过滤后，返回 OpenAI tools 数组。
- * 末尾追加 Finish 控制工具：当前工作完成时调用它结束本轮推理。
+ * 末尾追加 Finish（结束本轮）与 Say（说话唯一通道）控制工具。
  */
 export function getOpenAITools(agent: any): OpenAITool[] {
     const blocked = (agent?.blocked_actions || []) as string[];
@@ -77,6 +77,19 @@ export function getOpenAITools(agent: any): OpenAITool[] {
             name: 'Finish',
             description: td('Finish'),
             parameters: { type: 'object', properties: {}, required: [], additionalProperties: false },
+        },
+    });
+    tools.push({
+        type: 'function',
+        function: {
+            name: 'Say',
+            description: td('Say'),
+            parameters: {
+                type: 'object',
+                properties: { text: { type: 'string', description: tp('Say', 'text') } },
+                required: ['text'],
+                additionalProperties: false,
+            },
         },
     });
     return tools;
@@ -105,6 +118,7 @@ export async function executeToolCall(agent: any, toolName: string, args: Record
 
 /** 兼容检查：tool 名是否存在（不带 ! 也行） */
 export function toolExists(toolName: string): boolean {
+    if (toolName === 'Finish' || toolName === 'Stop' || toolName === 'Say') return true;
     const commandName = toolName.startsWith('!') ? toolName : '!' + toolName;
     return commandMap[commandName] !== undefined;
 }
@@ -137,7 +151,7 @@ function checkParamType(type: string, value: unknown, path: string): string | nu
  * 有 optional/default 的可缺，否则按缺失算。
  */
 export function validateToolCall(toolName: string, args: unknown): ToolValidation {
-    if (toolName === 'Finish' || toolName === 'Stop') return { ok: true };
+    if (toolName === 'Finish' || toolName === 'Stop' || toolName === 'Say') return { ok: true };
     const commandName = toolName.startsWith('!') ? toolName : '!' + toolName;
     const command = commandMap[commandName];
     if (!command) return { ok: false, code: 'UNKNOWN_TOOL', errors: [`No such tool: ${toolName}.`] };
@@ -166,14 +180,33 @@ export function validateToolCall(toolName: string, args: unknown): ToolValidatio
 
 const actionNames = new Set(actionsList.map((c) => stripBang(c.name)));
 
+/** 控制类工具（循环/说话），走注册 handler，不占身体通道。 */
+const CONTROL_TOOLS = new Set(['Finish', 'Stop', 'Say']);
+
 /**
  * 该工具是否占用身体动作通道。动作类工具一次只能跑一个
- * （忙时拒绝，不排队）；查询类只读不占；Stop/Finish 是控制信号。
+ * （忙时拒绝，不排队）；查询类只读不占；控制类走 handler。
  */
 export function isActionTool(toolName: string): boolean {
     const base = stripBang(toolName);
-    if (base === 'Finish' || base === 'Stop') return false;
+    if (CONTROL_TOOLS.has(base)) return false;
     return actionNames.has(base);
+}
+
+/** 游戏内单行聊天上限：超长截断（记录仍保留全文）。 */
+export const SAY_LINE_LIMIT = 240;
+
+/**
+ * Say 文案整形（纯函数）：空话拒绝，超长截断。
+ * 说话走 handler 发出，这里只定形状。
+ */
+export function formatSay(text: unknown): { ok: boolean; line?: string; full?: string; reason?: string } {
+    if (typeof text !== 'string' || text.trim() === '') {
+        return { ok: false, reason: 'Say text must be non-empty.' };
+    }
+    const chars = Array.from(text);
+    const line = chars.length > SAY_LINE_LIMIT ? `${chars.slice(0, SAY_LINE_LIMIT).join('')}…` : text;
+    return { ok: true, line, full: text };
 }
 
 /** 给 help 工具用的人类可读工具清单（替代旧文本命令文档） */

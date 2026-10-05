@@ -3,7 +3,7 @@
  * Stop/Finish 是控制信号，不占通道。
  */
 import { describe, expect, it } from 'vitest';
-import { isActionTool, stripBang, toolExists, validateToolCall } from '../src/agent/commands/to_openai_tools.js';
+import { isActionTool, stripBang, toolExists, validateToolCall, formatSay, getOpenAITools } from '../src/agent/commands/to_openai_tools.js';
 
 describe('isActionTool', () => {
   it('action tools claim the body channel', () => {
@@ -71,5 +71,29 @@ describe('validateToolCall', () => {
     expect(validateToolCall('getCraftingPlan', { targetItem: 'stick' }).ok).toBe(true);
     expect(validateToolCall('getCraftingPlan', { targetItem: 'stick', quantity: null }).ok).toBe(true);
     expect(validateToolCall('getCraftingPlan', { quantity: 2 }).ok).toBe(false);
+  });
+});
+
+describe('Say isolation', () => {
+  it('formatSay rejects empty talk and truncates long lines but keeps full text', () => {
+    expect(formatSay('').ok).toBe(false);
+    expect(formatSay('   ').ok).toBe(false);
+    expect(formatSay(123).ok).toBe(false);
+    const short = formatSay('来了');
+    expect(short).toEqual({ ok: true, line: '来了', full: '来了' });
+    const long = formatSay('x'.repeat(300));
+    expect(long.ok).toBe(true);
+    expect(Array.from(long.line ?? '').length).toBe(241);
+    expect(long.full?.length).toBe(300);
+  });
+
+  it('Say is a control tool: known, valid, channel-free', () => {
+    expect(toolExists('Say')).toBe(true);
+    expect(isActionTool('Say')).toBe(false);
+    expect(validateToolCall('Say', { text: 'hi' }).ok).toBe(true);
+    const tools = getOpenAITools({ blocked_actions: [] });
+    const names = tools.map((t) => t.function.name);
+    expect(names).toContain('Say');
+    expect(names).toContain('Finish');
   });
 });
