@@ -1,6 +1,7 @@
 .vscode/
 .idea/
 node_modules/
+dist/
 code_records/
 scratch.js
 bots/**/action-code/**
