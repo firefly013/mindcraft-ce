@@ -328,7 +328,11 @@ export class Agent {
 
     private async runTool(name: string, args: unknown): Promise<LoopToolResult> {
         const handler = this.toolHandlers.get(name);
-        if (handler) return handler(args);
+        if (handler) {
+            // 控制类调用也广播（Say 除外：它自己已经说话了）。
+            if (name !== 'Say') this.routeResponse(this.currentSource, MESSAGES.usedMarker(name));
+            return handler(args);
+        }
         const record = async (outcome: string): Promise<void> => {
             await this.history.add('system', MESSAGES.toolOutcome(name, args, outcome), {
                 kind: 'tool',
