@@ -7,7 +7,6 @@ import {
     getBlockAtPosition,
     getFirstBlockAboveHead
 } from "./world.js";
-import convoManager from '../conversation.js';
 
 export function getFullState(agent) {
     const bot = agent.bot;
@@ -31,9 +30,7 @@ export function getFullState(agent) {
     const legs = getBlockAtPosition(bot, 0, 0, 0).name;
     const head = getBlockAtPosition(bot, 0, 1, 0).name;
 
-    let players = getNearbyPlayerNames(bot);
-    let bots = convoManager.getInGameAgents().filter(b => b !== agent.name);
-    players = players.filter(p => !bots.includes(p));
+    const players = getNearbyPlayerNames(bot);
 
     const helmet = bot.inventory.slots[5];
     const chestplate = bot.inventory.slots[6];
@@ -45,9 +42,6 @@ export function getFullState(agent) {
     let activity;
     if (!agent.isIdle()) {
         activity = { current: agent.actions.currentActionLabel || 'Acting', kind: 'acting' };
-    } else if (convoManager.inConversation()) {
-        const who = convoManager.activeConversation?.name;
-        activity = { current: who ? `Chatting with ${who}` : 'Chatting', kind: 'chatting' };
     } else {
         activity = { current: 'Idle', kind: 'idle' };
     }
@@ -89,8 +83,7 @@ export function getFullState(agent) {
             }
         },
         nearby: {
-            humanPlayers: players,
-            botPlayers: bots,
+            players,
             entityTypes: getNearbyEntityTypes(bot).filter(t => t !== 'player' && t !== 'item'),
         },
         modes: {

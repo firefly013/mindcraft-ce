@@ -1,5 +1,4 @@
 import { readFileSync , writeFileSync, existsSync} from 'fs';
-import { executeToolCall } from '../commands/to_openai_tools.js';
 import { getPosition } from '../library/world.js';
 import { ConstructionTaskValidator, Blueprint } from './construction_tasks.js';
 import { CookingTaskInitiator } from './cooking_tasks.js';
@@ -257,10 +256,8 @@ export class Task {
             if (this.task_type === 'construction' && this.data.blueprint) {
                 this.blueprint = new Blueprint(this.data.blueprint);
                 this.goal = this.data.goal + ' \n' + this.blueprint.explain() + " \n" + "make sure to place the lower levels of the blueprint first";
-                this.conversation = this.data.conversation + ' \n' + this.blueprint.explain();
             } else {
                 this.goal = this.data.goal;
-                this.conversation = this.data.conversation;
             }
             this.taskTimeout = this.data.timeout || 300;
             // Set validator based on task_type
@@ -282,19 +279,12 @@ export class Task {
                 this.blocked_actions = [];
             }
             this.restrict_to_inventory = !!this.data.restrict_to_inventory;
-            if (this.conversation)
-                this.blocked_actions.push('!endConversation');
         }
         else {
             console.log('No task.');
         }
 
         this.name = this.agent.name;
-        this.available_agents = []
-    }
-
-    updateAvailableAgents(agents) {
-        this.available_agents = agents
     }
 
     // Add this method if you want to manually reset the hells_kitchen progress
@@ -313,30 +303,11 @@ export class Task {
         let add_string = '';
 
         if (this.task_type === 'cooking') {
-
-
-            if (this.data.agent_count > 2) {
-
-                if (this.name.toLowerCase().startsWith('andy')) {
-                    add_string = '\nIn the end, all the food items should be given to you by other bots. Make sure to talk to all the agents using startConversation tool to coordinate the task instead of talking to just one agent. You can even end current conversation with any agent using endConversation tool and then talk to a new agent using startConversation tool.';
-                } 
-                else {
-                    add_string = '\nIn the end, all the food items should be given to one single bot whose name starts with andy or Andy. Make sure to talk to all the agents using startConversation tool to coordinate the task instead of talking to just one agent. You can even end current conversation with any agent using endConversation tool and then talk to a new agent using startConversation tool.';
-                }   
-            } 
-            else {
-                if (this.data.task_id && this.data.task_id.endsWith('hells_kitchen')) {
-                    add_string = '';
-                } 
-                else {
-                add_string = '\nIn the end, all the food items should be given to one single bot.';
-                }
+            if (this.data.task_id && this.data.task_id.endsWith('hells_kitchen')) {
+                add_string = '';
             }
-        }
-
-        if (this.task_type === 'techtree') {
-            if (this.data.agent_count > 2) {
-                add_string = '\nMake sure to share resources among all agents and to talk to all the agents using startConversation tool to coordinate the task instead of talking to just one agent. You can even end current conversation with any agent using endConversation tool and then talk to a new agent using startConversation tool.'
+            else {
+                add_string = '\nIn the end, all the food items should be given to one single bot.';
             }
         }
 
@@ -359,21 +330,10 @@ export class Task {
         if (this.validator)
             res = this.validator.validate();
         if (res && res.valid) {
-            // Find all the agents and clear their inventories
-            for (let agent of this.available_agents) {
-                this.agent.bot.chat(`/clear ${agent}`);
-            }
-            // this.agent.bot.chat(`/clear @a`);
             return {"message": 'Task successful', "score": res.score};
         }
-        let other_names = this.available_agents.filter(n => n !== this.name);
         const elapsedTime = (Date.now() - this.taskStartTime) / 1000;
 
-        if (elapsedTime >= 30 && this.available_agents.length !== this.data.agent_count) {
-            console.log('No other agents found. Task unsuccessful.');
-            return {"message": 'No other agents found', "score": 0};
-        }
-        
         if (this.taskTimeout) {
             if (elapsedTime >= this.taskTimeout) {
                 console.log('Task timeout reached. Task unsuccessful.');
@@ -391,11 +351,8 @@ export class Task {
     async setAgentGoal() {
         const agentGoal = this.getAgentGoal();
         if (!agentGoal) return;
-        let msg = MESSAGES.taskGoal(agentGoal);
-        if (this.data.agent_count + this.data.human_count > 1) {
-            msg += MESSAGES.taskCollab(this.available_agents.filter(n => n !== this.name).join(', '));
-            console.log(`Setting goal for agent ${this.agent.count_id}: ${agentGoal}`);
-        }
+        const msg = MESSAGES.taskGoal(agentGoal);
+        console.log(`Setting goal for agent ${this.agent.count_id}: ${agentGoal}`);
         // 无 goal 模式：目标作为系统消息进入 ReAct 循环，做到 Finish 为止
         await this.agent.handleMessage('system', msg);
     }
@@ -477,59 +434,32 @@ export class Task {
 
         await this.teleportBots();
 
-        if (this.data.agent_count && this.data.agent_count > 1) {
-            // TODO wait for other bots to join
-            await new Promise((resolve) => setTimeout(resolve, 10000));
-            if (this.available_agents.length < this.data.agent_count) {
-                console.log(`Missing ${this.data.agent_count - this.available_agents.length} bot(s).`);
-                this.agent.killAll();
-            }
-        }
         await new Promise((resolve) => setTimeout(resolve, 500));
-        if (this.data.conversation && this.agent.count_id === 0) {
-            let other_name = this.available_agents.filter(n => n !== this.name)[0];
-            let waitCount = 0;
-            while (other_name === undefined && waitCount < 20) {
-                other_name = this.available_agents.filter(n => n !== this.name)[0];
-                await new Promise((resolve) => setTimeout(resolve, 1000));
-                waitCount++;
-            }
-            if (other_name === undefined && this.data.agent_count > 1) {
-                console.log('No other agents found. Task unsuccessful.');
-                this.agent.killAll();
-            }
-            await executeToolCall(this.agent, 'startConversation', { player_name: other_name, message: this.data.conversation });
-        }
         await this.setAgentGoal();
     }
-    
+
     async teleportBots() {
-        console.log('\n\nTeleporting bots');
+        console.log('\n\nTeleporting bot');
         function getRandomOffset(range) {
             return Math.floor(Math.random() * (range * 2 + 1)) - range;
         }
 
-        let human_player_name = null;
-        let bot = this.agent.bot;
+        const bot = this.agent.bot;
 
         // Finding if there is a human player on the server
+        let human_player_name = null;
         for (const playerName in bot.players) {
+            if (playerName === this.name) continue;
             const player = bot.players[playerName];
-            if (!this.available_agents.some((n) => n === playerName)) {
-                console.log('Found human player:', player.username);
-                human_player_name = player.username
-                break;
-            }
+            console.log('Found human player:', player.username);
+            human_player_name = player.username
+            break;
         }
 
-        // go the human if there is one and not required for the task
-        if (human_player_name && this.data.human_count === 0) {
+        // go to the human if there is one
+        if (human_player_name) {
             console.log(`Teleporting ${this.name} to human ${human_player_name}`)
             bot.chat(`/tp ${this.name} ${human_player_name}`)
-        }
-        else {
-            console.log(`Teleporting ${this.name} to ${this.available_agents[0]}`)
-            bot.chat(`/tp ${this.name} ${this.available_agents[0]}`);
         }
 
         await new Promise((resolve) => setTimeout(resolve, 200));
@@ -550,15 +480,6 @@ export class Task {
             const zOffset = getRandomOffset(5);
             bot.chat(`/tp ${this.name} ${Math.floor(pos.x + xOffset)} ${pos.y + 3} ${Math.floor(pos.z + zOffset)}`);
             await new Promise((resolve) => setTimeout(resolve, 200));
-        }
-
-        if (this.data.agent_count && this.data.agent_count > 1) {
-            // TODO wait for other bots to join
-            await new Promise((resolve) => setTimeout(resolve, 10000));
-            if (this.available_agents.length < this.data.agent_count) {
-                console.log(`Missing ${this.data.agent_count - this.available_agents.length} bot(s).`);
-                this.agent.killAll();
-            }
         }
 
         if (this.data.type === 'construction'){

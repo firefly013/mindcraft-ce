@@ -1,6 +1,5 @@
 import * as skills from '../library/skills.js';
 import settings from '../settings.js';
-import convoManager from '../conversation.js';
 import { td, tp, MESSAGES } from '../../prompts.js';
 
 
@@ -377,36 +376,6 @@ export const actionsList = [
         perform: runAsAction(async (agent, id, index, count) => {
             await skills.tradeWithVillager(agent.bot, id, index, count);
         })
-    },
-    {
-        name: '!startConversation',
-        description: td('startConversation'),
-        params: {
-            'player_name': { type: 'string', description: tp('startConversation', 'player_name') },
-            'message': { type: 'string', description: tp('startConversation', 'message') },
-        },
-        perform: async function (agent, player_name, message) {
-            if (!convoManager.isOtherAgent(player_name))
-                return player_name + ' is not a bot, cannot start conversation.';
-            if (convoManager.inConversation() && !convoManager.inConversation(player_name)) 
-                convoManager.forceEndCurrentConversation();
-            else if (convoManager.inConversation(player_name))
-                agent.history.add('system', MESSAGES.alreadyInConversation(player_name));
-            convoManager.startConversation(player_name, message);
-        }
-    },
-    {
-        name: '!endConversation',
-        description: td('endConversation'),
-        params: {
-            'player_name': { type: 'string', description: tp('endConversation', 'player_name') }
-        },
-        perform: async function (agent, player_name) {
-            if (!convoManager.inConversation(player_name))
-                return `Not in conversation with ${player_name}.`;
-            convoManager.endConversation(player_name);
-            return `Converstaion with ${player_name} ended.`;
-        }
     },
     {
         name: '!lookAtPlayer',

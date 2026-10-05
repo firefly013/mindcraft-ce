@@ -84,8 +84,7 @@ export class History {
             const data = {
                 memory: this.memory,
                 turns: this.turns,
-                taskStart: this.agent.task.taskStartTime,
-                last_sender: this.agent.last_sender
+                taskStart: this.agent.task.taskStartTime
             };
             writeFileSync(this.memory_fp, JSON.stringify(data, null, 2));
             console.log('Saved memory to:', this.memory_fp);

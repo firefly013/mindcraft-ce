@@ -8,7 +8,6 @@ import { executeToolCall } from './commands/to_openai_tools.js';
 import { ActionManager } from './action_manager.js';
 import { NPCContoller } from './npc/controller.js';
 import { MemoryBank } from './memory_bank.js';
-import convoManager from './conversation.js';
 import { addBrowserViewer } from './vision/browser_viewer.js';
 import { serverProxy, sendOutputToServer } from './mindserver_proxy.js';
 import settings from './settings.js';
@@ -19,7 +18,6 @@ import { log, validateNameFormat, handleDisconnection } from './connection_handl
 
 export class Agent {
     async start(load_mem=false, init_message=null, count_id=0) {
-        this.last_sender = null;
         this.count_id = count_id;
         this._disconnectHandled = false;
 
@@ -42,7 +40,6 @@ export class Agent {
         this.coder = new Coder(this);
         this.npc = new NPCContoller(this);
         this.memory_bank = new MemoryBank();
-        convoManager.initAgent(this);
 
         // load mem first before doing task
         let save_data = null;
@@ -132,7 +129,6 @@ export class Agent {
                 }
 
                 await new Promise((resolve) => setTimeout(resolve, 10000));
-                this.checkAllPlayersPresent();
 
             } catch (error) {
                 console.error('Error in spawn event:', error);
@@ -162,13 +158,8 @@ export class Agent {
 
                 console.log(this.name, 'received message from', username, ':', message);
 
-                if (convoManager.isOtherAgent(username)) {
-                    console.warn('received whisper from other bot??')
-                }
-                else {
-                    // 全中文：不再做英文翻译，直接处理原文
-                    this.handleMessage(username, message);
-                }
+                // 全中文：不再做英文翻译，直接处理原文
+                this.handleMessage(username, message);
             } catch (error) {
                 console.error('Error handling message:', error);
             }
@@ -179,8 +170,6 @@ export class Agent {
         this.bot.on('whisper', respondFunc);
         
         this.bot.on('chat', (username, message) => {
-            if (serverProxy.getNumOtherAgents() > 0) return;
-            // only respond to open chat messages when there are no other agents
             respondFunc(username, message);
         });
 
@@ -207,33 +196,11 @@ export class Agent {
         if (init_message) {
             this.history.add('system', init_message);
         }
-        if (save_data?.last_sender) {
-            this.last_sender = save_data.last_sender;
-            if (convoManager.otherAgentInGame(this.last_sender)) {
-                const msg_package = {
-                    message: MESSAGES.convoRestart,
-                    start: true
-                };
-                convoManager.receiveFromBot(this.last_sender, msg_package);
-            }
-        }
-        else if (init_message) {
+        if (init_message && !save_data) {
             await this.handleMessage('system', init_message);
         }
-        else {
+        else if (!init_message && !save_data) {
             this.openChat(MESSAGES.hello(this.name));
-        }
-    }
-
-    checkAllPlayersPresent() {
-        if (!this.task || !this.task.agent_names) {
-          return;
-        }
-
-        const missingPlayers = this.task.agent_names.filter(name => !this.bot.players[name]);
-        if (missingPlayers.length > 0) {
-            console.log(`Missing players/bots: ${missingPlayers.join(', ')}`);
-            this.cleanKill('Not all required players/bots are present in the world. Exiting.', 4);
         }
     }
 
@@ -252,7 +219,6 @@ export class Agent {
 
     shutUp() {
         this.shut_up = true;
-        convoManager.endAllConversations();
     }
 
     async handleMessage(source, message) {
@@ -264,15 +230,10 @@ export class Agent {
 
         // ReAct 无限循环直到 Finish：无上限，循环只由 Finish / 无响应 / 中断结束
 
-        const from_other_bot = convoManager.isOtherAgent(source);
-
-        if (from_other_bot)
-            this.last_sender = source;
-
         // 全中文：不再做翻译，直接使用原文
         console.log('received message from', source, ':', message);
 
-        const checkInterrupt = () => this.shut_up || convoManager.responseScheduledFor(source);
+        const checkInterrupt = () => this.shut_up;
 
         let behavior_log = this.bot.modes.flushBehaviorLog().trim();
         if (behavior_log.length > 0) {
@@ -337,22 +298,7 @@ export class Agent {
 
     async routeResponse(to_player, message) {
         if (this.shut_up) return;
-        const is_self = to_player === 'system' || to_player === this.name;
-        if (is_self && this.last_sender) {
-            // this is for when the agent is prompted by system while still in conversation
-            // so it can respond to events like death but be routed back to the last sender
-            to_player = this.last_sender;
-        }
-
-        if (convoManager.isOtherAgent(to_player) && convoManager.inConversation(to_player)) {
-            // if we're in an ongoing conversation with the other bot, send the response to it
-            convoManager.sendToBot(to_player, message);
-        }
-        else {
-            // otherwise, use open chat
-            this.openChat(message);
-            // note that to_player could be another bot, but if we get here the conversation has ended
-        }
+        this.openChat(message);
     }
 
     async openChat(message) {

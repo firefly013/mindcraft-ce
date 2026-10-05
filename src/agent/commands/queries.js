@@ -1,6 +1,5 @@
 import * as world from '../library/world.js';
 import * as mc from '../../utils/mcdata.js';
-import convoManager from '../conversation.js';
 import { checkLevelBlueprint, checkBlueprint } from '../tasks/construction_tasks.js';
 import { load } from 'cheerio';
 import { td, tp } from '../../prompts.js';
@@ -52,12 +51,9 @@ export const queryList = [
             res += `\- Current Action: ${action}`;
 
 
-            let players = world.getNearbyPlayerNames(bot);
-            let bots = convoManager.getInGameAgents().filter(b => b !== agent.name);
-            players = players.filter(p => !bots.includes(p));
+            const players = world.getNearbyPlayerNames(bot);
 
-            res += '\n- Nearby Human Players: ' + (players.length > 0 ? players.join(', ') : 'None.');
-            res += '\n- Nearby Bot Players: ' + (bots.length > 0 ? bots.join(', ') : 'None.');
+            res += '\n- Nearby Players: ' + (players.length > 0 ? players.join(', ') : 'None.');
 
             res += '\n' + agent.bot.modes.getMiniDocs() + '\n';
             return pad(res);
@@ -150,15 +146,10 @@ export const queryList = [
         perform: function (agent) {
             let bot = agent.bot;
             let res = 'NEARBY_ENTITIES';
-            let players = world.getNearbyPlayerNames(bot);
-            let bots = convoManager.getInGameAgents().filter(b => b !== agent.name);
-            players = players.filter(p => !bots.includes(p));
+            const players = world.getNearbyPlayerNames(bot);
 
             for (const player of players) {
-                res += `\n- Human player: ${player}`;
-            }
-            for (const bot of bots) {
-                res += `\n- Bot player: ${bot}`;
+                res += `\n- player: ${player}`;
             }
 
             let nearbyEntities = world.getNearbyEntities(bot);

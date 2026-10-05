@@ -211,16 +211,6 @@ export class Prompter {
         return resp;
     }
 
-    async promptShouldRespondToBot(new_message) {
-        await this.checkCooldown();
-        let prompt = this.prompts.bot_responder;
-        let messages = this.agent.history.getHistory();
-        messages.push({role: 'user', content: new_message});
-        prompt = await this.replaceStrings(prompt, null, messages);
-        let res = await this.chat_model.sendRequest([], prompt);
-        return res.trim().toLowerCase() === 'respond';
-    }
-
     async promptVision(messages, imageBuffer) {
         await this.checkCooldown();
         let prompt = this.prompts.image_analysis;

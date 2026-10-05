@@ -1,5 +1,4 @@
 import { io } from 'socket.io-client';
-import convoManager from './conversation.js';
 import { setSettings } from './settings.js';
 import { getFullState } from './library/full_state.js';
 
@@ -14,7 +13,6 @@ class MindServerProxy {
         
         this.socket = null;
         this.connected = false;
-        this.agents = [];
         MindServerProxy.instance = this;
     }
 
@@ -40,19 +38,6 @@ class MindServerProxy {
             this.connected = false;
             if (this.agent) {
                 this.agent.cleanKill('Disconnected from MindServer. Killing agent process.');
-            }
-        });
-
-        this.socket.on('chat-message', (agentName, json) => {
-            convoManager.receiveFromBot(agentName, json);
-        });
-
-        this.socket.on('agents-status', (agents) => {
-            this.agents = agents;
-            convoManager.updateAgents(agents);
-            if (this.agent?.task) {
-                console.log(this.agent.name, 'updating available agents');
-                this.agent.task.updateAvailableAgents(agents);
             }
         });
 
@@ -101,14 +86,6 @@ class MindServerProxy {
         this.agent = agent;
     }
 
-    getAgents() {
-        return this.agents;
-    }
-
-    getNumOtherAgents() {
-        return this.agents.length - 1;
-    }
-
     login() {
         this.socket.emit('login-agent', this.agent.name);
     }
@@ -124,11 +101,6 @@ class MindServerProxy {
 
 // Create and export a singleton instance
 export const serverProxy = new MindServerProxy();
-
-// for chatting with other bots
-export function sendBotChatToServer(agentName, json) {
-    serverProxy.getSocket().emit('chat-message', agentName, json);
-}
 
 // for sending general output to server for display
 export function sendOutputToServer(agentName, message) {

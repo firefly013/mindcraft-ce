@@ -81,11 +81,6 @@
         "description": "Whether to show bot's chat messages in game chat",
         "default": true
     },
-    "chat_bot_messages": {
-        "type": "boolean",
-        "description": "Whether to publicly chat messages to and from other bots",
-        "default": true
-    },
     "render_bot_view": {
         "type": "boolean",
         "description": "Whether to render bot view for user observation. Does not give bot vision.",

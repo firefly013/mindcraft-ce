@@ -2,7 +2,6 @@ import * as skills from './library/skills.js';
 import * as world from './library/world.js';
 import * as mc from '../utils/mcdata.js';
 import settings from './settings.js'
-import convoManager from './conversation.js';
 import { MESSAGES, MODE_TEXT } from '../prompts.js';
 
 async function say(agent, message) {
@@ -173,9 +172,8 @@ async function execute(mode, agent, func, timeout=-1) {
 
     if (should_reprompt) {
         // auto prompt to respond to the interruption
-        let role = convoManager.inConversation() ? agent.last_sender : 'system';
-        let logs = agent.bot.modes.flushBehaviorLog();
-        agent.handleMessage(role, MESSAGES.modeInterrupted(interrupted_action, mode.name, logs));
+        const logs = agent.bot.modes.flushBehaviorLog();
+        agent.handleMessage('system', MESSAGES.modeInterrupted(interrupted_action, mode.name, logs));
     }
 }
 

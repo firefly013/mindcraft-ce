@@ -22,7 +22,7 @@ const settings = {
         // "./profiles/mercury.json",
         // "./profiles/andy-4.2.json",
 
-        // using more than 1 profile requires you to /msg each bot indivually
+        // each profile spawns one standalone bot; bots do not talk to each other
         // individual profiles override values from the base profile
     ],
 
@@ -47,7 +47,6 @@ const settings = {
 
     "max_messages": 15, // max number of messages to keep in context
     "narrate_behavior": true, // chat simple automatic actions ('Picking up item!')
-    "chat_bot_messages": true, // publicly chat messages to other bots
 
     "spawn_timeout": 30, // num seconds allowed for the bot to spawn before throwing error. Increase when spawning takes a while.
     "block_place_delay": 0, // delay between placing blocks (ms) if using newAction. helps avoid bot being kicked by anti-cheat mechanisms on servers.
