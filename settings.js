@@ -46,7 +46,6 @@ const settings = {
     "code_timeout_mins": -1, // minutes code is allowed to run. -1 for no timeout
 
     "max_messages": 15, // max number of messages to keep in context
-    "max_rounds": -1, // ReAct 安全上限：连续工具调用轮数，-1 不限（正常由 Finish 结束）
     "narrate_behavior": true, // chat simple automatic actions ('Picking up item!')
     "chat_bot_messages": true, // publicly chat messages to other bots
 

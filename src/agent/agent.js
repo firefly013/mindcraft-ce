@@ -217,7 +217,7 @@ export class Agent {
             }
         }
         else if (init_message) {
-            await this.handleMessage('system', init_message, 2);
+            await this.handleMessage('system', init_message);
         }
         else {
             this.openChat("Hello world! I am "+this.name);
@@ -254,20 +254,14 @@ export class Agent {
         convoManager.endAllConversations();
     }
 
-    async handleMessage(source, message, max_rounds=null) {
+    async handleMessage(source, message) {
         await this.checkTaskDone();
         if (!source || !message) {
             console.warn('Received empty message from', source);
             return false;
         }
 
-        // ReAct 无限循环直到 Finish：安全上限仅防 API 失控，正常由 Finish 结束
-        if (max_rounds === null) {
-            max_rounds = settings.max_rounds === -1 ? Infinity : settings.max_rounds;
-        }
-        if (max_rounds === -1) {
-            max_rounds = Infinity;
-        }
+        // ReAct 无限循环直到 Finish：无上限，循环只由 Finish / 无响应 / 中断结束
 
         const from_other_bot = convoManager.isOtherAgent(source);
 
@@ -299,14 +293,8 @@ export class Agent {
             this.routeResponse(source, '我的模型不支持原生工具调用，换个 OpenAI 兼容模型再试。');
             return false;
         }
-        let rounds = 0;
         for (;;) {
             if (checkInterrupt()) break;
-            if (rounds >= max_rounds) {
-                console.warn(`ReAct safety cap reached (${max_rounds} rounds), stopping.`);
-                break;
-            }
-            rounds++;
             const history = this.history.getHistory();
 
             // 原生工具调用：模型直接返回 tool_calls，Finish 结束循环
