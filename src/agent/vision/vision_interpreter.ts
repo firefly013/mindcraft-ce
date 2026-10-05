@@ -7,6 +7,8 @@ export class VisionInterpreter {
     allow_vision: boolean;
     fp: string;
     camera: Camera | undefined;
+    /** 最近一次拍摄，供 Live State 快照引用（文件名+拍摄时间）。 */
+    lastScreenshot: { file: string; takenAt: number } | null = null;
 
     constructor(agent: any, allow_vision: boolean) {
         this.agent = agent;
@@ -37,10 +39,12 @@ export class VisionInterpreter {
             await bot.look(player.yaw, player.pitch);
             result = `Looking in the same direction as ${player_name}\n`;
             filename = await camera.capture();
+            this.lastScreenshot = { file: filename, takenAt: Date.now() };
         } else {
             await bot.lookAt(new Vec3(player.position.x, player.position.y + player.height, player.position.z));
             result = `Looking at player ${player_name}\n`;
             filename = await camera.capture();
+            this.lastScreenshot = { file: filename, takenAt: Date.now() };
 
         }
 
@@ -60,6 +64,7 @@ export class VisionInterpreter {
             return "Vision is disabled. Use other methods to describe the environment.";
         }
         const filename = await camera.capture();
+        this.lastScreenshot = { file: filename, takenAt: Date.now() };
 
         return result + `Image analysis: "${await this.analyzeImage(filename)}"`;
     }
