@@ -82,6 +82,14 @@ export function getOpenAITools(agent: any): OpenAITool[] {
     tools.push({
         type: 'function',
         function: {
+            name: 'Stop',
+            description: td('Stop'),
+            parameters: { type: 'object', properties: {}, required: [], additionalProperties: false },
+        },
+    });
+    tools.push({
+        type: 'function',
+        function: {
             name: 'Say',
             description: td('Say'),
             parameters: {
@@ -260,6 +268,10 @@ export function getToolDocs(agent: any): string {
                 docs += `  ${param}: ${command.params[param]?.description || ''}\n`;
             }
         }
+    }
+    // 控制类工具不在 commandList 里，单独列出（与 getOpenAITools 追加的一致）。
+    for (const name of ['Finish', 'Stop', 'Say', 'UpdatePlan']) {
+        docs += `${name}: ${td(name)}\n`;
     }
     return docs;
 }

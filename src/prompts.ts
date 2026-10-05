@@ -232,6 +232,10 @@ export const TOOL_TEXT: Record<string, { description: string; params: Record<str
     description: '当前工作完成时调用，结束本轮推理循环。正在执行的动作不受影响。',
     params: {},
   },
+  Stop: {
+    description: '立刻停下身体动作（中断当前执行）。动作卡住或要换方向时用这个；不占通道，忙时也能调。',
+    params: {},
+  },
   Say: {
     description: '在游戏公聊里说一句话，玩家能直接看到。想让玩家听见什么就调它；模型正文不会自动发出，说话必须走这个工具。超长会被截断，空话会被拒绝。',
     params: { text: '要说的话。' },

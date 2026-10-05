@@ -3,7 +3,7 @@
  * Stop/Finish 是控制信号，不占通道。
  */
 import { describe, expect, it } from 'vitest';
-import { isActionTool, stripBang, toolExists, validateToolCall, validateUpdatePlan, formatSay, getOpenAITools } from '../src/agent/commands/to_openai_tools.js';
+import { isActionTool, stripBang, toolExists, validateToolCall, validateUpdatePlan, formatSay, getOpenAITools, getToolDocs } from '../src/agent/commands/to_openai_tools.js';
 
 describe('isActionTool', () => {
   it('action tools claim the body channel', () => {
@@ -95,6 +95,8 @@ describe('Say isolation', () => {
     const names = tools.map((t) => t.function.name);
     expect(names).toContain('Say');
     expect(names).toContain('Finish');
+    expect(names).toContain('Stop');
+    expect(names).toContain('UpdatePlan');
   });
 
   it('UpdatePlan is a control tool with whole-replace shape', () => {
@@ -108,5 +110,9 @@ describe('Say isolation', () => {
     expect(validateUpdatePlan({ nope: 1 }).ok).toBe(false);
     const tools = getOpenAITools({ blocked_actions: [] });
     expect(tools.map((t) => t.function.name)).toContain('UpdatePlan');
+    const docs = getToolDocs({ blocked_actions: [] });
+    for (const name of ['Finish', 'Stop', 'Say', 'UpdatePlan']) {
+      expect(docs).toContain(`${name}:`);
+    }
   });
 });
