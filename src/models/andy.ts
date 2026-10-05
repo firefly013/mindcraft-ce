@@ -104,12 +104,17 @@ export class Andy implements AIModel {
     systemMessage: string,
     tools: OpenAITool[],
     tool_choice = 'auto',
+    liveTail = '',
   ): Promise<ToolResponse> {
     const model = this.model_name || 'auto';
     const messages: ChatMessage[] = [
       { role: 'system', content: systemMessage },
       ...strictFormat(turns),
     ];
+    // Live 快照放最后单独发：常变部分永不前移，前缀缓存才保得住。
+    if (liveTail.trim() !== '') {
+      messages.push({ role: 'user', content: `## 当前世界快照\n${liveTail}` });
+    }
     console.log(`Awaiting Andy tool response... (model: ${model})`);
     const data = await this.send(this.chat_endpoint, {
       model,

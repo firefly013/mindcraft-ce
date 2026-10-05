@@ -173,10 +173,9 @@ export class Prompter {
 
     let prompt = this.prompts.conversing;
     prompt = await this.replaceStrings(prompt, messages);
-    if (extraTail.trim() !== '') prompt += `\n\n## 当前世界快照\n${extraTail}`;
     const tools: OpenAITool[] = getOpenAITools(this.agent);
     try {
-      const res = await this.chat_model.sendRequestWithTools(messages, prompt, tools, 'auto');
+      const res = await this.chat_model.sendRequestWithTools(messages, prompt, tools, 'auto', extraTail);
       console.log('Generated tool response:', JSON.stringify(res.tool_calls?.map((t) => t.name)));
       await this._saveLog(prompt, messages, JSON.stringify(res), 'conversation-tools');
       let text = res.text ?? '';

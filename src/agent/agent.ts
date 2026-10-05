@@ -349,7 +349,7 @@ export class Agent {
         return { status: 'completed', data };
     }
 
-    /** 每轮现采 Live State，渲成追加在正文末尾的文本块，同时记一笔请求日志。 */
+    /** 每轮现采 Live State（原文给模型层，由它追加在消息列最后）。 */
     private assembleContext(): { text: string; tools: unknown } {
         const task = this.task as { goal?: unknown } | null;
         const live = sampleLiveState({
@@ -359,12 +359,13 @@ export class Agent {
             todos: [],
             currentAction: this.actions.currentActionLabel,
         });
+        const text = renderLiveState(live);
         const tools = getOpenAITools(this);
         this.requestLog?.logRequest({
-            text: `## 当前世界快照\n${renderLiveState(live)}`,
+            text,
             tools: tools.map((t) => t.function.name),
         });
-        return { text: `## 当前世界快照\n${renderLiveState(live)}`, tools };
+        return { text, tools };
     }
 
     private async modelCall(liveText: string, tools: unknown): Promise<LoopModelResponse> {

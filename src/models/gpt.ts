@@ -107,19 +107,23 @@ export class GPT implements AIModel {
   }
 
   /**
-   * OpenAI 原生工具调用：把 !Command 转换后的 tools 直接透传给 chat.completions。
+   * OpenAI 原生工具调用：把命令转换后的 tools 直接透传给 chat.completions。
+   * liveTail（现采 Live State）放消息列最后单独发，不进 system。
    * 返回 { text, tool_calls: [{ id, name, args }] }，调用方用 executeToolCall 执行。
-   * legacy 文本 !Command 仍保留为 fallback，本方法只新增不替换。
    */
   async sendRequestWithTools(
     turns: ChatMessage[],
     systemMessage: string,
     tools: OpenAITool[],
     tool_choice = 'auto',
+    liveTail = '',
   ): Promise<ToolResponse> {
     const messages = [{ role: 'system', content: systemMessage } as ChatMessage].concat(
       strictFormat(turns),
     );
+    if (liveTail.trim() !== '') {
+      messages.push({ role: 'user', content: `## 当前世界快照\n${liveTail}` });
+    }
     const model = this.model_name || 'gpt-5.4-mini';
     try {
       console.log('Awaiting openai tool response from model', model);

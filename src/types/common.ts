@@ -49,6 +49,11 @@ export interface AIModel {
     systemMessage: string,
     tools: OpenAITool[],
     toolChoice?: string,
+    /**
+     * 现采 Live State 原文。实现层必须把它放在消息列最后面单独发，
+     * 不能并进 system——常变部分不能前移破坏前缀缓存。
+     */
+    liveTail?: string,
   ): Promise<ToolResponse>;
 }
 
