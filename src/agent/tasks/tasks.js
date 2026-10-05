@@ -281,8 +281,6 @@ export class Task {
                 this.blocked_actions = [];
             }
             this.restrict_to_inventory = !!this.data.restrict_to_inventory;
-            if (this.data.goal)
-                this.blocked_actions.push('!endGoal');
             if (this.conversation)
                 this.blocked_actions.push('!endConversation');
         }
@@ -319,10 +317,10 @@ export class Task {
             if (this.data.agent_count > 2) {
 
                 if (this.name.toLowerCase().startsWith('andy')) {
-                    add_string = '\nIn the end, all the food items should be given to you by other bots. Make sure to talk to all the agents using startConversation command to coordinate the task instead of talking to just one agent. You can even end current conversation with any agent using endConversation command and then talk to a new agent using startConversation command.';
+                    add_string = '\nIn the end, all the food items should be given to you by other bots. Make sure to talk to all the agents using startConversation tool to coordinate the task instead of talking to just one agent. You can even end current conversation with any agent using endConversation tool and then talk to a new agent using startConversation tool.';
                 } 
                 else {
-                    add_string = '\nIn the end, all the food items should be given to one single bot whose name starts with andy or Andy. Make sure to talk to all the agents using startConversation command to coordinate the task instead of talking to just one agent. You can even end current conversation with any agent using endConversation command and then talk to a new agent using startConversation command.';
+                    add_string = '\nIn the end, all the food items should be given to one single bot whose name starts with andy or Andy. Make sure to talk to all the agents using startConversation tool to coordinate the task instead of talking to just one agent. You can even end current conversation with any agent using endConversation tool and then talk to a new agent using startConversation tool.';
                 }   
             } 
             else {
@@ -337,7 +335,7 @@ export class Task {
 
         if (this.task_type === 'techtree') {
             if (this.data.agent_count > 2) {
-                add_string = '\nMake sure to share resources among all agents and to talk to all the agents using startConversation command to coordinate the task instead of talking to just one agent. You can even end current conversation with any agent using endConversation command and then talk to a new agent using startConversation command.'
+                add_string = '\nMake sure to share resources among all agents and to talk to all the agents using startConversation tool to coordinate the task instead of talking to just one agent. You can even end current conversation with any agent using endConversation tool and then talk to a new agent using startConversation tool.'
             }
         }
 
@@ -390,12 +388,15 @@ export class Task {
     }
 
     async setAgentGoal() {
-        let agentGoal = this.getAgentGoal();
-        if (agentGoal && this.data.agent_count + this.data.human_count > 1) {
-            agentGoal += "You have to collaborate with other agents/bots, namely " + this.available_agents.filter(n => n !== this.name).join(', ') + " to complete the task as soon as possible by dividing the work among yourselves.";
+        const agentGoal = this.getAgentGoal();
+        if (!agentGoal) return;
+        let msg = `你的任务目标：${agentGoal}`;
+        if (this.data.agent_count + this.data.human_count > 1) {
+            msg += "You have to collaborate with other agents/bots, namely " + this.available_agents.filter(n => n !== this.name).join(', ') + " to complete the task as soon as possible by dividing the work among yourselves.";
             console.log(`Setting goal for agent ${this.agent.count_id}: ${agentGoal}`);
         }
-        await executeToolCall(this.agent, 'goal', { selfPrompt: agentGoal });
+        // 无 goal 模式：目标作为系统消息进入 ReAct 循环，做到 Finish 为止
+        await this.agent.handleMessage('system', msg);
     }
 
     async initBotTask() {

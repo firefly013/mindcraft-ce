@@ -157,8 +157,6 @@ const modes_list = [
 ];
 
 async function execute(mode, agent, func, timeout=-1) {
-    if (agent.self_prompter.isActive())
-        agent.self_prompter.stopLoop();
     let interrupted_action = agent.actions.currentActionLabel;
     mode.active = true;
     let code_return = await agent.actions.runAction(`mode:${mode.name}`, async () => {
@@ -167,10 +165,9 @@ async function execute(mode, agent, func, timeout=-1) {
     mode.active = false;
     console.log(`Mode ${mode.name} finished executing, code_return: ${code_return.message}`);
 
-    let should_reprompt = 
+    let should_reprompt =
         interrupted_action && // it interrupted a previous action
         !agent.actions.resume_func && // there is no resume function
-        !agent.self_prompter.isActive() && // self prompting is not on
         !code_return.interrupted; // this mode action was not interrupted by something else
 
     if (should_reprompt) {

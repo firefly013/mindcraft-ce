@@ -66,9 +66,9 @@
         "description": "Maximum number of recent messages to keep in context for LLM",
         "default": 15
     },
-    "max_commands": {
+    "max_rounds": {
         "type": "number",
-        "description": "Maximum number of consecutive tool-calling rounds. -1 for no limit",
+        "description": "ReAct safety cap: consecutive tool-calling rounds. -1 for no limit (normally ends at Finish)",
         "default": -1
     },
     "narrate_behavior": {

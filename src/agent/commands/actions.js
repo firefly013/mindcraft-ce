@@ -58,15 +58,12 @@ export const actionsList = [
             agent.clearBotLogs();
             agent.actions.cancelResume();
             agent.bot.emit('idle');
-            let msg = 'Agent stopped.';
-            if (agent.self_prompter.isActive())
-                msg += ' Self-prompting still active.';
-            return msg;
+            return 'Agent stopped.';
         }
     },
     {
         name: '!stfu',
-        description: 'Stop all chatting and self prompting, but continue current action.',
+        description: 'Stop all chatting, but continue current action.',
         perform: async function (agent) {
             agent.openChat('Shutting up.');
             agent.shutUp();
@@ -358,29 +355,6 @@ export const actionsList = [
             return `Mode ${mode_name} is already ${on ? 'on' : 'off'}.`;
             modes.setOn(mode_name, on);
             return `Mode ${mode_name} is now ${on ? 'on' : 'off'}.`;
-        }
-    },
-    {
-        name: '!goal',
-        description: 'Set a goal prompt to endlessly work towards with continuous self-prompting.',
-        params: {
-            'selfPrompt': { type: 'string', description: 'The goal prompt.' },
-        },
-        perform: async function (agent, prompt) {
-            if (convoManager.inConversation()) {
-                agent.self_prompter.setPromptPaused(prompt);
-            }
-            else {
-                agent.self_prompter.start(prompt);
-            }
-        }
-    },
-    {
-        name: '!endGoal',
-        description: 'Call when you have accomplished your goal. It will stop self-prompting and the current action. ',
-        perform: async function (agent) {
-            agent.self_prompter.stop();
-            return 'Self-prompting stopped.';
         }
     },
     {

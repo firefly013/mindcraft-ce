@@ -61,13 +61,22 @@ export function commandToTool(command) {
 
 /**
  * 按 blocked_actions 过滤后，返回 OpenAI tools 数组。
- * 供 GPT/兼容模型的 chat.completions 调用。
+ * 末尾追加 Finish 控制工具：当前工作完成时调用它结束本轮推理。
  */
 export function getOpenAITools(agent) {
     const blocked = agent?.blocked_actions || [];
-    return commandList
+    const tools = commandList
         .filter((cmd) => !blocked.includes(cmd.name))
         .map(commandToTool);
+    tools.push({
+        type: 'function',
+        function: {
+            name: 'Finish',
+            description: '当前工作完成时调用，结束本轮推理循环。正在执行的动作不受影响。',
+            parameters: { type: 'object', properties: {}, required: [], additionalProperties: false },
+        },
+    });
+    return tools;
 }
 
 /**
@@ -75,6 +84,7 @@ export function getOpenAITools(agent) {
  * args 为对象，按 command.params 的 key 顺序展开为位置参数。
  */
 export async function executeToolCall(agent, toolName, args = {}) {
+    if (toolName === 'Finish') return 'Finished.';
     const commandName = toolName.startsWith('!') ? toolName : '!' + toolName;
     const command = commandMap[commandName];
     if (!command) {

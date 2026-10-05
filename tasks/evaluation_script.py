@@ -18,21 +18,21 @@ import boto3
 BLOCKED_ACTIONS_COOKING = [
     '!activate', '!attackPlayer', '!checkBlueprint', '!checkBlueprintLevel',
     '!clearChat', '!clearFurnace', '!consume', '!craftable', '!discard',
-    '!endGoal', '!entities', '!equip', '!followPlayer', '!getBlueprint', '!getBlueprintLevel',
+    '!entities', '!equip', '!followPlayer', '!getBlueprint', '!getBlueprintLevel',
     '!goToBed', '!help', '!modes', '!moveAway', '!newAction', '!placeHere', '!putInChest',
     '!restart', '!setMode', '!stay', '!stfu', '!stop'
 ]
 BLOCKED_ACTIONS_CRAFTING = [
     '!activate', '!attack', '!attackPlayer', '!checkBlueprint', '!checkBlueprintLevel',
     '!clearChat', '!clearFurnace', '!consume', '!craftable', '!discard', '!endConversation',
-    '!endGoal', '!entities', '!followPlayer', '!getBlueprint', '!getBlueprintLevel',
+    '!entities', '!followPlayer', '!getBlueprint', '!getBlueprintLevel',
     '!goToBed', '!help', '!modes', '!newAction', '!putInChest', '!restart',
     '!searchForEntity', '!setMode', '!stay', '!stfu', '!stop', '!takeFromChest',
     '!viewChest'
 ]
 BLOCKED_ACTIONS_CONSTRUCTION = [
     '!activate', '!attackPlayer', '!clearChat', '!clearFurnace', '!collectBlocks',
-    '!consume', '!craftable', '!discard', '!endConversation', '!endGoal', '!entities',
+    '!consume', '!craftable', '!discard', '!endConversation', '!entities',
     '!equip', '!followPlayer', '!getBlueprint', '!getBlueprintLevel', '!goToBed',
     '!help', '!modes', '!moveAway', '!newAction', '!placeHere', '!putInChest',
     '!restart', '!searchForBlock', '!searchForEntity', '!setMode', '!stay', '!stfu',

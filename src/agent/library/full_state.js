@@ -48,12 +48,6 @@ export function getFullState(agent) {
     } else if (convoManager.inConversation()) {
         const who = convoManager.activeConversation?.name;
         activity = { current: who ? `Chatting with ${who}` : 'Chatting', kind: 'chatting' };
-    } else if (agent.self_prompter.isStopped()) {
-        activity = { current: 'Stopped', kind: 'stopped' };   // self-prompter OFF: won't act on its own
-    } else if (agent.self_prompter.isPaused()) {
-        activity = { current: 'Chatting', kind: 'chatting' };
-    } else if (agent.self_prompter.isActive()) {
-        activity = { current: 'Thinking', kind: 'thinking' }; // self-prompting between actions
     } else {
         activity = { current: 'Idle', kind: 'idle' };
     }

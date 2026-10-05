@@ -8,7 +8,6 @@ import { executeToolCall } from './commands/to_openai_tools.js';
 import { ActionManager } from './action_manager.js';
 import { NPCContoller } from './npc/controller.js';
 import { MemoryBank } from './memory_bank.js';
-import { SelfPrompter } from './self_prompter.js';
 import convoManager from './conversation.js';
 import { addBrowserViewer } from './vision/browser_viewer.js';
 import { serverProxy, sendOutputToServer } from './mindserver_proxy.js';
@@ -42,7 +41,6 @@ export class Agent {
         this.coder = new Coder(this);
         this.npc = new NPCContoller(this);
         this.memory_bank = new MemoryBank();
-        this.self_prompter = new SelfPrompter(this);
         convoManager.initAgent(this);
 
         // load mem first before doing task
@@ -205,11 +203,8 @@ export class Agent {
             console.warn('commonSense options failed:', err?.message ?? err);
         }
 
-        if (save_data?.self_prompt) {
-            if (init_message) {
-                this.history.add('system', init_message);
-            }
-            await this.self_prompter.handleLoad(save_data.self_prompt, save_data.self_prompting_state);
+        if (init_message) {
+            this.history.add('system', init_message);
         }
         if (save_data?.last_sender) {
             this.last_sender = save_data.last_sender;
@@ -256,28 +251,24 @@ export class Agent {
 
     shutUp() {
         this.shut_up = true;
-        if (this.self_prompter.isActive()) {
-            this.self_prompter.stop(false);
-        }
         convoManager.endAllConversations();
     }
 
-    async handleMessage(source, message, max_responses=null) {
+    async handleMessage(source, message, max_rounds=null) {
         await this.checkTaskDone();
         if (!source || !message) {
             console.warn('Received empty message from', source);
             return false;
         }
 
-        let used_command = false;
-        if (max_responses === null) {
-            max_responses = settings.max_commands === -1 ? Infinity : settings.max_commands;
+        // ReAct 无限循环直到 Finish：安全上限仅防 API 失控，正常由 Finish 结束
+        if (max_rounds === null) {
+            max_rounds = settings.max_rounds === -1 ? Infinity : settings.max_rounds;
         }
-        if (max_responses === -1) {
-            max_responses = Infinity;
+        if (max_rounds === -1) {
+            max_rounds = Infinity;
         }
 
-        const self_prompt = source === 'system' || source === this.name;
         const from_other_bot = convoManager.isOtherAgent(source);
 
         if (from_other_bot)
@@ -286,7 +277,7 @@ export class Agent {
         // 全中文：不再做翻译，直接使用原文
         console.log('received message from', source, ':', message);
 
-        const checkInterrupt = () => this.self_prompter.shouldInterrupt(self_prompt) || this.shut_up || convoManager.responseScheduledFor(source);
+        const checkInterrupt = () => this.shut_up || convoManager.responseScheduledFor(source);
 
         let behavior_log = this.bot.modes.flushBehaviorLog().trim();
         if (behavior_log.length > 0) {
@@ -302,19 +293,23 @@ export class Agent {
         await this.history.add(source, message);
         this.history.save();
 
-        if (!self_prompt && this.self_prompter.isActive()) // message is from user during self-prompting
-            max_responses = 1; // force only respond to this message, then let self-prompting take over
         if (typeof this.prompter.chat_model.sendRequestWithTools !== 'function') {
             const err = `Model ${this.prompter.chat_model.constructor?.name ?? 'unknown'} does not support native tool calling.`;
             console.error(err);
             this.routeResponse(source, '我的模型不支持原生工具调用，换个 OpenAI 兼容模型再试。');
             return false;
         }
-        for (let i=0; i<max_responses; i++) {
+        let rounds = 0;
+        for (;;) {
             if (checkInterrupt()) break;
-            let history = this.history.getHistory();
+            if (rounds >= max_rounds) {
+                console.warn(`ReAct safety cap reached (${max_rounds} rounds), stopping.`);
+                break;
+            }
+            rounds++;
+            const history = this.history.getHistory();
 
-            // 原生工具调用：模型直接返回 tool_calls
+            // 原生工具调用：模型直接返回 tool_calls，Finish 结束循环
             const toolRes = await this.prompter.promptConvoTools(history);
             if (!toolRes || (!toolRes.tool_calls?.length && !toolRes.text?.trim())) {
                 console.warn('no response');
@@ -329,28 +324,32 @@ export class Agent {
                 this.history.save();
                 break;
             }
+            let finished = false;
             for (const tc of toolRes.tool_calls) {
                 if (checkInterrupt()) break;
-                this.self_prompter.handleUserPromptedCmd(self_prompt, true);
+                if (tc.name === 'Finish') {
+                    finished = true;
+                    break;
+                }
                 this.routeResponse(source, `*used ${tc.name}*`);
                 const execute_res = await executeToolCall(this, tc.name, tc.args);
                 console.log('Agent executed tool:', tc.name, 'and got:', execute_res);
-                used_command = true;
                 if (execute_res)
                     this.history.add('system', execute_res);
                 else
                     break;
             }
             this.history.save();
+            if (finished || checkInterrupt()) break;
         }
 
-        return used_command;
+        return true;
     }
 
     async routeResponse(to_player, message) {
         if (this.shut_up) return;
-        let self_prompt = to_player === 'system' || to_player === this.name;
-        if (self_prompt && this.last_sender) {
+        const is_self = to_player === 'system' || to_player === this.name;
+        if (is_self && this.last_sender) {
             // this is for when the agent is prompted by system while still in conversation
             // so it can respond to events like death but be routed back to the last sender
             to_player = this.last_sender;
@@ -477,7 +476,6 @@ export class Agent {
 
     async update(delta) {
         await this.bot.modes.update();
-        this.self_prompter.update(delta);
         await this.checkTaskDone();
     }
 
