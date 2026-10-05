@@ -3,7 +3,8 @@ import type { HistorySaveData } from './history.js';
 import { VisionInterpreter } from './vision/vision_interpreter.js';
 import { Prompter } from '../models/prompter.js';
 import { initBot } from '../utils/mcdata.js';
-import { executeToolCall, getOpenAITools, isActionTool, validateToolCall, validateUpdatePlan, formatSay } from './commands/to_openai_tools.js';
+import { executeToolCall, getOpenAITools, validateUpdatePlan, formatSay } from './commands/to_openai_tools.js';
+import { ActionRunner } from './action_runner.js';
 import { stopPvp, consume } from './library/skills.js';
 import pf from 'mineflayer-pathfinder';
 import { isHostile } from '../utils/mcdata.js';
@@ -306,9 +307,10 @@ export class Agent {
         });
         // Say 隔离：说话唯一通道。正文不再自动进聊天（见 modelCall），
         // 模型想让玩家听见必须调 Say；空话拒绝，超长截断但记全文。
+        // 说出去的话记一条历史，免得下轮模型忘了自己说过什么。
         this.toolHandlers.set('Say', (args: unknown) => {
             const shaped = formatSay((args as { text?: unknown } | null)?.text);
-            if (!shaped.ok || shaped.line == null) {
+            if (!shaped.ok || shaped.line == null || shaped.full == null) {
                 return Promise.resolve({
                     status: 'rejected',
                     code: 'BAD_ARGS',
@@ -316,6 +318,7 @@ export class Agent {
                 } as LoopToolResult);
             }
             this.routeResponse(this.currentSource, shaped.line);
+            void this.history.add(this.name, shaped.full, { kind: 'model', level: 2 });
             return Promise.resolve({ status: 'completed', data: shaped.full } as LoopToolResult);
         });
         // UpdatePlan：模型自己写计划，整单替换进存储，下一轮快照即见。
@@ -345,45 +348,37 @@ export class Agent {
         this.bot.emit('idle');
     }
 
-    private async runTool(name: string, args: unknown): Promise<LoopToolResult> {
+    private actionRunner: ActionRunner | null = null;
+
+    /** 非控制工具走 ActionRunner：动作类即时回 accepted，查询类阻塞回内容。 */
+    private runTool(name: string, args: unknown): Promise<LoopToolResult> {
         const handler = this.toolHandlers.get(name);
         if (handler) {
             // 控制类调用也广播（Say 除外：它自己已经说话了）。
             if (name !== 'Say') this.routeResponse(this.currentSource, MESSAGES.usedMarker(name));
             return handler(args);
         }
-        const record = async (outcome: string): Promise<void> => {
-            await this.history.add('system', MESSAGES.toolOutcome(name, args, outcome), {
-                kind: 'tool',
-                level: 2,
+        if (!this.actionRunner) {
+            this.actionRunner = new ActionRunner({
+                scheduler: this.scheduler,
+                record: async (outcome: string, tool: string, toolArgs: unknown): Promise<void> => {
+                    await this.history.add('system', MESSAGES.toolOutcome(tool, toolArgs, outcome), {
+                        kind: 'tool',
+                        level: 2,
+                    });
+                },
+                speak: (text: string): void => {
+                    this.routeResponse(this.currentSource, text);
+                },
+                execute: (tool: string, toolArgs: Record<string, unknown>): Promise<string> =>
+                    executeToolCall(this, tool, toolArgs),
+                notify: (payload: { call: string; result: LoopToolResult }): void => {
+                    const verdict = this.loop.notify({ kind: KIND.TOOL, level: LEVEL.WAKE, payload });
+                    void this.loop.handleDecision(verdict.decision);
+                },
             });
-        };
-        const checked = validateToolCall(name, args);
-        if (!checked.ok) {
-            const reason = checked.errors?.join('; ') ?? 'Bad arguments.';
-            await record(`rejected: ${reason}`);
-            return { status: 'rejected', code: checked.code ?? 'BAD_ARGS', reason };
         }
-        if (isActionTool(name)) {
-            const claim = this.scheduler.startAction(name);
-            if (!claim.accepted) {
-                const reason = 'An action is already running. Stop() first, then retry.';
-                await record(`rejected: ${reason}`);
-                return { status: 'rejected', code: claim.code ?? 'ACTION_BUSY', reason };
-            }
-            try {
-                this.routeResponse(this.currentSource, MESSAGES.usedMarker(name));
-                const data = await executeToolCall(this, name, args as Record<string, unknown>);
-                await record(data);
-                return { status: 'completed', data };
-            } finally {
-                this.scheduler.releaseAction();
-            }
-        }
-        this.routeResponse(this.currentSource, MESSAGES.usedMarker(name));
-        const data = await executeToolCall(this, name, args as Record<string, unknown>);
-        await record(data);
-        return { status: 'completed', data };
+        return this.actionRunner.run(name, args);
     }
 
     /** 每轮现采 Live State（原文给模型层，由它追加在消息列最后）。 */

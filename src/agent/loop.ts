@@ -83,8 +83,10 @@ export class AgentLoop {
     this.emergencyHandler = deps.emergencyHandler ?? null;
 
     this.runner.register('Stop', async () => {
-      await this.stopExecutor?.();
+      // 先失效 generation：在途的完成回调看到过期会就地丢弃，
+      // 再去停身体——顺序反了就会漏一条过期结果进下一轮。
       const stopped = this.scheduler.stopAll();
+      await this.stopExecutor?.();
       this.history.append('Model', 2, { stopped: true, generation: stopped.generation });
       return { status: 'completed', data: { stopped: true, generation: stopped.generation } };
     });
