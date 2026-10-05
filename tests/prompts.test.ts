@@ -27,28 +27,26 @@ describe('td/tp', () => {
 
 describe('MESSAGES', () => {
   it('pins every user-visible template exactly', () => {
-    expect(MESSAGES.hello('Andy')).toBe('Hello world! I am Andy');
+    expect(MESSAGES.hello('Andy')).toBe('Hello world! 我是Andy');
     expect(MESSAGES.usedMarker('stop')).toBe('*used stop*');
     expect(MESSAGES.taskGoal('dig')).toBe('你的任务目标：dig');
-    expect(MESSAGES.taskEnded(0.5)).toBe('Task ended with score : 0.5');
-    expect(MESSAGES.taskEnded('timeout')).toBe('Task ended with score : timeout');
-    expect(MESSAGES.actionTimeout(3)).toBe(
-      'Action timed out after 3 minutes. Attempting force stop.',
-    );
+    expect(MESSAGES.taskEnded(0.5)).toBe('任务结束，得分：0.5');
+    expect(MESSAGES.taskEnded('timeout')).toBe('任务结束，得分：timeout');
+    expect(MESSAGES.actionTimeout(3)).toBe('动作超时（3 分钟），正在强制停止。');
     expect(MESSAGES.death('x:1', 'overworld', 'boom')).toBe(
-      "You died at position x:1 in the overworld dimension with the final message: 'boom'. " +
-        "Your place of death is saved as 'last_death_position' if you want to return. " +
-        'Previous actions were stopped and you have respawned.',
+      "你死在了overworld维度 x:1，临终消息：'boom'。" +
+        "死亡点已存为 'last_death_position'，想回去可以找它。" +
+        '之前的动作已停止，你已重生。',
     );
-    expect(MESSAGES.goalDone('g')).toBe('You recently successfully completed the goal g.');
-    expect(MESSAGES.goalFailed('g')).toBe('You recently failed to complete the goal g.');
+    expect(MESSAGES.goalDone('g')).toBe('你刚成功完成了目标g。');
+    expect(MESSAGES.goalFailed('g')).toBe('你刚没能完成目标g。');
     expect(MESSAGES.modelUnsupported).toBe(
       '我的模型不支持原生工具调用，换个 OpenAI 兼容模型再试。',
     );
-    expect(MESSAGES.recentConvoPrefix).toBe('Recent conversation:\n');
-    expect(MESSAGES.shuttingUp).toBe('Shutting up.');
-    expect(MESSAGES.restarting).toBe('Restarting.');
-    expect(MESSAGES.exiting).toBe('Exiting.');
+    expect(MESSAGES.recentConvoPrefix).toBe('最近对话：\n');
+    expect(MESSAGES.shuttingUp).toBe('闭嘴了。');
+    expect(MESSAGES.restarting).toBe('重启中。');
+    expect(MESSAGES.exiting).toBe('退出中。');
   });
 });
 
