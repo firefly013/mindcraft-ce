@@ -261,7 +261,8 @@ export const DETECTORS: readonly Detector[] = Object.freeze([
     value: (s) => s.alive ?? null, fireOn: (prev, next) => prev === false && next === true },
 ]);
 
-const STOP_WORDS = Object.freeze(['停', '别动', '危险', '救命', 'stop']);
+/** 聊天里的急停词：提到它们视为 L4 抢占（与 resolvePriority 同表）。 */
+export const STOP_WORDS: readonly string[] = Object.freeze(['停', '别动', '危险', '救命', 'stop']);
 
 export interface PriorityDescriptor {
   type: string;

@@ -109,6 +109,18 @@ export function toolExists(toolName: string): boolean {
     return commandMap[commandName] !== undefined;
 }
 
+const actionNames = new Set(actionsList.map((c) => stripBang(c.name)));
+
+/**
+ * 该工具是否占用身体动作通道。动作类工具一次只能跑一个
+ * （忙时拒绝，不排队）；查询类只读不占；Stop/Finish 是控制信号。
+ */
+export function isActionTool(toolName: string): boolean {
+    const base = stripBang(toolName);
+    if (base === 'Finish' || base === 'Stop') return false;
+    return actionNames.has(base);
+}
+
 /** 给 help 工具用的人类可读工具清单（替代旧文本命令文档） */
 export function getToolDocs(agent: any): string {
     const blocked = (agent?.blocked_actions || []) as string[];

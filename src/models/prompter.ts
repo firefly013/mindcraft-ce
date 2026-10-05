@@ -160,10 +160,11 @@ export class Prompter {
 
   /**
    * 原生工具调用版对话：tools 由全部命令转换而来，模型直接返回
-   * tool_calls。返回 { text, tool_calls }，
+   * tool_calls。extraTail 是现采的 Live State 文本，追加在正文最后
+   * （放末尾，不破坏前缀缓存）。返回 { text, tool_calls }，
    * 模型不支持时返回 null。
    */
-  async promptConvoTools(messages: ChatMessage[]): Promise<ToolResponse | null> {
+  async promptConvoTools(messages: ChatMessage[], extraTail = ''): Promise<ToolResponse | null> {
     if (typeof this.chat_model.sendRequestWithTools !== 'function') return null;
     this.most_recent_msg_time = Date.now();
     const current_msg_time = this.most_recent_msg_time;
@@ -172,6 +173,7 @@ export class Prompter {
 
     let prompt = this.prompts.conversing;
     prompt = await this.replaceStrings(prompt, messages);
+    if (extraTail.trim() !== '') prompt += `\n\n## 当前世界快照\n${extraTail}`;
     const tools: OpenAITool[] = getOpenAITools(this.agent);
     try {
       const res = await this.chat_model.sendRequestWithTools(messages, prompt, tools, 'auto');

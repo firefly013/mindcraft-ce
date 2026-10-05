@@ -3,8 +3,18 @@ import type { HistorySaveData } from './history.js';
 import { VisionInterpreter } from './vision/vision_interpreter.js';
 import { Prompter } from '../models/prompter.js';
 import { initBot } from '../utils/mcdata.js';
-import { executeToolCall } from './commands/to_openai_tools.js';
-import { stopPvp } from './library/skills.js';
+import { executeToolCall, getOpenAITools, isActionTool, toolExists } from './commands/to_openai_tools.js';
+import { stopPvp, consume } from './library/skills.js';
+import pf from 'mineflayer-pathfinder';
+import { isHostile } from '../utils/mcdata.js';
+import { Scheduler, KIND, LEVEL } from './scheduler.js';
+import type { Kind, Level } from './scheduler.js';
+import { STOP_WORDS } from './edges.js';
+import { AgentLoop } from './loop.js';
+import type { LoopModelResponse, LoopRunner, LoopToolResult } from './loop.js';
+import { sampleLiveState, renderLiveState } from './live_state.js';
+import { runEmergency, shouldTriggerEmergency } from './emergency.js';
+import type { ThreatEntity } from './emergency.js';
 import { ActionManager } from './action_manager.js';
 import { NPCContoller } from './npc/controller.js';
 import { MemoryBank } from './memory_bank.js';
@@ -34,6 +44,11 @@ export class Agent {
     vision_interpreter: VisionInterpreter | undefined;
     shut_up: boolean = false;
     respondFunc: ((username: string, message: string) => Promise<void>) | undefined;
+    scheduler!: Scheduler;
+    loop!: AgentLoop;
+    loopLog: Array<{ kind: string; level: number; payload: unknown }> = [];
+    toolHandlers = new Map<string, (args: unknown) => Promise<LoopToolResult>>();
+    lowHpArmed: boolean = false;
 
     start(load_mem = false, init_message: string | null = null, count_id = 0): void {
         this.count_id = count_id;
@@ -78,6 +93,7 @@ export class Agent {
         this.task = new Task(this, settings.task as TaskData | null, taskStart);
         // 原生工具黑名单：getOpenAITools 按此过滤，不再需要文本命令黑名单
         this.blocked_actions = settings.blocked_actions.concat(this.task.blocked_actions || []);
+        this.buildLoop();
 
         console.log(this.name, 'logging into minecraft...');
         this.bot = initBot(this.name);
@@ -171,7 +187,7 @@ export class Agent {
             "Gamerule "
         ];
 
-        const respondFunc = async (username: string, message: string): Promise<void> => {
+        const respondFunc = async (username: string, message: string, whisper = false): Promise<void> => {
             if (message === "") return;
             if (username === this.name) return;
             if (settings.only_chat_with.length > 0 && !settings.only_chat_with.includes(username)) return;
@@ -182,8 +198,17 @@ export class Agent {
 
                 console.log(this.name, 'received message from', username, ':', message);
 
-                // 全中文：不再做英文翻译，直接处理原文
-                await this.handleMessage(username, message);
+                // 全中文：不再做英文翻译，直接处理原文。
+                // 聊天默认 L3 唤醒；喊急停词的直接抢占当前请求。
+                const lower = message.toLowerCase();
+                const urgent = STOP_WORDS.some((w) => lower.includes(w.toLowerCase()));
+                await this.handleMessage(
+                    username,
+                    message,
+                    KIND.USER,
+                    urgent ? LEVEL.PREEMPT : LEVEL.WAKE,
+                    { whisper, mention: lower.includes(this.name.toLowerCase()) },
+                );
             } catch (error: unknown) {
                 console.error('Error handling message:', error);
             }
@@ -191,10 +216,12 @@ export class Agent {
 
 		this.respondFunc = respondFunc;
 
-        this.bot.on('whisper', respondFunc);
+        this.bot.on('whisper', (username: string, message: string) => {
+            void respondFunc(username, message, true);
+        });
 
         this.bot.on('chat', (username: string, message: string) => {
-            respondFunc(username, message);
+            void respondFunc(username, message, false);
         });
 
         // Set up auto-eat
@@ -241,23 +268,174 @@ export class Agent {
         this.bot.interrupt_code = false;
     }
 
+    private currentSource: string = 'system';
+
+    private buildLoop(): void {
+        this.scheduler = new Scheduler();
+        const runner: LoopRunner = {
+            register: (name: string, handler: (args: unknown) => Promise<LoopToolResult>) => {
+                this.toolHandlers.set(name, handler);
+            },
+            call: (name: string, args: unknown) => this.runTool(name, args),
+        };
+        this.loop = new AgentLoop({
+            scheduler: this.scheduler,
+            runner,
+            history: {
+                append: (kind: string, level: number, payload: unknown) => {
+                    this.loopLog.push({ kind, level, payload });
+                },
+            },
+            assemble: () => this.assembleContext(),
+            model: (text: string, tools: unknown) => this.modelCall(text, tools),
+            stopExecutor: async () => {
+                await this.fullStop();
+            },
+            emergencyHandler: () => this.runEmergency(),
+        });
+    }
+
+    /** 全部停下：动作停、日志清、续跑取消、回到 idle。 */
+    private async fullStop(): Promise<void> {
+        await this.actions.stop();
+        this.clearBotLogs();
+        this.actions.cancelResume();
+        this.bot.emit('idle');
+    }
+
+    private async runTool(name: string, args: unknown): Promise<LoopToolResult> {
+        const handler = this.toolHandlers.get(name);
+        if (handler) return handler(args);
+        if (!toolExists(name)) {
+            return { status: 'rejected', code: 'UNKNOWN_TOOL', reason: `No such tool: ${name}.` };
+        }
+        if (isActionTool(name)) {
+            const claim = this.scheduler.startAction(name);
+            if (!claim.accepted) {
+                return {
+                    status: 'rejected',
+                    code: claim.code ?? 'ACTION_BUSY',
+                    reason: 'An action is already running. Stop() first, then retry.',
+                };
+            }
+            try {
+                this.routeResponse(this.currentSource, MESSAGES.usedMarker(name));
+                const data = await executeToolCall(this, name, args as Record<string, unknown>);
+                return { status: 'completed', data };
+            } finally {
+                this.scheduler.releaseAction();
+            }
+        }
+        this.routeResponse(this.currentSource, MESSAGES.usedMarker(name));
+        const data = await executeToolCall(this, name, args as Record<string, unknown>);
+        return { status: 'completed', data };
+    }
+
+    /** 每轮现采 Live State，渲成追加在正文末尾的文本块。 */
+    private assembleContext(): { text: string; tools: unknown } {
+        const task = this.task as { goal?: unknown } | null;
+        const live = sampleLiveState({
+            bot: this.bot,
+            vision: this.vision_interpreter,
+            goal: typeof task?.goal === 'string' ? task.goal : null,
+            todos: [],
+            currentAction: this.actions.currentActionLabel,
+        });
+        return { text: `## 当前世界快照\n${renderLiveState(live)}`, tools: getOpenAITools(this) };
+    }
+
+    private async modelCall(liveText: string, tools: unknown): Promise<LoopModelResponse> {
+        void tools;
+        if (this.shut_up) return { text: null, calls: [] };
+        const history = this.history.getHistory();
+        const res = await this.prompter.promptConvoTools(history, liveText);
+        if (!res) return { text: null, calls: [] };
+        if (res.text?.trim()) {
+            await this.history.add(this.name, res.text);
+            this.routeResponse(this.currentSource, res.text);
+        }
+        return {
+            text: res.text,
+            calls: res.tool_calls.map((c: { name: string; args: unknown }) => ({ name: c.name, args: c.args })),
+        };
+    }
+
+    private async runEmergency(): Promise<void> {
+        const bot = this.bot;
+        await runEmergency({
+            get health(): number {
+                return typeof bot.health === 'number' ? bot.health : 0;
+            },
+            inventoryNames: (): string[] => {
+                try {
+                    return (bot.inventory.items() as Array<{ name: string }>).map((i) => i.name);
+                } catch {
+                    return [];
+                }
+            },
+            feet: (): { x: number; y: number; z: number } | null => {
+                try {
+                    const p = bot.entity.position;
+                    return { x: Math.floor(p.x), y: Math.floor(p.y), z: Math.floor(p.z) };
+                } catch {
+                    return null;
+                }
+            },
+            threats: (): ThreatEntity[] => {
+                try {
+                    return (Object.values(bot.entities ?? {}) as Array<Record<string, unknown>>)
+                        .filter((e) => e != null && (e as { position?: unknown }).position != null)
+                        .map((e) => {
+                            const ent = e as { id?: unknown; name?: unknown; displayName?: unknown; position?: unknown };
+                            const pos = ent.position as { x: unknown; y: unknown; z: unknown };
+                            return {
+                                id: typeof ent.id === 'number' ? ent.id : -1,
+                                name: typeof ent.name === 'string' ? ent.name : 'unknown',
+                                hostile: isHostile(e),
+                                position:
+                                    typeof pos?.x === 'number' && typeof pos?.y === 'number' && typeof pos?.z === 'number'
+                                        ? { x: pos.x, y: pos.y, z: pos.z }
+                                        : null,
+                            };
+                        });
+                } catch {
+                    return [];
+                }
+            },
+            stopAll: (): void => {
+                this.requestInterrupt();
+            },
+            fleeTo: (x: number, z: number): void => {
+                try {
+                    bot.pathfinder.setMovements(new pf.Movements(bot));
+                    bot.pathfinder.setGoal(new pf.goals.GoalXZ(x, z));
+                } catch (err: unknown) {
+                    console.warn('emergency flee failed:', err instanceof Error ? err.message : String(err));
+                }
+            },
+            eat: (food: string): Promise<void> => consume(bot, food).then(() => undefined),
+        });
+    }
+
     shutUp(): void {
         this.shut_up = true;
     }
 
-    async handleMessage(source: string, message: string): Promise<boolean> {
+    async handleMessage(
+        source: string,
+        message: string,
+        kind: Kind = KIND.USER,
+        level: Level = LEVEL.WAKE,
+        extra: Record<string, unknown> = {},
+    ): Promise<boolean> {
         await this.checkTaskDone();
         if (!source || !message) {
             console.warn('Received empty message from', source);
             return false;
         }
 
-        // ReAct 无限循环直到 Finish：无上限，循环只由 Finish / 无响应 / 中断结束
-
         // 全中文：不再做翻译，直接使用原文
         console.log('received message from', source, ':', message);
-
-        const checkInterrupt = (): boolean => this.shut_up;
 
         // Handle other user messages
         await this.history.add(source, message);
@@ -269,44 +447,9 @@ export class Agent {
             this.routeResponse(source, MESSAGES.modelUnsupported);
             return false;
         }
-        for (;;) {
-            if (checkInterrupt()) break;
-            const history = this.history.getHistory();
-
-            // 原生工具调用：模型直接返回 tool_calls，Finish 结束循环
-            const toolRes: ToolResponse | undefined = await this.prompter.promptConvoTools(history);
-            if (!toolRes || (!toolRes.tool_calls?.length && !toolRes.text?.trim())) {
-                console.warn('no response');
-                break;
-            }
-            if (toolRes.text?.trim()) {
-                console.log(`${this.name} full response to ${source}: ""${toolRes.text}""`);
-                this.history.add(this.name, toolRes.text);
-                this.routeResponse(source, toolRes.text);
-            }
-            if (!toolRes.tool_calls?.length) {
-                this.history.save();
-                break;
-            }
-            let finished = false;
-            for (const tc of toolRes.tool_calls) {
-                if (checkInterrupt()) break;
-                if (tc.name === 'Finish') {
-                    finished = true;
-                    break;
-                }
-                this.routeResponse(source, MESSAGES.usedMarker(tc.name));
-                const execute_res = await executeToolCall(this, tc.name, tc.args);
-                console.log('Agent executed tool:', tc.name, 'and got:', execute_res);
-                if (execute_res)
-                    this.history.add('system', execute_res);
-                else
-                    break;
-            }
-            this.history.save();
-            if (finished || checkInterrupt()) break;
-        }
-
+        this.currentSource = source;
+        const verdict = this.loop.notify({ kind, level, payload: { source, message, ...extra } });
+        await this.loop.handleDecision(verdict.decision);
         return true;
     }
 
@@ -357,6 +500,20 @@ export class Agent {
                 this.bot.lastDamageTaken = prev_health - this.bot.health;
             }
             prev_health = this.bot.health;
+            // 低血边沿：掉进线以下发一次 L5，回到 12 以上才重新 armed。
+            if (shouldTriggerEmergency(this.bot.health) && !this.lowHpArmed) {
+                this.lowHpArmed = true;
+                const verdict = this.loop.notify({
+                    kind: KIND.WORLD,
+                    level: LEVEL.EMERGENCY,
+                    payload: { health: this.bot.health },
+                });
+                void this.loop.handleDecision(verdict.decision).catch((err: unknown) => {
+                    console.error('emergency decision failed:', err instanceof Error ? err.message : String(err));
+                });
+            } else if (typeof this.bot.health === 'number' && this.bot.health >= 12) {
+                this.lowHpArmed = false;
+            }
         });
         // Logging callbacks
         this.bot.on('error' , (err: unknown) => {
@@ -390,7 +547,12 @@ export class Agent {
                     death_pos_text = `x: ${death_pos.x.toFixed(2)}, y: ${death_pos.y.toFixed(2)}, z: ${death_pos.z.toFixed(2)}`;
                 }
                 const dimention = this.bot.game.dimension;
-                this.handleMessage('system', MESSAGES.death(death_pos_text || 'unknown', dimention, message));
+                void this.handleMessage(
+                    'system',
+                    MESSAGES.death(death_pos_text || 'unknown', dimention, message),
+                    KIND.WORLD,
+                    LEVEL.PREEMPT,
+                );
             }
         });
         this.bot.on('idle', () => {
