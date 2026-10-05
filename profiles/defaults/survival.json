@@ -1,9 +1,9 @@
 {
     "modes": {
-        "self_preservation": true,
-        "unstuck": true,
+        "self_preservation": false,
+        "unstuck": false,
         "cowardice": false,
-        "self_defense": true,
+        "self_defense": false,
         "hunting": true,
         "item_collecting": true,
         "torch_placing": true,

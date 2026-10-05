@@ -1,6 +1,7 @@
 import { readFileSync, mkdirSync, writeFileSync} from 'fs';
 import { Examples } from '../utils/examples.js';
 import { getCommandDocs } from '../agent/commands/index.js';
+import { getOpenAITools } from '../agent/commands/to_openai_tools.js';
 import { SkillLibrary } from "../agent/library/skill_library.js";
 import { stringifyTurns } from '../utils/text.js';
 import { getCommand } from '../agent/commands/index.js';
@@ -245,6 +246,38 @@ export class Prompter {
         }
 
         return '';
+    }
+
+    /**
+     * 原生工具调用版对话：tools 由全部 !Command 转换而来，模型直接返回
+     * tool_calls 而不是文本 !command。返回 { text, tool_calls }，
+     * 模型不支持时返回 null，由调用方回落到文本 promptConvo。
+     */
+    async promptConvoTools(messages) {
+        if (typeof this.chat_model.sendRequestWithTools !== 'function')
+            return null;
+        this.most_recent_msg_time = Date.now();
+        const current_msg_time = this.most_recent_msg_time;
+        await this.checkCooldown();
+        if (current_msg_time !== this.most_recent_msg_time)
+            return { text: '', tool_calls: [] };
+
+        let prompt = this.profile.conversing;
+        prompt = await this.replaceStrings(prompt, messages, this.convo_examples);
+        const tools = getOpenAITools(this.agent);
+        try {
+            const res = await this.chat_model.sendRequestWithTools(messages, prompt, tools, 'auto');
+            console.log('Generated tool response:', JSON.stringify(res.tool_calls?.map(t => t.name)));
+            await this._saveLog(prompt, messages, JSON.stringify(res), 'conversation-tools');
+            let text = res.text ?? '';
+            if (text.includes('</think>')) {
+                text = text.split('</think>')[1] ?? '';
+            }
+            return { text, tool_calls: res.tool_calls ?? [] };
+        } catch (error) {
+            console.error('Tool request failed, falling back to text commands:', error?.message ?? error);
+            return null;
+        }
     }
 
     async promptCoding(messages) {

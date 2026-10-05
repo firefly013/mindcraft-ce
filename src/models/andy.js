@@ -75,6 +75,38 @@ export class Andy {
         return finalRes;
     }
 
+    /**
+     * OpenAI 原生工具调用（OpenAI 兼容网关）：把 !Command 转换后的 tools
+     * 透传给 chat/completions，返回 { text, tool_calls: [{ id, name, args }] }。
+     * 调用方用 executeToolCall 执行。不支持时抛错，由上层回落到文本 !Command。
+     */
+    async sendRequestWithTools(turns, systemMessage, tools, tool_choice = 'auto') {
+        const model = this.model_name || 'auto';
+        const messages = [{ role: 'system', content: systemMessage }].concat(strictFormat(turns));
+        console.log(`Awaiting Andy tool response... (model: ${model})`);
+        const data = await this.send(this.chat_endpoint, {
+            model,
+            messages,
+            tools,
+            tool_choice,
+            stream: false,
+            ...(this.params || {})
+        });
+        const msg = data?.choices?.[0]?.message ?? {};
+        let tool_calls = [];
+        try {
+            tool_calls = (msg.tool_calls || []).map((tc) => {
+                let args = {};
+                try { args = JSON.parse(tc.function?.arguments ?? '{}') ?? {}; }
+                catch { args = {}; }
+                return { id: tc.id, name: tc.function?.name ?? '', args };
+            });
+        } catch {
+            tool_calls = [];
+        }
+        return { text: msg.content ?? '', tool_calls };
+    }
+
     async embed(text) {
         const embeddings = await this.embedMany([text]);
         return embeddings[0];

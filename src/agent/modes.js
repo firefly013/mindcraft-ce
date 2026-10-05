@@ -24,150 +24,36 @@ async function say(agent, message) {
 const modes_list = [
     {
         name: 'self_preservation',
-        description: 'Respond to drowning, burning, and damage at low health. Interrupts all actions.',
+        description: '已退役：保命响应改由 @nxg-org/mineflayer-common-sense 插件处理。本 mode 不再执行任何动作，仅保留注册以兼容旧调用。',
         interrupts: ['all'],
-        on: true,
+        on: false,
         active: false,
-        fall_blocks: ['sand', 'gravel', 'concrete_powder'], // includes matching substrings like 'sandstone' and 'red_sand'
-        update: async function (agent) {
-            const bot = agent.bot;
-            let block = bot.blockAt(bot.entity.position);
-            let blockAbove = bot.blockAt(bot.entity.position.offset(0, 1, 0));
-            if (!block) block = {name: 'air'}; // hacky fix when blocks are not loaded
-            if (!blockAbove) blockAbove = {name: 'air'};
-            if (blockAbove.name === 'water') {
-                // does not call execute so does not interrupt other actions
-                if (!bot.pathfinder.goal) {
-                    bot.setControlState('jump', true);
-                }
-            }
-            else if (this.fall_blocks.some(name => blockAbove.name.includes(name))) {
-                execute(this, agent, async () => {
-                    await skills.moveAway(bot, 2);
-                });
-            }
-            else if (block.name === 'lava' || block.name === 'fire' ||
-                blockAbove.name === 'lava' || blockAbove.name === 'fire') {
-                say(agent, 'I\'m on fire!');
-                // if you have a water bucket, use it
-                let waterBucket = bot.inventory.findInventoryItem('water_bucket');
-                if (waterBucket) {
-                    execute(this, agent, async () => {
-                        let success = await skills.placeBlock(bot, 'water_bucket', block.position.x, block.position.y, block.position.z);
-                        if (success) say(agent, 'Placed some water, ahhhh that\'s better!');
-                    });
-                }
-                else {
-                    execute(this, agent, async () => {
-                        let waterBucket = bot.inventory.findInventoryItem('water_bucket');
-                        if (waterBucket) {
-                            let success = await skills.placeBlock(bot, 'water_bucket', block.position.x, block.position.y, block.position.z);
-                            if (success) say(agent, 'Placed some water, ahhhh that\'s better!');
-                            return;
-                        }
-                        let nearestWater = world.getNearestBlock(bot, 'water', 20);
-                        if (nearestWater) {
-                            const pos = nearestWater.position;
-                            let success = await skills.goToPosition(bot, pos.x, pos.y, pos.z, 0.2);
-                            if (success) say(agent, 'Found some water, ahhhh that\'s better!');
-                            return;
-                        }
-                        await skills.moveAway(bot, 5);
-                    });
-                }
-            }
-            else if (Date.now() - bot.lastDamageTime < 3000 && (bot.health < 5 || bot.lastDamageTaken >= bot.health)) {
-                say(agent, 'I\'m dying!');
-                execute(this, agent, async () => {
-                    await skills.moveAway(bot, 20);
-                });
-            }
-            else if (agent.isIdle()) {
-                bot.clearControlStates(); // clear jump if not in danger or doing anything else
-            }
-        }
+        update: async function (agent) {}
     },
     {
         name: 'unstuck',
-        description: 'Attempt to get unstuck when in the same place for a while. Interrupts some actions.',
+        description: '已退役：不再自主脱困喊话（原 I\'m stuck!/I\'m free. 已删除）。仅保留注册以兼容旧调用。',
         interrupts: ['all'],
-        on: true,
+        on: false,
         active: false,
-        prev_location: null,
-        distance: 2,
-        stuck_time: 0,
-        last_time: Date.now(),
-        max_stuck_time: 20,
-        prev_dig_block: null,
-        update: async function (agent) {
-            if (agent.isIdle()) { 
-                this.prev_location = null;
-                this.stuck_time = 0;
-                return; // don't get stuck when idle
-            }
-            const bot = agent.bot;
-            const cur_dig_block = bot.targetDigBlock;
-            if (cur_dig_block && !this.prev_dig_block) {
-                this.prev_dig_block = cur_dig_block;
-            }
-            if (this.prev_location && this.prev_location.distanceTo(bot.entity.position) < this.distance && cur_dig_block == this.prev_dig_block) {
-                this.stuck_time += (Date.now() - this.last_time) / 1000;
-            }
-            else {
-                this.prev_location = bot.entity.position.clone();
-                this.stuck_time = 0;
-                this.prev_dig_block = null;
-            }
-            const max_stuck_time = cur_dig_block?.name === 'obsidian' ? this.max_stuck_time * 2 : this.max_stuck_time;
-            if (this.stuck_time > max_stuck_time) {
-                say(agent, 'I\'m stuck!');
-                this.stuck_time = 0;
-                execute(this, agent, async () => {
-                    const crashTimeout = setTimeout(() => { agent.cleanKill("Got stuck and couldn't get unstuck") }, 10000);
-                    await skills.moveAway(bot, 5);
-                    clearTimeout(crashTimeout);
-                    say(agent, 'I\'m free.');
-                });
-            }
-            this.last_time = Date.now();
-        },
-        unpause: function () {
-            this.prev_location = null;
-            this.stuck_time = 0;
-            this.prev_dig_block = null;
-        }
+        update: async function (agent) {},
+        unpause: function () {}
     },
     {
         name: 'cowardice',
-        description: 'Run away from enemies. Interrupts all actions.',
+        description: '已退役：不再自主逃跑，战斗决策交由模型工具调用。仅保留注册以兼容旧调用。',
         interrupts: ['all'],
-        on: true,
+        on: false,
         active: false,
-        update: async function (agent) {
-            const enemy = world.getNearestEntityWhere(agent.bot, entity => mc.isHostile(entity), 16);
-            if (enemy && await world.isClearPath(agent.bot, enemy)) {
-                say(agent, `Aaa! A ${enemy.name.replace("_", " ")}!`);
-                execute(this, agent, async () => {
-                    await skills.avoidEnemies(agent.bot, 24);
-                });
-            }
-        }
+        update: async function (agent) {}
     },
     {
         name: 'self_defense',
-        description: 'Attack nearby enemies. Interrupts all actions.',
+        description: '已退役：不再自主攻击，战斗决策交由模型工具调用。仅保留注册以兼容旧调用。',
         interrupts: ['all'],
-        on: true,
+        on: false,
         active: false,
-        update: async function (agent) {
-            const enemy = world.getNearestEntityWhere(agent.bot, entity => mc.isHostile(entity), 8);
-            if (enemy && await world.isClearPath(agent.bot, enemy)) {
-                say(agent, `Fighting ${enemy.name}!`);
-                execute(this, agent, async () => {
-                    await skills.defendSelf(agent.bot, 8);
-                });
-            }
-        }
+        update: async function (agent) {}
     },
     {
         name: 'hunting',

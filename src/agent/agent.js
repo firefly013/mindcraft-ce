@@ -5,6 +5,7 @@ import { Prompter } from '../models/prompter.js';
 import { initModes } from './modes.js';
 import { initBot } from '../utils/mcdata.js';
 import { containsCommand, commandExists, executeCommand, truncCommandMessage, isAction, blacklistCommands } from './commands/index.js';
+import { executeToolCall } from './commands/to_openai_tools.js';
 import { ActionManager } from './action_manager.js';
 import { NPCContoller } from './npc/controller.js';
 import { MemoryBank } from './memory_bank.js';
@@ -194,6 +195,18 @@ export class Agent {
         });
         this.bot.autoEat.enableAuto();
 
+        // 保命应急交由 common-sense 插件（着火/摔落等基础响应），自研 modes 已退役
+        try {
+            this.bot.commonSense?.setOptions?.({
+                autoRespond: true,
+                fallCheck: true,
+                fireCheck: true,
+                useOffhand: true
+            });
+        } catch (err) {
+            console.warn('commonSense options failed:', err?.message ?? err);
+        }
+
         if (save_data?.self_prompt) {
             if (init_message) {
                 this.history.add('system', init_message);
@@ -316,6 +329,42 @@ export class Agent {
         for (let i=0; i<max_responses; i++) {
             if (checkInterrupt()) break;
             let history = this.history.getHistory();
+
+            // 原生工具优先：模型直接返回 tool_calls，不再拼文本 !command
+            let toolRes = null;
+            try {
+                toolRes = await this.prompter.promptConvoTools(history);
+            } catch (err) {
+                console.warn('Tool call path failed, falling back to text commands:', err?.message ?? err);
+                toolRes = null;
+            }
+            if (toolRes && (toolRes.tool_calls?.length > 0 || toolRes.text?.trim())) {
+                if (toolRes.text?.trim()) {
+                    console.log(`${this.name} full response to ${source}: ""${toolRes.text}""`);
+                    this.history.add(this.name, toolRes.text);
+                    this.routeResponse(source, toolRes.text);
+                }
+                if (toolRes.tool_calls?.length > 0) {
+                    for (const tc of toolRes.tool_calls) {
+                        if (checkInterrupt()) break;
+                        this.self_prompter.handleUserPromptedCmd(self_prompt, true);
+                        this.routeResponse(source, `*used ${tc.name}*`);
+                        let execute_res = await executeToolCall(this, tc.name, tc.args);
+                        console.log('Agent executed tool:', tc.name, 'and got:', execute_res);
+                        used_command = true;
+                        if (execute_res)
+                            this.history.add('system', execute_res);
+                        else
+                            break;
+                    }
+                    this.history.save();
+                    continue;
+                }
+                this.history.save();
+                break;
+            }
+
+            // 回落：legacy 文本 !Command（模型不支持 tools 或网关未返回时）
             let res = await this.prompter.promptConvo(history);
 
             console.log(`${this.name} full response to ${source}: ""${res}""`);

@@ -6,6 +6,7 @@ import { pathfinder } from 'mineflayer-pathfinder';
 import { plugin as pvp } from 'mineflayer-pvp';
 import { plugin as collectblock } from 'mineflayer-collectblock';
 import { loader as autoEat } from 'mineflayer-auto-eat';
+import commonSense from '@nxg-org/mineflayer-common-sense';
 import plugin from 'mineflayer-armor-manager';
 const armorManager = plugin;
 let mc_version = settings.minecraft_version;
@@ -157,6 +158,7 @@ export function initBot(username) {
     bot.loadPlugin(pvp);
     bot.loadPlugin(collectblock);
     bot.loadPlugin(autoEat);
+    bot.loadPlugin(commonSense); // 保命应急：着火/摔落等基础响应，替代自研 modes
     bot.loadPlugin(armorManager); // auto equip armor
     bot.once('resourcePack', () => {
         bot.acceptResourcePack();

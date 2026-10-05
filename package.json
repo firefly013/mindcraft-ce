@@ -11,6 +11,7 @@
         "@google/genai": "2.12.0",
         "@huggingface/inference": "4.13.23",
         "@mistralai/mistralai": "2.5.0",
+        "@nxg-org/mineflayer-common-sense": "^1.3.0",
         "canvas": "3.2.3",
         "cheerio": "1.2.0",
         "eslint": "10.7.0",
