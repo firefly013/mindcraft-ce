@@ -102,6 +102,19 @@ describe('snapshotFromBot', () => {
     expect(still.nextIsLava).toBeUndefined();
   });
 
+  it('reads the fire flag off entity metadata, defensively', () => {
+    const burning = snapshotFromBot(
+      stubBot({ entity: { position: { x: 0, y: 64, z: 0 }, metadata: [{ value: 1 }] } }),
+    );
+    expect(burning.onFire).toBe(true);
+    const calm = snapshotFromBot(
+      stubBot({ entity: { position: { x: 0, y: 64, z: 0 }, metadata: [{ value: 0 }] } }),
+    );
+    expect(calm.onFire).toBeUndefined();
+    // 形状不对：静默，不炸。
+    expect(snapshotFromBot(stubBot({ entity: { position: { x: 0, y: 64, z: 0 }, metadata: 'junk' } })).onFire).toBeUndefined();
+  });
+
   it('computed flags drive their L5 detectors through the watcher', () => {
     const w = createEdgeWatcher();
     // 快照→检测器端到端：脚下 -70 直接打出虚空 L5。

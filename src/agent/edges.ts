@@ -454,10 +454,9 @@ export interface SnapshotExtra {
  * 从 mineflayer bot 现拼边沿快照。全部防御性读取；读不到的
  * 保持 undefined（检测器把缺值当"没触发"，不瞎报）。
  *
- * 诚实缺口（host 还没接传感）：onFire（着火读实体元数据，
- * 版本相关，先空着）、trapped（被围困要结合移动史，轮询层
- * 以后再做）——对应 L5 检测器平时静默，等补上传感再亮。
- * belowVoid/fallLethal/nextIsLava 已从位置/朝向算出来。
+ * 诚实缺口（host 还没接传感）：trapped（被围困要结合移动史，
+ * 轮询层以后再做）——对应 L5 检测器平时静默，等补上传感再亮。
+ * belowVoid/fallLethal/nextIsLava/onFire 已从位置/朝向/元数据算出来。
  */
 export function snapshotFromBot(bot: unknown, extra: SnapshotExtra = {}): EdgeSnapshot {
   const snap: EdgeSnapshot = {};
@@ -535,6 +534,17 @@ export function snapshotFromBot(bot: unknown, extra: SnapshotExtra = {}): EdgeSn
         snap.inWater = feetName === 'water' ? true : undefined;
         const biome = feetBlock['biome'] as { name?: unknown } | string | null | undefined;
         snap.biome = typeof biome === 'string' ? biome : strOf(biome?.name);
+
+        // 着火：实体元数据第 0 项是 flags 字节，bit0=着火
+        // （各版本协议稳定项；读不懂就空着，不瞎报）。
+        try {
+          const meta = (entity as { metadata?: unknown }).metadata;
+          const first = Array.isArray(meta) ? (meta[0] as { value?: unknown } | number | undefined) : undefined;
+          const flags = typeof first === 'number' ? first : typeof first?.value === 'number' ? first.value : null;
+          if (flags != null) snap.onFire = (flags & 1) === 1 ? true : undefined;
+        } catch {
+          // 元数据形状不对就不报。
+        }
 
         // 虚空：主世界/末地掉到 -60 以下就是往虚空里掉（下界没虚空，到不了）。
         const feetY = num(pos.y);
