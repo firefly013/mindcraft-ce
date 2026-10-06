@@ -1222,6 +1222,33 @@ function startDoorInterval(bot: any): ReturnType<typeof setInterval> {
     return doorCheckInterval;
 }
 
+/**
+ * 寻路走不动时，把**物理现场**摊开。
+ *
+ * 模型真机报过"goToCoordinates 完全不动且被 task.stuck，原因不明"，还自己给了
+ * 堆栈定位（pathfinder monitorMovement→resetPath，疑似客户端物理被禁）。与其猜，
+ * 不如把"卡在哪、脚/头是什么方块、物理开没开"直接写出来——模型能据此改策略
+ * （挖出来 / 搭脚点 / 换目标），排查的人也能一眼看出原因。
+ */
+function describeStuck(bot: any): string {
+    try {
+        const p = bot.entity.position;
+        const at = (dy: number): string => {
+            const b = bot.blockAt?.(p.offset(0, dy, 0));
+            return typeof b?.name === 'string' ? b.name : '?';
+        };
+        const physics = bot.physicsEnabled === false ? '**物理已关闭**' : '物理正常';
+        const inBlock = at(0) !== 'air' && at(0) !== 'cave_air' && at(0) !== 'water';
+        return (
+            `你在 (${p.x.toFixed(1)},${p.y.toFixed(1)},${p.z.toFixed(1)})，` +
+            `脚 ${at(0)} / 头 ${at(1)}，${physics}` +
+            (inBlock ? '——**脚下方块是实心的，你可能卡在方块里**：用 mineBlock 挖开再走。' : '。')
+        );
+    } catch {
+        return '（读不到物理状态）';
+    }
+}
+
 export async function goToPosition(bot: any, x: number | null, y: number | null, z: number | null, min_distance: number = 2): Promise<boolean> {
     /**
      * Navigate to the given position.
@@ -1268,12 +1295,12 @@ export async function goToPosition(bot: any, x: number | null, y: number | null,
             return true;
         }
         else {
-            log(bot, `Unable to reach ${x}, ${y}, ${z}, you are ${Math.round(distance)} blocks away.`);
+            log(bot, `Unable to reach ${x}, ${y}, ${z}, you are ${Math.round(distance)} blocks away. ${describeStuck(bot)}`);
             return false;
         }
     } catch (err: unknown) {
         const msg: string = err instanceof Error ? err.message : String(err);
-        log(bot, `Pathfinding stopped: ${msg}.`);
+        log(bot, `Pathfinding stopped: ${msg}. ${describeStuck(bot)}`);
         clearInterval(progressInterval);
         return false;
     }
