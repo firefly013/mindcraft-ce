@@ -1,16 +1,31 @@
 # mindcraft-ce → pi-durable 迁移设计
 
-> 状态：设计已定，PoC 已验证，尚未改动仓库代码。
+> 状态：P1–P7 已完成并通过门禁（工作区 `migrate/pi-durable`）；`agent.ts` 切换与压缩接线待做。
 > 目标运行时：`@earendil-works/pi-durable` **1.0.4**（精确锁定，不用 caret）、`@earendil-works/pi-ai` **1.0.4**、`@earendil-works/chord` **1.0.4**。
 
-## 0. 决策摘要
+## 0. 为什么迁移：三条硬约束
+
+这不是"换个框架"，是被三条约束逼出来的。记录下来，免得以后被改回去。
+
+| 要求 | MCP | 给某个 Agent 写插件 | 库（pi-durable） |
+|---|---|---|---|
+| **Live State 每次调用的最后注入，且不进上下文** | ✗ 只能做成工具；一调就留在上下文里；不提供工具模型就不知道自己的状态 | ✓ | ✓ `beforeRequest` hook |
+| **控制上下文压缩** | ✗ 完全碰不到 | ✓ | ✓ `CompactionTask` + `CompactionPolicy` |
+| **不绑死在某个特定 Agent 上** | ✓ 但代价是上面两条全丢 | ✗ 只能放那一个 Agent 上用 | ✓ 是库，不是 Agent |
+
+所以路走成了：**先试 MCP → 不行（够不到上下文）；再试写插件 → 不行（绑死）；自己写框架 → 原型失败**；最后回头改造本项目，把 deliberative 层换成 pi-durable。
+
+**"注入但不进上下文"是本项目的核心诉求**，已有测试钉住：尾巴是最后一条 user 消息，同时 `JSON.stringify(entries)` 里搜不到它（`tests/runtime_loop.test.ts`）。
+
+## 0.1 决策摘要
 
 | 问题 | 决定 |
 |---|---|
 | 迁移深度 | 全量替换 deliberative 层（对话/历史/压缩/ReAct/工具/子代理/持久化） |
-| 强制工具调用 | 改用 pi-durable 原生 `control: { terminate: true }`，放弃 `tool_choice: 'required'` |
+| **回合语义** | **自然的 ReAct 工具循环**：不挂 `control.terminate`、**不要 `Finish`**、不强制工具调用。run 的结束就是"模型不再调工具" |
+| **L1–L5 事件** | 映射到原生原语：L1/L2 = `write`；L3 = `steer`（引导）；L4 = `abort` + `submit`；L5 = `abort` + 保命反射 + 恢复 |
 | 存储拓扑 | 每个 bot 进程一个 SQLite：`bots/<profile.name>/session.db` |
-| 反射层 | `scheduler.ts` / `emergency.ts` / `edges.ts` / `live_state.ts` **冻结**，不进 durable 路径 |
+| 反射层 | `edges.ts` / `emergency.ts` / `live_state.ts` 保留在仓库内；`scheduler.ts` 的分发机制由原生原语取代 |
 | 双通道 | 保留：散文 = `pi.assistant`；Say = 自定义 entry `mc.say` |
 
 ## 1. 已验证的环境事实
