@@ -284,9 +284,11 @@ export const DETECTORS: readonly Detector[] = Object.freeze([
   { type: 'bot.hunger_low', level: 3, kind: 'all',
     fire: (s) => lte(s.food, 6),
     clear: (s) => gte(s.food, 12) },
-  { type: 'bot.oxygen_low', level: 3, kind: 'all',
-    fire: (s) => lte(s.oxygen, 5),
-    clear: (s) => gte(s.oxygen, 15) },
+  // **删掉 bot.oxygen_low**：mineflayer 的 oxygenLevel 在 1.20.6 上取不到
+  // air_supply，读数是垃圾——模型真机报过"干燥草地报 oxygen=1"、"-1"、"干燥洞窟里 0"，
+  // 全是假警报，白白唤醒请求。水下安全已经由 world.water.drowning（submerged：
+  // 头+脚都是水）覆盖，不需要这个坏字段再报一遍。
+  // （原来这里是：{ type: 'bot.oxygen_low', ... fire: lte(s.oxygen, 5) ... }）
   {
     // 「身边有敌对生物」是**一类事实**，不是"第 14500 号僵尸"。
     // 和 `hostile_far` 同样的毛病：按实体 id 做边缘，一晚上能报十几条，
