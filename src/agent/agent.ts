@@ -14,6 +14,7 @@ import { STOP_WORDS, shouldEmitHurt, isStuck, isHeartbeatDue } from './edges.js'
 import { AgentLoop } from './loop.js';
 import type { LoopModelResponse, LoopRunner, LoopToolResult } from './loop.js';
 import { sampleLiveState, renderLiveState } from './live_state.js';
+import type { SampleContext } from './live_state.js';
 import { runEmergency, shouldTriggerEmergency, FOOD_VALUE } from './emergency.js';
 import type { ThreatEntity } from './emergency.js';
 import { validateFeedback, buildFeedbackEntry, appendFeedback } from './feedback.js';
@@ -509,16 +510,26 @@ export class Agent {
      * 否则模型会看到两份互相矛盾的状态。
      */
     liveStateText(): string {
+        return renderLiveState(sampleLiveState(this.sampleContext()));
+    }
+
+    /**
+     * 感知采样的**唯一入口**。
+     *
+     * 尾巴（每轮现采、不进上下文）与 `stats`（模型主动拍、永久留存）都从这里
+     * 取数——两处绝不能各采各的，否则模型会看到两份互相矛盾的状态。
+     * 迁移到 pi-durable 后，它同时被 `openBotWiring` 的 `sample` 回调复用。
+     */
+    sampleContext(): SampleContext {
         const task = this.task as { goal?: unknown } | null;
         const plan = this.plan.snapshot();
-        const live = sampleLiveState({
+        return {
             bot: this.bot,
             vision: this.vision_interpreter,
             goal: plan.goal ?? (typeof task?.goal === 'string' ? task.goal : null),
             todos: plan.todos,
             currentAction: this.actions.currentActionLabel,
-        });
-        return renderLiveState(live);
+        };
     }
 
     private async modelCall(liveText: string, tools: unknown, image?: string | null): Promise<LoopModelResponse> {
