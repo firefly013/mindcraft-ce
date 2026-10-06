@@ -25,7 +25,7 @@
         "mineflayer-armor-manager": "2.0.1",
         "mineflayer-auto-eat": "5.0.3",
         "mineflayer-collectblock": "1.6.0",
-        "mineflayer-pathfinder": "2.4.5",
+        "mineflayer-pathfinder": "github:PrismarineJS/mineflayer-pathfinder#d773d15ff1bb271090122b3c7106a519a68bbbd9",
         "node-canvas-webgl": "0.3.0",
         "open": "11.0.0",
         "openai": "6.48.0",

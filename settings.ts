@@ -43,9 +43,7 @@ const settings: Settings = {
     "render_bot_view": false, // show bot's view in browser at localhost:3000, 3001...
 
     "allow_vision": true, // 每轮现拍示意图进 Live State 主循环（粗略重绘，大概看布局）
-    "blocked_actions" : ["!checkBlueprint", "!checkBlueprintLevel", "!getBlueprint", "!getBlueprintLevel",
-        // Baritone 试运行：移动/扫描/看向走 Baritone 命令，重复的原生工具暂时禁用。
-        "!goToPlayer", "!followPlayer", "!searchForBlock", "!searchForEntity", "!moveAway", "!lookAtPlayer", "!lookAtPosition"] , // tools to disable.
+    "blocked_actions" : ["!checkBlueprint", "!checkBlueprintLevel", "!getBlueprint", "!getBlueprintLevel"] , // tools to disable.
     "cheat": false, // allow server-cheat shortcuts (/tp, /setblock, instant place) in skills. Requires OP.
 
     "max_messages": 15, // max number of messages to keep in context

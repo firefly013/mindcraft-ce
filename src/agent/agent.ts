@@ -11,9 +11,6 @@ import { isHostile } from '../utils/mcdata.js';
 import { Scheduler, KIND, LEVEL } from './scheduler.js';
 import type { Kind, Level } from './scheduler.js';
 import { STOP_WORDS, shouldEmitHurt, isStuck, isHeartbeatDue } from './edges.js';
-import { attachBaritone } from './baritone_loader.js';
-import type { BaritoneHandle } from './baritone_loader.js';
-import { createBaritoneTool } from './baritone_tool.js';
 import { AgentLoop } from './loop.js';
 import type { LoopModelResponse, LoopRunner, LoopToolResult } from './loop.js';
 import { sampleLiveState, renderLiveState } from './live_state.js';
@@ -58,7 +55,6 @@ export class Agent {
     loop!: AgentLoop;
     loopLog: Array<{ kind: string; level: number; payload: unknown }> = [];
     plan: PlanStore = new PlanStore();
-    baritone: BaritoneHandle | null = null;
     private lastHurtEmitAt: number = 0;
     private lastCollectEmitAt: number = 0;
     private stuckPos: string | null = null;
@@ -165,8 +161,6 @@ export class Agent {
                 addBrowserViewer(this.bot, count_id);
                 console.log('Initializing vision intepreter...');
                 this.vision_interpreter = new VisionInterpreter(this, settings.allow_vision);
-                console.log('Attaching baritone...');
-                this.baritone = await attachBaritone(this.bot);
 
                 // wait for a bit so stats are not undefined
                 await new Promise<void>((resolve) => setTimeout(resolve, 1000));
@@ -283,13 +277,6 @@ export class Agent {
         this.bot.collectBlock.cancelTask();
         this.bot.pathfinder.stop();
         stopPvp(this.bot);
-        // 通用刹车必须包含 Baritone：保命逃亡时它在抢方向盘，
-        // 掐不死它，L5 的 fleeTo 就是白定。
-        try {
-            this.baritone?.getCommandManager?.()?.execute('forcecancel');
-        } catch (err: unknown) {
-            console.warn('baritone forcecancel failed:', err instanceof Error ? err.message : String(err));
-        }
     }
 
     clearBotLogs(): void {
@@ -357,28 +344,10 @@ export class Agent {
                 `Todos: ${snap.todos.length > 0 ? snap.todos.join('; ') : 'none'}.`;
             return Promise.resolve({ status: 'completed', data: summary } as LoopToolResult);
         });
-        // Baritone：一条机器人命令行。查询直返，动作占通道后台盯，
-        // 控制命令被 handler 拦截（停机走 Stop）。
-        this.toolHandlers.set(
-            'Baritone',
-            createBaritoneTool({
-                getBaritone: () => this.baritone,
-                scheduler: this.scheduler,
-                notify: (payload: { call: string; result: LoopToolResult }): void => {
-                    const verdict = this.loop.notify({ kind: KIND.TOOL, level: LEVEL.WAKE, payload });
-                    void this.loop.handleDecision(verdict.decision);
-                },
-            }),
-        );
     }
 
-    /** 全部停下：Baritone 任务先掐，动作停、日志清、续跑取消、回到 idle。 */
+    /** 全部停下：动作停、日志清、续跑取消、回到 idle。 */
     private async fullStop(): Promise<void> {
-        try {
-            this.baritone?.getCommandManager?.()?.execute('forcecancel');
-        } catch (err: unknown) {
-            console.warn('baritone forcecancel failed:', err instanceof Error ? err.message : String(err));
-        }
         await this.actions.stop();
         this.clearBotLogs();
         this.actions.cancelResume();

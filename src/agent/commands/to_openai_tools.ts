@@ -116,21 +116,6 @@ export function getOpenAITools(agent: any): OpenAITool[] {
             },
         },
     });
-    tools.push({
-        type: 'function',
-        function: {
-            name: 'Baritone',
-            description: td('Baritone'),
-            parameters: {
-                type: 'object',
-                properties: {
-                    command: { type: 'string', description: tp('Baritone', 'command') },
-                },
-                required: ['command'],
-                additionalProperties: false,
-            },
-        },
-    });
     return tools;
 }
 
@@ -177,21 +162,6 @@ export function validateUpdatePlan(args: unknown): ToolValidation {
     return { ok: true };
 }
 
-/** Baritone 形状校验：command 必填非空字符串（具体命令名由 handler 再判）。 */
-export function validateBaritone(args: unknown): ToolValidation {
-    const command = (args as { command?: unknown } | null)?.command;
-    if (typeof command !== 'string' || command.trim() === '') {
-        return { ok: false, code: 'BAD_ARGS', errors: ['$.command: expected non-empty string'] };
-    }
-    const given = (args ?? {}) as Record<string, unknown>;
-    const errors: string[] = [];
-    for (const key of Object.keys(given)) {
-        if (key !== 'command') errors.push(`$: unknown property '${key}'`);
-    }
-    if (errors.length > 0) return { ok: false, code: 'BAD_ARGS', errors };
-    return { ok: true };
-}
-
 /** 兼容检查：tool 名是否存在（不带 ! 也行） */
 export function toolExists(toolName: string): boolean {
     if (CONTROL_TOOLS.has(toolName)) return true;
@@ -229,7 +199,6 @@ function checkParamType(type: string, value: unknown, path: string): string | nu
 export function validateToolCall(toolName: string, args: unknown): ToolValidation {
     if (toolName === 'Finish' || toolName === 'Stop' || toolName === 'Say') return { ok: true };
     if (toolName === 'UpdatePlan') return validateUpdatePlan(args);
-    if (toolName === 'Baritone') return validateBaritone(args);
     const commandName = toolName.startsWith('!') ? toolName : '!' + toolName;
     const command = commandMap[commandName];
     if (!command) return { ok: false, code: 'UNKNOWN_TOOL', errors: [`No such tool: ${toolName}.`] };
@@ -259,8 +228,7 @@ export function validateToolCall(toolName: string, args: unknown): ToolValidatio
 const actionNames = new Set(actionsList.map((c) => stripBang(c.name)));
 
 /** 控制类工具（循环/说话/计划/机器人命令），走注册 handler，不占身体通道。 */
-const CONTROL_TOOLS = new Set(['Finish', 'Stop', 'Say', 'UpdatePlan', 'Baritone']);
-
+const CONTROL_TOOLS = new Set(['Finish', 'Stop', 'Say', 'UpdatePlan']);
 /**
  * 该工具是否占用身体动作通道。动作类工具一次只能跑一个
  * （忙时拒绝，不排队）；查询类只读不占；控制类走 handler。
@@ -301,7 +269,7 @@ export function getToolDocs(agent: any): string {
         }
     }
     // 控制类工具不在 commandList 里，单独列出（与 getOpenAITools 追加的一致）。
-    for (const name of ['Finish', 'Stop', 'Say', 'UpdatePlan', 'Baritone']) {
+    for (const name of ['Finish', 'Stop', 'Say', 'UpdatePlan']) {
         docs += `${name}: ${td(name)}\n`;
     }
     return docs;
