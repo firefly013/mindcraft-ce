@@ -32,21 +32,33 @@ function pageFile(dir: string, page: number): string {
   return join(dir, `request-${String(page).padStart(3, '0')}.log`);
 }
 
-/** 把一条消息压成日志里的一行（多行内容缩进，别把日志撑散）。 */
-function renderMessage(message: Message): string {
-  const role = String(message.role);
-  const content = message.content;
-  let body: string;
-  if (typeof content === 'string') {
-    body = content;
-  } else {
-    try {
-      body = JSON.stringify(content);
-    } catch {
-      body = '[unserializable]';
-    }
+/** 一条消息的正文（多行缩进，别把日志撑散）。 */
+function contentText(content: unknown): string {
+  if (typeof content === 'string') return content.replace(/\n/g, '\n  ');
+  try {
+    return JSON.stringify(content) ?? 'null';
+  } catch {
+    return '[unserializable]';
   }
-  return `[${role}] ${body.replace(/\n/g, '\n  ')}`;
+}
+
+/** 把一条消息压成日志里的几行。 */
+function renderMessage(message: Message): string {
+  const lines: string[] = [`[${String(message.role)}] ${contentText(message.content)}`];
+  // 系统消息的提示词正文在 `sections` 里，**不在 `content`**：pi-ai 的
+  // `SystemMessage` 只有 `content`（基础提示）+ `sections`（具名段落，按顺序
+  // 逐字渲染在后面）。只打 `content` 会让日志里出现一个空的 `[system]`，
+  // D3（日志 = 模型实际收到的消息列）就不成立了。
+  const sections = (message as { sections?: Record<string, string | null> }).sections;
+  for (const [key, value] of Object.entries(sections ?? {})) {
+    lines.push(`  [section:${key}]`);
+    if (value == null) {
+      lines.push('    (removed)');
+      continue;
+    }
+    for (const line of value.split('\n')) lines.push(`    ${line}`);
+  }
+  return lines.join('\n');
 }
 
 export interface RequestLogOptions {

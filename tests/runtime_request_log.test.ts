@@ -114,6 +114,31 @@ describe('D3：日志 = 模型实际收到的消息列', () => {
     expect(text).toContain('[user] 第一行\n  第二行');
   });
 
+  it('系统消息的提示词在 `sections` 里，必须渲染出来', () => {
+    // pi-ai 的 SystemMessage 只有 `content`（基础提示）+ `sections`（具名段落）。
+    // 系统提示词走的是 section，所以只打 content 会得到一个空的 [system]——
+    // 真机日志里就是这么暴露的（D3 不成立）。
+    const dir = tempDir();
+    const sink = sinkIn(dir);
+    sink.writeRequest([
+      { role: 'system', content: '', sections: { system: '你是 $NAME。\n第二行' } } as unknown as Message,
+      user('你好'),
+    ]);
+    const text = readFileSync(sink.file, 'utf8');
+    expect(text).toContain('[section:system]');
+    expect(text).toContain('你是 $NAME。');
+    expect(text).toContain('    第二行');
+  });
+
+  it('section 被移除时日志里也看得出来（null）', () => {
+    const dir = tempDir();
+    const sink = sinkIn(dir);
+    sink.writeRequest([
+      { role: 'system', content: '', sections: { system: null } } as unknown as Message,
+    ]);
+    expect(readFileSync(sink.file, 'utf8')).toContain('(removed)');
+  });
+
   it('内部字段不进日志（messages 已是模型形状）', () => {
     const dir = tempDir();
     const sink = sinkIn(dir);

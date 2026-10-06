@@ -126,6 +126,19 @@ async function until(predicate: () => boolean, timeoutMs = 3_000): Promise<void>
 }
 
 describe('装配层全栈', () => {
+  it('系统提示词真的发给了模型（在 system 消息的 sections 里）', async () => {
+    // 这条缺口是真机冒烟抓出来的：请求日志里只有一个空的 [system]。
+    // pi-ai 的 SystemMessage 把基础提示放 `content`、把具名段落放 `sections`，
+    // 而系统提示词走的是 section——所以断言必须读 `sections`。
+    const h = await openHarness();
+    await (await h.wiring.runtime.submit('你好')).wait(ctx);
+
+    const system = h.seen[0]?.find((message) => message['role'] === 'system');
+    expect(system).toBeDefined();
+    expect(JSON.stringify(system?.['sections'])).toContain('SYS');
+    await h.wiring.close();
+  });
+
   it('尾巴带 live state，但**不落 transcript**（核心诉求）', async () => {
     const h = await openHarness();
     await (await h.wiring.runtime.submit('看看我')).wait(ctx);
