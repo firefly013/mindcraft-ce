@@ -49,6 +49,14 @@ export interface LiveHeld {
   armor: string[];
   /** 主手剩余耐久比例 0~1；空手或无耐久物品为 null。 */
   mainHandDurability: number | null;
+  /**
+   * 主手耐久的**原始读数**（used / max），用来诊断。
+   *
+   * 模型报过"耐久剩余 0%"但工具明显没坏（挖了 36 格），而 `prismarine-item` 的
+   * `durabilityUsed` 是 getter，读不到 NBT 时会退化成 0 或 max，容易把"读不到"
+   * 说成"快报废"。把两个原始数摊开，一眼能分清是读数错了还是真坏了。
+   */
+  mainHandDurabilityRaw: string | null;
 }
 
 export interface LiveBackpack {
@@ -345,7 +353,7 @@ export function sampleLiveState(ctx: SampleContext): LiveState {
       onGround: null,
       effects: [],
     },
-    held: { mainHand: null, offHand: null, armor: [], mainHandDurability: null },
+    held: { mainHand: null, offHand: null, armor: [], mainHandDurability: null, mainHandDurabilityRaw: null },
     backpack: { freeSlots: null, items: [] },
     position: { x: null, y: null, z: null, yaw: null, pitch: null, dimension: null, biome: null, speed: null },
     environment: { timeOfDay: null, weather: 'Unknown', light: null, lightConfidence: 'unknown', day: null },
@@ -398,6 +406,10 @@ export function sampleLiveState(ctx: SampleContext): LiveState {
         (s): s is string => s != null && s !== 'null',
       ),
       mainHandDurability: durabilityFraction(usedDurability, maxDurability),
+      mainHandDurabilityRaw:
+        usedDurability != null || maxDurability != null
+          ? `used=${usedDurability ?? '?'} max=${maxDurability ?? '?'}`
+          : null,
     };
 
     const packItems: string[] = [];
@@ -722,7 +734,7 @@ export function renderLiveState(s: LiveState): string {
   );
   const h = s.held;
   lines.push(
-    `Held: main ${h.mainHand ?? 'empty'}${h.mainHandDurability != null ? ` (耐久剩余 ${Math.round(h.mainHandDurability * 100)}%)` : ''} ` +
+    `Held: main ${h.mainHand ?? 'empty'}${h.mainHandDurability != null ? ` (耐久剩余 ${Math.round(h.mainHandDurability * 100)}%${h.mainHandDurabilityRaw != null ? `，原始 ${h.mainHandDurabilityRaw}` : ''})` : ''} ` +
       `off ${h.offHand ?? 'empty'} armor ${h.armor.length > 0 ? h.armor.join('/') : 'none'}`,
   );
   lines.push(
