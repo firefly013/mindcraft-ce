@@ -111,7 +111,7 @@ describe('Say isolation', () => {
     const tools = getOpenAITools({ blocked_actions: [] });
     expect(tools.map((t) => t.function.name)).toContain('UpdatePlan');
     const docs = getToolDocs({ blocked_actions: [] });
-    for (const name of ['Finish', 'Stop', 'Say', 'UpdatePlan']) {
+    for (const name of ['Finish', 'Stop', 'Say', 'UpdatePlan', 'Feedback']) {
       expect(docs).toContain(`${name}:`);
     }
   });

@@ -2,6 +2,7 @@ import { actionsList } from './actions.js';
 import type { AgentCommand, CommandParamDef } from './actions.js';
 import { queryList } from './queries.js';
 import { td, tp } from '../../prompts.js';
+import { validateFeedback as validateFeedbackArgs } from '../feedback.js';
 import type { OpenAITool } from '../../types/common.js';
 
 const commandList: AgentCommand[] = queryList.concat(actionsList);
@@ -116,6 +117,22 @@ export function getOpenAITools(agent: any): OpenAITool[] {
             },
         },
     });
+    tools.push({
+        type: 'function',
+        function: {
+            name: 'Feedback',
+            description: td('Feedback'),
+            parameters: {
+                type: 'object',
+                properties: {
+                    title: { type: 'string', description: tp('Feedback', 'title') },
+                    body: { type: 'string', description: tp('Feedback', 'body') },
+                },
+                required: ['title', 'body'],
+                additionalProperties: false,
+            },
+        },
+    });
     return tools;
 }
 
@@ -196,9 +213,17 @@ function checkParamType(type: string, value: unknown, path: string): string | nu
  * 都变成带路径的 verdict，而不是抛错。null 视为"没给"：
  * 有 optional/default 的可缺，否则按缺失算。
  */
+/** Feedback 形状校验：title/body 必填非空字符串（错误带路径）。 */
+export function validateFeedback(args: unknown): ToolValidation {
+    const checked = validateFeedbackArgs(args);
+    if (checked.ok) return { ok: true };
+    return { ok: false, code: 'BAD_ARGS', errors: checked.errors };
+}
+
 export function validateToolCall(toolName: string, args: unknown): ToolValidation {
     if (toolName === 'Finish' || toolName === 'Stop' || toolName === 'Say') return { ok: true };
     if (toolName === 'UpdatePlan') return validateUpdatePlan(args);
+    if (toolName === 'Feedback') return validateFeedback(args);
     const commandName = toolName.startsWith('!') ? toolName : '!' + toolName;
     const command = commandMap[commandName];
     if (!command) return { ok: false, code: 'UNKNOWN_TOOL', errors: [`No such tool: ${toolName}.`] };
@@ -227,8 +252,8 @@ export function validateToolCall(toolName: string, args: unknown): ToolValidatio
 
 const actionNames = new Set(actionsList.map((c) => stripBang(c.name)));
 
-/** 控制类工具（循环/说话/计划/机器人命令），走注册 handler，不占身体通道。 */
-const CONTROL_TOOLS = new Set(['Finish', 'Stop', 'Say', 'UpdatePlan']);
+/** 控制类工具（循环/说话/计划/反馈），走注册 handler，不占身体通道。 */
+const CONTROL_TOOLS = new Set(['Finish', 'Stop', 'Say', 'UpdatePlan', 'Feedback']);
 /**
  * 该工具是否占用身体动作通道。动作类工具一次只能跑一个
  * （忙时拒绝，不排队）；查询类只读不占；控制类走 handler。
@@ -269,7 +294,7 @@ export function getToolDocs(agent: any): string {
         }
     }
     // 控制类工具不在 commandList 里，单独列出（与 getOpenAITools 追加的一致）。
-    for (const name of ['Finish', 'Stop', 'Say', 'UpdatePlan']) {
+    for (const name of ['Finish', 'Stop', 'Say', 'UpdatePlan', 'Feedback']) {
         docs += `${name}: ${td(name)}\n`;
     }
     return docs;

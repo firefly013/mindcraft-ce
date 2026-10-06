@@ -16,6 +16,7 @@ import type { LoopModelResponse, LoopRunner, LoopToolResult } from './loop.js';
 import { sampleLiveState, renderLiveState } from './live_state.js';
 import { runEmergency, shouldTriggerEmergency, FOOD_VALUE } from './emergency.js';
 import type { ThreatEntity } from './emergency.js';
+import { validateFeedback, buildFeedbackEntry, appendFeedback } from './feedback.js';
 import { PlanStore } from './plan.js';
 import { createEdgeWatcher, resolvePriority, schedulerLevelFor, snapshotFromBot } from './edges.js';
 import { createRequestLog } from './requestLog.js';
@@ -343,6 +344,37 @@ export class Agent {
                 `Plan updated. Goal: ${snap.goal ?? 'none'}. ` +
                 `Todos: ${snap.todos.length > 0 ? snap.todos.join('; ') : 'none'}.`;
             return Promise.resolve({ status: 'completed', data: summary } as LoopToolResult);
+        });
+        // Feedback：模型提使用意见，自动附计划快照和历史尾部摘要，
+        // 落盘 bots/<name>/feedback.jsonl。写失败显式拒绝——
+        // 意见被悄悄吞掉是这条工具唯一不能发生的事。
+        this.toolHandlers.set('Feedback', (args: unknown) => {
+            const checked = validateFeedback(args);
+            if (!checked.ok) {
+                return Promise.resolve({
+                    status: 'rejected',
+                    code: 'BAD_ARGS',
+                    reason: checked.errors?.join('; ') ?? 'Bad arguments.',
+                } as LoopToolResult);
+            }
+            const a = args as { title: string; body: string };
+            const entry = buildFeedbackEntry(
+                { title: a.title, body: a.body },
+                {
+                    plan: this.plan.snapshot(),
+                    historyTail: this.history.getHistory().map((t) => ({ role: t.role, content: t.content })),
+                },
+            );
+            try {
+                const file = appendFeedback(`./bots/${this.name}`, entry);
+                return Promise.resolve({ status: 'completed', data: `反馈已记录到 ${file}，谢谢，接着干活。` } as LoopToolResult);
+            } catch (err: unknown) {
+                return Promise.resolve({
+                    status: 'rejected',
+                    code: 'STORE_FAILED',
+                    reason: err instanceof Error ? err.message : String(err),
+                } as LoopToolResult);
+            }
         });
     }
 
