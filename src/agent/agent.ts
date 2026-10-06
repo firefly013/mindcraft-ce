@@ -143,20 +143,6 @@ export class Agent {
         console.log(this.name, 'logging into minecraft...');
         this.bot = initBot(this.name);
 
-        // 补上 minecraft-data 丢掉的 tag 信息（`#planks` 被写死成 oak_planks）——不补的话
-
-        // "有桦木板"会被判成"没有橡木板"，crafting_table / chest / shield 全都做不出来
-
-        // （模型真机验收报的）。mineflayer 读的是它自己的 registry。
-
-        const addedRecipes = expandTagRecipes(this.bot?.registry);
-
-        if (addedRecipes > 0) {
-
-            this.log.with('lifecycle').info({ event: 'tag-recipes-expanded', added: addedRecipes });
-
-        }
-
 
         // Connection Handler
         const onDisconnect = (event: string, reason: unknown): void => {
@@ -207,6 +193,12 @@ export class Agent {
 
                 // wait for a bit so stats are not undefined
                 await new Promise<void>((resolve) => setTimeout(resolve, 1000));
+
+                // **补 tag 配方必须在这里做**：`bot.registry` 是登录之后才加载的，
+                // 之前放在 initBot 后面立刻调用，那时 registry 还是空的，补丁等于没打
+                // （模型真机报"木棍还是做不出来（2 birch_planks → 4 stick 失败）"）。
+                const addedRecipes = expandTagRecipes(this.bot?.registry);
+                this.log.with('lifecycle').info({ event: 'tag-recipes-expanded', added: addedRecipes });
 
                 console.log(`${this.name} spawned.`);
                 this.log.with('lifecycle').info({ event: 'spawned', bot: this.name });

@@ -344,7 +344,21 @@ async function transferWithContainer(
 
 
     }
-    return { ok: moved > 0, detail: moved > 0 ? `挪了 ${name}×${moved}` : `没能挪动 ${name}` };
+    // **存完把箱子内容读出来**。模型真机报过"回执说挪了 cobblestone×12，开箱一看
+    // 没进去"——光看自己的计数分不清"真挪了"还是"窗口索引读错了"。把箱子实际内容
+    // 摊开，一眼就能判：挪了却不在箱子里 = 索引/API 用错了，不是模型操作错。
+    const boxNow: string[] = [];
+    for (let i = boxStart; i < Math.min(boxEnd, container.slots?.length ?? 0); i++) {
+      const it = container.slots?.[i] as { name?: string; count?: number } | null | undefined;
+      if (it?.name != null) boxNow.push(`${it.name}×${it.count ?? 1}`);
+    }
+    const boxText = boxNow.length > 0 ? boxNow.join('、') : '（空）';
+    return {
+      ok: moved > 0,
+      detail:
+        (moved > 0 ? `挪了 ${name}×${moved}` : `没能挪动 ${name}`) +
+        `；箱子现在有：${boxText}`,
+    };
   } catch (error: unknown) {
     return { ok: false, detail: `挪物品时出错：${error instanceof Error ? error.message : String(error)}` };
   } finally {
