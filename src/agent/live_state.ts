@@ -733,8 +733,11 @@ export function renderLiveState(s: LiveState): string {
   const lines: string[] = [];
   const b = s.body;
   lines.push(
+    // oxygen 故意不显示：mineflayer 的 oxygenLevel 在 1.20.6 上取不到 air_supply，
+    // 会出现 -1、"干燥洞窟里 0"这种不可能的读数（模型真机报过），摆出来只会误导判断。
+    // 水下安全改用 submerged（头+脚都是水）那条独立信号。
     `Body: health ${b.health ?? UNKNOWN} food ${b.food ?? UNKNOWN} saturation ${b.saturation ?? UNKNOWN} ` +
-      `oxygen ${b.oxygen ?? UNKNOWN} xp ${b.xpLevel ?? UNKNOWN} pose ${b.pose ?? UNKNOWN} ` +
+      `xp ${b.xpLevel ?? UNKNOWN} pose ${b.pose ?? UNKNOWN} ` +
       `onGround ${b.onGround ?? UNKNOWN} effects ${b.effects.length > 0 ? b.effects.join(', ') : 'none'}`,
   );
   const h = s.held;

@@ -429,7 +429,12 @@ async function runSkill(
   const after = read();
   const delta = (after.startsWith(before) ? after.slice(before.length) : after).trim();
   if (ok === timedOut) {
-    lines.push(step(`${failText}：**超时**（${TOOL_TIMEOUT_MS / 1000} 秒没返回），已放弃并释放身体通道`));
+    lines.push(
+      step(
+        `${failText}：**超时**（${TOOL_TIMEOUT_MS / 1000} 秒没返回），已释放身体通道。` +
+          '注意：**超时 ≠ 没做成**——熔炉这类异步动作常常已经投料成功、在后台继续跑（模型真机验证过：回执超时，但铁锭后来一个个到账）。先看一眼实际状态再决定要不要重试，别盲目重发。',
+      ),
+    );
     if (delta !== '') {
       for (const line of delta.split('\n')) {
         if (line.trim() !== '') lines.push(`    ${line.trim()}`);
@@ -594,8 +599,14 @@ export const interactList: AgentCommand[] = [
 
           try {
 
+            // **blockAt 可能返回 null**（那一格没加载/读不到），直接传给 openContainer 会
+            // 抛 mineflayer 的 'containerToOpen is neither a block nor an entity'——模型真机
+            // 报过这条：两条路径都打不开炉子。先自己判空，报一句人话。
             const furnaceBlock = agent.bot.blockAt?.(new Vec3(located.x, located.y, located.z));
-
+            if (furnaceBlock == null) {
+              lines.push(step(`读不到 (${located.x},${located.y},${located.z}) 那一格——区块可能没加载，或者坐标偏了。`));
+              return renderReport(lines);
+            }
             const container: any = await agent.bot.openContainer(furnaceBlock);
 
             lines.push(step('打开看了炉子里面'));
