@@ -313,13 +313,45 @@ pi-ai 额外  stream:true, stream_options:{include_usage:true}, store:false  ←
 
 **门禁**：`typecheck` 0 / `lint` 0 / **32 文件 452 测试全绿** / 覆盖率 100% / `build` 0 / `ALL PROMPT REFS OK`。
 
-### 仍未接线：最后的统一切换
+### P6 已完成（抢占桥）
 
-`BotRuntime` + 52 个工具 + 感知/状态适配器都已就绪并通过门禁，但 `agent.ts` / `prompter.ts` **仍走旧路径**。剩下的是最大也最险的一块：
+新增：
 
-1. **agent.ts 切换**：把 `AgentLoop` / `History` / `Prompter` 换成 `BotRuntime`，`assembleContext` 换成 `composeLiveTail`，`routeResponse` 作为 `onSay` 注入（**不重写**，避免与 `only_chat_with` / `chat_ingame` 等既有逻辑漂移）。
-2. **抢占桥**：反射层与 deliberative 层之间是**同步 Verdict 返回值**协议（无事件总线），只有 L4/L5 作废在途回合。桥的形态是「同步判定 → 异步 `conversation.abort()` / `whenBusy:'steer'`」，必须在 P3 的运行时上单独验证，不能假设它等价于旧的 `unsee()` + `requestId` 比对。
-3. **压缩接线**：`CompactionTask` + `CompactionPolicy` 取代 `compaction.ts`，并按 pi-ai 目录的真实 `contextWindow`（1_000_000）修正阈值——旧实现回退 128_000，压缩线算错 8.7 倍。
+| 文件 | 作用 |
+|---|---|
+| `src/runtime/preemption.ts` | `PreemptionBridge`：同步 Verdict → 异步会话操作 |
+| `tests/runtime_preemption.test.ts` | 11 个测试（**真实** `Scheduler` + 假 run 句柄） |
+
+**要解决的问题**：`Scheduler.pushEvent()` 是**同步**的，pi-durable 的 `submit()`/`abort()` 是**异步**的；旧循环靠同步返回值 + 一个 `requestId` 比对作废在途响应（`loop.ts:142`）。桥必须做到「同步判定 → 异步动作」，且**异步动作不能阻塞判定**。
+
+**语义映射（逐条对照旧实现）**：
+
+| verdict | 新行为 |
+|---|---|
+| `stored`（L1/L2 或 emergency 锁定） | 什么都不做 |
+| `start`（L3 空闲 / L4 空闲） | `startRun()` |
+| `queued`（L3 忙） | **什么都不做**——在途 run 结束时 `finishRequest()` 因存在未见的 L3+ 事件回 `start`，由那条路径续跑（这就是"搭车"的落点） |
+| `preempt`（L4 忙） | `abortRun()` → `startRun()` |
+| `emergency`（L5） | `abortRun()` → `onEmergency()`，**不**开 run（紧急反射绕过模型） |
+
+**作废在途响应的落点**：旧实现比对 `describe().currentRequestId !== begun.requestId`；这里的等价物是 `current.requestId !== requestId`——被抢占那一轮结束时不再 `finishRequest`。双保险：即使时序错开让它真被调到，`pushEvent(preempt)` 已把 `currentRequestId` 清零，只会得到 `stale`。
+
+**验证到的三条关键语义**（都是载荷测试，不是"看起来对"）：
+
+1. `notify()` 返回时**异步动作尚未执行**（断言 `runs` 为空）——证明判定没被阻塞。
+2. `preempt` 在在途 run 还跑着时插入，且新一轮带上了被 `unsee()` 退回的旧事件（`[{first:1},{urgent:2}]`）——**事件不丢**。
+3. 被抢占那轮的**迟到结束不会再开一轮**（断言 `runs` 仍为 2）——等价于旧实现的响应作废。
+
+**踩坑记录**：`settle()` 必须**循环**等待——链会在动作执行过程中被替换（一轮跑完发现还有未见的 L3+ 事件时追加下一轮），只 await 一次会漏掉后追加的工作。这是测试里最容易踩的陷阱，已在实现里注释说明。
+
+**门禁**：`typecheck` 0 / `lint` 0 / **33 文件 463 测试全绿** / 覆盖率 100% / `build` 0 / `ALL PROMPT REFS OK`。
+
+### 剩余：agent.ts 统一切换 + 压缩接线
+
+1. **agent.ts 切换**：把 `AgentLoop` / `History` / `Prompter` 换成 `BotRuntime` + `PreemptionBridge`，`assembleContext` 换成 `composeLiveTail`，`routeResponse` 作为 `onSay` 注入（**不重写**，避免与 `only_chat_with` / `chat_ingame` 等既有逻辑漂移）。
+   - **未决**：一轮 run 的 `submit()` 该提交什么内容？旧设计里每轮没有 user 消息——事件只进尾巴（`## 事件`），不进 transcript。若把事件当 user 消息提交，它们就会进 transcript 并被逐轮重放，与旧设计的分发/剪枝语义不同。这个选择需要单独定。
+2. **压缩接线**：`CompactionTask` + `CompactionPolicy` 取代 `compaction.ts`，并按 pi-ai 目录的真实 `contextWindow`（1_000_000）修正阈值——旧实现回退 128_000，压缩线算错 8.7 倍。
+
 
 
 
