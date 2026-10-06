@@ -294,9 +294,33 @@ pi-ai 额外  stream:true, stream_options:{include_usage:true}, store:false  ←
 
 **门禁**：`typecheck` 0 / `lint` 0 / **30 文件 439 测试全绿** / 覆盖率 100% / `build` 0 / `ALL PROMPT REFS OK`。
 
-### 仍未接线的部分（P5 起）
+### P5 已完成（感知注入 + 状态门面）
 
-`BotRuntime` + 52 个工具都已可用，但 `agent.ts` / `prompter.ts` **仍走旧路径**——双路径迁移。P5 接感知注入（`beforeRequest` 已在 P3 备好，需接 `sampleLiveState`/`renderLiveState`）与 Say 双通道的实际出口（游戏聊天/前端），P6 接压缩与文档，最后统一切换。
+新增：
+
+| 文件 | 作用 |
+|---|---|
+| `src/runtime/perception.ts` | `liveTailFromTexts`（纯拼装）/ `composeLiveTail`（接真实感知层） |
+| `src/runtime/state_access.ts` | `createStateAccess`：memory / places / plan 的读写门面 |
+| `tests/runtime_perception.test.ts` | 8 个测试 |
+| `tests/runtime_state_access.test.ts` | 5 个测试 |
+
+**拼装与旧实现逐字一致**（`agent.ts:462-488`）：`composeTail(renderEvents(events), memoryText, liveBlock)`，顺序 **事件 → 记忆摘要 → 世界快照**，空段丢弃，快照永远最后。`renderLiveState` 的文本是 token 与 prompt-cache 敏感契约，措辞不能顺手改。
+
+拆成两层是为了可测：`liveTailFromTexts` 是纯函数（顺序与省略规则全在这），`composeLiveTail` 只负责现采一次。测试里两者都覆盖，后者用 `{bot:{}}` 空桩也能安全采样（`sampleLiveState` 全防御性读取）。
+
+**状态门面约定"读不到就返回默认值"**，而不是 `undefined`——调用方不该到处判空。`plan()`/`places()` 返回**深拷贝**（与 `PlanStore.snapshot` 的既有约定一致），有测试证明改快照不反噬存储、`setPlan` 不共享调用方的 todos 对象。
+
+**门禁**：`typecheck` 0 / `lint` 0 / **32 文件 452 测试全绿** / 覆盖率 100% / `build` 0 / `ALL PROMPT REFS OK`。
+
+### 仍未接线：最后的统一切换
+
+`BotRuntime` + 52 个工具 + 感知/状态适配器都已就绪并通过门禁，但 `agent.ts` / `prompter.ts` **仍走旧路径**。剩下的是最大也最险的一块：
+
+1. **agent.ts 切换**：把 `AgentLoop` / `History` / `Prompter` 换成 `BotRuntime`，`assembleContext` 换成 `composeLiveTail`，`routeResponse` 作为 `onSay` 注入（**不重写**，避免与 `only_chat_with` / `chat_ingame` 等既有逻辑漂移）。
+2. **抢占桥**：反射层与 deliberative 层之间是**同步 Verdict 返回值**协议（无事件总线），只有 L4/L5 作废在途回合。桥的形态是「同步判定 → 异步 `conversation.abort()` / `whenBusy:'steer'`」，必须在 P3 的运行时上单独验证，不能假设它等价于旧的 `unsee()` + `requestId` 比对。
+3. **压缩接线**：`CompactionTask` + `CompactionPolicy` 取代 `compaction.ts`，并按 pi-ai 目录的真实 `contextWindow`（1_000_000）修正阈值——旧实现回退 128_000，压缩线算错 8.7 倍。
+
 
 
 
