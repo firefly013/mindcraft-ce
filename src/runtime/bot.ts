@@ -13,9 +13,11 @@
  * ```
  */
 import type { EntryDraft, Extension, ToolRegistration } from '@earendil-works/pi-durable';
+import { defineExtension } from '@earendil-works/pi-durable';
 import type { SampleContext } from '../agent/live_state.js';
 import { compactionPolicyFromProfile } from './compaction.js';
 import { EventIntake, type GameEvent } from './events.js';
+import { intakeLifecycleHook } from './log_hooks.js';
 import { composeLiveTail } from './perception.js';
 import { resolveProvider, type ResolvedProvider } from './provider.js';
 import { openBotRuntime, type BotRuntime } from './runtime.js';
@@ -89,6 +91,10 @@ export async function openBotWiring(options: BotWiringOptions): Promise<BotWirin
   const provider = options.provider ?? resolveProvider(options.profile);
   const compaction = compactionPolicyFromProfile(options.profile);
 
+  // 事件接入：**先建**（或接上调用方给的），这样下面那个请求生命周期的 hook
+  // 能闭包住它——L3 整流的闸门就挂在那里。
+  const intake = options.intake ?? new EventIntake();
+
   const runtime = await openBotRuntime({
     name: options.name,
     provider,
@@ -98,18 +104,22 @@ export async function openBotWiring(options: BotWiringOptions): Promise<BotWirin
     systemPrompt: options.systemPrompt,
     liveTail: () => composeLiveTail(options.sample()),
     tools: options.tools ?? [],
-    ...(options.extensions != null ? { extensions: options.extensions } : {}),
+    extensions: [
+      ...(options.extensions ?? []),
+      defineExtension({
+        name: 'intake-lifecycle',
+        hooks: [intakeLifecycleHook(intake)],
+      }),
+    ],
     ...(options.onSay != null ? { onSay: options.onSay } : {}),
   });
 
   const state = createStateAccess(runtime.session.harness, runtime.conversation.id);
 
-  // 事件接入：可以接一个**早就建好的** intake（Agent 就是这么用的——
-  // 运行时还没就绪时收到的事件会被暂存，attach 时按顺序补投）。
-  const intake = options.intake ?? new EventIntake();
+  // 接入层可以接一个**早就建好的** intake（Agent 就是这么用的——运行时还没
+  // 就绪时收到的事件会被暂存，attach 时按顺序补投）。
   intake.attach({
     submit: (text, whenBusy) => runtime.submit(text, { whenBusy }),
-    write: (event) => runtime.write(eventEntryDraft(event)),
     abort: () => runtime.abort(),
     rescue: options.rescue,
     ...(options.onEvent != null ? { onEvent: options.onEvent } : {}),

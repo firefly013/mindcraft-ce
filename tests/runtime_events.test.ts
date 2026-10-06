@@ -44,10 +44,6 @@ function makeIntake() {
       submits.push({ text, whenBusy });
       return Promise.resolve(fakeSubmission());
     },
-    write: (event) => {
-      writes.push(event);
-      return Promise.resolve(fakeSubmission());
-    },
     abort: () => {
       aborts.push(submits.length);
       return Promise.resolve();
@@ -79,41 +75,69 @@ function event(text: string, level: number): GameEvent {
   return { text, level: level as GameEvent['level'] };
 }
 
-describe('L1/L2：只记账，不唤醒', () => {
-  it('走 write，不 submit', async () => {
+describe('L1/L2：只进缓冲区，不唤醒', () => {
+  it('进"下一次要发的内容"，不 submit、不标记需要请求', async () => {
     const h = makeIntake();
     h.intake.notify(event('L1', LEVEL.UNUSED));
     h.intake.notify(event('L2', LEVEL.STATE));
     await h.intake.settle();
 
-    expect(h.writes.map((e) => e.text)).toEqual(['L1', 'L2']);
     expect(h.submits).toHaveLength(0);
+    expect(h.intake.pendingCount).toBe(2);
     expect(h.actions).toEqual(['L1:write', 'L2:write']);
   });
 
-  it('write 不进 outstanding——`abort()` 明确"queued writes stay"', async () => {
+  it('只有 L2 攒着时，请求结束也不发（搭下一次请求的车）', async () => {
     const h = makeIntake();
     h.intake.notify(event('L2', LEVEL.STATE));
     await h.intake.settle();
-    expect(h.intake.outstandingEvents).toHaveLength(0);
+    // 请求结束会检查"需要请求"标志——L2 没标记，所以什么都不发
+    h.intake.requestFinished();
+    await h.intake.settle();
+    expect(h.submits).toHaveLength(0);
+    expect(h.intake.pendingCount).toBe(1);
+  });
+
+  it('L2 搭 L3 的车：一起进同一批', async () => {
+    const h = makeIntake();
+    h.intake.notify(event('L2', LEVEL.STATE));
+    h.intake.notify(event('L3', LEVEL.WAKE));
+    await h.intake.settle();
+    expect(h.submits).toEqual([{ text: 'L2\n\nL3', whenBusy: 'steer' }]);
   });
 });
 
-describe('L3：引导（steer）', () => {
-  it('走 submit(whenBusy=steer)，并记入 outstanding', async () => {
+describe('L3：整流——一次请求带走一整批', () => {
+  it('5 条 L3 只 submit **一次**（原来是一条一次，真机上掉 8 次血 = 8 次请求）', async () => {
     const h = makeIntake();
-    h.intake.notify(event('L3', LEVEL.WAKE));
+    for (let i = 1; i <= 5; i++) h.intake.notify(event(`L3-${i}`, LEVEL.WAKE));
     await h.intake.settle();
 
-    expect(h.submits).toEqual([{ text: 'L3', whenBusy: 'steer' }]);
-    expect(h.intake.outstandingEvents.map((e) => e.text)).toEqual(['L3']);
-    expect(h.actions).toEqual(['L3:steer']);
+    expect(h.submits).toHaveLength(1);
+    expect(h.submits[0]?.text).toBe('L3-1\n\nL3-2\n\nL3-3\n\nL3-4\n\nL3-5');
+    expect(h.actions).toEqual(['L3-1:steer', 'L3-2:steer', 'L3-3:steer', 'L3-4:steer', 'L3-5:steer']);
+  });
+
+  it('请求在飞的时候只攒不发；请求结束才发一次', async () => {
+    const h = makeIntake();
+    h.intake.requestStarted();
+    for (let i = 1; i <= 3; i++) h.intake.notify(event(`L3-${i}`, LEVEL.WAKE));
+    await h.intake.settle();
+    // 模型正在生成，这时发过去它也看不见——攒着零成本
+    expect(h.submits).toHaveLength(0);
+    expect(h.intake.pendingCount).toBe(3);
+
+    h.intake.requestFinished();
+    await h.intake.settle();
+    expect(h.submits).toHaveLength(1);
+    expect(h.submits[0]?.text).toBe('L3-1\n\nL3-2\n\nL3-3');
   });
 
   it('落定后从 outstanding 移除', async () => {
     const h = makeIntake();
     h.intake.notify(event('L3', LEVEL.WAKE));
     await h.intake.settle();
+    expect(h.intake.outstandingEvents.map((e) => e.text)).toEqual(['L3']);
     h.releaseAll();
     // 等 forget 的微任务跑完
     await new Promise((resolve) => setTimeout(resolve, 0));
@@ -121,8 +145,8 @@ describe('L3：引导（steer）', () => {
   });
 });
 
-describe('L4：中断（abort + submit）', () => {
-  it('排队中的 L3 被 abort 撤回后**重新提交**，然后才是 L4 自己', async () => {
+describe('L4：中断（abort + 把整批发出去）', () => {
+  it('L4 把在途的 L3 退回缓冲区，和它一起作为**一次**提交发出去', async () => {
     const h = makeIntake();
     h.intake.notify(event('L3', LEVEL.WAKE));
     await h.intake.settle();
@@ -132,13 +156,13 @@ describe('L4：中断（abort + submit）', () => {
     await h.intake.settle();
 
     expect(h.aborts).toHaveLength(1);
-    // L3 先于 L4 重新提交：保持时间顺序，且一个都不能丢
-    expect(h.submits.map((s) => s.text)).toEqual(['L3', 'L3', 'L4']);
+    // 在途的 L3 先退回，再和 L4 一起走一次提交——顺序不乱、一条不丢
+    expect(h.submits.map((s) => s.text)).toEqual(['L3', 'L3\n\nL4']);
     expect(h.submits.every((s) => s.whenBusy === 'steer')).toBe(true);
     expect(h.actions).toEqual(['L3:steer', 'L4:preempt']);
   });
 
-  it('没有排队事件时只提交自己', async () => {
+  it('没有攒下东西时只提交自己', async () => {
     const h = makeIntake();
     h.intake.notify(event('L4', LEVEL.PREEMPT));
     await h.intake.settle();
@@ -148,7 +172,7 @@ describe('L4：中断（abort + submit）', () => {
 });
 
 describe('L5：冻住 → 保命 → 接着干', () => {
-  it('abort + rescue，被撤回的 L3 在保命之后重新提交，**L5 自己不提交**', async () => {
+  it('abort + 保命，**保命跑完**才把整批提交出去', async () => {
     const h = makeIntake();
     h.intake.notify(event('L3', LEVEL.WAKE));
     await h.intake.settle();
@@ -158,18 +182,18 @@ describe('L5：冻住 → 保命 → 接着干', () => {
 
     expect(h.aborts).toHaveLength(1);
     expect(h.rescues).toHaveLength(1);
-    // L5 由反射消化，不再喂给模型——所以只有 L3 被重新提交
-    expect(h.submits.map((s) => s.text)).toEqual(['L3', 'L3']);
+    // 保命要跑好几秒，先提交的话模型会对着过时的世界做判断——所以提交在后
+    expect(h.submits.map((s) => s.text)).toEqual(['L3', 'L3\n\nL5']);
     expect(h.actions).toEqual(['L3:steer', 'L5:emergency']);
   });
 
-  it('空闲时 L5 也能触发（abort + rescue）', async () => {
+  it('空闲时 L5 也能触发（abort + 保命）', async () => {
     const h = makeIntake();
     h.intake.notify(event('L5', LEVEL.EMERGENCY));
     await h.intake.settle();
     expect(h.aborts).toHaveLength(1);
     expect(h.rescues).toHaveLength(1);
-    expect(h.submits).toHaveLength(0);
+    expect(h.submits.map((s) => s.text)).toEqual(['L5']);
   });
 });
 
@@ -182,7 +206,7 @@ describe('同步返回 / 异常隔离', () => {
     expect(h.submits).toHaveLength(1);
   });
 
-  it('一个动作抛错不阻断后续事件', async () => {
+  it('提交抛错：整批退回缓冲区不丢，后续事件照样处理', async () => {
     const h = makeIntake();
     let first = true;
     const intake = new EventIntake({
@@ -199,18 +223,46 @@ describe('同步返回 / 异常隔离', () => {
           abort: () => Promise.resolve('settled' as const),
         } as never);
       },
-      write: () => Promise.resolve({} as never),
       abort: () => Promise.resolve(),
       rescue: () => Promise.resolve(),
       onError: (error) => h.errors.push(error),
     });
 
     intake.notify(event('bad', LEVEL.WAKE));
-    intake.notify(event('good', LEVEL.WAKE));
     await intake.settle();
 
     expect(h.errors).toHaveLength(1);
-    expect(h.submits.map((s) => s.text)).toEqual(['good']);
+    // 抛错不能把事件凭空吃掉——整批退回缓冲区等下次重试
+    expect(h.submits).toHaveLength(0);
+    expect(intake.pendingCount).toBe(1);
+
+    // 后续事件照样处理，并且和退回的那条合成一批发出去
+    intake.notify(event('good', LEVEL.WAKE));
+    await intake.settle();
+    expect(h.submits.map((s) => s.text)).toEqual(['bad\n\ngood']);
+  });
+
+  it('中断本身抛错也不让泵停摆', async () => {
+    const errors: unknown[] = [];
+    const intake = new EventIntake({
+      submit: () =>
+        Promise.resolve({
+          id: 'sub' as never,
+          status: () => Promise.resolve({} as never),
+          wait: () => Promise.resolve({ status: 'done' } as never),
+          abort: () => Promise.resolve('settled' as const),
+        } as never),
+      abort: () => Promise.reject(new Error('abort boom')),
+      rescue: () => Promise.resolve(),
+      onError: (error) => errors.push(error),
+    });
+
+    intake.notify(event('L4', LEVEL.PREEMPT));
+    await intake.settle();
+    // 一条事件处理失败只记一笔，泵继续跑（后面还排着几十条）
+    expect(errors).toHaveLength(1);
+    // 它的文本没丢，还在缓冲区里等下一次顺风车
+    expect(intake.pendingCount).toBe(1);
   });
 });
 
@@ -245,10 +297,6 @@ describe('运行时就绪前的事件不丢', () => {
         submits.push({ text, whenBusy });
         return Promise.resolve(fakeSubmission());
       },
-      write: (event: GameEvent) => {
-        writes.push(event);
-        return Promise.resolve(fakeSubmission());
-      },
       abort: () => Promise.resolve(),
       rescue: () => Promise.resolve(),
       onEvent: (event: GameEvent, action: string) => actions.push(`${event.text}:${action}`),
@@ -264,7 +312,7 @@ describe('运行时就绪前的事件不丢', () => {
     expect(h.intake.attached).toBe(false);
     expect(h.intake.waitingCount).toBe(2);
     expect(h.submits).toHaveLength(0);
-    expect(h.writes).toHaveLength(0);
+    expect(h.intake.pendingCount).toBe(0);
   });
 
   it('attach 后**按顺序**补投，一个都不丢', async () => {
@@ -276,17 +324,19 @@ describe('运行时就绪前的事件不丢', () => {
 
     expect(h.intake.attached).toBe(true);
     expect(h.intake.waitingCount).toBe(0);
-    expect(h.submits.map((s) => s.text)).toEqual(['先', '后']);
+    // 两条 L3 补投后合成**一批**发出去，顺序不变
+    expect(h.submits.map((s) => s.text)).toEqual(['先\n\n后']);
     expect(h.actions).toEqual(['先:steer', '后:steer']);
   });
 
-  it('attach 后新来的事件直接进链', async () => {
+  it('attach 后新来的事件直接进缓冲区', async () => {
     const h = makeDeferredIntake();
     h.intake.attach(h.deps);
     h.intake.notify(event('L2', LEVEL.STATE));
     await h.intake.settle();
     expect(h.intake.waitingCount).toBe(0);
-    expect(h.writes.map((e) => e.text)).toEqual(['L2']);
+    expect(h.intake.pendingCount).toBe(1);
+    expect(h.submits).toHaveLength(0);
   });
 
   it('重复 attach 抛错（不许悄悄换掉运行时）', () => {
@@ -301,7 +351,8 @@ describe('运行时就绪前的事件不丢', () => {
     h.intake.attach(h.deps);
     await h.intake.settle();
     expect(h.actions).toEqual(['紧急:emergency']);
-    expect(h.submits).toHaveLength(0);
+    // 按"所有事件都立刻进消息"的统一规则，L5 的文本也会跟着这一批过去
+    expect(h.submits.map((s) => s.text)).toEqual(['紧急']);
   });
 });
 

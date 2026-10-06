@@ -176,7 +176,6 @@ describe('B2：L4 打断在途回答，但**动作不受影响**', () => {
     const intake = new EventIntake();
     intake.attach({
       submit: () => Promise.resolve(fakeSubmission()),
-      write: () => Promise.resolve(fakeSubmission()),
       abort: () => {
         generationAlive = false;
         return Promise.resolve();

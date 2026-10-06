@@ -166,15 +166,20 @@ describe('装配层全栈', () => {
     await h.wiring.close();
   });
 
-  it('L2 事件走 write：不唤醒模型，但出现在下一次请求里', async () => {
+  it('L2 事件：不唤醒模型，但搭下一次请求的车', async () => {
     const h = await openHarness();
     h.wiring.intake.notify({ level: 2 as never, text: '背包里多了一块木头' });
     await h.wiring.intake.settle();
-    // 没有模型调用：被动 entry 不拉起 run
+    // L2 不标记"需要请求"，所以拉不起 run
     expect(h.faux.state.callCount).toBe(0);
 
-    await (await h.wiring.runtime.submit('继续')).wait(ctx);
-    expect(userTexts(h.seen[0])).toContain('背包里多了一块木头');
+    // 下一条 L3 把它一起带走——**同一批**，一次请求
+    h.wiring.intake.notify({ level: 3 as never, text: '有玩家在叫我' });
+    await until(() => h.faux.state.callCount > 0);
+    // 两条合成**一批**（一条消息），这就是整流
+    const texts = userTexts(h.seen[0]).join('\n');
+    expect(texts).toContain('背包里多了一块木头');
+    expect(texts).toContain('有玩家在叫我');
     await h.wiring.close();
   });
 
@@ -244,10 +249,11 @@ describe('装配层全栈', () => {
     expect(intake.attached).toBe(true);
     expect(intake.waitingCount).toBe(0);
 
-    // L2 走 write：不唤醒模型，但下一次请求能看到
+    // L2 不唤醒模型，但会搭下一次请求的车
     expect(h.faux.state.callCount).toBe(0);
-    await (await h.wiring.runtime.submit('继续')).wait(ctx);
-    expect(userTexts(h.seen[0])).toContain('连接期间的噪声');
+    intake.notify({ level: 3 as never, text: '连接后的事' });
+    await until(() => h.faux.state.callCount > 0);
+    expect(userTexts(h.seen[0]).join('\n')).toContain('连接期间的噪声');
     await h.wiring.close();
   });
 

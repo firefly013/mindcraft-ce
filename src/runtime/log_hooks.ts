@@ -16,6 +16,7 @@ import {
   hook,
   type HookRegistration,
 } from '@earendil-works/pi-durable';
+import type { EventIntake } from './events.js';
 import type { Logger } from './logger.js';
 
 /**
@@ -60,6 +61,28 @@ export function compactionLogHook(logger: Logger): HookRegistration {
         firstKept: compaction.firstKept,
         instructions: compaction.instructions ?? null,
       });
+      return undefined;
+    },
+  });
+}
+
+/**
+ * 把 provider 请求的开始/结束告诉接入层——那是 **L3 整流的闸门**。
+ *
+ * 模型正在生成的时候它**本来就不能反应**新事件，所以那段时间只攒不发；
+ * 请求一结束再检查"需要请求"标志，把整批一次带走。
+ *
+ * 没有这个闸门就只能每条事件 `submit` 一次：实测 5 条 steer = 5 次 API 调用，
+ * 真机上一场骷髅战掉 8 次血就是 8 次完整请求。
+ */
+export function intakeLifecycleHook(intake: EventIntake): HookRegistration {
+  return hook(GenerationTask, {
+    beforeRequest: () => {
+      intake.requestStarted();
+      return undefined;
+    },
+    afterResponse: () => {
+      intake.requestFinished();
       return undefined;
     },
   });

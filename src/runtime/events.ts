@@ -2,34 +2,38 @@
  * 事件接入层：L1–L5 → pi-durable 原生原语。
  *
  * 这**不是**一个独立子系统，就是"打断消息队列"——和普通 Agent 的引导/排队/ESC
- * 是同一件事：
+ * 是同一件事。
  *
- * | 级别 | 普通 Agent 里的对应物 | 落点 |
- * |---|---|---|
- * | L1/L2 | 记一笔，不打断 | `write`（被动 entry，不唤醒模型） |
- * | L3 | 引导：下一次 API 请求带上 | `submit({whenBusy:'steer'})` |
- * | L4 | 双击 ESC：停掉当前回答再发 | `abort()` → `submit()` |
- * | L5 | 冻住 → 保命 → 接着干 | `abort()` → `rescue()` → 重新提交 |
+ * ## 统一的第一步：所有事件在发生的一瞬间都进"下一次要发的内容"
  *
- * ## 唯一需要自己写的那点"队列"
+ * 只有一个缓冲区 `pending`，它是**下一次请求将要发送的完整内容**。任何级别的事件
+ * 一到就追加进去，不分彼此。差别**只在之后**：
  *
- * `abort()` 会**撤回排队中的输入**（而**排队中的 write 会留下**）。旧实现靠
- * `unsee()` 把事件退回、让新请求重新带上；这里必须自己缓冲一份，abort 之后
- * 重新提交，否则 L3 排队中的事件会被 L4/L5 悄悄吃掉。
+ * | 级别 | 之后做什么 |
+ * |---|---|
+ * | L1/L2 | 到此为止。搭下一次请求的车，**不额外唤醒** |
+ * | L3 | 标记"需要请求" |
+ * | L4 | 立刻 `abort()`，然后把这一整批发出去 |
+ * | L5 | 立刻 `abort()` → 保命反射 → 把这一整批发出去 |
  *
- * 之所以要缓冲，是因为 pi-durable 不知道"这个输入是从哪个事件来的"——它只认
- * 输入。所以这一层是薄薄一层账，不是另一套调度器。
+ * ## 为什么这么写：整流
  *
- * ## 为什么是**两条**队列，而不是一条 promise 链
+ * 原来每个 L3 都 `submit` 一次。实测（faux provider，5 条 steer）：**5 次 API
+ * 调用**，请求内容还一层层累积（第 5 次带上 L3-1..4）——每条事件都把模型多唤醒
+ * 一次。真机上那场骷髅战掉 8 次血，就是 8 次完整请求。
  *
- * 原来是一条 FIFO 链：`chain = chain.then(() => react(event))`。等级只决定
- * **做什么**，完全不决定**什么时候做**——于是"L4 打断立刻插入"只是设计意图，
- * 没实现。真机日志里 pia 被骷髅射死，死亡事件 12:32:38 入队、12:32:57 才落地：
- * **排在 30 条 L3 后面干等了 19 秒**，最后还连同被 abort 的那一轮一起丢了。
+ * 现在：**一次请求在飞的时候什么都不发**（模型本来就不能反应，攒着零成本）；
+ * 请求结束才检查"需要请求"标志，把整批一次带走。所以"5 秒的不可打断请求里产生
+ * 99999 个 L3"也只是一次请求——这就是天然整流。
  *
- * 现在分两条：L4/L5 进 `urgent`，L1–L3 进 `normal`，泵**每次取下一个都先看
- * urgent**。泵仍然是单线程串行的（write/steer/interrupt 都会改对话，必须互斥），
- * 所以 L4 最多等**当前那一条**跑完，而不是等前面排的一整串。
+ * 附带好处：`pending` 是**还没提交**的，`abort()` 撤不到它。真机上死亡消息就是
+ * 因为走了 L4 的 `abort()` 被卷走的（19 秒后才落地，最后彻底没了）。
+ *
+ * ## L4/L5 的优先级
+ *
+ * `urgent` 队列专门装 L4/L5，泵每取下一个都先看它。原来是一条 FIFO promise 链，
+ * 等级只决定**做什么**、不决定**什么时候做**——"打断立刻插入"根本没实现，死亡
+ * 事件排在 30 条 L3 后面干等了 19 秒。
  */
 import { BACKGROUND_CONTEXT } from '@earendil-works/chord/context';
 import type { Context } from '@earendil-works/chord';
@@ -45,10 +49,8 @@ export interface GameEvent {
 
 /** 这一层对运行时的最小依赖，便于单测注入假实现。 */
 export interface EventIntakeDeps {
-  /** L3/L4 的输入提交（引导）。 */
+  /** 把攒下的一整批内容作为一次引导提交。 */
   submit: (text: string, whenBusy: 'steer') => Promise<Submission>;
-  /** L1/L2 的被动写入：不唤醒模型，但会出现在下一次请求的上下文里。 */
-  write: (event: GameEvent) => Promise<Submission>;
   /** L4/L5 的中断。 */
   abort: () => Promise<void>;
   /** L5 的保命反射，绕过模型。 */
@@ -58,17 +60,28 @@ export interface EventIntakeDeps {
   onError?: (error: unknown) => void;
 }
 
+/** 一批事件的正文：一条一行，空行分隔，模型能读。 */
+function batchText(batch: readonly GameEvent[]): string {
+  return batch.map((event) => event.text).join('\n\n');
+}
+
 export class EventIntake {
   private deps: EventIntakeDeps | null;
   private readonly context: Context;
   /** 优先通道：L4/L5。泵每次取下一个都先看它。 */
   private urgent: GameEvent[] = [];
-  /** 普通通道：L1/L2/L3，先进先出。 */
+  /** 普通通道：L1–L3，先进先出。 */
   private normal: GameEvent[] = [];
   /** 正在排空的泵；null = 空闲。 */
   private pump: Promise<void> | null = null;
-  /** 已提交但**尚未落定**的输入——abort 会撤回它们。write 不进这里。 */
-  private outstanding: Array<{ event: GameEvent; submission: Submission }> = [];
+  /** **下一次请求将要发送的完整内容**。任何级别的事件都立刻进这里。 */
+  private pending: GameEvent[] = [];
+  /** 有 L3 攒着 = 该主动发一次；只有 L1/L2 就搭下一次请求的车。 */
+  private needsRequest = false;
+  /** 有一次 provider 请求正在飞：这期间不发，攒着。 */
+  private requestInFlight = false;
+  /** 已经提交、还没落定的那一批——`abort()` 会撤回它，所以中断时要退回缓冲区。 */
+  private inFlight: GameEvent[] | null = null;
   /** 运行时还没接上时收到的事件，按顺序暂存。 */
   private waiting: GameEvent[] = [];
 
@@ -102,6 +115,39 @@ export class EventIntake {
     return this.waiting.length;
   }
 
+  /** 攒着还没发出去的内容条数（诊断用）。 */
+  get pendingCount(): number {
+    return this.pending.length;
+  }
+
+  /** 已提交但**尚未落定**的那一批——`abort()` 会撤回它。 */
+  get outstandingEvents(): readonly GameEvent[] {
+    return this.inFlight ?? [];
+  }
+
+  /**
+   * 一次 provider 请求开始了：这期间只攒不发。
+   *
+   * 模型正在生成，它**本来就不能反应**新事件——攒着零成本。等这次请求结束
+   * （`requestFinished`）再一次性带走。
+   */
+  requestStarted(): void {
+    this.requestInFlight = true;
+  }
+
+  /**
+   * 一次 provider 请求结束了：检查"需要请求"标志。
+   *
+   * 有 L3 攒着就把整批一次发出去；只有 L1/L2 就什么都不做——它们搭下一次
+   * 请求的车（这是 L2 与 L3 唯一的区别）。
+   */
+  requestFinished(): void {
+    this.requestInFlight = false;
+    const deps = this.deps;
+    if (deps == null || !this.needsRequest) return;
+    void this.start(deps);
+  }
+
   /** 收一个事件：**同步返回**（旧调度协议是同步的），异步动作排在队列上。 */
   notify(event: GameEvent): void {
     const deps = this.deps;
@@ -110,8 +156,7 @@ export class EventIntake {
       this.waiting.push(event);
       return;
     }
-    // 按等级分流。**这就是"L4 打断立刻插入"的实现**——等级不决定做什么，
-    // 还决定插在谁前面。
+    // 按等级分流。L4/L5 走优先通道——这就是"打断立刻插入"的实现。
     if (event.level >= LEVEL.PREEMPT) this.urgent.push(event);
     else this.normal.push(event);
     void this.start(deps);
@@ -124,8 +169,7 @@ export class EventIntake {
    * 它是在 `bot.on('chat')` / 轮询回调里被就地调用的，当场干活会重入。
    *
    * 清 `pump` 这一步**必须与"判空"同步**（中间不能有 await）：否则中间进来的
-   * 事件会看到 `pump` 还在、把自己留在队列里没人取。`drain` 返回后紧接着就是
-   * 同一个微任务里的赋值，所以那个窗口不存在——不需要额外补一次检查。
+   * 事件会看到 `pump` 还在、把自己留在队列里没人取。
    */
   private start(deps: EventIntakeDeps): Promise<void> {
     if (this.pump == null) {
@@ -141,13 +185,20 @@ export class EventIntake {
   private async drain(deps: EventIntakeDeps): Promise<void> {
     for (;;) {
       const event = this.urgent.shift() ?? this.normal.shift();
-      if (event === undefined) return;
+      if (event === undefined) break;
       try {
         await this.react(event, deps);
       } catch (error: unknown) {
         // 一条事件处理失败不该让整个泵停摆——后面还有几十条在排队。
         deps.onError?.(error);
       }
+    }
+    // 队列空了：按规则把攒下的内容发出去（L4/L5 在 interrupt 里已经强制发过，
+    // 那时 pending 已空，这里是空操作）。
+    try {
+      await this.flush(deps);
+    } catch (error: unknown) {
+      deps.onError?.(error);
     }
   }
 
@@ -161,62 +212,83 @@ export class EventIntake {
     while (this.pump != null) await this.pump;
   }
 
-  /** 尚未落定的输入事件（abort 撤回后需要重新提交的那些）。 */
-  get outstandingEvents(): readonly GameEvent[] {
-    return this.outstanding.map((item) => item.event);
-  }
-
   private async react(event: GameEvent, deps: EventIntakeDeps): Promise<void> {
+    // **统一的第一步**：任何级别的事件都在这一瞬间进入"下一次要发的内容"。
+    this.pending.push(event);
+
     if (event.level <= LEVEL.STATE) {
-      // L1/L2：只记账。**不 track**——`abort()` 明确"queued writes stay"，
-      // 被动写入不会被撤回，不需要重新提交。
-      await deps.write(event);
+      // L1/L2：到此为止。搭下一次请求的车，不额外唤醒。
       deps.onEvent?.(event, 'write');
       return;
     }
     if (event.level === LEVEL.WAKE) {
-      await this.steer(event, deps);
+      // L3：标记"需要请求"。真正发出去要等这次请求结束（整流）。
+      this.needsRequest = true;
       deps.onEvent?.(event, 'steer');
       return;
     }
     if (event.level === LEVEL.PREEMPT) {
-      await this.interrupt(event, deps);
+      // L4：立刻打断，然后把整批发出去（插队）。
+      await this.abortAndWithdraw(deps);
+      await this.flush(deps, true);
       deps.onEvent?.(event, 'preempt');
       return;
     }
     // L5：冻住 → 保命 → 接着干。
-    // 紧急事件本身由反射消化，**不再喂给模型**（旧实现的 pushEvent 也把它
-    // 标成 consumed，免得锁解除后它再唤醒一次请求）。
-    await this.interrupt(null, deps);
+    // **保命在前、提交在后**：保命要跑好几秒，先提交的话模型会在这几秒里
+    // 对着一份过时的世界做判断。
+    await this.abortAndWithdraw(deps);
     await deps.rescue();
+    await this.flush(deps, true);
     deps.onEvent?.(event, 'emergency');
   }
 
-  private async steer(event: GameEvent, deps: EventIntakeDeps): Promise<void> {
-    const submission = await deps.submit(event.text, 'steer');
-    this.track(event, submission);
+  /**
+   * 把攒下的内容一次性发出去。
+   *
+   * @param force 中断路径用：请求在飞也要发（那是"打断立刻插入"）。
+   *
+   * 不 force 时只认 `needsRequest`——只有 L1/L2 攒着的话什么都不做，让它们搭
+   * 下一次请求的车。
+   *
+   * **调用方保证 `pending` 非空**，所以这里不写"空批次"守卫（那是够不到的分支）：
+   * `needsRequest` 为真时缓冲区必然有事件（两者在 `react` 里一起成立、在
+   * `flush` 里一起清掉）；强制路径刚把当前事件推进去。
+   */
+  private async flush(deps: EventIntakeDeps, force = false): Promise<void> {
+    if (!force && (this.requestInFlight || !this.needsRequest)) return;
+    const batch = this.pending;
+    this.pending = [];
+    this.needsRequest = false;
+    this.inFlight = batch;
+    let submission: Submission;
+    try {
+      submission = await deps.submit(batchText(batch), 'steer');
+    } catch (error: unknown) {
+      // 提交失败：把这一批**放回缓冲区**，别让事件凭空消失（下次 flush 会重试）。
+      this.inFlight = null;
+      this.pending.unshift(...batch);
+      throw error;
+    }
+    const clear = (): void => {
+      if (this.inFlight === batch) this.inFlight = null;
+    };
+    void submission.wait(this.context).then(clear, clear);
   }
 
   /**
-   * 中断当前工作。
+   * 中断：撤回在途那一批 + `abort()`。
    *
-   * `alsoSubmit` 是"中断完要立刻发过去"的事件（L4 用它；L5 传 null）。
-   * 被撤回的排队事件**先于**它重新提交，保持时间顺序。
+   * `abort()` 会**撤回排队中的输入**，所以先把在途那一批**退回缓冲区**——不然
+   * 它连同被 abort 的那一轮一起丢（真机上死亡消息就是这么没的）。退回去之后
+   * 由调用方决定什么时候重发（L4 立刻发；L5 等保命跑完再发）。
    */
-  private async interrupt(alsoSubmit: GameEvent | null, deps: EventIntakeDeps): Promise<void> {
-    const withdrawn = this.outstanding.map((item) => item.event);
-    this.outstanding = [];
+  private async abortAndWithdraw(deps: EventIntakeDeps): Promise<void> {
+    const withdrawn = this.inFlight;
+    if (withdrawn != null) {
+      this.inFlight = null;
+      this.pending.unshift(...withdrawn);
+    }
     await deps.abort();
-    for (const pending of withdrawn) await this.steer(pending, deps);
-    if (alsoSubmit != null) await this.steer(alsoSubmit, deps);
-  }
-
-  private track(event: GameEvent, submission: Submission): void {
-    const record = { event, submission };
-    this.outstanding.push(record);
-    const forget = (): void => {
-      this.outstanding = this.outstanding.filter((item) => item !== record);
-    };
-    void submission.wait(this.context).then(forget, forget);
   }
 }
