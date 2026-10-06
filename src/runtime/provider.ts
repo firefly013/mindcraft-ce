@@ -15,6 +15,9 @@ import {
   createProvider,
   envApiKeyAuth,
   type Api,
+  type Credential,
+  type CredentialInfo,
+  type CredentialStore,
   type Model,
   type Models,
 } from '@earendil-works/pi-ai';
@@ -143,6 +146,40 @@ function customModel(
  *   - 无 `url`              → 官方 `openaiProvider()`
  *   - 其它 `url`            → `createProvider()` 现造一个 OpenAI 兼容 provider
  */
+/**
+ * 只读凭据库：把 `keys.json` / 环境变量里取到的 key 交给 pi-ai 的鉴权解析。
+ *
+ * **为什么必须这么做**：内置 provider 的 auth 是
+ * `envApiKeyAuth(name, [ENV])`，它只认**已存凭据**或**环境变量**。而本项目的
+ * key 在 `keys.json` 里（`getKey`），既不进环境、也不进 pi-ai 的凭据库——于是
+ * **每个请求都失败**：`Provider is not configured: opencode-go`，assistant 条目
+ * 是 `stopReason: "error"`、usage 全 0，模型一个字都答不出来。
+ *
+ * 这条**只有真机跑得出来**：单测全都手动 `setProvider(faux)`，不需要鉴权。
+ *
+ * 只读：登录/刷新交给 pi-ai 的交互式流程，本项目不写凭据（也不用 OAuth）。
+ */
+export function staticCredentialStore(
+  providerId: string,
+  apiKey: string | undefined,
+): CredentialStore {
+  const credential: Credential | undefined =
+    apiKey == null || apiKey === '' ? undefined : { type: 'api_key', key: apiKey };
+  return {
+    read: (id) => Promise.resolve(id === providerId ? credential : undefined),
+    list: () =>
+      Promise.resolve(
+        credential == null
+          ? []
+          : ([{ providerId, type: credential.type }] as readonly CredentialInfo[]),
+      ),
+    // 写路径：本项目不持久化凭据。仍如实把 `fn` 的结果回给 pi-ai（它用这个结果
+    // 继续本次请求），但不落盘——我们只用 API key，没有刷新语义。
+    modify: (_id, fn) => fn(credential),
+    delete: () => Promise.resolve(),
+  };
+}
+
 export function resolveProvider(profile: unknown): ResolvedProvider {
   const { modelId, url, params, contextWindow } = readProfileModel(profile);
   const apiKeyEnv =
@@ -162,26 +199,28 @@ export function resolveProvider(profile: unknown): ResolvedProvider {
     apiKey = getKey(apiKeyEnv);
   }
 
-  const models = createModels();
+  // 端点分派要在建 `Models` 之前定，因为凭据库是按 provider id 挂的。
   let providerId: string;
-  if (url != null && url.includes(GO_HOST)) {
-    providerId = 'opencode-go';
+  if (url != null && url.includes(GO_HOST)) providerId = 'opencode-go';
+  else if (url != null && url.includes(ZEN_HOST)) providerId = 'opencode';
+  else if (url == null) providerId = 'openai';
+  else providerId = 'custom';
+
+  const models = createModels({ credentials: staticCredentialStore(providerId, apiKey) });
+  if (providerId === 'opencode-go') {
     models.setProvider(opencodeGoProvider());
-  } else if (url != null && url.includes(ZEN_HOST)) {
-    providerId = 'opencode';
+  } else if (providerId === 'opencode') {
     models.setProvider(opencodeProvider());
-  } else if (url == null) {
-    providerId = 'openai';
+  } else if (providerId === 'openai') {
     models.setProvider(openaiProvider());
   } else {
-    providerId = 'custom';
     models.setProvider(
       createProvider({
         id: providerId,
         name: 'OpenAI-compatible endpoint',
-        baseUrl: url,
+        baseUrl: url as string,
         auth: { apiKey: envApiKeyAuth(apiKeyEnv, [apiKeyEnv]) },
-        models: [customModel(modelId, url, contextWindow)],
+        models: [customModel(modelId, url as string, contextWindow)],
         api: { 'openai-completions': openAICompletionsApi() },
       }),
     );

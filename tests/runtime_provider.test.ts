@@ -127,3 +127,44 @@ describe('resolveProvider 端点分派', () => {
   });
 });
 
+/**
+ * 真机冒烟抓到的 bug：**key 从来没交给 pi-ai**。
+ *
+ * 内置 provider 的 auth 是 `envApiKeyAuth(name, [ENV])`，它只认**已存凭据**或
+ * **环境变量**。而本项目的 key 在 `keys.json` 里（`getKey`），既不进环境也不进
+ * pi-ai 的凭据库——于是每个请求都失败：`Provider is not configured: opencode-go`，
+ * assistant 条目是 `stopReason: "error"`、usage 全 0，模型一个字都答不出来。
+ *
+ * 单测全都手动 `setProvider(faux)`，不需要鉴权，所以只有真机才暴露。
+ * 这条断言用 `getAuth()`（pi-ai 自己的鉴权解析入口）当预言机，不需要联网。
+ */
+describe('凭据真的交给了 pi-ai', () => {
+  it('resolveProvider 之后 getAuth 能解析出 key', async () => {
+    process.env['PI_TEST_API_KEY'] = 'sk-test-12345';
+    try {
+      const resolved = resolveProvider({
+        model: {
+          model: 'deepseek-v4.1-flash',
+          url: 'https://opencode.ai/zen/go/v1',
+          params: { api_key_env: 'PI_TEST_API_KEY' },
+        },
+      });
+      expect(resolved.providerId).toBe('opencode-go');
+      const auth = await resolved.models.getAuth(resolved.model);
+      expect(auth).toBeDefined();
+      expect(auth?.auth.apiKey).toBe('sk-test-12345');
+    } finally {
+      delete process.env['PI_TEST_API_KEY'];
+    }
+  });
+
+  it('本地端点用占位 key，也能解析出来（LM Studio / vLLM 那类不校验）', async () => {
+    const resolved = resolveProvider({
+      model: { model: 'local-model', url: OFFLINE_URL, params: { api_key_env: MISSING_KEY } },
+    });
+    const auth = await resolved.models.getAuth(resolved.model);
+    expect(auth?.auth.apiKey).toBe('not-needed');
+  });
+});
+
+
