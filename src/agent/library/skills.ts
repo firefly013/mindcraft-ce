@@ -2019,8 +2019,18 @@ export async function goToSurface(bot: any): Promise<boolean> {
         if (!block || block.name === 'air' || block.name === 'cave_air') {
             continue;
         }
-        await goToPosition(bot, block.position.x, block.position.y + 1, block.position.z, 0); // this will probably work most of the time but a custom mining and towering up implementation could be added if needed
-        log(bot, `Going to the surface at y=${y+1}.`);
+        // **把结果如实返回**。原来这里无条件 log 'Going to the surface' + return true——
+        // 模型真机报过 'goToSurface 静默结束：无结果事件、人没动'：它以为上去了，其实
+        // 一步没动，后面的判断全建立在错误前提上。
+        const arrived = await goToPosition(bot, block.position.x, block.position.y + 1, block.position.z, 0);
+        if (!arrived) {
+            log(
+                bot,
+                `Surface is at y=${y + 1} (${block.name}) but I could not get up there from here. 竖井/洞穴里常这样——用 mineBlock 挖头顶开路，或者 placeBlock 搭落脚点一段段往上。`,
+            );
+            return false;
+        }
+        log(bot, `Reached the surface at y=${y + 1}.`);
         return true;
     }
     return false;
