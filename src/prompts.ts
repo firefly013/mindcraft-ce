@@ -123,6 +123,10 @@ export const TOOL_TEXT: Record<string, { description: string; params: Record<str
     description: '往指定坐标放一个方块。搭建筑、摆下界门门框（4x5 黑曜石）用它——placeHere 只能放脚下，摆不了门框。',
     params: { type: '要放的方块类型。', x: '目标 x 坐标。', y: '目标 y 坐标。', z: '目标 z 坐标。' },
   },
+  mineBlock: {
+    description: '挖掉指定坐标的那一格。往头顶/斜上方开路、在竖井里挖落脚位用它——collectBlocks 只找最近的、digDown 只会往下。够不着（超过 4.5 格）会明说。',
+    params: { x: '目标 x 坐标。', y: '目标 y 坐标。', z: '目标 z 坐标。' },
+  },
   attack: {
     description: '攻击并杀死最近的某种实体。',
     params: { type: '要攻击的实体类型。' },

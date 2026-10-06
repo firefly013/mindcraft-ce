@@ -232,6 +232,21 @@ export const actionsList: AgentCommand[] = [
         })
     },
     {
+        name: '!mineBlock',
+        description: td('mineBlock'),
+        params: {
+            'x': { type: 'float', description: tp('mineBlock', 'x') },
+            'y': { type: 'float', description: tp('mineBlock', 'y') },
+            'z': { type: 'float', description: tp('mineBlock', 'z') }
+        },
+        perform: runAsAction(async (agent: any, x: number, y: number, z: number) => {
+            // **挖指定的那一格**。collectBlocks 是自己找最近的、digDown 只会往下；
+            // 模型真机报过硬缺口："我在 100 格深的洞里没有挖掉头顶方块的工具，
+            // 所以搭不了落脚点"。和 placeBlock 对称的原语。
+            await skills.mineBlockAt(agent.bot, x, y, z);
+        })
+    },
+    {
         name: '!attack',
         description: td('attack'),
         params: {'type': { type: 'string', description: tp('attack', 'type')}},

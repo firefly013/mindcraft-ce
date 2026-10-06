@@ -1903,6 +1903,43 @@ function stringifyItem(bot: any, item: any): string {
     return text;
 }
 
+export async function mineBlockAt(bot: any, x: number, y: number, z: number): Promise<boolean> {
+    /**
+     * 挖掉**指定坐标**的那一格。
+     *
+     * 为什么需要：`collectBlock` 是"自己找最近的并挖"（中层），`digDown` 只会往下。
+     * 模型真机报过这个硬缺口："我在 100 格深的洞里**没有挖掉头顶方块的工具**，
+     * 所以搭不了落脚点"——它要的是"挖我指定的那一格"这个原语。
+     * @param {MinecraftBot} bot, reference to the minecraft bot.
+     * @param {number} x, y, z, 目标方块坐标。
+     * @returns {Promise<boolean>} 挖掉了返回 true。
+     **/
+    const target: any = bot.blockAt(new Vec3(x, y, z));
+    if (!target) {
+        log(bot, `(${x},${y},${z}) 读不到方块。`);
+        return false;
+    }
+    if (target.name === 'air' || target.name === 'cave_air' || target.name === 'void_air') {
+        log(bot, `(${x},${y},${z}) 是空气，不用挖。`);
+        return false;
+    }
+    const dist: number = bot.entity.position.distanceTo(target.position);
+    if (dist > 4.5) {
+        log(bot, `${target.name} @(${x},${y},${z}) 离你 ${dist.toFixed(1)} 格，够不着（最多 4.5）。先走过去，或者用 placeBlock 搭个脚点。`);
+        return false;
+    }
+    try {
+        // 尽力换上合适的工具；换不上也让 dig 自己试（原版手也能挖土/木）。
+        try { await bot.tool?.equipForBlock?.(target); } catch { /* best-effort */ }
+        await bot.dig(target);
+        log(bot, `挖掉了 ${target.name} @(${x},${y},${z})。`);
+        return true;
+    } catch (err: unknown) {
+        log(bot, `挖 ${target.name} @(${x},${y},${z}) 失败：${err instanceof Error ? err.message : String(err)}`);
+        return false;
+    }
+}
+
 export async function digDown(bot: any, distance: number = 10): Promise<boolean> {
     /**
      * Digs down a specified distance. Will stop if it reaches lava, water, or a fall of >=4 blocks below the bot.
