@@ -63,6 +63,8 @@ export interface EdgeSnapshot {
   inLava?: boolean | null;
   belowVoid?: boolean | null;
   inWater?: boolean | null;
+  /** 头也在水里（真正淹没）——不依赖坏掉的 oxygenLevel。 */
+  submerged?: boolean | null;
   onFire?: boolean | null;
   fallLethal?: boolean | null;
   trapped?: boolean | null;
@@ -249,8 +251,10 @@ export const DETECTORS: readonly Detector[] = Object.freeze([
   },
   { type: 'world.void.falling', level: 5, kind: 'flag', flag: 'belowVoid' },
   { type: 'world.water.drowning', level: 5, kind: 'all',
-    fire: (s) => lte(s.oxygen, 5) && s.inWater === true,
-    clear: (s) => gte(s.oxygen, 15) },
+    // **不看 oxygen**：那个字段在 1.20.6 上恒为 20（mineflayer 取不到 air_supply），
+    // 用它做条件等于永不触发。改用"头+脚都在水里"这个可靠信号。
+    fire: (s) => s.submerged === true,
+    clear: (s) => s.submerged !== true },
   { type: 'world.fire.burning_low_hp', level: 5, kind: 'all',
     fire: (s) => s.onFire === true && lt(s.health, 6),
     clear: (s) => s.onFire !== true },
@@ -681,6 +685,34 @@ export function snapshotFromBot(bot: unknown, extra: SnapshotExtra = {}): EdgeSn
         const feetName = feetBlock['name'];
         snap.inLava = feetName === 'lava' ? true : undefined;
         snap.inWater = feetName === 'water' ? true : undefined;
+
+        // **真正淹没**：头也在水里。这是**可靠**信号——mineflayer 的
+
+        // `oxygenLevel = Math.round(metas.air_supply / 15)` 在 1.20.6 上取不到 air_supply，
+
+        // 会一直停在默认值 20。模型真机上就是这么溺死的：氧气显示 20，world.water.drowning
+
+        // （L5 紧急）永远不触发。
+
+        // 头那一格：mock 出来的 bot 可能没有 blockAt / entity.position.offset，
+
+        // 所以先看有没有，别让快照整个炸掉（测试就是这么抓到第一版的）。
+
+        const anyBot = bot as {
+
+          blockAt?: (pos: unknown) => { name?: unknown } | null;
+
+          entity?: { position?: { offset?: (x: number, y: number, z: number) => unknown } };
+
+        };
+
+        const headPos = anyBot.entity?.position?.offset?.(0, 1.6, 0);
+
+        const headBlock = headPos == null ? null : anyBot.blockAt?.(headPos);
+
+        snap.submerged =
+
+          feetName === 'water' && headBlock?.['name'] === 'water' ? true : undefined;
         const biome = feetBlock['biome'] as { name?: unknown } | string | null | undefined;
         snap.biome = typeof biome === 'string' ? biome : strOf(biome?.name);
 
