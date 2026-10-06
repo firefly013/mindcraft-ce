@@ -19,6 +19,21 @@ import type { PlanTodo } from './plan.js';
 import { Vec3 } from 'vec3';
 
 /**
+ * 主手耐久比例：1 = 全新，0 = 报废；读不到就 null。
+ *
+ * **必须钳到 [0,1]**。mineflayer 的 `durabilityUsed`（NBT Damage）可能大于
+ * mcData 给的 `maxDurability`，直接算 `1 - used/max` 会得到负数——模型侧
+ * 看到的就是 `Held: stone_pickaxe (durability -300%)` 这种鬼话（它还据此
+ * 反馈过 bug）；更糟的是负值会让 `tool.durability_low` 永远处于触发态。
+ */
+export function durabilityFraction(used: unknown, max: unknown): number | null {
+  const u = num(used);
+  const m = num(max);
+  if (u == null || m == null || m <= 0) return null;
+  return Math.min(1, Math.max(0, 1 - u / m));
+}
+
+/**
  * `bot.blockAt` 只接受 Vec3：mineflayer 把参数原样交给 prismarine-world，
  * 而后者在区块已加载时会执行 `pos.floored()`——传 plain `{x,y,z}` 会抛
  * TypeError，被外层的 try/catch 吞掉后所有方块感知静默变成 null/unknown。
@@ -380,10 +395,7 @@ export function sampleLiveState(ctx: SampleContext): LiveState {
       armor: [slotName(8), slotName(7), slotName(6), slotName(5)].filter(
         (s): s is string => s != null && s !== 'null',
       ),
-      mainHandDurability:
-        usedDurability != null && maxDurability != null && maxDurability > 0
-          ? Math.round((1 - usedDurability / maxDurability) * 100) / 100
-          : null,
+      mainHandDurability: durabilityFraction(usedDurability, maxDurability),
     };
 
     const packItems: string[] = [];

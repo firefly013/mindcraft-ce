@@ -19,6 +19,7 @@ export default defineConfig({
         'src/agent/memory_bank.ts',
         'src/agent/compaction.ts',
         'src/agent/requestLog.ts',
+        'src/agent/auto_pickup.ts',
       ],
       thresholds: {
         lines: 100,

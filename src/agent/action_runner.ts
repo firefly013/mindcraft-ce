@@ -15,6 +15,7 @@
  */
 
 import { Scheduler } from './scheduler.js';
+import { AUTO_PICKUP_ID } from './auto_pickup.js';
 import { MESSAGES } from '../prompts.js';
 import { isActionTool, validateToolCall } from './commands/to_openai_tools.js';
 import type { LoopToolResult } from './loop.js';
@@ -60,7 +61,13 @@ export class ActionRunner {
       await this.record(data, name, args);
       return { status: 'completed', data };
     }
-    const claim = this.scheduler.startAction(name, args);
+    let claim = this.scheduler.startAction(name, args);
+    if (!claim.accepted) {
+      // 自动拾取是后台房客：模型要用身体，它立刻让位，不让模型吃到忙音。
+      if (claim.code === 'ACTION_BUSY' && this.scheduler.preempt(AUTO_PICKUP_ID)) {
+        claim = this.scheduler.startAction(name, args);
+      }
+    }
     if (!claim.accepted) {
       const running = this.scheduler.currentAction();
       // 幂等：被拒的这次**就是**正在跑的那个动作。

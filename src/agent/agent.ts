@@ -6,6 +6,9 @@ import { initBot } from '../utils/mcdata.js';
 import { executeToolCall, getOpenAITools, validateUpdatePlan, formatSay } from './commands/to_openai_tools.js';
 import { ActionRunner } from './action_runner.js';
 import { stopPvp, consume } from './library/skills.js';
+import * as skills from './library/skills.js';
+import { nearestDropWithin, shouldAttemptPickup, AUTO_PICKUP_ID, PICKUP_RADIUS, PICKUP_INTERVAL_MS, PICKUP_TIMEOUT_MS } from './auto_pickup.js';
+import type { PickupTarget } from './auto_pickup.js';
 import pf from 'mineflayer-pathfinder';
 import { isHostile } from '../utils/mcdata.js';
 import { Scheduler, KIND, LEVEL } from './scheduler.js';
@@ -61,6 +64,10 @@ export class Agent {
     private stuckPos: string | null = null;
     private stuckSince: number = 0;
     private lastHeartbeatAt: number = Date.now();
+    /** 自动拾取：上次尝试时刻 + 是否正在捡（避免重叠）+ 是否正被饿着。 */
+    private lastPickupAt: number = 0;
+    private pickingUp: boolean = false;
+    private pickupStarved: boolean = false;
     edgeWatcher: EdgeWatcher | null = null;
     requestLog: RequestLog | null = null;
     toolHandlers = new Map<string, (args: unknown) => Promise<LoopToolResult>>();
@@ -315,6 +322,7 @@ export class Agent {
             assemble: (events: unknown[]) => this.assembleContext(events),
             onEvent: (event) => {
                 // 事件进模型看得见的历史，恰好一次（正文不在这轮的尾巴里重发）。
+                // 等级只决定"要不要唤醒"，不决定"要不要被记住"。
                 this.history.addEvent(event);
             },
             model: (text: string, tools: unknown, image?: string | null) =>
@@ -485,6 +493,17 @@ export class Agent {
     }
 
     /**
+     * 当前正在跑的动作名——**以调度器的身体通道为唯一真相**。
+     *
+     * 不能用 `ActionManager.currentActionLabel`：那个标签要等动作函数返回才清，
+     * 而通道在 Stop / 结束时就释放了，两者会错开。模型反馈里出现过
+     * "goToSurface 时快照显示的还是 collectBlocks"，就是读了这一份陈旧标签。
+     */
+    currentActionName(): string | null {
+        return this.scheduler?.currentAction()?.id ?? null;
+    }
+
+    /**
      * 现采一份 Live State 文本。
      *
      * **感知与"拍照"共用同一份采样**：请求尾巴每轮现采（不进历史），
@@ -500,7 +519,7 @@ export class Agent {
             vision: this.vision_interpreter,
             goal: plan.goal ?? (typeof task?.goal === 'string' ? task.goal : null),
             todos: plan.todos,
-            currentAction: this.actions.currentActionLabel,
+            currentAction: this.currentActionName(),
         });
         return renderLiveState(live);
     }
@@ -805,7 +824,91 @@ export class Agent {
     async update(delta: number): Promise<void> {
         void delta;
         await this.checkTaskDone();
+        // 拾取是后台行为，**不能 await**：它要走 4 秒，await 会把边沿轮询一起冻住。
+        this.maybeAutoPickup();
         await this.pollEdges();
+    }
+
+    /**
+     * 自动拾取调度：到点、没在捡、身体空闲就试一次。
+     *
+     * 它是"最低优先级的房客"——通道被模型的动作占着就老实等着；
+     * 反过来模型要用身体时可以在 ActionRunner 里把它抢占掉（见 scheduler.preempt）。
+     */
+    private maybeAutoPickup(): void {
+        if (!this.bot || !this.scheduler) return;
+        const now = Date.now();
+        const target = nearestDropWithin(this.bot, PICKUP_RADIUS);
+        if (target == null) {
+            this.pickupStarved = false;
+            return;
+        }
+        const busy = this.scheduler.currentAction() != null;
+        if (
+            !shouldAttemptPickup({
+                busy,
+                pickingUp: this.pickingUp,
+                sinceLastAttemptMs: now - this.lastPickupAt,
+            })
+        ) {
+            // "有掉落物、但身体被模型占着"是最值得看见的一种失败：它意味着
+            // 拾取根本轮不上（模型连着发动作）。每次挨饿只报一行，不刷屏。
+            if (busy && !this.pickupStarved) {
+                this.pickupStarved = true;
+                console.log(
+                    `auto pickup: 通道忙（${this.currentActionName() ?? '?'}），先不捡 ${target.name} (${target.distance.toFixed(1)}m)`,
+                );
+            }
+            if (!busy) this.pickupStarved = false;
+            return;
+        }
+        this.pickupStarved = false;
+        this.lastPickupAt = now;
+        this.pickingUp = true;
+        void this.tryAutoPickup(target).finally(() => {
+            this.pickingUp = false;
+        });
+    }
+
+    /** 走一步去把指定掉落物踩进背包；失败/超时/被抢占都安静收场。 */
+    private async tryAutoPickup(target: PickupTarget): Promise<void> {
+        const claim = this.scheduler.startAction(AUTO_PICKUP_ID, { id: target.id });
+        if (!claim.accepted) return;
+        // 落一行日志：拾取是后台行为，没有这行就完全看不见它有没有在工作。
+        console.log(`auto pickup: ${target.name} (${target.distance.toFixed(1)}m)`);
+        const generation = claim.generation ?? 0;
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        try {
+            const arrived = await Promise.race([
+                skills
+                    .goToPosition(this.bot, target.x, target.y, target.z, 0)
+                    .then(() => true)
+                    .catch(() => false),
+                // 被抢占（generation 变了）也立刻收手：模型要用身体了。
+                (async () => {
+                    while (this.scheduler.isCurrent(generation)) {
+                        await new Promise<void>((resolve) => setTimeout(resolve, 150));
+                    }
+                    return false;
+                })(),
+                new Promise<boolean>((resolve) => {
+                    timer = setTimeout(() => resolve(false), PICKUP_TIMEOUT_MS);
+                }),
+            ]);
+            if (!arrived) {
+                try {
+                    this.bot.pathfinder?.stop?.();
+                } catch {
+                    // 停不下来就算了，通道照样释放。
+                }
+            }
+        } catch (err: unknown) {
+            console.error('auto pickup failed:', err instanceof Error ? err.message : String(err));
+        } finally {
+            if (timer !== undefined) clearTimeout(timer);
+            // 只有这一代还活着才释放：被 Stop/抢占过的话，通道已经不属于它了。
+            if (this.scheduler.isCurrent(generation)) this.scheduler.releaseAction();
+        }
     }
 
     /**
@@ -818,7 +921,7 @@ export class Agent {
         try {
             const task = this.task as { goal?: unknown } | null;
             snapshot = snapshotFromBot(this.bot, {
-                currentAction: this.actions?.currentActionLabel ?? null,
+                currentAction: this.currentActionName(),
                 goal: typeof task?.goal === 'string' ? task.goal : null,
                 foodNames: Object.keys(FOOD_VALUE),
             });

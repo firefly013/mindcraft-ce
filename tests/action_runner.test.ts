@@ -168,6 +168,17 @@ describe('ActionRunner', () => {
     expect(h.notices).toHaveLength(1);
   });
 
+  it('the model preempts a background autoPickup instead of getting a busy error', async () => {
+    // 自动拾取是后台房客：它由 Agent 直接用 scheduler.startAction 认领
+    // （不是普通工具），模型要用身体时它立刻让位——否则模型会莫名吃到忙音。
+    const h = makeHarness();
+    h.scheduler.startAction('autoPickup', { id: 7 });
+    expect(h.scheduler.describe().actionId).toBe('autoPickup');
+    const res = await h.runner.run('collectBlocks', { type: 'oak_log', num: 4 });
+    expect(res.status).toBe('accepted');
+    expect(h.scheduler.describe().actionId).toBe('collectBlocks');
+  });
+
   it('Stop reports what it actually stopped, and frees the channel for the next action', async () => {
     const h = makeHarness();
     h.hold = true;

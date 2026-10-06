@@ -19,6 +19,7 @@
 import { LEVEL } from './scheduler.js';
 import type { Level } from './scheduler.js';
 import { ALWAYS_HOSTILE } from './emergency.js';
+import { durabilityFraction } from './live_state.js';
 import { Vec3 } from 'vec3';
 
 /** 检测器看到的拍平快照（由调用方从 LiveState 等拼出来）。 */
@@ -156,6 +157,34 @@ function isHostileEntity(e: EdgeEntity): boolean {
   return ALWAYS_HOSTILE.has(String(e.name ?? '').toLowerCase());
 }
 
+/** 快照里的敌对生物（玩家不算）。 */
+function hostiles(snapshot: EdgeSnapshot): EdgeEntity[] {
+  return (snapshot.entities ?? []).filter((e) => isHostileEntity(e) && !isPlayerEntity(e));
+}
+
+/**
+ * 某种敌对生物在快照里的距离列表。
+ *
+ * 用于**按类型**做边缘的检测器（`entity.hostile_far`）：同一种怪无论有几只、
+ * 走到哪个距离，都算同一个 key。这样"远处有僵尸"只报一次，而不是每只僵尸
+ * 各报一次。
+ */
+function hostilesIn(snapshot: EdgeSnapshot, name: string | number | null | undefined): number[] {
+  const target = String(name ?? '');
+  const out: number[] = [];
+  for (const e of hostiles(snapshot)) {
+    if (String(e.name ?? 'unknown') !== target) continue;
+    const d = num(e.distance);
+    if (d != null) out.push(d);
+  }
+  return out;
+}
+
+/** 敌对生物的类型集合，作为按类型边缘的 key 列表。 */
+function hostileTypeKeys(snapshot: EdgeSnapshot): string[] {
+  return [...new Set(hostiles(snapshot).map((e) => String(e.name ?? 'unknown')))];
+}
+
 /** 苦力怕起爆方向在实体元数据里的下标（minecraft-data: creeper.metadataKeys[16] = swell_dir）。 */
 export const CREEPER_SWELL_DIR_INDEX = 16;
 
@@ -259,10 +288,17 @@ export const DETECTORS: readonly Detector[] = Object.freeze([
     clear: (s, id) => !within(s, id, 40),
   },
   {
+    // 「远处有敌对生物」是**一类事实**，不是"第 1401 号僵尸"。
+    // 按实体 id 做边缘的话，站在夜里一分钟能报十几条——每只走到 32~64 格的
+    // 怪都各报一次，日志里就是这样刷屏的。模型要看具体的谁，Live State 里
+    // 本来就有带 id 和距离的实体表。
+    //
+    // 所以按**类型**做边缘：这种怪进了 32~64 报一次；它（们）全部离开 64
+    // 才解除 arm；之后再进来才会再报。
     type: 'entity.hostile_far', level: 2, kind: 'keyed',
-    keyOf: (s) => (s.entities ?? []).filter((e) => isHostileEntity(e) && !isPlayerEntity(e)).map((e) => e.id),
-    fire: (s, id) => { const d = distOf(s, id); return d != null && d > 32 && d <= 64; },
-    clear: (s, id) => !within(s, id, 64),
+    keyOf: (s) => hostileTypeKeys(s),
+    fire: (s, name) => hostilesIn(s, name).some((d) => d > 32 && d <= 64),
+    clear: (s, name) => !hostilesIn(s, name).some((d) => d <= 64),
   },
   {
     type: 'player.nearby', level: 3, kind: 'keyed',
@@ -293,9 +329,17 @@ export const DETECTORS: readonly Detector[] = Object.freeze([
     clear: (s) => gte(s.foodCount, 12) },
   {
     type: 'tool.durability_low', level: 3, kind: 'keyed',
-    keyOf: (s) => (s.heldSlots ?? []).map((h) => h.slot),
-    fire: (s, slot) => (s.heldSlots ?? []).some((h) => h.slot === slot && lte(h.fraction, 0.1)),
-    clear: (s, slot) => !(s.heldSlots ?? []).some((h) => h.slot === slot && lte(h.fraction, 0.3)),
+    // key 固定是 `hand`，**不能**用 `heldSlots` 推导：手上一换成没有耐久的东西
+    // （空手、方块、食物），key 就从快照里消失、armed 被静默解除，再换回那把
+    // 旧镐子就又报一次。砍树/合成时反复切工具，90 秒能报 5 次——而它是 L3，
+    // 每次都拉起一次完整请求。
+    // 边缘应该跟着"耐久恢复"走：`clear` 才是解除条件。
+    keyOf: () => ['hand'],
+    fire: (s) => (s.heldSlots ?? []).some((h) => h.slot === 'hand' && lte(h.fraction, 0.1)),
+    // 解除条件必须是"手上真的拿着一件**健康**的耐用品"（>30%）。
+    // 写成 `!low` 是不行的：空手/方块/食物会让它立刻为真，切一次工具就解除一次，
+    // 于是每换回那把旧镐子又报一遍。
+    clear: (s) => (s.heldSlots ?? []).some((h) => h.slot === 'hand' && !lte(h.fraction, 0.3)),
   },
   { type: 'agent.death', level: 4, kind: 'all',
     fire: (s) => s.alive === false, clear: (s) => s.alive !== false },
@@ -481,7 +525,14 @@ function deltaFor(detector: Detector, key: string | number | null, snapshot: Edg
   if (detector.type.startsWith('bot.oxygen')) delta['oxygen'] = snapshot.oxygen;
   if (detector.type === 'world.light_low') delta['light'] = snapshot.light;
   if (detector.type === 'inventory.full') delta['freeSlots'] = snapshot.freeSlots;
-  if (detector.type === 'inventory.food_low') delta['foodCount'] = snapshot.foodCount;
+  if (detector.type === 'inventory.food_low') {
+    delta['foodCount'] = snapshot.foodCount;
+    // 光报"没食物了"没有用（模型反馈过："系统只发了事件但**没有可执行的建议**，
+    // 现在全靠我自己想"）。把下一步直接写进事件里。
+    delta['hint'] =
+      '没有食物了：searchForEntity 找 pig/cow/chicken/sheep → attack 杀掉 → smeltItem 把生肉烤熟 → consume 吃掉；' +
+      '旁边有小麦/胡萝卜/土豆就直接 collectBlocks 收。饿到 6 以下会掉血。';
+  }
   return delta;
 }
 
@@ -544,10 +595,11 @@ export function snapshotFromBot(bot: unknown, extra: SnapshotExtra = {}): EdgeSn
     }
 
     const held = (b['heldItem'] ?? null) as { durabilityUsed?: unknown; maxDurability?: unknown } | null;
-    const used = num(held?.durabilityUsed);
-    const max = num(held?.maxDurability);
-    if (held != null && used != null && max != null && max > 0) {
-      snap.heldSlots = [{ slot: 'hand', fraction: 1 - used / max }];
+    // 与 Live State 共用同一个钳制过的算法：负的 fraction 会让
+    // `tool.durability_low` 永远处于触发态（模型反馈过 -300%/-900%）。
+    const fraction = durabilityFraction(held?.durabilityUsed, held?.maxDurability);
+    if (fraction != null) {
+      snap.heldSlots = [{ slot: 'hand', fraction }];
     }
 
     const time = num((b['time'] as { timeOfDay?: unknown } | undefined)?.timeOfDay);

@@ -78,8 +78,66 @@ describe('keyed detectors: one armed state per object', () => {
     ).toHaveLength(1);
   });
 
-  it('player.nearby uses its own 5/8 band per player', () => {
+  it('hostile_far is keyed by TYPE, not by entity id', () => {
+    // 「远处有敌对生物」是一类事实：同一种怪无论几只，只报一次。
+    // 按 id 做边缘会刷屏——站夜里一分钟十几只怪各报一次（日志里就是这样）。
     const w = createEdgeWatcher();
+    const far = (id: number, d: number, name = 'zombie') => ({ id, name, distance: d });
+
+    const first = w.poll({ entities: [far(1, 50), far(2, 60), far(3, 40)] });
+    expect(first.filter((e) => e.type === 'entity.hostile_far')).toHaveLength(1);
+    expect(first.find((e) => e.type === 'entity.hostile_far')?.key).toBe('zombie');
+
+    // 又一只同类走进远区：仍在 arm 状态，不重发。
+    expect(
+      w.poll({ entities: [far(1, 50), far(4, 55)] }).filter((e) => e.type === 'entity.hostile_far'),
+    ).toEqual([]);
+
+    // 同类全部离开 64 才解除；再进来才再报一次。
+    expect(
+      w.poll({ entities: [far(1, 70)] }).filter((e) => e.type === 'entity.hostile_far'),
+    ).toEqual([]);
+    expect(
+      w.poll({ entities: [far(1, 50)] }).filter((e) => e.type === 'entity.hostile_far'),
+    ).toHaveLength(1);
+  });
+
+  it('hostile_far keeps different types on independent edges', () => {
+    const w = createEdgeWatcher();
+    const far = (id: number, d: number, name: string) => ({ id, name, distance: d });
+    const fired = w.poll({ entities: [far(1, 50, 'zombie'), far(2, 55, 'skeleton')] })
+      .filter((e) => e.type === 'entity.hostile_far')
+      .map((e) => e.key)
+      .sort();
+    expect(fired).toEqual(['skeleton', 'zombie']);
+  });
+
+  it('hostile_far ignores mobs inside the perception radius', () => {
+    const w = createEdgeWatcher();
+    // 32 以内属于 hostile_nearby 的辖区，远区不该抢报。
+    expect(
+      w.poll({ entities: [ent(1, 20)] }).filter((e) => e.type === 'entity.hostile_far'),
+    ).toEqual([]);
+  });
+
+  it('durability_low stays armed while the hand flickers between tools', () => {
+    // 砍树/合成时手上来回切：换到没有耐久的东西不该把边缘解除，
+    // 否则每换回一次旧镐子就再报一次——而它是 L3，每次都拉起一次请求。
+    const w = createEdgeWatcher();
+    const hand = (fraction: number | null) => ({
+      heldSlots: fraction == null ? undefined : [{ slot: 'hand', fraction }],
+    });
+    expect(w.poll(hand(0.05)).map((e) => e.type)).toContain('tool.durability_low');
+    // 换成方块（没有耐久数据）：边缘保持 armed，不再报。
+    expect(w.poll(hand(null)).filter((e) => e.type === 'tool.durability_low')).toEqual([]);
+    // 换回同一把快坏的镐子：仍然不报。
+    expect(w.poll(hand(0.05)).filter((e) => e.type === 'tool.durability_low')).toEqual([]);
+    // 真正修好/换新（耐久回到 30% 以上）才解除；之后再坏才再报。
+    expect(w.poll(hand(0.8)).filter((e) => e.type === 'tool.durability_low')).toEqual([]);
+    expect(w.poll(hand(0.05)).map((e) => e.type)).toContain('tool.durability_low');
+  });
+
+  it('player.nearby uses its own 5/8 band per player', () => {    const w = createEdgeWatcher();
     const player = (id: number, d: number) => ({ id, name: 'steve', kind: 'player', distance: d });
     expect(w.poll({ entities: [player(7, 4)] }).map((e) => e.type)).toContain('player.nearby');
     expect(w.poll({ entities: [player(7, 6)] })).toEqual([]);

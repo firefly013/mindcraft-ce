@@ -209,6 +209,20 @@ export class Scheduler {
   }
 
   /**
+   * 抢占：如果当前占着通道的正是 `id`，就把它作废并让出通道。
+   *
+   * 专给**低优先级的后台行为**用（目前只有自动拾取）：它是"房客"，
+   * 模型要用身体就立刻让位，不该让模型吃到 `ACTION_BUSY`。
+   * generation 一并 +1，被抢占那个动作的收尾回调/循环会看到自己过期而停下。
+   */
+  preempt(id: string): boolean {
+    if (this.action == null || this.action.id !== id) return false;
+    this.action = null;
+    this.generation++;
+    return true;
+  }
+
+  /**
    * `Stop()`：丢掉动作，并让所有在途回调的 generation 失效。
    *
    * 一并回报"刚才到底停掉了什么"：没在跑的时候 Stop 是空操作，

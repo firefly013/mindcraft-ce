@@ -273,9 +273,32 @@ bots/<name>/logs/request-001.log   ← 每次请求覆盖写，永远是最新�
 ### 7.3 属于设计、要留的
 
 `agent.ts`（组装）、`loop.ts`（回合）、`scheduler.ts`（事件分级）、`edges.ts`（世界 → 事件）、
-`emergency.ts`（L5 硬逻辑）、`live_state.ts`（快照）、`commands/*`（工具）、
-`action_runner.ts`（动作通道回执）、`history.ts` + `compaction.ts`（上下文）、
+`emergency.ts`（L5 硬逻辑）、`live_state.ts`（快照）、`auto_pickup.ts`（后台拾取）、
+`commands/*`（工具）、`action_runner.ts`（动作通道回执）、`history.ts` + `compaction.ts`（上下文）、
 `requestLog.ts`（日志）、`plan.ts` / `memory_bank.ts` / `feedback.ts`（模型自维护状态）。
+
+### 7.4 后台行为怎么用身体通道（2026-10-06 新增）
+
+`auto_pickup` 是第一个"不是模型发起、但要用身体"的行为（要走路才能踩到掉落物）。
+规矩定成：
+
+- **最低优先级的房客**：只在通道空闲时认领（`autoPickup` 这个名字会出现在 Live State
+  的 `action` 字段里）；模型要用身体时 `Scheduler.preempt()` 把它作废并让位——
+  模型**永远不该**因为一个后台行为吃到 `ACTION_BUSY`；
+- **generation 守卫**：被抢占/Stop 之后它不再释放通道（`isCurrent`），否则会把模型
+  刚认领的通道给放了；
+- 它**不吃 `await`**：拾取最多走 4 秒，`update()` 里必须 fire-and-forget，
+  否则边沿轮询跟着一起冻住。
+
+另外两条由此推出（都写进了提示词）：
+
+- **掉落物自动拾取 → 别用 `discard` 清背包**：扔地上会被重新捡回来。清背包要
+  用箱子：`placeHere` 放下 + `putInChest` 塞进去，**箱子就是垃圾桶**。
+- **边缘触发要按"事"而不是按"对象"**：`entity.hostile_far` 原来按实体 id 做边缘，
+  站着不动一分钟能报十几条（每只走到 32~64 格的怪各报一次）。改成按**类型**
+  做边缘后，同类只报一次，全部离开 64 格再进来才重报。凡是"一类事实"的探测器
+  都该这么定 key（`tool.durability_low` 同理：key 固定 `hand`，解除条件是
+  "手上真的拿着健康耐用品"，而不是"这一刻没有低耐久物品"）。
 
 ---
 
