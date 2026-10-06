@@ -27,6 +27,7 @@
  * 否则 section 值一变就追加一条 `pi.system` entry，缓存全废。
  */
 import { Type } from '@earendil-works/pi-ai';
+import type { Message } from '@earendil-works/pi-ai';
 import {
   GenerationTask,
   defineTool,
@@ -70,22 +71,36 @@ export function createSayTool(onSay: (text: string) => void = () => {}): ToolReg
 }
 
 /**
- * 每轮请求前把动态尾巴（事件 / 记忆 / 世界快照）追加成**最后一条 user 消息**。
+ * 每轮请求前把动态尾巴（记忆 / 世界快照）追加成**最后一条 user 消息**。
  *
- * 标题由拼装方负责，这里不加壳——否则 "## 事件" 会挂到
+ * 尾巴可以是异步的：记忆存在文档里，要读一次。但**同步生产器仍走同步路径**——
+ * 尾巴为空时直接返回 `undefined`（不追加消息），契约与旧实现逐字一致；
+ * 只有生产器真返回 Promise 时才变成异步 hook。
+ *
+ * 标题由拼装方负责，这里不加壳——否则 "## 记忆摘要" 会挂到
  * "## 当前世界快照" 标题底下。
  */
-export function liveTailHook(liveTail: () => string): HookRegistration {
+export function liveTailHook(liveTail: () => string | Promise<string>): HookRegistration {
+  const append = (
+    request: { readonly messages: readonly Message[] },
+    raw: string,
+  ): { readonly messages: readonly Message[] } | undefined => {
+    const tail = raw.trim();
+    if (tail === '') return undefined;
+    return {
+      messages: [
+        ...request.messages,
+        { role: 'user' as const, content: tail, timestamp: Date.now() },
+      ],
+    };
+  };
+
   return hook(GenerationTask, {
     beforeRequest: (request) => {
-      const tail = liveTail().trim();
-      if (tail === '') return undefined;
-      return {
-        messages: [
-          ...request.messages,
-          { role: 'user' as const, content: tail, timestamp: Date.now() },
-        ],
-      };
+      const tail = liveTail();
+      return typeof tail === 'string'
+        ? append(request, tail)
+        : tail.then((value) => append(request, value));
     },
   });
 }

@@ -48,7 +48,11 @@ export interface BotRuntimeOptions {
   /** 静态系统提示词。应当稳定，否则会破坏 prompt cache。 */
   systemPrompt: () => string;
   /** 每轮请求前注入的动态尾巴（事件 / 记忆 / 世界快照）；空串则不加。 */
-  liveTail: () => string;
+  /**
+   * 每轮尾巴（记忆 + 世界快照）。可以是异步的——记忆存在文档里要读一次；
+   * `beforeRequest` 允许返回 Promise。
+   */
+  liveTail: () => string | Promise<string>;
   /** 游戏工具。原样安装，不做任何包装。 */
   tools?: readonly ToolRegistration[];
   /** Say 通道回调（写游戏内聊天 / 推前端）。 */
