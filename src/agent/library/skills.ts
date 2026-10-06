@@ -1101,6 +1101,16 @@ export async function goToGoal(bot: any, goal: any, _persist?: boolean): Promise
 
     const destructiveMovements: any = new (pf as any).Movements(bot);
 
+    // **落差上限压到 2 格**。这两套 Movements 原来都没设 maxDropDown（默认 4），
+    // 而 destructiveMovements 更是纯默认值——模型真机上反复被它带进大落差：
+    // pib "从 y=29 掉回来 12 格"、pia "searchForBlock 带我从竖井直落 13 格"（摔死）。
+    // 多绕几步也比摔死强，何况它手上有 mineBlock/placeBlock 可以自己开路。
+    for (const movements of [nonDestructiveMovements, destructiveMovements]) {
+        movements.maxDropDown = 2;
+    }
+    // 破坏性寻路也别太随便挖：让"挖"比"绕"贵，只有真绕不过去才动镐。
+    destructiveMovements.digCost = 5;
+
     let final_movements: any = destructiveMovements;
 
     const pathfind_timeout = 1000;
