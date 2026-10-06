@@ -214,6 +214,24 @@ export const actionsList: AgentCommand[] = [
         })
     },
     {
+        name: '!placeBlock',
+        description: td('placeBlock'),
+        params: {
+            'type': { type: 'BlockOrItemName', description: tp('placeBlock', 'type') },
+            'x': { type: 'float', description: tp('placeBlock', 'x') },
+            'y': { type: 'float', description: tp('placeBlock', 'y') },
+            'z': { type: 'float', description: tp('placeBlock', 'z') }
+        },
+        perform: runAsAction(async (agent: any, type: string, x: number, y: number, z: number) => {
+            // **往指定坐标放方块**。placeHere 只能放"脚下当前位置"，搭下界门那种
+            // 4x5 门框根本摆不出来——模型真机报过这个硬缺口（凑够黑曜石也没用）。
+            const ok = await skills.placeBlock(agent.bot, type, x, y, z);
+            if (!ok) {
+                skills.log(agent.bot, `没能把 ${type} 放到 (${x},${y},${z})：那一格可能不是空气，或者够不着。`);
+            }
+        })
+    },
+    {
         name: '!attack',
         description: td('attack'),
         params: {'type': { type: 'string', description: tp('attack', 'type')}},

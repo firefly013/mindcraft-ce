@@ -119,6 +119,10 @@ export const TOOL_TEXT: Record<string, { description: string; params: Record<str
     description: '在当前位置放一个指定方块。只放单个方块/火把用，不要拿它盖建筑。',
     params: { type: '要放的方块类型。' },
   },
+  placeBlock: {
+    description: '往指定坐标放一个方块。搭建筑、摆下界门门框（4x5 黑曜石）用它——placeHere 只能放脚下，摆不了门框。',
+    params: { type: '要放的方块类型。', x: '目标 x 坐标。', y: '目标 y 坐标。', z: '目标 z 坐标。' },
+  },
   attack: {
     description: '攻击并杀死最近的某种实体。',
     params: { type: '要攻击的实体类型。' },
