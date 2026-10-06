@@ -316,14 +316,24 @@ export async function attackNearest(bot: any, mobType: string, kill: boolean = t
      * @example
      * await skills.attackNearest(bot, "zombie", true);
      **/
-    const mob: any = world.getNearbyEntities(bot, 24).find((entity: any) => entity.name === mobType);
+    // 范围原来只有 24 格、失败只回一句"找不到"——模型真机报过
+    // "attack 报找不到 pig，而快照里 16 格内就有一只"，它无从自查。
+    // 现在放宽到 64 格，**失败时把附近实际有什么列出来**，让它能自己改目标。
+    const ATTACK_RANGE = 64;
+    const nearby: any[] = world.getNearbyEntities(bot, ATTACK_RANGE);
+    const mob: any = nearby.find((entity: any) => entity.name === mobType);
     if (mob) {
         const res: boolean | undefined = await attackEntity(bot, mob, kill);
         return res === true;
     }
-    log(bot, 'Could not find any '+mobType+' to attack.');
+    const seen = [...new Set(nearby.map((e: any) => e.name).filter((n: unknown) => typeof n === 'string'))];
+    log(
+        bot,
+        `Could not find any ${mobType} to attack within ${ATTACK_RANGE} blocks.` +
+            (seen.length > 0 ? ` Nearby: ${seen.join(', ')}.` : ' Nothing nearby.'),
+    );
     return false;
-}
+    }
 
 export function stopPvp(bot: any): void {
     // @nxg-org/mineflayer-custom-pvp：近战 swordpvp + 远程 bowpvp 都要停
