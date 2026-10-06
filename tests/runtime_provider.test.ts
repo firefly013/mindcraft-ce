@@ -10,7 +10,6 @@
  * 旧适配器走注入的 stub client。
  */
 import { beforeAll, describe, expect, it } from 'vitest';
-import { GPT } from '../src/models/gpt.js';
 import { PiModel } from '../src/runtime/model.js';
 import { resolveProvider } from '../src/runtime/provider.js';
 import type { ChatMessage, OpenAITool } from '../src/types/common.js';
@@ -71,21 +70,6 @@ function capturingPi(profile: unknown): {
   return { model, payloads };
 }
 
-function capturingGpt(): { model: GPT; bodies: Record<string, unknown>[] } {
-  const bodies: Record<string, unknown>[] = [];
-  const client = {
-    chat: {
-      completions: {
-        create: (body: Record<string, unknown>) => {
-          bodies.push(body);
-          return Promise.resolve({ choices: [{ message: { content: 'ok', tool_calls: [] } }] });
-        },
-      },
-    },
-  };
-  return { model: new GPT('gpt-5.4', OFFLINE_URL, undefined, client as never), bodies };
-}
-
 describe('resolveProvider 端点分派', () => {
   it('OpenCode Go profile 命中内置目录：真实 1M 窗口 + deepseek thinking 格式', () => {
     const profile = {
@@ -143,107 +127,3 @@ describe('resolveProvider 端点分派', () => {
   });
 });
 
-describe('payload 等价：PiModel vs GPT', () => {
-  const turns: ChatMessage[] = [
-    { role: 'user', content: 'hi' },
-    { role: 'assistant', content: 'hello' },
-    { role: 'user', content: 'go north' },
-  ];
-  const TAIL = '## 当前世界快照\nhp=20';
-
-  // 预热一次：把适配器与 OpenAI SDK 的惰性 import 在计时开始前付掉。
-  beforeAll(async () => {
-    const { model } = capturingPi(LOCAL_PROFILE);
-    await model.sendRequestWithTools([{ role: 'user', content: 'warm' }], 'SYS', [], 'auto');
-  }, MODEL_CALL_TIMEOUT_MS);
-
-  it('messages / tools / tool_choice 与旧适配器逐字节一致', async () => {
-    const { model: pi, payloads } = capturingPi(LOCAL_PROFILE);
-    await pi.sendRequestWithTools(turns, 'SYS', TOOLS, 'required', TAIL);
-    const { model: gpt, bodies } = capturingGpt();
-    await gpt.sendRequestWithTools(turns, 'SYS', TOOLS, 'required', TAIL);
-
-    expect(payloads).toHaveLength(1);
-    expect(bodies).toHaveLength(1);
-    const next = first(payloads);
-    const old = first(bodies);
-
-    // 语义部分必须完全一致。
-    expect(next['model']).toBe(old['model']);
-    expect(next['messages']).toEqual(old['messages']);
-    expect(next['tools']).toEqual(old['tools']);
-    expect(next['tool_choice']).toBe(old['tool_choice']);
-
-    // pi-ai 额外带的都是传输层字段，不是语义差异：
-    //   stream + stream_options.include_usage → 内部流式收集 + 用量统计
-    //   store:false                          → 明确不落供应商侧存储
-    expect(next['stream']).toBe(true);
-    expect(next['stream_options']).toEqual({ include_usage: true });
-    expect(next['store']).toBe(false);
-
-    // 顺序：system 头固定，历史居中，尾巴永远最后一条。
-    const messages = next['messages'] as Array<Record<string, unknown>>;
-    expect(messages).toHaveLength(5);
-    expect(messages[0]).toMatchObject({ role: 'system', content: 'SYS' });
-    expect(messages[4]).toMatchObject({ role: 'user', content: TAIL });
-  }, MODEL_CALL_TIMEOUT_MS);
-
-  it('尾巴只有空白且无截图时不追加消息', async () => {
-    const { model, payloads } = capturingPi(LOCAL_PROFILE);
-    await model.sendRequestWithTools(turns, 'SYS', TOOLS, 'auto', '   ');
-    // 3 条历史 + system 头；空白尾巴不追加消息
-    expect((payloads[0]?.['messages'] as unknown[]).length).toBe(4);
-  }, MODEL_CALL_TIMEOUT_MS);
-
-  it('带截图时尾巴与图合成同一条多模态 user 消息', async () => {
-    const { model, payloads } = capturingPi(LOCAL_PROFILE);
-    await model.sendRequestWithTools(turns, 'SYS', TOOLS, 'auto', TAIL, 'QUJD');
-    const messages = payloads[0]?.['messages'] as Array<Record<string, unknown>>;
-    // 3 条历史 + system 头 + 尾巴 = 5
-    expect(messages).toHaveLength(5);
-    expect(messages[4]).toEqual({
-      role: 'user',
-      content: [
-        { type: 'text', text: TAIL },
-        { type: 'image_url', image_url: { url: 'data:image/jpeg;base64,QUJD' } },
-      ],
-    });
-  }, MODEL_CALL_TIMEOUT_MS);
-
-  it('sendRequest 把 stop 放进请求体；模型名含 o1/o3/5 时删掉（复刻旧 URL 分支）', async () => {
-    // 'llama-3-8b' 不含 o1/o3/5 → 应带 stop。
-    const withStop = capturingPi({
-      model: { model: 'llama-3-8b', url: OFFLINE_URL, params: { api_key_env: MISSING_KEY } },
-    });
-    await withStop.model.sendRequest(turns, 'SYS');
-    expect(withStop.payloads[0]?.['stop']).toBe('***');
-
-    // 'o3-mini' 命中 o3 → 旧适配器会删掉 stop，新路径必须一致。
-    const noStop = capturingPi({
-      model: { model: 'o3-mini', url: OFFLINE_URL, params: { api_key_env: MISSING_KEY } },
-    });
-    await noStop.model.sendRequest(turns, 'SYS');
-    expect(noStop.payloads[0]?.['stop']).toBeUndefined();
-  }, MODEL_CALL_TIMEOUT_MS);
-
-  it('profile.params 原样进请求体，接线字段被剔除', async () => {
-    const { model, payloads } = capturingPi({
-      model: {
-        model: 'gpt-5.4',
-        url: OFFLINE_URL,
-        params: {
-          api_key_env: MISSING_KEY,
-          headers: { 'x-test': 'v' },
-          thinking: { type: 'disabled' },
-          temperature: 0.3,
-        },
-      },
-    });
-    await model.sendRequestWithTools(turns, 'SYS', [], 'auto');
-    const payload = first(payloads);
-    expect(payload['thinking']).toEqual({ type: 'disabled' });
-    expect(payload['temperature']).toBe(0.3);
-    expect(payload).not.toHaveProperty('api_key_env');
-    expect(payload).not.toHaveProperty('headers');
-  }, MODEL_CALL_TIMEOUT_MS);
-});

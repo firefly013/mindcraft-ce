@@ -4,7 +4,7 @@
  */
 import { describe, expect, it } from 'vitest';
 import { ActionRunner } from '../src/agent/action_runner.js';
-import type { LoopToolResult } from '../src/agent/loop.js';
+import type { ToolOutcome } from '../src/runtime/tools.js';
 import { Scheduler } from '../src/agent/scheduler.js';
 
 interface Harness {
@@ -12,7 +12,7 @@ interface Harness {
   scheduler: Scheduler;
   records: string[];
   spoken: string[];
-  notices: Array<{ call: string; result: LoopToolResult }>;
+  notices: Array<{ call: string; result: ToolOutcome }>;
   hold: boolean;
   resolveExecute: (value: string) => void;
   rejectExecute: (err: unknown) => void;
@@ -33,7 +33,7 @@ function makeHarness(): Harness {
   const scheduler = new Scheduler();
   const records: string[] = [];
   const spoken: string[] = [];
-  const notices: Array<{ call: string; result: LoopToolResult }> = [];
+  const notices: Array<{ call: string; result: ToolOutcome }> = [];
   const executed: string[] = [];
   const harness = {
     runner: null as unknown as ActionRunner,

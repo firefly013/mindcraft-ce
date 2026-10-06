@@ -6,7 +6,6 @@ import { tmpdir } from 'os';
 import { join } from 'path';
 import { describe, expect, it } from 'vitest';
 import { snapshotFromBot, createEdgeWatcher } from '../src/agent/edges.js';
-import { createRequestLog, renderRequestLog } from '../src/agent/requestLog.js';
 
 function stubBot(overrides: Record<string, unknown> = {}): Record<string, unknown> {
   return {
@@ -203,83 +202,3 @@ describe('snapshotFromBot', () => {
   });
 });
 
-describe('createRequestLog', () => {
-  it('overwrites one file per request and rotates to a new one on compaction', () => {
-    const dir = mkdtempSync(join(tmpdir(), 'reqlog-'));
-    const log = createRequestLog({ dir, clock: () => 1_700_000_000_000 });
-
-    expect(log.path).toBeNull();
-    const first = log.logRequest({ text: 'hello', tools: ['stats', 'Finish'], round: 7 });
-    expect(first).toBe(join(dir, 'logs', 'request-001.log'));
-    // path 报的是"当前正在写的那一个"。
-    expect(log.path).toBe(first);
-
-    // 第二次请求**覆盖**同一个文件：里面永远只有最近一次请求。
-    log.logRequest({ text: 'world', tools: [] });
-    expect(log.path).toBe(first);
-    const only = readFileSync(first as string, 'utf8');
-    expect(only).toContain('# round: -');
-    expect(only).toContain('# tools: ');
-    expect(only).toContain('world');
-    expect(only).not.toContain('hello');
-    expect(readdirSync(join(dir, 'logs'))).toEqual(['request-001.log']);
-
-    // 压仓翻页：下一次请求落到新文件，旧文件原地保留。
-    expect(log.rotate()).toBe(join(dir, 'logs', 'request-002.log'));
-    const second = log.logRequest({ text: 'after compaction', tools: [] });
-    expect(second).toBe(join(dir, 'logs', 'request-002.log'));
-    expect(readFileSync(join(dir, 'logs', 'request-001.log'), 'utf8')).toContain('world');
-    expect(readFileSync(second as string, 'utf8')).toContain('after compaction');
-  });
-
-  it('rotating before anything was logged still starts at 001', () => {
-    // 压仓可能发生在第一个请求落盘之前（启动即压）。这种情况下不该丢掉 001。
-    const dir = mkdtempSync(join(tmpdir(), 'reqlog-early-'));
-    const log = createRequestLog({ dir });
-    expect(log.rotate()).toBe(join(dir, 'logs', 'request-001.log'));
-    expect(log.logRequest({ text: 'x', tools: [] })).toBe(join(dir, 'logs', 'request-001.log'));
-  });
-
-  it('never throws when the log cannot be written', () => {
-    // 目录建不出来：ensure() 失败，直接回 null。
-    const dir = mkdtempSync(join(tmpdir(), 'reqlog-bad-'));
-    writeFileSync(join(dir, 'logs'), 'not a directory', 'utf8');
-    const log = createRequestLog({ dir });
-    expect(log.logRequest({ text: 'x', tools: [] })).toBeNull();
-  });
-
-  it('swallows a write failure instead of killing the round', () => {
-    // 目录能建、文件写不进去（这里让目标路径是个目录）：写盘抛错必须被吞掉，
-    // 返回 null。删掉 try/catch 这条用例就会抛出来。
-    const dir = mkdtempSync(join(tmpdir(), 'reqlog-eisdir-'));
-    const log = createRequestLog({ dir });
-    mkdirSync(join(dir, 'logs', 'request-001.log'), { recursive: true });
-    expect(log.logRequest({ text: 'x', tools: [] })).toBeNull();
-  });
-
-  it('renders the request as the exact message list the model receives', () => {
-    // 这份日志的全部意义：打开就知道模型此刻看到了什么。
-    const text = renderRequestLog({
-      systemPrompt: '你是机器人',
-      messages: [
-        { role: 'user', content: '挖点木头', kind: 'user', level: 3, at: 1 },
-        { role: 'assistant', content: '好', kind: 'model', level: 2, at: 2, usage: { promptTokens: 9, completionTokens: 1, totalTokens: 10 } },
-        { role: 'system', content: '工具 collectBlocks {} → accepted', kind: 'tool', level: 2, at: 3 },
-      ],
-      tail: '## 本轮新事件\n#4\n\n## 当前世界快照\n血量 20',
-      imageChars: 1234,
-    });
-    const blocks = text.split('\n\n');
-    expect(blocks[0]).toBe('[system] 你是机器人');
-    expect(blocks[1]).toBe('[user] 挖点木头');
-    expect(blocks[2]).toBe('[assistant] 好');
-    // 工具回执是 role=system，发出去时按 strictFormat 变成 SYSTEM: 前缀的 user。
-    expect(blocks[3]).toBe('[user] SYSTEM: 工具 collectBlocks {} → accepted');
-    // 尾巴原样作为最后一条 user 消息（它自带空行，所以整段断言）。
-    expect(text).toContain('[user] ## 本轮新事件\n#4\n\n## 当前世界快照\n血量 20');
-    expect(text.endsWith('[user] <image/jpeg base64, 1234 chars>')).toBe(true);
-    // 内部字段（kind/level/at/usage）绝不外泄到日志里。
-    expect(text).not.toContain('usage');
-    expect(text).not.toContain('"at"');
-  });
-});

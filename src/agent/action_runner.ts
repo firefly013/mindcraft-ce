@@ -17,7 +17,7 @@
 import { Scheduler } from './scheduler.js';
 import { MESSAGES } from '../prompts.js';
 import { isActionTool, validateToolCall } from './commands/to_openai_tools.js';
-import type { LoopToolResult } from './loop.js';
+import type { ToolOutcome } from '../runtime/tools.js';
 
 export interface ActionRunnerDeps {
   scheduler: Scheduler;
@@ -28,7 +28,7 @@ export interface ActionRunnerDeps {
   /** 工具执行体（查询直调，动作后台跑）。 */
   execute: (name: string, args: Record<string, unknown>) => Promise<string>;
   /** 执行完上报：进调度等下一轮。 */
-  notify: (payload: { call: string; result: LoopToolResult }) => void;
+  notify: (payload: { call: string; result: ToolOutcome }) => void;
 }
 
 export class ActionRunner {
@@ -36,7 +36,7 @@ export class ActionRunner {
   private record: (outcome: string, name: string, args: unknown) => Promise<void>;
   private speak: (text: string) => void;
   private execute: (name: string, args: Record<string, unknown>) => Promise<string>;
-  private notify: (payload: { call: string; result: LoopToolResult }) => void;
+  private notify: (payload: { call: string; result: ToolOutcome }) => void;
 
   constructor(deps: ActionRunnerDeps) {
     this.scheduler = deps.scheduler;
@@ -47,7 +47,7 @@ export class ActionRunner {
   }
 
   /** 跑一个工具调用：动作类即时回 accepted，查询类阻塞回内容。 */
-  async run(name: string, args: unknown): Promise<LoopToolResult> {
+  async run(name: string, args: unknown): Promise<ToolOutcome> {
     const checked = validateToolCall(name, args);
     if (!checked.ok) {
       const reason = checked.errors?.join('; ') ?? 'Bad arguments.';

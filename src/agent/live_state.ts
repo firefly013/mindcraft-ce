@@ -14,7 +14,7 @@
  * 快照失败而发不出去。
  */
 
-import { estimateTokens } from './compaction.js';
+import { estimateTokens } from '../utils/tokens.js';
 import type { PlanTodo } from './plan.js';
 import { Vec3 } from 'vec3';
 
