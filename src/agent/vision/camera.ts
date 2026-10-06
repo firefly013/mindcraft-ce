@@ -10,6 +10,16 @@ import { Vec3 } from 'vec3';
 import { EventEmitter } from 'events';
 
 import worker_threads from 'worker_threads';
+
+// prismarine-viewer 的 viewer 内部用的是**全局** THREE / Worker
+// （见 node_modules/prismarine-viewer/viewer/lib/entity/Entity.js 的 `/* global THREE */`）。
+// 它自己的 headless 入口（lib/headless.js）会设置这两个全局，而我们只用了
+// viewer/lib 的子路径，所以要自己装。
+//
+// 以前这里是靠 browser_viewer.ts 里那句 `import prismarine-viewer`（根模块会
+// eager-require headless，从而设置全局）顺带装上的——**别把别人的副作用当依赖**：
+// 删掉那个文件，截图链就静默断掉（屏幕全黑/报 THREE is not defined）。
+(global as unknown as Record<string, unknown>).THREE = THREE;
 (global as unknown as Record<string, unknown>).Worker = worker_threads.Worker;
 
 
