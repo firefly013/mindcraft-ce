@@ -16,7 +16,7 @@ import { actionsList } from '../agent/commands/actions.js';
 import { queryList } from '../agent/commands/queries.js';
 import { stripBang } from '../agent/commands/to_openai_tools.js';
 import { paramNames } from './tool_schema.js';
-import { commandToRegistration } from './tools.js';
+import { commandToRegistration, loopResultText, type ToolOutcome } from './tools.js';
 
 /** 与旧 `to_openai_tools.ts` 的 `commandList` 同一个来源、同一个顺序。 */
 export const GAME_COMMANDS = queryList.concat(actionsList);
@@ -45,4 +45,26 @@ export function buildGameTools(deps: GameToolDeps): ToolRegistration[] {
       return deps.execute(stripBang(command.name), named);
     }),
   );
+}
+
+/** 身体通道的最小接口（`ActionRunner` 满足它）。 */
+export interface ActionChannel {
+  run(name: string, args: unknown): Promise<ToolOutcome>;
+}
+
+/**
+ * 工具调用 → 身体通道的接线。
+ *
+ * **单独抽出来是为了可测**：`agent.ts` 的 `invokeTool` 就是调它，所以测试跑
+ * 的就是生产路径。如果哪天有人把工具的 `execute` 直连 `executeToolCall`，
+ * 「动作类工具真的占用了身体通道」这条断言会红——那是 E1/E3 失效的前兆，
+ * 而它们在契约层是测不出来的（见 `runtime_action_boundary.test.ts` 的说明）。
+ */
+export function actionChannelInvoker(
+  channel: ActionChannel,
+): (name: string, args: Record<string, unknown>) => Promise<string> {
+  return async (name, args) => {
+    const result = await channel.run(name, args);
+    return loopResultText(name, args, result);
+  };
 }

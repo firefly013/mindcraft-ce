@@ -21,7 +21,7 @@ import { defineExtension } from '@earendil-works/pi-durable';
 import { openBotWiring, type BotWiring } from '../runtime/bot.js';
 import { createFeedbackTool, createStopTool, createUpdatePlanTool } from '../runtime/control_tools.js';
 import { EventIntake } from '../runtime/events.js';
-import { buildGameTools } from '../runtime/game_tools.js';
+import { actionChannelInvoker, buildGameTools } from '../runtime/game_tools.js';
 import { migrateLegacyState, readLegacySave } from '../runtime/legacy.js';
 import { systemPromptFromProfile } from '../runtime/prompt.js';
 import { compactionPageHook, createRequestLogSink, requestLogHook } from '../runtime/request_log.js';
@@ -420,11 +420,10 @@ export class Agent {
      * `executeToolCall` 会绕过通道，E1（忙时同动作幂等）/E3（Stop 一次停干净）
      * 当场失效。回执文本走 `loopResultText`，与旧 `runTool` 逐字一致。
      */
-    private async invokeTool(name: string, args: Record<string, unknown>): Promise<string> {
+    private invokeTool(name: string, args: Record<string, unknown>): Promise<string> {
         const runner = this.actionRunner;
-        if (runner == null) return '工具通道尚未就绪，稍后再试。';
-        const result = await runner.run(name, args);
-        return loopResultText(name, args, result);
+        if (runner == null) return Promise.resolve('工具通道尚未就绪，稍后再试。');
+        return actionChannelInvoker(runner)(name, args);
     }
 
     /** 全部停下：动作停、日志清、回到 idle。 */
