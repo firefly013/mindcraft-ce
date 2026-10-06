@@ -431,6 +431,23 @@ pi-ai 额外  stream:true, stream_options:{include_usage:true}, store:false  ←
 
 **一处需要定的差异**：pi-durable 的摘要提示词不可配置——`beforeCompact` 只能"拒绝或提供自己的摘要"，而 hook 里**没有模型访问权限**。主线新写的 `summary_system` / `saving_memory`（结构化检查点格式）因此无法直接喂给内置 CompactionTask。要么接受 pi-durable 的摘要格式，要么自写 compaction task。
 
+## 设计注记：`stats` 工具**不是**冗余，别删
+
+**尾巴里的 Live State 和 `stats` 产出的 State 是互补的两件事：**
+
+| | 尾巴里的 Live State | `stats` 工具产出的 State |
+|---|---|---|
+| 生命周期 | **一次请求**，用完就没 | **永久留在上下文里**（一条 `pi.tool-result` entry） |
+| 模型看到 | 只有"现在" | "现在" + 历次快照，**可以比对** |
+| 进不进上下文 | **不进**（核心诉求，见 §0） | 进 |
+
+`stats` 应当改造成**与尾巴里的 State 一模一样**（或更丰富）：直接复用 `sampleLiveState` + `renderLiveState`，于是模型能拿两段文本做 diff——"相比我上次看自己状态的时候，身上多了什么"。
+
+**为什么不能只留尾巴**：那样模型只有"此刻"，失去**时间轴**。VLM-Bot 的设计里确实没有查看状态的工具（当时认为尾巴可以取代它），但代价就是这个。
+
+**成本**：一份完整 Live State 预算约 `PERCEPTION_BUDGET_TOKENS = 1024`，攒几次就很可观。这正是压仓该管的事——旧快照会被总结掉，而"上次比对"的结论会留在摘要里。
+
+
 
 
 
