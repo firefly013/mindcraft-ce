@@ -623,6 +623,12 @@ export const KEY_BLOCKS: readonly string[] = Object.freeze([
   'bedrock', 'spawner', 'trial_spawner', 'bed',
 ]);
 
+/**
+ * KEY_BLOCKS 的集合视图：热路径上每个有名字的方块都要查一次（每轮约 27 万次
+ * 迭代），线性 `Array.includes` 扫 38 个字符串太浪费。对外仍导出数组，契约不变。
+ */
+const KEY_BLOCK_SET: ReadonlySet<string> = new Set(KEY_BLOCKS);
+
 function sampleBlocks(
   bot: Record<string, unknown>,
   feet: { x: number; y: number; z: number },
@@ -632,9 +638,22 @@ function sampleBlocks(
     const blockAt = (bot as { blockAt?: (p: unknown) => unknown }).blockAt;
     if (typeof blockAt !== 'function') return out;
     const r = Math.ceil(PERCEPTION_RADIUS);
+    const r2 = PERCEPTION_RADIUS * PERCEPTION_RADIUS;
+    // 剪枝（只跳过"必然会被最后那行 `d <= PERCEPTION_RADIUS` 丢掉"的迭代）：
+    // 判据用 `r2 + MARGIN` 的余量，把浮点误差也考虑进去，所以 out 的内容与
+    // 顺序逐位不变——模型看到的东西完全一样，只是少查了球外的 blockAt。
+    const MARGIN = 1;
     for (let x = feet.x - r; x <= feet.x + r; x++) {
-      for (let y = feet.y - r; y <= feet.y + r; y++) {
-        for (let z = feet.z - r; z <= feet.z + r; z++) {
+      const dx = x - feet.x;
+      for (let z = feet.z - r; z <= feet.z + r; z++) {
+        const dz = z - feet.z;
+        const rem = r2 - dx * dx - dz * dz;
+        // 这一列的所有 y 都在球外（连余量都补不回来）。
+        if (rem < -MARGIN) continue;
+        for (let y = feet.y - r; y <= feet.y + r; y++) {
+          const dy = y - feet.y;
+          // 这个 y 也在球外。
+          if (dy * dy > rem + MARGIN) continue;
           let block: { name?: unknown } | null = null;
           try {
             block = blockAt.call(bot, Vec3Of({ x, y, z })) as { name?: unknown } | null;
@@ -642,7 +661,7 @@ function sampleBlocks(
             block = null;
           }
           const name = str(block?.name);
-          if (name == null || !KEY_BLOCKS.includes(name)) continue;
+          if (name == null || !KEY_BLOCK_SET.has(name)) continue;
           const d = dist3(x, y, z, feet.x, feet.y, feet.z);
           if (d <= PERCEPTION_RADIUS) out.push({ name, distance: Math.round(d * 10) / 10, x, y, z });
         }
