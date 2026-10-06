@@ -352,6 +352,61 @@ pi-ai 额外  stream:true, stream_options:{include_usage:true}, store:false  ←
    - **未决**：一轮 run 的 `submit()` 该提交什么内容？旧设计里每轮没有 user 消息——事件只进尾巴（`## 事件`），不进 transcript。若把事件当 user 消息提交，它们就会进 transcript 并被逐轮重放，与旧设计的分发/剪枝语义不同。这个选择需要单独定。
 2. **压缩接线**：`CompactionTask` + `CompactionPolicy` 取代 `compaction.ts`，并按 pi-ai 目录的真实 `contextWindow`（1_000_000）修正阈值——旧实现回退 128_000，压缩线算错 8.7 倍。
 
+## P7（修订）：事件系统 = 打断消息队列，不是独立子系统
+
+### 原则修正
+
+迁到 pi-durable 的理由是**一切皆插件 + 机制自带**：恢复、上下文压缩、上下文管理都是现成的，不需要重复造轮子——**只要把工具写出来，再注入一个 state**。
+
+由此推出对 P6 的修正：**不该去桥接 `scheduler.ts` 那套手写分发**（`consumed`/`seenBy`/`unsee`/`pruneConsumed`/`generation`），那是在重实现 pi-durable 已经原生的东西。正确做法是让那套机制**消失**，每个级别落到一个原生原语上。
+
+事件系统看起来和主流 Agent 不一样，其实**非常相似：它就是打断消息队列**。对应 DSH 的两个术语——**引导（steer）**：下一次 API 请求带上；**排队（followUp）**：等 Agent 完全结束工作再发过去拉起来。
+
+### 实测结论（`tests/runtime_inbox_semantics.test.ts`）
+
+前提是「每个工具都被 `withTerminate` 挂上 `control.terminate`」——本项目"一轮一次模型调用"的设定。用 faux provider + 可外部放行的慢工具把 run 钉在在途状态：
+
+| 提交方式 | 模型调用 | 第二次请求看到 | 结论 |
+|---|---|---|---|
+| `write` | **1** | — | 不唤醒模型 |
+| `steer` | **2** | `…toolResult:[slow done] \| user:插一句话` | **加入正在跑的 run** |
+| `followUp` | **2** | `…toolResult:[slow done] \| user:等会儿再说` | 本轮答完后开新一轮 |
+
+**最关键的发现：`steer` 会覆盖 `control.terminate`。** 所有工具都请求了 terminate，`steer` 一来 run 就继续了第二次模型调用。这正是"引导"的语义。
+
+### 修正后的 L1–L5 映射
+
+| 级别 | 旧语义 | 新落点 |
+|---|---|---|
+| L1 | 只记账，从不唤醒 | `write`（被动 entry） |
+| L2 | 只记账，随下一次请求顺带发给模型 | `write`（同上；实测不增加模型调用） |
+| L3 空闲 | 立刻开请求 | `submit()` |
+| L3 忙 | 排队等本轮结束 | `submit({whenBusy:'followUp'})` |
+| L4 | 取消当前回合、带事件重开 | `abort()` → `submit()` |
+| L5 | 取消 + 停动作 + 锁通道 | `abort()` → 保命反射 → 恢复 |
+
+**L3 取 `followUp` 而不是 `steer`**：旧 L3-busy 是「当前请求看不到它，本轮结束时由下一轮带上」，而 `steer` 会让当前轮**不结束**（实测），那是行为改变。`steer` 留给将来"要加入当前工作"的需求。
+
+### 两个必须处理的问题
+
+1. **`abort()` 会撤回排队中的输入。** 旧实现靠 `unsee()` 把事件退回，好让新请求重新带上；pi-durable 的 `abort()` 直接撤回。所以 L4/L5 之前需要把待处理事件**自己缓冲一份**，abort 之后重新提交——这就是"改造了一下队列"的实际工作量，很小但要记得做。
+2. **`BotRuntime.write()`** 已补上（原先只有 `submit`），作为 L1/L2 的落点。
+
+### 主线收敛的发现
+
+主线（`C:\Users\bobo\mindcraft-ce` 工作区）正在改的 `src/agent/compaction.ts` 注释里明确写着**照 Pi 实现**（`github.com/earendil-works/pi`）——而 pi-durable 的 `CompactionTask` **就是** Pi 的压仓。两边连字段名都对上了：
+
+| 主线 profile 新字段 | pi-durable `CompactionPolicy` |
+|---|---|
+| `context_window` | 模型目录的 `contextWindow` |
+| `reserve_tokens: 16384` | `reserveTokens` |
+| `keep_recent_tokens: 20000` | `keepRecentTokens` |
+
+主线手写的这几件事 pi-durable 原生就有：真实 usage 锚点、超限压缩后重试一次、只追加摘要不删历史、切点不落在工具回执上。**所以迁移会把这整个文件变成接线，而不是重实现。**
+
+**一处需要定的差异**：pi-durable 的摘要提示词不可配置——`beforeCompact` 只能"拒绝或提供自己的摘要"，而 hook 里**没有模型访问权限**。主线新写的 `summary_system` / `saving_memory`（结构化检查点格式）因此无法直接喂给内置 CompactionTask。要么接受 pi-durable 的摘要格式，要么自写 compaction task。
+
+
 
 
 

@@ -11,6 +11,7 @@ import {
   defineExtension,
   type Conversation,
   type ConversationWatch,
+  type EntryDraft,
   type Extension,
   type Submission,
   type SubmissionDraft,
@@ -55,6 +56,13 @@ export interface BotRuntime {
   conversation: Conversation;
   /** 提交用户/系统输入，返回可 `wait()` 的 submission。 */
   submit(content: UserInput, options?: SubmitOptions): Promise<Submission>;
+  /**
+   * 被动写一条 entry：**不唤醒模型**，但会出现在下一次请求的上下文里。
+   *
+   * 这是 L1/L2「只记账，随下一次请求顺带发给模型」的落点——实测确认它不会
+   * 让 `callCount` 增加（见 `tests/runtime_inbox_semantics.test.ts`）。
+   */
+  write(entry: EntryDraft): Promise<Submission>;
   /** 中断当前 run（L4/L5 抢占的落点）。 */
   abort(): Promise<void>;
   /** 结构视图，供前端 late-join / 重连。 */
@@ -104,6 +112,7 @@ export async function openBotRuntime(options: BotRuntimeOptions): Promise<BotRun
       return conversation.submit(draft, BACKGROUND_CONTEXT);
     },
     abort: () => conversation.abort(BACKGROUND_CONTEXT),
+    write: (entry) => conversation.submit({ type: 'write', entry }, BACKGROUND_CONTEXT),
     watch: () => conversation.watch(BACKGROUND_CONTEXT),
     close: () => session.close(),
   };
