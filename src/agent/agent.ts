@@ -434,6 +434,17 @@ export class Agent {
     }
 
     /**
+     * 当前正在跑的动作名——**以调度器的身体通道为唯一真相**。
+     *
+     * 不能用 `ActionManager.currentActionLabel`：那个标签要等动作函数返回才清，
+     * 而通道在 Stop / 结束时就释放了，两者会错开。模型反馈里出现过
+     * "goToSurface 时快照显示的还是 collectBlocks"，就是读了这一份陈旧标签。
+     */
+    currentActionName(): string | null {
+        return this.scheduler?.currentAction()?.id ?? null;
+    }
+
+    /**
      * 现采一份 Live State 文本。
      *
      * **感知与"拍照"共用同一份采样**：请求尾巴每轮现采（不进历史），
@@ -460,7 +471,7 @@ export class Agent {
             vision: this.vision_interpreter,
             goal: plan.goal ?? (typeof task?.goal === 'string' ? task.goal : null),
             todos: plan.todos,
-            currentAction: this.actions.currentActionLabel,
+            currentAction: this.currentActionName(),
         };
     }
 
@@ -719,7 +730,7 @@ export class Agent {
         try {
             const task = this.task as { goal?: unknown } | null;
             snapshot = snapshotFromBot(this.bot, {
-                currentAction: this.actions?.currentActionLabel ?? null,
+                currentAction: this.currentActionName(),
                 goal: typeof task?.goal === 'string' ? task.goal : null,
                 foodNames: Object.keys(FOOD_VALUE),
             });

@@ -9,6 +9,7 @@ import { describe, expect, it } from 'vitest';
 import {
   budgetedList,
   compassOf,
+  durabilityFraction,
   KEY_BLOCKS,
   PERCEPTION_LIMIT,
   PERCEPTION_RADIUS,
@@ -287,6 +288,35 @@ describe('perception fields', () => {
       }),
     });
     expect(orphan.body.effects).toEqual(['effect#99 I 1s']);
+  });
+
+  it('clamps durability instead of reporting negative percentages', () => {
+    // 模型反馈过 `Held: stone_pickaxe (durability -300%)`：mineflayer 的
+    // durabilityUsed 可以大于 mcData 的 maxDurability。不钳的话负数会让
+    // tool.durability_low 永远处于触发态，也会把模型带进沟里。
+    expect(durabilityFraction(3000, 1000)).toBe(0);
+    expect(durabilityFraction(1300, 1000)).toBe(0);
+    expect(durabilityFraction(999, 1000)).toBeCloseTo(0.001);
+    expect(durabilityFraction(0, 1000)).toBe(1);
+    // 读不到 / 上限不合法 -> 没有结论，而不是编一个数。
+    expect(durabilityFraction(undefined, 1000)).toBeNull();
+    expect(durabilityFraction(1, undefined)).toBeNull();
+    expect(durabilityFraction(1, 0)).toBeNull();
+
+    const s = sampleLiveState({
+      bot: stubBot({
+        entity: {
+          id: 1,
+          position: { x: 0, y: 64, z: 0 },
+          yaw: 0,
+          pitch: 0,
+          metadata: [],
+          onGround: true,
+        },
+        heldItem: { name: 'stone_pickaxe', count: 1, durabilityUsed: 4000, maxDurability: 1000 },
+      }),
+    });
+    expect(s.held.mainHandDurability).toBe(0);
   });
 
   it('reads pose from entity metadata[6] (mineflayer has no entity.pose)', () => {

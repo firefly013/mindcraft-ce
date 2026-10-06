@@ -144,6 +144,23 @@ export const PERCEPTION_BUDGET_TOKENS = 1024;
 /** 聚合摘要最多出几行，避免"远合并"自己又变成一坨。 */
 export const SUMMARY_LINES = 6;
 
+/**
+ * 主手耐久比例：1 = 全新，0 = 报废；读不到就 null。
+ *
+ * **必须钳到 [0,1]**。mineflayer 的 `durabilityUsed`（NBT Damage）可能大于
+ * mcData 给的 `maxDurability`，直接算 `1 - used/max` 会得到负数——模型侧
+ * 看到的就是 `Held: stone_pickaxe (durability -300%)` 这种鬼话（它还据此
+ * 反馈过 bug）；更糟的是负值会让 `tool.durability_low` 永远处于触发态。
+ *
+ * `edges.ts` 也用它——两处必须是同一个算法，否则快照和边缘检测会各说各话。
+ */
+export function durabilityFraction(used: unknown, max: unknown): number | null {
+  const u = num(used);
+  const m = num(max);
+  if (u == null || m == null || m <= 0) return null;
+  return Math.min(1, Math.max(0, 1 - u / m));
+}
+
 function num(value: unknown): number | null {
   return typeof value === 'number' && Number.isFinite(value) ? value : null;
 }
@@ -380,10 +397,7 @@ export function sampleLiveState(ctx: SampleContext): LiveState {
       armor: [slotName(8), slotName(7), slotName(6), slotName(5)].filter(
         (s): s is string => s != null && s !== 'null',
       ),
-      mainHandDurability:
-        usedDurability != null && maxDurability != null && maxDurability > 0
-          ? Math.round((1 - usedDurability / maxDurability) * 100) / 100
-          : null,
+      mainHandDurability: durabilityFraction(usedDurability, maxDurability),
     };
 
     const packItems: string[] = [];
