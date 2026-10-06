@@ -353,8 +353,23 @@ async function transferWithContainer(
     // 没进去"——光看自己的计数分不清"真挪了"还是"窗口索引读错了"。把箱子实际内容
     // 摊开，一眼就能判：挪了却不在箱子里 = 索引/API 用错了，不是模型操作错。
     const boxNow: string[] = [];
-    for (let i = boxStart; i < Math.min(boxEnd, container.slots?.length ?? 0); i++) {
-      const it = container.slots?.[i] as { name?: string; count?: number } | null | undefined;
+    // **用服务端的话来判定**：container.slots 是 mineflayer 的**本地乐观镜像**，
+    // 点击后它先改本地账本，所以我能读到"源槽少了"、据此报"挪了 N"，而服务端可能
+    // 根本没接受这个操作——模型真机报的"空箱 25 槽仍报账不搬"就是这么来的：
+    // 账是本地账、箱子是服务端的箱子。
+    //
+    // 所以搬完**关掉箱子重开一次**，用服务端返回的新窗口内容做判定。
+    let fresh: any = container;
+    try {
+      await container.close?.();
+      await new Promise((resolve) => setTimeout(resolve, 250));
+      fresh = await bot.openContainer(bot.blockAt?.(new Vec3(chestBlock.x, chestBlock.y, chestBlock.z)));
+    } catch {
+      fresh = container; // 重开失败就退回本地镜像，但下面会说明
+    }
+    const freshSlots: Array<{ name?: string; count?: number } | null> = fresh?.slots ?? [];
+    for (let i = boxStart; i < Math.min(boxEnd, freshSlots.length); i++) {
+      const it = freshSlots[i];
       if (it?.name != null) boxNow.push(`${it.name}×${it.count ?? 1}`);
     }
     const boxText = boxNow.length > 0 ? boxNow.join('、') : '（空）';
@@ -362,7 +377,7 @@ async function transferWithContainer(
       ok: moved > 0,
       detail:
         (moved > 0 ? `挪了 ${name}×${moved}` : `没能挪动 ${name}`) +
-        `；箱子现在有：${boxText}`,
+        `；重开箱子看到的（服务端口径）：${boxText}`,
     };
   } catch (error: unknown) {
     return { ok: false, detail: `挪物品时出错：${error instanceof Error ? error.message : String(error)}` };
