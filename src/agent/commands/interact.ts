@@ -195,7 +195,11 @@ async function transferWithContainer(
   try {
     const ok = await skills.goToPosition(bot, chestBlock.x, chestBlock.y, chestBlock.z, 2);
     if (!ok) return { ok: false, detail: '走不到容器旁边' };
-    container = await bot.openContainer(chestBlock);
+    // `openContainer` 要的是 **Block 对象**，不是 `{x,y,z}`——传裸坐标它会报
+    // `containerToOpen is neither a block nor an entity`（模型真机报回来的）。
+    const block = bot.blockAt?.({ x: chestBlock.x, y: chestBlock.y, z: chestBlock.z });
+    if (block == null) return { ok: false, detail: `(${chestBlock.x},${chestBlock.y},${chestBlock.z}) 那里没有方块` };
+    container = await bot.openContainer(block);
   } catch (error: unknown) {
     return { ok: false, detail: `打不开容器：${error instanceof Error ? error.message : String(error)}` };
   }
