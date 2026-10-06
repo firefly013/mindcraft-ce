@@ -234,8 +234,13 @@ async function transferWithContainer(
     const slots: Array<{ name?: string; count?: number } | null> = container.slots ?? [];
     const invStart = Number(container.inventoryStart ?? 9);
     const invEnd = Number(container.inventoryEnd ?? slots.length);
-    const boxStart = Number(container.containerStart ?? 0);
-    const boxEnd = Number(container.containerEnd ?? invStart);
+    // **箱子部分永远是 [0, inventoryStart)**——不要用 containerStart/containerEnd。
+    // 模型真机报过"存物回执说挪了 12 个，开箱一看没进去"：如果这两个字段和
+    // inventoryStart 对不上，我算出来的"箱子区间"就会指回**玩家背包**，于是物品只是在
+    // 背包里换了个格子（源槽确实减少了 → 计数看着像成功），箱子纹丝不动。
+    // inventoryStart 是容器部分和玩家部分的分界，这个是可靠的。
+    const boxStart = 0;
+    const boxEnd = invStart;
     const from = direction === 'deposit' ? { s: invStart, e: invEnd } : { s: boxStart, e: boxEnd };
     const to = direction === 'deposit' ? { s: boxStart, e: boxEnd } : { s: invStart, e: invEnd };
 

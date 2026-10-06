@@ -2177,14 +2177,38 @@ export async function useToolOn(bot: any, toolName: string, targetName: string):
     };
     const blockInView: any = bot.blockAtCursor(5);
     if (viewBlocked()) {
-        log(bot, `Block ${blockInView.name} is in the way, moving closer...`);
-        // choose random block next to target block, go to it
-        const nearbyPos: any = block.position.offset(Math.random() * 2 - 1, 0, Math.random() * 2 - 1);
-        await goToPosition(bot, nearbyPos.x, nearbyPos.y, nearbyPos.z, 1);
-        await bot.lookAt(block.position.offset(0.5, 0.5, 0.5));
+        // **多试几个站位，别只随机试一个就放弃**。模型真机被这条卡过两次：
+        // 'Block stone is in the way, not using water_bucket'——它在岩浆层上方倒水，
+        // 准星被脚下的石头挡住，只试一个随机位置就返回失败，于是整条下界门链停住。
+        // 围着目标绕一圈试 4 个方向，最后再退一步正对着看。
+        log(bot, `Block ${blockInView.name} is in the way, trying other spots...`);
+        const bx: number = block.position.x;
+        const by: number = block.position.y;
+        const bz: number = block.position.z;
+        const spots: Array<[number, number, number]> = [
+            [bx + 1, by, bz],
+            [bx - 1, by, bz],
+            [bx, by, bz + 1],
+            [bx, by, bz - 1],
+            [bx + 1, by, bz + 1],
+            [bx - 1, by, bz - 1],
+        ];
+        for (const [sx, sy, sz] of spots) {
+            try {
+                await goToPosition(bot, sx, sy, sz, 1);
+                await bot.lookAt(block.position.offset(0.5, 0.5, 0.5));
+            } catch {
+                continue;
+            }
+            if (!viewBlocked()) break;
+        }
         if (viewBlocked()) {
             const blocked: any = bot.blockAtCursor(5);
-            log(bot, `Block ${blocked.name} is in the way, not using ${toolName}.`);
+            log(
+                bot,
+                `Block ${blocked?.name ?? '?'} is in the way, not using ${toolName}. ` +
+                    '试了目标四周 6 个站位都被挡——先 mineBlock 挖掉挡路的那一格，或者换一个能正对着的目标再来。',
+            );
             return false;
         }
     }
