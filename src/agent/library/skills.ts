@@ -2133,7 +2133,21 @@ export async function useToolOn(bot: any, toolName: string, targetName: string):
         return false;
     }
     if (toolName.includes('bucket')) {
+        // **必须验证**：`activateItem` 只是发一个"用物品"包，服务端采不采纳要看
+        // 十字准星是否真的对着目标。模型真机报过"连续两次 useOn(水桶, water)，
+        // 回执都是 Used bucket on water，但背包里还是空桶"——原来这里无条件
+        // log 成功 + return true，等于假成功，把整个下界门计划卡死了。
+        const before: number = (world.getInventoryCounts(bot) as Record<string, number>)[toolName] ?? 0;
         await bot.activateItem();
+        await new Promise((resolve) => setTimeout(resolve, 350));
+        const after: number = (world.getInventoryCounts(bot) as Record<string, number>)[toolName] ?? 0;
+        if (after >= before) {
+            log(
+                bot,
+                `对 ${block.name} 用了 ${toolName}，但物品没变化——准星多半没真的对着它（或者够不着/被方块挡住）。往目标挪近、正对着再来一次。`,
+            );
+            return false;
+        }
     }
     else {
         await bot.activateBlock(block);
