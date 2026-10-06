@@ -166,7 +166,7 @@ describe('renderLiveState', () => {
       'Body:',
       'Held:',
       'Backpack',
-      'Position:',
+      'Position (此刻):',
       'Environment:',
       'Nearby entities',
       'Nearby key blocks',
