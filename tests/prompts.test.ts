@@ -48,6 +48,23 @@ describe('MESSAGES', () => {
     expect(MESSAGES.restarting).toBe('重启中。');
     expect(MESSAGES.exiting).toBe('退出中。');
   });
+
+  it('renders a tool outcome line with args, truncation and empty-output marker', () => {
+    expect(MESSAGES.toolOutcome('goToPlayer', { player_name: 'steve' }, 'done')).toBe(
+      '工具 goToPlayer {"player_name":"steve"} → done',
+    );
+    // 空输出有个明确的占位，不是空白。
+    expect(MESSAGES.toolOutcome('stats', {}, '')).toBe('工具 stats {} → (无输出)');
+    // 无法序列化（循环引用）与 undefined 都退化成 {}，绝不抛错。
+    const circular: Record<string, unknown> = {};
+    circular['self'] = circular;
+    expect(MESSAGES.toolOutcome('x', circular, 'ok')).toBe('工具 x {} → ok');
+    expect(MESSAGES.toolOutcome('x', undefined, 'ok')).toBe('工具 x {} → ok');
+    // 超长参数截断并标记。
+    const long = MESSAGES.toolOutcome('x', { blob: 'y'.repeat(900) }, 'ok');
+    expect(long).toContain('[截断]');
+    expect(long.length).toBeLessThan(600);
+  });
 });
 
 describe('resolvePromptSet', () => {

@@ -12,18 +12,11 @@ const settings: Settings = {
 
     "base_profile": "assistant", // survival, assistant, creative, or god_mode
     "profiles": [
-        "./andy.json",
+        "./profiles/opencode.json",
         // "./profiles/gpt.json",
-        // "./profiles/claude.json",
-        // "./profiles/gemini.json",
-        // "./profiles/llama.json",
-        // "./profiles/qwen.json",
-        // "./profiles/grok.json",
-        // "./profiles/mistral.json",
-        // "./profiles/deepseek.json",
-        // "./profiles/mercury.json",
-        // "./profiles/andy-4.2.json",
 
+        // 只有一个 OpenAI 兼容供应商：加 bot 就再加一个 profile，
+        // 用 model.url 指到别的兼容端点即可（见 profiles/opencode.json）。
         // each profile spawns one standalone bot; bots do not talk to each other
         // individual profiles override values from the base profile
     ],
@@ -31,12 +24,6 @@ const settings: Settings = {
     "load_memory": false, // load memory from previous session
     "init_message": "用中文回复hello world和你的名字", // sends to all on spawn
     "only_chat_with": [], // users that the bots listen to and send general messages to. if empty it will chat publicly
-
-    "speak": false,
-    // allows all bots to speak through text-to-speech.
-    // specify speech model inside each profile with format: {provider}/{model}/{voice}.
-    // if set to "system" it will use basic system text-to-speech.
-    // Works on windows and mac, but linux requires you to install the espeak package through your package manager eg: `apt install espeak` `pacman -S espeak`.
 
     "chat_ingame": true, // bot responses are shown in minecraft chat
 

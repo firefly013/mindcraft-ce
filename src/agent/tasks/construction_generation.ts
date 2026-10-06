@@ -705,7 +705,7 @@ export async function getBlockName(bot: any, coordinate: { x: number; y: number;
  * @param y_amount - how many spaces you want to register from the start coordinate in the y dimension
  * @param x_amount - how many spaces in the x direction on minecraft
  * @param z_amount - how many spaces from the start coordinate in the z direction in minecraft
- * @param bot - the mineflayer agent (ex. andy)
+ * @param bot - the mineflayer agent (ex. scout)
  * @returns - a Blueprint object of the converted blueprint
  */
 export async function worldToBlueprint(startCoord: { x: number; y: number; z: number }, y_amount: number, x_amount: number, z_amount: number, bot: any): Promise<BlueprintData & { materials: Record<string, number> }> {

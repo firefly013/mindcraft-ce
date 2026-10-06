@@ -1,8 +1,17 @@
+/**
+ * 供应商注册表契约：**只有一个** OpenAI 兼容适配器。
+ *
+ * 这里把"单一供应商"当成契约来锁：
+ *   - 模型名不再需要前缀，任何名字都落到同一个 provider；
+ *   - 显式 `api` 指向不存在的供应商要报错，不能静默兜底；
+ *   - 目录里多出第二个适配器要立刻失败（这是我们主动收窄的决定）。
+ */
 import { promises as fs } from 'node:fs';
+import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { describe, expect, it, vi } from 'vitest';
-import { createModel, selectAPI } from '../src/models/_model_map.js';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
+import { createModel, discoverModels, selectAPI } from '../src/models/_model_map.js';
 import type { AgentProfile } from '../src/types/common.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -11,31 +20,28 @@ const MODELS_DIR = path.join(__dirname, '..', 'src', 'models');
 const profile = (over: Record<string, unknown> = {}): AgentProfile =>
   ({ name: 'test', model: 'x', ...over }) as AgentProfile;
 
+// createModel 会真的 new 一个适配器，需要 key 存在（不联网，只是构造）。
+const KEY = 'OPENAI_API_KEY';
+const savedKey = process.env[KEY];
+beforeAll(() => {
+  process.env[KEY] = 'vitest-key';
+});
+afterAll(() => {
+  if (savedKey === undefined) Reflect.deleteProperty(process.env, KEY);
+  else process.env[KEY] = savedKey;
+});
+
 describe('selectAPI', () => {
-  it('accepts a bare model string', () => {
-    expect(selectAPI('ollama/llama3')).toEqual(
-      expect.objectContaining({ api: 'ollama', model: 'llama3' }),
+  it('accepts a bare model string and routes it to the only provider', () => {
+    expect(selectAPI('deepseek-v4.1-flash')).toEqual(
+      expect.objectContaining({ api: 'openai', model: 'deepseek-v4.1-flash' }),
     );
   });
 
   it('accepts a String object too (legacy path)', () => {
     // `no-new-wrappers` is not enabled repo-wide; the wrapper is intentional here.
-    const out = selectAPI(new String('ollama/llama3') as unknown as string);
-    expect(out.api).toBe('ollama');
-  });
-
-  it('rewrites the legacy local prefix to ollama', () => {
-    // 'local/llama3' -> api 'ollama', then the api prefix is stripped: 'llama3'
-    expect(selectAPI(profile({ model: 'local/llama3' }))).toMatchObject({
-      api: 'ollama',
-      model: 'llama3',
-    });
-    expect(selectAPI(profile({ api: 'local', model: 'm' }))).toMatchObject({
-      api: 'ollama',
-      model: 'm',
-    });
-    // empty model: no replacement to run, ends up as the api default
-    expect(selectAPI(profile({ api: 'local', model: '' })).model).toBeNull();
+    const out = selectAPI(new String('gpt-5.4') as unknown as string);
+    expect(out.api).toBe('openai');
   });
 
   it('keeps an explicit api and strips its prefix from the model', () => {
@@ -46,77 +52,77 @@ describe('selectAPI', () => {
   });
 
   it('nulls the model when it only names the api', () => {
-    const out = selectAPI(profile({ api: 'openai', model: 'openai/' }));
-    expect(out.model).toBeNull();
+    expect(selectAPI(profile({ api: 'openai', model: 'openai/' })).model).toBeNull();
   });
 
   it.each([
-    ['gpt-4o', 'openai'],
-    ['o1-mini', 'openai'],
-    ['o3-mini', 'openai'],
-    ['claude-opus', 'anthropic'],
-    ['gemini-flash', 'google'],
-    ['grok-beta', 'xai'],
-    ['mistral-large', 'mistral'],
-    ['deepseek-chat', 'deepseek'],
-    ['qwen-max', 'qwen'],
-  ])('infers %s -> %s without a prefix', (model, api) => {
-    expect(selectAPI(profile({ model })).api).toBe(api);
+    'gpt-4o',
+    'o1-mini',
+    'claude-opus',
+    'gemini-flash',
+    'grok-beta',
+    'mistral-large',
+    'deepseek-chat',
+    'qwen-max',
+    'my-mistral-model',
+    'zzz-nope',
+  ])('routes %s to the single provider without a prefix', (model) => {
+    expect(selectAPI(profile({ model })).api).toBe('openai');
   });
 
-  it('infers by substring even when no registered prefix matches', () => {
-    // 'my-*' matches no apiMap prefix, so these must fall through to the
-    // substring inference chain (a startsWith-only mutant would throw here).
-    expect(selectAPI(profile({ model: 'my-mistral-model' })).api).toBe('mistral');
-    expect(selectAPI(profile({ model: 'my-deepseek-model' })).api).toBe('deepseek');
-    expect(selectAPI(profile({ model: 'my-qwen-model' })).api).toBe('qwen');
+  it('strips a leading openai/ prefix but leaves other slashes alone', () => {
+    expect(selectAPI(profile({ model: 'openai/gpt-4o' })).model).toBe('gpt-4o');
+    // 单一供应商下没有别的前缀可认，整串原样当模型名。
+    expect(selectAPI(profile({ model: 'vendor/model' })).model).toBe('vendor/model');
   });
 
-  it('throws exact errors for unknown models and apis', () => {
-    expect(() => selectAPI(profile({ model: 'zzz-nope' }))).toThrow('Unknown model: zzz-nope');
+  it('only strips the api prefix at the START of the string', () => {
+    // 回归线：以前用 replace('openai/','')，会吃掉串中间的 "openai/"。
+    expect(selectAPI(profile({ model: 'my-openai/proxy' })).model).toBe('my-openai/proxy');
+    expect(selectAPI(profile({ model: 'vendor/openai/gpt-4' })).model).toBe('vendor/openai/gpt-4');
+  });
+
+  it('tolerates a profile with no model field (falls back to the provider default)', () => {
+    const out = selectAPI({ name: 'x', api: 'openai' } as AgentProfile);
+    expect(out.api).toBe('openai');
+    expect(out.model).toBeNull();
+  });
+
+  it('throws for an api that is not registered', () => {
     expect(() => selectAPI(profile({ api: 'zzz-nope', model: 'm' }))).toThrow(
       'Unknown api: zzz-nope',
     );
+    // 以前的 ollama/anthropic 等供应商已经不存在，必须是硬错误而不是静默兜底。
+    expect(() => selectAPI(profile({ api: 'ollama', model: 'm' }))).toThrow('Unknown api: ollama');
   });
 });
 
 describe('provider registry (directory-driven)', () => {
-  it('routes every discovered prefix to selectAPI', async () => {
+  it('discovers exactly one adapter, and it is the OpenAI-compatible one', async () => {
     const files = (await fs.readdir(MODELS_DIR)).filter(
       (f) => f.endsWith('.ts') && f !== '_model_map.ts' && f !== 'prompter.ts',
     );
-    expect(files.length).toBeGreaterThan(10);
-    for (const file of files) {
-      const mod = (await import(`../src/models/${file}`)) as Record<string, unknown>;
-      const prefixes: string[] = [];
-      for (const exported of Object.values(mod)) {
-        if (
-          typeof exported === 'function' &&
-          Object.prototype.hasOwnProperty.call(exported, 'prefix')
-        ) {
-          const prefix = (exported as unknown as { prefix?: unknown }).prefix;
-          if (typeof prefix === 'string' && prefix.length > 0) prefixes.push(prefix);
-        }
-      }
-      expect(prefixes.length, file).toBeGreaterThan(0);
-      for (const prefix of prefixes) {
-        // Renaming/removing a prefix must break model routing loudly.
-        expect(selectAPI(profile({ model: `${prefix}/some-model` })).api).toBe(prefix);
-      }
-    }
+    expect(files).toEqual(['gpt.ts']);
+    const mod = (await import('../src/models/gpt.js')) as Record<string, unknown>;
+    const prefixes = Object.values(mod)
+      .filter((exported) => typeof exported === 'function' && 'prefix' in exported)
+      .map((exported) => (exported as unknown as { prefix: string }).prefix);
+    expect(prefixes).toEqual(['openai']);
+    // 改名/换前缀必须让路由立刻炸掉。
+    expect(selectAPI(profile({ model: 'openai/some-model' })).api).toBe('openai');
   });
 });
 
 describe('createModel', () => {
-  it('builds the default model when the model value only names the api', () => {
-    const model = createModel(profile({ api: 'ollama', model: 'ollama' }));
-    expect(model.constructor.name).toBe('Ollama');
+  it('builds the provider default model when the model value only names the api', () => {
+    const model = createModel(profile({ api: 'openai', model: 'openai' }));
+    expect(model.constructor.name).toBe('GPT');
     expect(typeof model.sendRequest).toBe('function');
   });
 
   it('builds the api default model when the model is already null', () => {
-    const model = createModel(profile({ api: 'ollama', model: null }));
-    expect(model.constructor.name).toBe('Ollama');
+    const model = createModel(profile({ api: 'openai', model: null }));
+    expect(model.constructor.name).toBe('GPT');
   });
 
   it('throws exact errors for unknown and missing apis', () => {
@@ -128,28 +134,27 @@ describe('createModel', () => {
 });
 
 describe('registry resilience', () => {
-  const BAD = path.join(MODELS_DIR, 'zz_probe_bad.ts');
-  const BROKEN = path.join(MODELS_DIR, 'zz_probe_broken.ts');
-  const BROKEN_STR = path.join(MODELS_DIR, 'zz_probe_broken_str.ts');
-
   // A broken provider file must never take down model routing for the rest.
+  // 探针建在系统临时目录：源码树保持干净（中断也不会在 src/models 里留东西）。
   it('survives unloadable modules and malformed prefixes', async () => {
-    const { writeFileSync, rmSync } = await import('node:fs');
-    writeFileSync(
-      BAD,
+    const { mkdtempSync, rmSync, writeFileSync } = await import('node:fs');
+    const probeDir = mkdtempSync(path.join(tmpdir(), 'mindcraft-models-'));
+    const write = (name: string, body: string): void =>
+      writeFileSync(path.join(probeDir, name), body, 'utf8');
+    write('good.ts', "export class Probe { static prefix = 'probe'; }\n");
+    write(
+      'zz_probe_bad.ts',
       'export function helper(): number { return 1; }\n' +
         'export function empty(): void {}\n' +
         'export function numeric(): void {}\n' +
         "(empty as unknown as { prefix: string }).prefix = '';\n" +
         "(numeric as unknown as { prefix: unknown }).prefix = 42;\n",
-      'utf8',
     );
-    writeFileSync(BROKEN, "throw new Error('probe failure');\n", 'utf8');
-    writeFileSync(BROKEN_STR, "throw 'plain probe failure';\n", 'utf8');
+    write('zz_probe_broken.ts', "throw new Error('probe failure');\n");
+    write('zz_probe_broken_str.ts', "throw 'plain probe failure';\n");
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
     try {
-      vi.resetModules();
-      const fresh = await import('../src/models/_model_map.js');
+      const map = await discoverModels(probeDir);
       expect(warn).toHaveBeenCalledWith(
         'Failed to load model module:',
         'zz_probe_broken.ts',
@@ -161,15 +166,14 @@ describe('registry resilience', () => {
         'zz_probe_broken_str.ts',
         'plain probe failure',
       );
-      // healthy providers still route
-      expect(fresh.selectAPI(profile({ model: 'ollama/m' })).api).toBe('ollama');
-      expect(fresh.selectAPI(profile({ model: 'openai/gpt-4' })).api).toBe('openai');
+      // 坏文件与畸形 prefix 都不进表；健康模块照常发现。
+      expect(Object.keys(map)).toEqual(['probe']);
+      // 真实注册表没被探针影响
+      expect(selectAPI(profile({ model: 'openai/gpt-4' })).api).toBe('openai');
+      expect(selectAPI(profile({ model: 'anything-else' })).api).toBe('openai');
     } finally {
       warn.mockRestore();
-      rmSync(BAD, { force: true });
-      rmSync(BROKEN, { force: true });
-      rmSync(BROKEN_STR, { force: true });
-      vi.resetModules();
+      rmSync(probeDir, { recursive: true, force: true });
     }
   });
 });

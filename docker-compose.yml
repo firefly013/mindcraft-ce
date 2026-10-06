@@ -5,7 +5,7 @@ services:
       SETTINGS_JSON: |
         {"auto_open_ui": false}
     volumes:
-      - ./settings.js:/app/settings.js
+      - ./settings.ts:/app/settings.ts
       - ./keys.json:/app/keys.json
       - ./profiles:/app/profiles
       - ./bots:/app/bots

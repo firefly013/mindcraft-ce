@@ -87,7 +87,7 @@ export class Prompter {
     this.chat_model = createModel(chat_model_profile);
 
     // 截图直看走主循环（liveTail 图片），独立理解链已拆：
-    // 不再有 vision_model，profile.vision_model 配了也忽略。
+    // 没有独立的 vision 模型，profile 里配 vision_model 也不会被读。
 
     // RAG 已彻底移除：不再有 embedding 模型、示例检索与 skill 文档检索
 

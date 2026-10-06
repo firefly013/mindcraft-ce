@@ -1,14 +1,20 @@
-import { rmSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { getKey, hasKey } from '../src/utils/keys.js';
 
 const MARKER = 'MIGRATION_TEST_KEY_XYZ';
 const FILE_KEY = 'MIGRATION_FILE_KEY_XYZ';
 
+// 这个文件会往 CWD 写 ./keys.json 来测"文件优先"。开发者本机很可能有真的
+// keys.json，所以先备份、收尾还原——以前是直接 rm，等于跑一次测试就把真 key 删了。
+const KEYS_PATH = './keys.json';
+const originalKeys = existsSync(KEYS_PATH) ? readFileSync(KEYS_PATH, 'utf8') : null;
+
 afterEach(() => {
   Reflect.deleteProperty(process.env, MARKER);
   Reflect.deleteProperty(process.env, FILE_KEY);
-  rmSync('./keys.json', { force: true });
+  if (originalKeys == null) rmSync(KEYS_PATH, { force: true });
+  else writeFileSync(KEYS_PATH, originalKeys, 'utf8');
 });
 
 describe('keys (no keys.json on disk)', () => {

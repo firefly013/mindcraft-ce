@@ -16,14 +16,49 @@ export function stripBang(name: string): string {
     return name.startsWith('!') ? name.slice(1) : name;
 }
 
-/** 命令参数类型 -> JSON Schema 类型 */
-function paramToSchema(param: CommandParamDef): Record<string, string> {
+/** domain 形如 [min, max] 或 [min, max, '[)']；第三项是区间括号，缺省两端闭。 */
+function domainBounds(param: CommandParamDef): {
+    min: number | null;
+    max: number | null;
+    minExclusive: boolean;
+    maxExclusive: boolean;
+} | null {
+    const domain = param.domain;
+    if (!Array.isArray(domain) || domain.length < 2) return null;
+    const min = typeof domain[0] === 'number' ? domain[0] : null;
+    const max = typeof domain[1] === 'number' ? domain[1] : null;
+    if (min == null && max == null) return null;
+    const brackets = typeof domain[2] === 'string' ? domain[2] : '[]';
+    return { min, max, minExclusive: brackets.startsWith('('), maxExclusive: brackets.endsWith(')') };
+}
+
+/**
+ * 数值参数的范围校验。domain 以前只写在命令定义里、既不进 schema
+ * 也不校验，模型给个 -64 之外的 y 也照跑。这里按区间括号语义检查。
+ */
+export function checkDomain(param: CommandParamDef, value: number, path: string): string | null {
+    const b = domainBounds(param);
+    if (b == null) return null;
+    if (b.min != null && (b.minExclusive ? value <= b.min : value < b.min)) {
+        return `${path}: expected ${b.minExclusive ? '>' : '>='} ${b.min}, got ${value}`;
+    }
+    if (b.max != null && (b.maxExclusive ? value >= b.max : value > b.max)) {
+        return `${path}: expected ${b.maxExclusive ? '<' : '<='} ${b.max}, got ${value}`;
+    }
+    return null;
+}
+
+/** 命令参数类型 -> JSON Schema 类型；数值参数把 domain 的有限上下界也带出去。 */
+function paramToSchema(param: CommandParamDef): Record<string, unknown> {
     const desc = typeof param.description === 'string' ? param.description : '';
+    let schema: Record<string, unknown>;
     switch (param.type) {
         case 'int':
-            return { type: 'integer', description: desc };
+            schema = { type: 'integer', description: desc };
+            break;
         case 'float':
-            return { type: 'number', description: desc };
+            schema = { type: 'number', description: desc };
+            break;
         case 'boolean':
             return { type: 'boolean', description: desc };
         case 'BlockName':
@@ -33,6 +68,20 @@ function paramToSchema(param: CommandParamDef): Record<string, string> {
         default:
             return { type: 'string', description: desc };
     }
+    const b = domainBounds(param);
+    // JSON Schema 的 minimum/maximum 是**闭**语义，而 domain 支持开区间
+    // （第三项 '[)' / '(]'）。开的那一端必须用 exclusiveMinimum/Maximum 表达，
+    // 否则广告给模型的区间比 checkDomain 实际放行的更宽：模型给 0 是"合法"，
+    // 到了校验器却被拒。
+    if (b?.min != null && Number.isFinite(b.min)) {
+        if (b.minExclusive) schema['exclusiveMinimum'] = b.min;
+        else schema['minimum'] = b.min;
+    }
+    if (b?.max != null && Number.isFinite(b.max)) {
+        if (b.maxExclusive) schema['exclusiveMaximum'] = b.max;
+        else schema['maximum'] = b.max;
+    }
+    return schema;
 }
 
 /**
@@ -45,7 +94,10 @@ export function commandToTool(command: AgentCommand): OpenAITool {
     if (command.params) {
         for (const [name, param] of Object.entries(command.params)) {
             properties[name] = paramToSchema(param);
-            required.push(name);
+            // 声明了 optional / default 的参数不能进 required：校验器的
+            // canOmit = optional===true || default!==undefined 会放行，
+            // 而 schema 说必填就是"广告比校验更严"（例如 getCraftingPlan.quantity）。
+            if (param.optional !== true && param.default === undefined) required.push(name);
         }
     }
     return {
@@ -65,7 +117,7 @@ export function commandToTool(command: AgentCommand): OpenAITool {
 
 /**
  * 按 blocked_actions 过滤后，返回 OpenAI tools 数组。
- * 末尾追加 Finish（结束本轮）与 Say（说话唯一通道）控制工具。
+ * 末尾追加 5 个控制工具：Finish/Stop/Say/UpdatePlan/Feedback（名单见 CONTROL_TOOLS）。
  */
 export function getOpenAITools(agent: any): OpenAITool[] {
     const blocked = (agent?.blocked_actions || []) as string[];
@@ -110,7 +162,19 @@ export function getOpenAITools(agent: any): OpenAITool[] {
                 type: 'object',
                 properties: {
                     goal: { type: 'string', description: tp('UpdatePlan', 'goal') },
-                    todos: { type: 'array', items: { type: 'string' }, description: tp('UpdatePlan', 'todos') },
+                    todos: {
+                        type: 'array',
+                        items: {
+                            type: 'object',
+                            properties: {
+                                text: { type: 'string', description: '待办内容。' },
+                                done: { type: 'boolean', description: '是否已完成。' },
+                            },
+                            required: ['text'],
+                            additionalProperties: false,
+                        },
+                        description: tp('UpdatePlan', 'todos'),
+                    },
                 },
                 required: [],
                 additionalProperties: false,
@@ -148,7 +212,10 @@ export async function executeToolCall(agent: any, toolName: string, args: Record
         return `Unknown tool: ${toolName}.`;
     }
     const paramNames = command.params ? Object.keys(command.params) : [];
-    const ordered = paramNames.map((k) => args[k]);
+    // 校验器把 `null` 当"没给"（canOmit 收 null），但 JS 的默认参数只对
+    // `undefined` 生效——不在这里归一，`{quantity: null}` 就会把 null 原样
+    // 传给 `perform(agent, targetItem, quantity = 1)`，拿不到默认值。
+    const ordered = paramNames.map((k) => args[k] ?? undefined);
     try {
         const result: unknown = await command.perform(agent, ...ordered);
         return (result as string | null | undefined) ?? '';
@@ -157,7 +224,9 @@ export async function executeToolCall(agent: any, toolName: string, args: Record
     }
 }
 
-/** UpdatePlan 形状校验：goal 可选字符串，todos 可选字符串数组（整单替换）。 */
+/** UpdatePlan 形状校验：goal 可选字符串，todos 可选 {text,done}[]（整单替换）。
+ *  注意这里比 JSON Schema **更宽松**（收纯字符串、done 可省，按未完成折算）：
+ *  schema 是给模型看的严格形式，校验器负责兼容旧格式，二者故意不一致。 */
 export function validateUpdatePlan(args: unknown): ToolValidation {
     if (args == null || typeof args !== 'object' || Array.isArray(args)) {
         return { ok: false, code: 'BAD_ARGS', errors: ['$: expected object'] };
@@ -171,8 +240,29 @@ export function validateUpdatePlan(args: unknown): ToolValidation {
         errors.push('$.goal: expected string');
     }
     if (given['todos'] !== undefined && given['todos'] !== null) {
-        if (!Array.isArray(given['todos']) || !(given['todos'] as unknown[]).every((t) => typeof t === 'string')) {
-            errors.push('$.todos: expected string[]');
+        const todos = given['todos'];
+        if (!Array.isArray(todos)) {
+            errors.push('$.todos: expected array');
+        } else {
+            todos.forEach((todo, i) => {
+                const path = `$.todos[${i}]`;
+                // 旧格式（纯字符串）仍然收，按未完成折算。
+                if (typeof todo === 'string') return;
+                if (todo == null || typeof todo !== 'object' || Array.isArray(todo)) {
+                    errors.push(`${path}: expected object {text,done}`);
+                    return;
+                }
+                const entry = todo as Record<string, unknown>;
+                for (const key of Object.keys(entry)) {
+                    if (key !== 'text' && key !== 'done') errors.push(`${path}: unknown property '${key}'`);
+                }
+                if (typeof entry['text'] !== 'string' || entry['text'].trim() === '') {
+                    errors.push(`${path}.text: expected non-empty string`);
+                }
+                if (entry['done'] !== undefined && typeof entry['done'] !== 'boolean') {
+                    errors.push(`${path}.done: expected boolean`);
+                }
+            });
         }
     }
     if (errors.length > 0) return { ok: false, code: 'BAD_ARGS', errors };
@@ -245,6 +335,11 @@ export function validateToolCall(toolName: string, args: unknown): ToolValidatio
         }
         const bad = checkParamType(def.type, value, `$.${name}`);
         if (bad) errors.push(bad);
+        else if (typeof value === 'number') {
+            // 类型对了还要在 domain 范围内：[-64,320] 这类约束以前形同虚设。
+            const outOfRange = checkDomain(def, value, `$.${name}`);
+            if (outOfRange) errors.push(outOfRange);
+        }
     }
     if (errors.length > 0) return { ok: false, code: 'BAD_ARGS', errors };
     return { ok: true };
@@ -253,7 +348,7 @@ export function validateToolCall(toolName: string, args: unknown): ToolValidatio
 const actionNames = new Set(actionsList.map((c) => stripBang(c.name)));
 
 /** 控制类工具（循环/说话/计划/反馈），走注册 handler，不占身体通道。 */
-const CONTROL_TOOLS = new Set(['Finish', 'Stop', 'Say', 'UpdatePlan', 'Feedback']);
+export const CONTROL_TOOLS = new Set(['Finish', 'Stop', 'Say', 'UpdatePlan', 'Feedback']);
 /**
  * 该工具是否占用身体动作通道。动作类工具一次只能跑一个
  * （忙时拒绝，不排队）；查询类只读不占；控制类走 handler。

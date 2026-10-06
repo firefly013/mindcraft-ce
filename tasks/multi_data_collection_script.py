@@ -26,7 +26,7 @@ successful logs into a subfolder for each run, based on the success marked in th
 at the end it will aggregate everything into a json file, ready for training. 
 
 Example usage: 
-python3 ./multi_data_collection_script.py --api vllm --model meta-llama/Meta-Llama-3-8B-Instruct --num_agents 2 --num_parallel 2 \
+python3 ./multi_data_collection_script.py --model deepseek-v4.1-flash --num_agents 2 --num_parallel 2 \
     --tasks "tasks/crafting_tasks/test_tasks/tasks_2_agents.json:3" "tasks/crafting_tasks/test_tasks/tasks_3_agents.json:3"
 
 Meaning run those two tasks each 2 times, with num agents. The results will be in 
@@ -130,7 +130,6 @@ def run_data_collection(args):
             # Run from project root
             subprocess.run([
                 "python", eval_script_path,
-                "--api", args.api,
                 "--model", args.model,
                 "--task_path", task_path, # task_path is already absolute or resolved
                 "--num_agents", str(args.num_agents),
@@ -187,8 +186,7 @@ def run_data_collection(args):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Run multiple evaluations and collect successful logs")
     parser.add_argument("--eval_script", default="tasks/evaluation_script.py", help="Path to evaluation script relative to project root")
-    parser.add_argument("--api", default="vllm", help="API to use")
-    parser.add_argument("--model", default="meta-llama/Meta-Llama-3-8B-Instruct", help="Model to use")
+    parser.add_argument("--model", default="deepseek-v4.1-flash", help="Model to use")
     parser.add_argument("--num_agents", type=int, default=2, help="Number of agents")
     parser.add_argument("--num_parallel", type=int, default=2, help="Number of parallel runs")
     parser.add_argument("--tasks", nargs="+", default=["tasks/crafting_tasks/test_tasks/tasks_2_agents.json:2"], 

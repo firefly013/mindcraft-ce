@@ -8,7 +8,7 @@ mindcraft.init()
 
 # Get the directory of the current script
 script_dir = os.path.dirname(os.path.abspath(__file__))
-profile_path = os.path.abspath(os.path.join(script_dir, '..', '..', 'andy.json'))
+profile_path = os.path.abspath(os.path.join(script_dir, '..', '..', 'profiles', 'opencode.json'))
 
 # Load agent settings from a JSON file
 try:
@@ -19,9 +19,9 @@ try:
     mindcraft.create_agent(settings)
 
     settings_copy = settings.copy()
-    settings_copy['profile']['name'] = 'andy2'
+    settings_copy['profile']['name'] = 'opencode2'
     mindcraft.create_agent(settings_copy)
 except FileNotFoundError:
-    print(f"Error: Could not find andy.json at {profile_path}")
+    print(f"Error: Could not find profiles/opencode.json at {profile_path}")
 
 mindcraft.wait()

@@ -7,12 +7,12 @@ import subprocess
 import time
 
 def run_task(task_path, task_id, profiles=None):
-    """Run a single task using main.js"""
+    """Run a single task via the TypeScript entry (tsx loader)."""
     # Convert task_path to absolute path if it's relative
     if not os.path.isabs(task_path):
         task_path = os.path.abspath(task_path)
     
-    cmd = ["node", "main.js", "--task_path", task_path, "--task_id", task_id]
+    cmd = ["node", "--import", "tsx", "main.ts", "--task_path", task_path, "--task_id", task_id]
     
     # Add profiles if provided
     if profiles:

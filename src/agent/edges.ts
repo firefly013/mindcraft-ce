@@ -18,6 +18,8 @@
 
 import { LEVEL } from './scheduler.js';
 import type { Level } from './scheduler.js';
+import { ALWAYS_HOSTILE } from './emergency.js';
+import { Vec3 } from 'vec3';
 
 /** 检测器看到的拍平快照（由调用方从 LiveState 等拼出来）。 */
 export interface EdgeEntity {
@@ -144,15 +146,6 @@ function within(snapshot: EdgeSnapshot, id: string | number | null | undefined, 
   return d != null && d <= r;
 }
 
-const ALWAYS_HOSTILE = new Set([
-  'zombie', 'husk', 'drowned', 'skeleton', 'stray', 'bogged', 'creeper',
-  'spider', 'cave_spider', 'enderman', 'witch', 'slime', 'magma_cube',
-  'ghast', 'blaze', 'piglin_brute', 'hoglin', 'zoglin', 'phantom',
-  'pillager', 'vindicator', 'evoker', 'ravager', 'vex',
-  'guardian', 'elder_guardian', 'shulker', 'endermite', 'silverfish',
-  'warden', 'breeze',
-]);
-
 function isPlayerEntity(e: EdgeEntity): boolean {
   return e.isPlayer === true || String(e.kind ?? '').toLowerCase() === 'player';
 }
@@ -161,6 +154,54 @@ function isHostileEntity(e: EdgeEntity): boolean {
   if (e.hostile === true) return true;
   if (e.hostile === false) return false;
   return ALWAYS_HOSTILE.has(String(e.name ?? '').toLowerCase());
+}
+
+/** 苦力怕起爆方向在实体元数据里的下标（minecraft-data: creeper.metadataKeys[16] = swell_dir）。 */
+export const CREEPER_SWELL_DIR_INDEX = 16;
+
+/** 实体朝向与"指向 bot"的方向差在这个弧度内，就算盯着 bot（30°）。 */
+export const LOCK_ON_RADIANS = (30 * Math.PI) / 180;
+
+const TWO_PI = Math.PI * 2;
+
+/**
+ * 从 from 看向 to 时的 **mineflayer 朝向（弧度）**。
+ *
+ * mineflayer 的 `entity.yaw` 是弧度，内部约定 0=北(-Z)、π=南(+Z)：
+ * `conversions.fromNotchianYaw(y) = euclideanMod(PI - toRadians(y), 2π)`。
+ * 这里直接把"从实体指向 bot"的方向换算成同一套弧度——不要和 notchian
+ * 的角度（0=南、90=西）混用，那是另一套坐标系，混用会让判定与朝向无关。
+ */
+export function lockOnYaw(fromX: number, fromZ: number, toX: number, toZ: number): number {
+  const rad = Math.PI + Math.atan2(toX - fromX, toZ - fromZ);
+  return ((rad % TWO_PI) + TWO_PI) % TWO_PI;
+}
+
+/** 两个弧度角之间的最小夹角（0~π），处理绕圈。 */
+export function facingDelta(a: number, b: number): number {
+  return Math.abs(((((a - b) % TWO_PI) + 3 * Math.PI) % TWO_PI) - Math.PI);
+}
+
+/**
+ * 手里的东西算不算武器：剑、斧（不含镐）、三叉戟、弓、弩、重锤。
+ * 比 skills.ts 挑近战武器时用的判据更宽（那边只认剑/斧）——这里是
+ * "对方是否持有威胁性武器"，远程也算。
+ */
+export function isWeaponItem(name: unknown): boolean {
+  const n = typeof name === 'string' ? name.toLowerCase() : '';
+  if (n === '') return false;
+  if (n.includes('sword')) return true;
+  if (n.includes('axe') && !n.includes('pickaxe')) return true;
+  return n === 'trident' || n === 'bow' || n === 'crossbow' || n === 'mace';
+}
+
+/** 读实体元数据第 index 项（mineflayer 既可能是裸数字也可能是 {value}）。 */
+function metadataValue(entity: unknown, index: number): number | null {
+  const meta = (entity as { metadata?: unknown } | null | undefined)?.metadata;
+  if (!Array.isArray(meta)) return null;
+  const raw = meta[index] as { value?: unknown } | number | undefined;
+  const value = typeof raw === 'number' ? raw : (raw as { value?: unknown } | undefined)?.value;
+  return num(value);
 }
 
 /**
@@ -511,24 +552,41 @@ export function snapshotFromBot(bot: unknown, extra: SnapshotExtra = {}): EdgeSn
 
     const time = num((b['time'] as { timeOfDay?: unknown } | undefined)?.timeOfDay);
     snap.isNight = time != null ? time >= 12542 && time < 23460 : undefined;
-    snap.isThunder = (b['thunderState'] as boolean | undefined) === true ? true : undefined;
+    // mineflayer 的 thunderState/rainState 是**数字**等级（rain.js 初值 0，
+    // 由 game_state_change 的 gameMode 赋值），不是布尔；`isRaining` 由
+    // start_raining/stop_raining 直接维护，和 rainState 一起看更稳。
+    const thunder = b['thunderState'] as unknown;
+    snap.isThunder = thunder === true || (num(thunder) ?? 0) > 0 ? true : undefined;
     const rain = b['rainState'] as unknown;
-    snap.isRain = rain === true || rain === 1 ? true : undefined;
+    snap.isRain =
+      b['isRaining'] === true || rain === true || (num(rain) ?? 0) > 0 ? true : undefined;
     snap.dimension = strOf((b['game'] as { dimension?: unknown } | undefined)?.dimension);
 
     try {
       const blockAt = b['blockAt'] as ((p: unknown) => unknown) | undefined;
       if (typeof blockAt === 'function') {
-        const at = (p: unknown): Record<string, unknown> => {
+        const at = (p: { x: number; y: number; z: number }): Record<string, unknown> => {
           try {
-            return (blockAt.call(b, p) ?? {}) as Record<string, unknown>;
+            // 必须传 Vec3：mineflayer 的 blockAt 把参数原样交给 prismarine-world，
+            // 而后者在**区块已加载**时会执行 `pos.floored()` —— plain 对象会抛
+            // TypeError，被这里吞掉后 light/inLava/nextIsLava 全部静默变 undefined。
+            return (blockAt.call(b, new Vec3(p.x, p.y, p.z)) ?? {}) as Record<string, unknown>;
           } catch {
             return {};
           }
         };
         const feetBlock = at(feet);
-        const light = num(feetBlock['light'] ?? feetBlock['skyLight']);
-        if (light != null) snap.light = light;
+        // prismarine-chunk 里 `light` 是**方块光**（火把/岩浆/发光方块），`skyLight` 是
+        // **天光**，两者独立且都可以是 0——露天白天就是 `light 0 / skyLight 15`，
+        // 所以 `light ?? skyLight` 永远拿不到天光（0 不是 nullish）。
+        // 另外 chunk 里的 skyLight **不随时辰变化**（半夜也是 15），所以"这里暗不暗"
+        // 必须结合白天/黑夜：夜里天光不照亮。
+        const blockLight = num(feetBlock['light']);
+        const skyLight = num(feetBlock['skyLight']);
+        if (blockLight != null || skyLight != null) {
+          const sky = snap.isNight === true ? 0 : (skyLight ?? 0);
+          snap.light = Math.max(blockLight ?? 0, sky);
+        }
         const feetName = feetBlock['name'];
         snap.inLava = feetName === 'lava' ? true : undefined;
         snap.inWater = feetName === 'water' ? true : undefined;
@@ -550,17 +608,26 @@ export function snapshotFromBot(bot: unknown, extra: SnapshotExtra = {}): EdgeSn
         const feetY = num(pos.y);
         snap.belowVoid = feetY != null && feetY < -60 ? true : undefined;
 
-        // 高坠：下落距离 8 格以上视为致命风险（保守，含摔残；无保护假设）。
-        const fallDistance = num((entity as { fallDistance?: unknown }).fallDistance);
-        snap.fallLethal = fallDistance != null && fallDistance >= 8 ? true : undefined;
+        // 高坠：mineflayer **不暴露** fallDistance（mineflayer / prismarine-entity /
+        // prismarine-physics 里零命中），所以用"离地 + 下落速度"做代理。
+        // 带阻力的真实递推是 v=(v-0.08)*0.98：恰好落下 8 格时 v≈-1.08，
+        // v<=-1.1 要到第 17 刻、已掉 9.67 格，所以阈值取 -1.08 才对得上"8 格"。
+        // 注意这是**近似**且受 300ms 轮询相位影响：8~9 格窗口很窄可能整段错过，
+        // 10~19 格概率性触发，≥20 格窗口超过轮询周期必中。保守方向，不会误报。
+        const vy = num(vel.y);
+        const onGround = (entity as { onGround?: unknown }).onGround;
+        snap.fallLethal = onGround === false && vy != null && vy <= -1.08 ? true : undefined;
 
-        // 前方岩浆：移动方向上两格内脚下是岩浆。
+        // 前方岩浆：朝向方向上两格内脚下是岩浆。
+        // mineflayer 的 yaw 是弧度且 0=北，此时水平朝向向量是 (-sin, -cos)。
+        // 先取脚下方块再叠加**取整**的偏移：直接 floor(世界坐标 + 2*dir)
+        // 会被 sin(π)=1.2e-16 这类浮点噪声推到 -1 号方块，正南方向就查不到。
         const yaw = num((entity as { yaw?: unknown }).yaw);
         if (yaw != null && snap.moving === true) {
           const ahead = at({
-            x: Math.floor(feet.x - Math.sin((yaw * Math.PI) / 180) * 2),
+            x: Math.floor(feet.x) + Math.round(-Math.sin(yaw) * 2),
             y: feet.y,
-            z: Math.floor(feet.z + Math.cos((yaw * Math.PI) / 180) * 2),
+            z: Math.floor(feet.z) + Math.round(-Math.cos(yaw) * 2),
           });
           snap.nextIsLava = ahead['name'] === 'lava' ? true : undefined;
         }
@@ -578,10 +645,13 @@ export function snapshotFromBot(bot: unknown, extra: SnapshotExtra = {}): EdgeSn
           id?: unknown;
           name?: unknown;
           displayName?: unknown;
+          username?: unknown;
           type?: unknown;
           kind?: unknown;
           position?: unknown;
           health?: unknown;
+          yaw?: unknown;
+          heldItem?: unknown;
         };
         if (e == null || e.id === selfId) continue;
         const ep = (e.position ?? {}) as { x?: unknown; y?: unknown; z?: unknown };
@@ -591,13 +661,53 @@ export function snapshotFromBot(bot: unknown, extra: SnapshotExtra = {}): EdgeSn
         if (ex == null || ey == null || ez == null) continue;
         const d = Math.hypot(ex - feet.x, ey - feet.y, ez - feet.z);
         const type = typeof e.type === 'string' ? e.type : typeof e.kind === 'string' ? e.kind : '';
+        const category = typeof e.kind === 'string' ? e.kind : '';
+        // 玩家实体的 `name` 是**类型名** `'player'`（mineflayer addNewPlayer 里写死），
+        // 身份在 `username` 上，且它不设 displayName —— 不先取 username 的话
+        // 快照里所有玩家都会显示成匿名的 `player#N`。
+        const rawName =
+          (typeof e.username === 'string' && e.username !== '' ? e.username : null) ??
+          (typeof e.name === 'string' ? e.name : null) ??
+          (typeof e.displayName === 'string' ? e.displayName : null) ??
+          'unknown';
+        const name = rawName.toLowerCase();
+        const isPlayer = type.toLowerCase() === 'player';
+
+        // 下面两个判据必须带 `!isPlayer`：`name` 现在优先取 username，而
+        // 用户名恰好叫 `creeper` / `tnt` 的玩家是很常见的——不加守卫就会把
+        // 玩家当成点燃的 TNT / 起爆的苦力怕，直接触发 L5 EMERGENCY
+        // （停掉所有动作 + 进 emergency）。玩家实体的 metadata[16] 是 `score`，
+        // 不是 `swell_dir`，读数本身也没有意义。
+        // 已点燃的 TNT 在协议里就是一个名为 tnt 的实体（displayName: Primed TNT）。
+        const primed = !isPlayer && name === 'tnt';
+        // 苦力怕引信：metadata[16] = swell_dir，-1 未起爆；点燃瞬间会先置 0，
+        // 所以判据是"不是 -1"，否则会漏掉第一个 tick。
+        const swellDir =
+          !isPlayer && name === 'creeper' ? metadataValue(e, CREEPER_SWELL_DIR_INDEX) : null;
+        const swelling = swellDir != null && swellDir !== -1;
+        // mcData 的类别能覆盖敌对名单之外的新生物。
+        const hostile = !isPlayer && (ALWAYS_HOSTILE.has(name) || category === 'Hostile mobs');
+        const held = (e.heldItem ?? null) as { name?: unknown } | null;
+        const heldWeapon = isPlayer && isWeaponItem(held?.name);
+        // 朝向：实体 yaw（弧度）与"从它指向 bot"的方向差在阈值内 = 盯着我。
+        const eyaw = num(e.yaw);
+        const lockedOn =
+          eyaw != null && facingDelta(eyaw, lockOnYaw(ex, ez, feet.x, feet.z)) <= LOCK_ON_RADIANS;
+
         list.push({
           id: typeof e.id === 'number' ? e.id : -1,
-          name: typeof e.name === 'string' ? e.name : typeof e.displayName === 'string' ? e.displayName : 'unknown',
+          name: rawName,
           kind: type !== '' ? type : undefined,
           distance: Math.round(d * 10) / 10,
-          isPlayer: type.toLowerCase() === 'player',
+          isPlayer,
+          // mineflayer 不给实体填 `health`（entities.js 里零命中），所以这里
+          // 目前恒为 undefined；读它只是留个口子，别以为快照里有怪物血量。
           health: num(e.health) ?? undefined,
+          hostile: hostile || undefined,
+          primed: primed || undefined,
+          swelling: swelling || undefined,
+          heldWeapon: heldWeapon || undefined,
+          lockedOn: lockedOn || undefined,
         });
       }
     } catch {

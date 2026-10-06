@@ -300,12 +300,29 @@ export const queryList: AgentCommand[] = [
             'query': { type: 'string', description: tp('searchWiki', 'query') }
         },
         perform: async function (agent: any, query: string): Promise<string> {
-            void agent;
+            // 宿主注入的语料优先（对齐 VLM 的注入式 SearchWiki）：单测与
+            // 离线部署可以把检索换成自己的知识源，不必打网络。
+            const injected = agent?.wikiSearch;
+            if (typeof injected === 'function') {
+                try {
+                    const found: unknown = await injected(query);
+                    if (typeof found === 'string' && found.trim() !== '') return found;
+                    return `No wiki entry found for "${query}".`;
+                } catch (error: unknown) {
+                    console.error('Injected wiki search failed:', error);
+                    return `Wiki lookup for "${query}" failed. Treat this as no information, not as an answer.`;
+                }
+            }
             const url = `https://minecraft.wiki/w/${query}`;
             try {
                 const response = await fetch(url);
                 if (response.status === 404) {
                   return `${query} was not found on the Minecraft Wiki. Try adjusting your search term.`;
+                }
+                if (!response.ok) {
+                  // 非 404 的失败（403/429/5xx）不能接着解析错误页：
+                  // 那个页面上的文字会被当成知识回给模型，等于把故障当事实。
+                  return `Wiki lookup for "${query}" failed (HTTP ${response.status}). Treat this as no information, not as an answer.`;
                 }
                 const html = await response.text();
                 const $ = load(html);
@@ -315,11 +332,16 @@ export const queryList: AgentCommand[] = [
                 parserOutput.find("table.navbox").remove();
 
                 const divContent = parserOutput.text();
-
-                return divContent.trim();
+                const text = divContent.trim();
+                if (text === '') {
+                  return `The Minecraft Wiki page for "${query}" had no readable content. Treat this as no information.`;
+                }
+                return text;
               } catch (error: unknown) {
                 console.error("Error fetching or parsing HTML:", error);
-                return `The following error occurred: ${error}`;
+                // 抓取失败必须如实报"没有信息"：以前把异常文本直接当
+                // 知识回给模型，等于教它把故障当事实。
+                return `Wiki lookup for "${query}" failed (network or parse error). Treat this as no information, not as an answer.`;
               }
         }
     },

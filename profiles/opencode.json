@@ -1,4 +1,13 @@
 {
     "name": "opencode",
-    "model": "opencode/deepseek-v4.1-flash"
+    "model": {
+        "api": "openai",
+        "model": "deepseek-v4.1-flash",
+        "url": "https://opencode.ai/zen/go/v1",
+        "params": {
+            "api_key_env": "OPENCODE_API_KEY",
+            "headers": { "x-opencode-session": "${OPENCODE_SESSION_ID}" },
+            "thinking": { "type": "disabled" }
+        }
+    }
 }

@@ -13,7 +13,7 @@ To run a task you will first need to follow the setup instructions on the main R
 2. Launch the supported Minecraft version from the main README
 3. Open the world to LAN at 55916 
 4. To run a simple task that involves collecting 4 oak_logs run 
-`node main.js --task_path tasks/basic/single_agent.json --task_id gather_oak_logs`
+`npm start -- --task_path tasks/basic/single_agent.json --task_id gather_oak_logs`
 
 Here is an example task json format: 
 
@@ -121,7 +121,12 @@ cd /tasks/server_data/
 java -jar server.jar
 ```
 
-If you want to run with vllm be sure to run with `--api vllm --url {your_url_for_vllm} --model {model_name}`, by default vllm will use http://127.0.0.1:8000/v1 as the url for quering the model!
+本分支只有一个 OpenAI 兼容供应商。要指向自建端点（vLLM / LM Studio / Ollama 的 OpenAI 兼容口等等），
+用 `--model {model_name}` 配合 `--url {your_url}`。
+
+**不传 `--url` 时**，生成的 agent profile 会从默认 profile（`profiles/opencode.json`）继承
+端点与 `params`（`url` / `api_key_env` / `headers` / `thinking`），只覆盖模型名；模板 profile 的
+其它字段（如 `prompt_set`）也会保留。所以评测脚本默认打的是 Zen 端点，而不是官方 OpenAI。
 
 Construction tasks run with native tools only; no freeform code generation is used. 
 
@@ -129,20 +134,20 @@ When running an experiment that requires more than 2 agents, use the `--num_agen
 
 Similarly, match the default prompt profile to the type of task. If you are running a crafting task use `--template_profile profiles/tasks/crafting_profile.json` to set that as the default profile. Similar for cooking and construction tasks. 
 
-In summary, to run two and three agent tasks on crafting  on gpt-4o-mini you would run 
+In summary, to run two and three agent tasks on crafting on the default model you would run 
 
 ```sh
-$ python tasks/evaluation_script.py --task_path tasks/crafting_tasks/test_tasks/2_agent.json --model gpt-4o-mini --template_profile profiles/tasks/crafting_profile.json
+$ python tasks/evaluation_script.py --task_path tasks/crafting_tasks/test_tasks/2_agent.json --model deepseek-v4.1-flash --template_profile profiles/tasks/crafting_profile.json
 
-$ python tasks/evaluation_script.py --task_path tasks/crafting_tasks/test_tasks/filtered_tasks_3_agents.json --model gpt-4o-mini --template_profile profiles/tasks/crafting_profile --num_agents 3
+$ python tasks/evaluation_script.py --task_path tasks/crafting_tasks/test_tasks/filtered_tasks_3_agents.json --model deepseek-v4.1-flash --template_profile profiles/tasks/crafting_profile.json --num_agents 3
 ```
 
 For cooking and construction 
 
 ```sh
-$ python tasks/evaluation_script.py --task_path {path_to_two_agent_cooking_tasks} --model gpt-4o-mini --template_profile profiles/tasks/cooking_profile.json 
+$ python tasks/evaluation_script.py --task_path {path_to_two_agent_cooking_tasks} --model deepseek-v4.1-flash --template_profile profiles/tasks/cooking_profile.json 
 
-$ python tasks/evaluation_script.py --task_path {path_to_two_agent_construction_tasks} --model gpt-4o-mini --template_profile profiles/tasks/construction_profile.json
+$ python tasks/evaluation_script.py --task_path {path_to_two_agent_construction_tasks} --model deepseek-v4.1-flash --template_profile profiles/tasks/construction_profile.json
 ```
 
 When you launch the evaluation script, you will see the minecraft server being launched. If you want to join this world, you can connect to it on the port localhost:55916 the way you would a standard Minecraft world (go to single player -> direct connection -> type in localhost:55916) It may take a few minutes for everything to be properly loaded - as first the agents need to be added to the world and given the correct permissions to use cheats and add inventory. After about 5 minutes everything should be loaded and working. If you wish to kill the experiment run `tmux kill-server`. Sometimes there will be issues copying the files, if this happens you can run the python file twice. 
@@ -157,7 +162,7 @@ python tasks/run_task_file.py --task_path=tasks/single_agent/crafting_train.json
 
 ## Using the Evaluation Script
 
-When you launch with `python evaluation_script.py` a Minecraft server will be launched in the `server_0` tmux shell, while in the `0` tmux shell the `node main.js` command will be run. You can view the exact bash shell that is being created and executed in the `tmp/` directory. 
+When you launch with `python evaluation_script.py` a Minecraft server will be launched in the `server_0` tmux shell, while in the `0` tmux shell the `node --import tsx main.ts` command will be run. You can view the exact bash shell that is being created and executed in the `tmp/` directory. 
 
 ### Evaluating Results 
 
@@ -218,5 +223,7 @@ To add new worlds to the minecraft environment beyond the base Forest and Superf
 
 ## Evaluating New Models
 
-To evaluate a new model on our tasks, please refer to the instructions on main README for adding models. If the model can be hosted through vllm, consider using the --vllm flag and instructions above for running that.
+To evaluate a new model on our tasks, point the single OpenAI-compatible provider at it: pass
+`--model {model_name}` and, if it is served by a local OpenAI-compatible server, `--url {your_url}`
+(see the instructions above).
 

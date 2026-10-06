@@ -1,4 +1,5 @@
 import OpenAIApi from 'openai';
+import { randomUUID } from 'node:crypto';
 import { getKey, hasKey } from '../utils/keys.js';
 import { strictFormat } from '../utils/text.js';
 import type {
@@ -8,27 +9,96 @@ import type {
   ToolResponse,
 } from '../types/common.js';
 
+/** 构造 OpenAI 客户端时的选项类型（不再手写一遍形状）。 */
+type OpenAIClientOptions = NonNullable<ConstructorParameters<typeof OpenAIApi>[0]>;
+
+/**
+ * headers 支持 `${VAR}` 占位，未设置的变量取一个新的 UUID。
+ *
+ * 用途：Zen 这类网关按会话路由，需要"每个进程一个会话 id"，而 profile
+ * 是静态 JSON。写成 `"x-opencode-session": "${OPENCODE_SESSION_ID}"` 就
+ * 既能表达这个头，又默认保持唯一（设了环境变量则全进程共用同一个）。
+ */
+export function resolveHeaders(raw: unknown): Record<string, string> | null {
+  if (raw == null || typeof raw !== 'object' || Array.isArray(raw)) return null;
+  const out: Record<string, string> = {};
+  for (const [key, value] of Object.entries(raw as Record<string, unknown>)) {
+    if (typeof value !== 'string') continue;
+    out[key] = value.replace(/\$\{([A-Z0-9_]+)\}/g, (_match, name: string) => {
+      const fromEnv = process.env[name];
+      return fromEnv != null && fromEnv !== '' ? fromEnv : randomUUID();
+    });
+  }
+  return Object.keys(out).length > 0 ? out : null;
+}
+
+/**
+ * 唯一的供应商适配器：任何 OpenAI 兼容端点都走这里。
+ *
+ * profile 里能配的东西：
+ *   - `url`：兼容端点根地址（不填走官方 OpenAI）；
+ *   - `params.api_key_env`：从 keys.json/环境变量取 key 的变量名，
+ *     默认 `OPENAI_API_KEY`（Zen、vLLM、LM Studio 各用各的 key 名）；
+ *   - `params.headers`：额外 HTTP 头（如 Zen 的 `x-opencode-session`）；
+ *   - `params` 其余键原样进请求体（如 `thinking: {type: 'disabled'}`）。
+ */
 export class GPT implements AIModel {
   static prefix = 'openai';
-  // `protected` (not `private`) so subclasses (e.g. AzureGPT) can reconfigure them.
+  // `protected` (not `private`) so subclasses can reconfigure them.
   protected model_name: string | null;
   protected params: Record<string, unknown> | undefined;
   protected url: string | undefined;
   protected openai: OpenAIApi;
+  /** 构造时实际用的客户端选项（诊断/单测可读，避免为了看 headers 去联网）。 */
+  readonly clientOptions: OpenAIClientOptions;
 
-  constructor(model_name: string | null, url?: string, params?: Record<string, unknown>) {
+  constructor(
+    model_name: string | null,
+    url?: string,
+    params?: Record<string, unknown>,
+    client?: OpenAIApi | null,
+  ) {
     this.model_name = model_name;
     this.params = params;
     this.url = url; // store so that we know whether a custom URL has been set
 
-    const config: Record<string, string> = {};
+    const config: Record<string, unknown> = {};
     if (url) config['baseURL'] = url;
 
     if (hasKey('OPENAI_ORG_ID')) config['organization'] = getKey('OPENAI_ORG_ID');
 
-    config['apiKey'] = getKey('OPENAI_API_KEY');
+    // key 变量名可由 profile 指定，这样一个适配器能服务任意兼容端点。
+    const keyEnv =
+      typeof params?.['api_key_env'] === 'string' ? (params['api_key_env'] as string) : 'OPENAI_API_KEY';
+    if (client == null) {
+      const key = hasKey(keyEnv);
+      if (key != null && key !== '') {
+        config['apiKey'] = key;
+      } else if (url) {
+        // 本地/自建兼容端点（LM Studio、vLLM、Ollama 兼容口…）通常不校验 key。
+        // 这些以前各有专属适配器、根本不读 key；收敛成单一适配器后
+        // 不能因为"keys.json 里没这一项"就崩在构造期。
+        config['apiKey'] = 'not-needed';
+      } else {
+        // 官方端点缺 key 是明确的配置错误，按原样报出来。
+        config['apiKey'] = getKey(keyEnv);
+      }
+    }
 
-    this.openai = new OpenAIApi(config);
+    const extraHeaders = resolveHeaders(params?.['headers']);
+    if (extraHeaders != null) config['defaultHeaders'] = extraHeaders;
+
+    this.clientOptions = config as OpenAIClientOptions;
+    // client 可注入：单测不必联网，也不必真有 key。
+    this.openai = client ?? new OpenAIApi(this.clientOptions);
+  }
+
+  /** 请求体参数：headers / api_key_env 是接线字段，不能混进 body。 */
+  protected bodyParams(): Record<string, unknown> {
+    const body: Record<string, unknown> = { ...(this.params ?? {}) };
+    delete body['headers'];
+    delete body['api_key_env'];
+    return body;
   }
 
   async sendRequest(
@@ -55,7 +125,7 @@ export class GPT implements AIModel {
           model: model,
           messages: msgs,
           stop: stop_seq,
-          ...(this.params ?? {}),
+          ...this.bodyParams(),
         };
         if (model.includes('o1') || model.includes('o3') || model.includes('5')) {
           delete pack['stop'];
@@ -82,7 +152,7 @@ export class GPT implements AIModel {
           model: model,
           instructions: systemMessage,
           input: withStop as never,
-          ...(this.params ?? {}),
+          ...this.bodyParams(),
         });
         console.log('Received.');
         res = response.output_text;
@@ -108,8 +178,11 @@ export class GPT implements AIModel {
 
   /**
    * OpenAI 原生工具调用：把命令转换后的 tools 直接透传给 chat.completions。
-   * liveTail（现采 Live State）放消息列最后单独发，不进 system。
-   * 返回 { text, tool_calls: [{ id, name, args }] }，调用方用 executeToolCall 执行。
+   *
+   * `liveTail` 是调用方拼好的"本轮上下文尾巴"（事件 / 记忆 / Live 快照），
+   * 原样作为最后一条 user 消息发出——标题由拼装方负责，这里不加壳，
+   * 免得"## 事件"挂在"## 当前世界快照"标题底下。
+   * 有现拍示意图就把图附在同一条 user 消息里（多模态数组）。
    */
   async sendRequestWithTools(
     turns: ChatMessage[],
@@ -117,12 +190,21 @@ export class GPT implements AIModel {
     tools: OpenAITool[],
     tool_choice = 'auto',
     liveTail = '',
+    liveImage: string | null = null,
   ): Promise<ToolResponse> {
     const messages = [{ role: 'system', content: systemMessage } as ChatMessage].concat(
       strictFormat(turns),
     );
-    if (liveTail.trim() !== '') {
-      messages.push({ role: 'user', content: `## 当前世界快照\n${liveTail}` });
+    if (liveTail.trim() !== '' || liveImage != null) {
+      if (liveImage != null) {
+        // ChatMessage.content 是 string，多模态要数组——网关认，类型上 cast 一下。
+        const parts: Array<Record<string, unknown>> = [];
+        if (liveTail.trim() !== '') parts.push({ type: 'text', text: liveTail });
+        parts.push({ type: 'image_url', image_url: { url: `data:image/jpeg;base64,${liveImage}` } });
+        messages.push({ role: 'user', content: parts } as unknown as ChatMessage);
+      } else {
+        messages.push({ role: 'user', content: liveTail });
+      }
     }
     const model = this.model_name || 'gpt-5.4-mini';
     try {
@@ -132,8 +214,8 @@ export class GPT implements AIModel {
         messages: messages as never,
         tools: tools as never,
         tool_choice: tool_choice as never,
-        ...(this.params ?? {}),
-      });
+        ...this.bodyParams(),
+      } as never);
       const msg = completion.choices[0]?.message;
       const tool_calls = (msg?.tool_calls ?? []).map((tc) => {
         const fn = (tc as { id?: string; function?: { name?: string; arguments?: string } }).function;
@@ -151,57 +233,4 @@ export class GPT implements AIModel {
       return { text: 'My brain disconnected, try again.', tool_calls: [] };
     }
   }
-
-  sendVisionRequest(
-    messages: ChatMessage[],
-    systemMessage: string,
-    imageBuffer: Buffer,
-  ): Promise<string> {
-    const imageMessages = [...(messages as unknown as Array<Record<string, unknown>>)];
-    imageMessages.push({
-      role: 'user',
-      content: [
-        { type: 'input_text', text: systemMessage },
-        {
-          type: 'input_image',
-          image_url: `data:image/jpeg;base64,${imageBuffer.toString('base64')}`,
-        },
-      ],
-    });
-
-    return this.sendRequest(imageMessages as unknown as ChatMessage[], systemMessage);
-  }
 }
-
-export async function sendAudioRequest(
-  text: string,
-  model: string,
-  voice: string,
-  url?: string,
-): Promise<string> {
-  const payload = {
-    model: model,
-    voice: voice,
-    input: text,
-  };
-
-  const config: Record<string, string> = {};
-
-  if (url) config['baseURL'] = url;
-
-  if (hasKey('OPENAI_ORG_ID')) config['organization'] = getKey('OPENAI_ORG_ID');
-
-  config['apiKey'] = getKey('OPENAI_API_KEY');
-
-  const openai = new OpenAIApi(config);
-
-  const mp3 = await openai.audio.speech.create(payload as never);
-  const buffer = Buffer.from(await mp3.arrayBuffer());
-  const base64 = buffer.toString('base64');
-  return base64;
-}
-
-export const TTSConfig = {
-  sendAudioRequest: sendAudioRequest,
-  baseUrl: 'https://api.openai.com/v1',
-};

@@ -10,7 +10,7 @@ After first start it will create config file `services/viaproxy/viaproxy.yml`.
 
 Edit this file, and change your desired target `target-address`, 
 
-then point your `settings.js` `host` and `port` to viaproxy endpoint:
+then point your `settings.ts` `host` and `port` to viaproxy endpoint:
 
 ```javascript
     "host": "host.docker.internal",

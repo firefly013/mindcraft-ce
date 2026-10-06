@@ -18,7 +18,10 @@ import { runEmergency, shouldTriggerEmergency, FOOD_VALUE } from './emergency.js
 import type { ThreatEntity } from './emergency.js';
 import { validateFeedback, buildFeedbackEntry, appendFeedback } from './feedback.js';
 import { PlanStore } from './plan.js';
+import type { PlanTodoInput } from './plan.js';
 import { createEdgeWatcher, resolvePriority, schedulerLevelFor, snapshotFromBot } from './edges.js';
+import { renderEvents, composeTail, EVENT_LOG_LIMIT } from './event_stream.js';
+import type { EventEntry } from './event_stream.js';
 import { createRequestLog } from './requestLog.js';
 import type { RequestLog } from './requestLog.js';
 
@@ -32,7 +35,6 @@ import settings from './settings.js';
 import { MESSAGES } from '../prompts.js';
 import { Task } from './tasks/tasks.js';
 import type { TaskData } from './tasks/tasks.js';
-import { speak } from './speak.js';
 import { log, validateNameFormat, handleDisconnection } from './connection_handler.js';
 import type { ToolResponse } from '../types/common.js';
 
@@ -253,7 +255,10 @@ export class Agent {
         try {
             this.bot.commonSense?.setOptions?.({
                 autoRespond: true,
-                fallCheck: true,
+                // 注意选项名：插件里摔落反射叫 **mlgCheck**（默认 false），
+                // 没有 `fallCheck` 这个键——以前写 `fallCheck: true` 是个静默
+                // 无效键，等于摔落反射从未开启（setOptions 只做 Object.assign）。
+                mlgCheck: true,
                 fireCheck: true,
                 useOffhand: true
             });
@@ -301,19 +306,25 @@ export class Agent {
             runner,
             history: {
                 append: (kind: string, level: number, payload: unknown) => {
+                    // 审计台账：只留最近一段，别让它无声长大。真正给模型
+                    // 看的事件走 assemble 的 events 参数（见 assembleContext）。
                     this.loopLog.push({ kind, level, payload });
+                    if (this.loopLog.length > EVENT_LOG_LIMIT) {
+                        this.loopLog.splice(0, this.loopLog.length - EVENT_LOG_LIMIT);
+                    }
                 },
             },
-            assemble: () => this.assembleContext(),
-            model: (text: string, tools: unknown, choice: string, image?: string | null) =>
-                this.modelCall(text, tools, choice, image),
+            assemble: (events: unknown[]) => this.assembleContext(events),
+            model: (text: string, tools: unknown, image?: string | null) =>
+                this.modelCall(text, tools, image),
             stopExecutor: async () => {
                 await this.fullStop();
             },
             emergencyHandler: () => this.runEmergency(),
         });
-        // Say 隔离：说话唯一通道。正文不再自动进聊天（见 modelCall），
-        // 模型想让玩家听见必须调 Say；空话拒绝，超长截断但记全文。
+        // 双通道发言（有意设计，别改成单通道）：正文会在 modelCall 里自动
+        // 进聊天，充当"干活的动静"；Say 是专门说话的工具，两者并存。
+        // 这里只管 Say 的形状：空话拒绝，超长截断但记全文；
         // 说出去的话记一条历史，免得下轮模型忘了自己说过什么。
         this.toolHandlers.set('Say', (args: unknown) => {
             const shaped = formatSay((args as { text?: unknown } | null)?.text);
@@ -338,11 +349,11 @@ export class Agent {
                     reason: checked.errors?.join('; ') ?? 'Bad arguments.',
                 } as LoopToolResult);
             }
-            const a = (args ?? {}) as { goal?: string | null; todos?: string[] | null };
+            const a = (args ?? {}) as { goal?: string | null; todos?: PlanTodoInput[] | null };
             const snap = this.plan.update(a.goal, a.todos);
             const summary =
                 `Plan updated. Goal: ${snap.goal ?? 'none'}. ` +
-                `Todos: ${snap.todos.length > 0 ? snap.todos.join('; ') : 'none'}.`;
+                `Todos: ${snap.todos.length > 0 ? snap.todos.map((t) => `${t.done ? '[x]' : '[ ]'} ${t.text}`).join('; ') : 'none'}.`;
             return Promise.resolve({ status: 'completed', data: summary } as LoopToolResult);
         });
         // Feedback：模型提使用意见，自动附计划快照和历史尾部摘要，
@@ -440,8 +451,21 @@ export class Agent {
         return this.actionRunner.run(name, args);
     }
 
-    /** 每轮现采 Live State + 现拍示意图（原文与图都给模型层，由它追加在消息列最后）。 */
-    private async assembleContext(): Promise<{ text: string; tools: unknown; image?: string | null }> {
+    /**
+     * 每轮组装上下文。顺序很重要：
+     *   1. 先拍照——Live State 里的"截图文件名/时间"要引用这一轮刚拍的图，
+     *      否则文本和图差一拍；
+     *   2. 再现采 Live State；
+     *   3. 把这一轮未见的事件块放在快照**前面**，两张一起作为最后一条
+     *      user 消息发出，稳定前缀（system + 历史）不受影响。
+     */
+    private async assembleContext(events: unknown[] = []): Promise<{ text: string; tools: unknown; image?: string | null }> {
+        let image: string | null;
+        try {
+            image = (await this.vision_interpreter?.captureBase64?.()) ?? null;
+        } catch {
+            image = null;
+        }
         const task = this.task as { goal?: unknown } | null;
         const plan = this.plan.snapshot();
         const live = sampleLiveState({
@@ -451,14 +475,18 @@ export class Agent {
             todos: plan.todos,
             currentAction: this.actions.currentActionLabel,
         });
-        const text = renderLiveState(live);
+        const liveText = renderLiveState(live);
+        // 未见事件必须让模型看到：它是"我为什么被叫醒"的唯一解释。
+        const eventsText = renderEvents(events as EventEntry[]);
+        // 记忆从 system 前缀挪到尾巴：记忆一更新就换 system 会让
+        // 整个前缀缓存失效，而它本来就只有几百字、每轮重发不心疼。
+        // （压仓留下的 `kind:'summary'` 条目已在 getHistory 里剔除，不会重复。）
+        const memory = typeof this.history?.memory === 'string' ? this.history.memory.trim() : '';
+        const memoryText = memory === '' ? '' : `## 记忆摘要\n${memory}`;
+        // 每段各带自己的标题；快照标题在这里给，适配器只负责原样发出去。
+        const liveBlock = `## 当前世界快照\n${liveText}`;
+        const text = composeTail(eventsText, memoryText, liveBlock);
         const tools = getOpenAITools(this);
-        let image: string | null;
-        try {
-            image = (await this.vision_interpreter?.captureBase64?.()) ?? null;
-        } catch {
-            image = null;
-        }
         this.requestLog?.logRequest({
             text,
             tools: tools.map((t) => t.function.name),
@@ -466,9 +494,8 @@ export class Agent {
         return { text, tools, image: image ?? null };
     }
 
-    private async modelCall(liveText: string, tools: unknown, _choice: unknown, image?: string | null): Promise<LoopModelResponse> {
+    private async modelCall(liveText: string, tools: unknown, image?: string | null): Promise<LoopModelResponse> {
         void tools;
-        void _choice;
         if (this.shut_up) return { text: null, calls: [] };
         const history = this.history.getHistory();
         const res = await this.prompter.promptConvoTools(history, liveText, image ?? null);
@@ -575,6 +602,10 @@ export class Agent {
             return false;
         }
         this.currentSource = source;
+        // 静音时不要把事件交给循环：beginRequest 会把事件标成 consumed，
+        // 而 modelCall 会因为 shut_up 直接早退——那样这些事件就再也补不回来
+        // （事件流引入后的新副作用）。挡在门外，解除静音后它们仍会被送达。
+        if (this.shut_up) return false;
         const verdict = this.loop.notify({ kind, level, payload: { source, message, ...extra } });
         await this.loop.handleDecision(verdict.decision);
         return true;
@@ -597,9 +628,6 @@ export class Agent {
             }
         }
         else {
-            if (settings.speak) {
-                speak(message, this.prompter.profile.speak_model);
-            }
             if (settings.chat_ingame) {this.bot.chat(message);}
             sendOutputToServer(this.name, message);
         }

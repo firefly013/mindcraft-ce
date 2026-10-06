@@ -46,11 +46,6 @@
         "description": "List of agents to only chat with. If empty, the bot will chat publicly",
         "default": []
     },
-    "speak": {
-        "type": "boolean",
-        "description": "Whether to enable text-to-speech reading on the host machine",
-        "default": false
-    },
     "allow_vision": {
         "type": "boolean",
         "description": "Whether to allow vision capabilities",

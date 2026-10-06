@@ -1,6 +1,7 @@
 import { readFileSync, readdirSync, statSync } from 'fs';
 import { join } from 'path';
 import * as P from '../src/prompts.js';
+import { CONTROL_TOOLS, getOpenAITools } from '../src/agent/commands/to_openai_tools.js';
 
 type ToolText = Record<string, { params?: Record<string, unknown> }>;
 const TOOL_TEXT = P.TOOL_TEXT as ToolText;
@@ -16,7 +17,8 @@ for (const fp of ['./src/agent/commands/actions.ts', './src/agent/commands/queri
     used.get(m[1] as string)?.add(m[2] as string);
   }
 }
-used.set('Finish', new Set<string>());
+// 控制类工具不在命令文件里，名单以 to_openai_tools 的 CONTROL_TOOLS 为准。
+for (const name of CONTROL_TOOLS) used.set(name, new Set<string>());
 let fail = 0;
 for (const [key, params] of used) {
   if (!TOOL_TEXT[key]) { console.log('MISSING TOOL_TEXT:', key); fail++; continue; }
@@ -29,9 +31,32 @@ for (const fp of ['./src/agent/commands/actions.ts', './src/agent/commands/queri
   const src = readFileSync(fp, 'utf8');
   for (const m of src.matchAll(/name:\s*['"]!([^'"]+)['"]/g)) defined.add(m[1] as string);
 }
-defined.add('Finish');
+for (const name of CONTROL_TOOLS) defined.add(name);
 for (const key of Object.keys(TOOL_TEXT)) {
   if (!defined.has(key)) { console.log('ORPHAN TOOL_TEXT:', key); fail++; }
+}
+
+// 1b. 提示词 <-> 真实 schema 的**参数**双向核对。
+// 上面那轮只挡"孤儿工具名"，抓不到参数级漂移：提示词里还留着某参数的说明、
+// 而 schema 已经不再声明它（或反过来 schema 有参数却没写提示词）。
+// 用 getOpenAITools 取**全部**工具（含 5 个控制类），这样控制工具的参数也受检。
+type BuiltTool = { function: { name: string; parameters: { properties?: Record<string, unknown> } } };
+let builtTools: BuiltTool[] = [];
+try {
+  builtTools = getOpenAITools({ blocked_actions: [] }) as unknown as BuiltTool[];
+} catch (err) {
+  console.log('TOOL BUILD FAILED:', String(err));
+  fail++;
+}
+for (const tool of builtTools) {
+  const props = new Set(Object.keys(tool.function.parameters.properties ?? {}));
+  const text = TOOL_TEXT[tool.function.name]?.params ?? {};
+  for (const p of props) {
+    if (!(p in text)) { console.log('SCHEMA PARAM WITHOUT PROMPT TEXT: ' + tool.function.name + '.' + p); fail++; }
+  }
+  for (const p of Object.keys(text)) {
+    if (!props.has(p)) { console.log('ORPHAN PROMPT PARAM: ' + tool.function.name + '.' + p); fail++; }
+  }
 }
 
 // 2. MESSAGES / MODE_TEXT 引用完整性

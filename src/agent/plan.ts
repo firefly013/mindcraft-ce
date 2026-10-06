@@ -10,26 +10,37 @@
  * 存这里只会制造"到底以哪个为准"的糊涂账。
  */
 
+export interface PlanTodo {
+  text: string;
+  done: boolean;
+}
+
 export interface PlanSnapshot {
   goal: string | null;
-  todos: string[];
+  todos: PlanTodo[];
 }
+
+/** 兼容旧格式：纯字符串按"未完成"折算。 */
+export type PlanTodoInput = PlanTodo | string;
 
 export class PlanStore {
   private goal: string | null = null;
-  private todos: string[] = [];
+  private todos: PlanTodo[] = [];
 
   /** 整单替换：goal 空串表示清空；todos 不传表示不动。 */
-  update(goal?: string | null, todos?: string[] | null): PlanSnapshot {
+  update(goal?: string | null, todos?: PlanTodoInput[] | null): PlanSnapshot {
     if (goal !== undefined) {
       const trimmed = typeof goal === 'string' ? goal.trim() : '';
       this.goal = trimmed !== '' ? trimmed : null;
     }
     if (todos !== undefined && todos !== null) {
       this.todos = todos
-        .filter((t): t is string => typeof t === 'string')
-        .map((t) => t.trim())
-        .filter((t) => t !== '');
+        .map((t): PlanTodo => {
+          if (typeof t === 'string') return { text: t.trim(), done: false };
+          const text = typeof t?.text === 'string' ? t.text.trim() : '';
+          return { text, done: t?.done === true };
+        })
+        .filter((t) => t.text !== '');
     }
     return this.snapshot();
   }
@@ -40,8 +51,9 @@ export class PlanStore {
     return this.snapshot();
   }
 
+  /** 深拷贝返回：调用方改快照不该反噬存储。 */
   snapshot(): PlanSnapshot {
-    return { goal: this.goal, todos: [...this.todos] };
+    return { goal: this.goal, todos: this.todos.map((t) => ({ ...t })) };
   }
 }
 

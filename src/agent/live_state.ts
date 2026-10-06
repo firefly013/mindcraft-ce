@@ -14,6 +14,17 @@
  * 快照失败而发不出去。
  */
 
+import { estimateTokens } from './compaction.js';
+import type { PlanTodo } from './plan.js';
+import { Vec3 } from 'vec3';
+
+/**
+ * `bot.blockAt` 只接受 Vec3：mineflayer 把参数原样交给 prismarine-world，
+ * 而后者在区块已加载时会执行 `pos.floored()`——传 plain `{x,y,z}` 会抛
+ * TypeError，被外层的 try/catch 吞掉后所有方块感知静默变成 null/unknown。
+ */
+const Vec3Of = (p: { x: number; y: number; z: number }): unknown => new Vec3(p.x, p.y, p.z);
+
 export interface ScreenshotRef {
   file: string;
   takenAt: number;
@@ -28,12 +39,16 @@ export interface LiveBody {
   xpProgress: number | null;
   pose: string | null;
   onGround: boolean | null;
+  /** 药水效果，形如 `strength II 45s`；空数组=身上没有任何效果。 */
+  effects: string[];
 }
 
 export interface LiveHeld {
   mainHand: string | null;
   offHand: string | null;
   armor: string[];
+  /** 主手剩余耐久比例 0~1；空手或无耐久物品为 null。 */
+  mainHandDurability: number | null;
 }
 
 export interface LiveBackpack {
@@ -49,6 +64,8 @@ export interface LivePosition {
   pitch: number | null;
   dimension: string | null;
   biome: string | null;
+  /** 水平速度（格/秒，粗估）；站着不动是 0。 */
+  speed: number | null;
 }
 
 export interface LiveEnvironment {
@@ -56,7 +73,9 @@ export interface LiveEnvironment {
   weather: 'Clear' | 'Rain' | 'Thunderstorm' | 'Unknown';
   light: number | null;
   /** 客户端光照读数是快照，可能过期——可信度必须诚实标注。 */
-  lightConfidence: 'high' | 'medium' | 'low' | 'unknown';
+  lightConfidence: 'high' | 'unknown';
+  /** 游戏内第几天（time.day）。 */
+  day: number | null;
 }
 
 export interface LiveEntity {
@@ -88,6 +107,8 @@ export interface LiveMeta {
   gamemode: string | null;
   openScreen: string | null;
   currentAction: string | null;
+  /** 潜行/疾跑等控制状态；null 表示普通站立。 */
+  posture: string | null;
 }
 
 export interface LiveState {
@@ -98,18 +119,30 @@ export interface LiveState {
   environment: LiveEnvironment;
   entities: LiveEntity[];
   entitiesTruncated: number;
+  /** 超明细上限的部分按"名字×数量 方位"聚合，远端语义不丢。 */
+  entitiesSummary: string[];
   blocks: LiveBlock[];
   blocksTruncated: number;
+  blocksSummary: string[];
   screenshot: LiveScreenshot;
   goal: string | null;
-  todos: string[];
+  todos: PlanTodo[];
   meta: LiveMeta;
 }
 
 /** 感知半径（格），与截断上限一起保证快照有界。 */
 export const PERCEPTION_RADIUS = 32;
-/** 实体/方块各自最多列几条，超了只报总数。 */
+/** 实体/方块各自最多列几条明细，超了走聚合摘要。 */
 export const PERCEPTION_LIMIT = 16;
+/**
+ * 明细列表的 token 预算（对齐 VLM 的每列表 1024）：条数与 token
+ * 谁先到谁封顶。名字很长的实体/方块多起来时，先保近处。
+ * 口径说明：预算只算明细行本身，表头与下方的聚合摘要（最多
+ * SUMMARY_LINES 行）不计入，所以整段实际占用会略超这个数。
+ */
+export const PERCEPTION_BUDGET_TOKENS = 1024;
+/** 聚合摘要最多出几行，避免"远合并"自己又变成一坨。 */
+export const SUMMARY_LINES = 6;
 
 function num(value: unknown): number | null {
   return typeof value === 'number' && Number.isFinite(value) ? value : null;
@@ -130,12 +163,148 @@ function dist3(
   return Math.hypot(ax - bx, ay - by, az - bz);
 }
 
+/** 罗盘八向：-Z 北、+Z 南、-X 西、+X 东（与 Minecraft 一致）。 */
+export function compassOf(dx: number, dz: number): string {
+  const angle = (Math.atan2(dx, -dz) * 180) / Math.PI;
+  const idx = Math.round((((angle % 360) + 360) % 360) / 45) % 8;
+  return ['N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW'][idx] as string;
+}
+
+/**
+ * 条数与 token 双上限，谁先到谁封顶。永远至少留第一条——
+ * 否则"预算很小"会退化成什么都不给，比不知道还糟。
+ */
+export function budgetedList<T>(
+  items: readonly T[],
+  limit: number,
+  budgetTokens: number,
+  cost: (item: T) => number,
+): T[] {
+  const kept: T[] = [];
+  let tokens = 0;
+  for (const item of items) {
+    if (kept.length >= limit) break;
+    const c = cost(item);
+    if (kept.length > 0 && tokens + c > budgetTokens) break;
+    kept.push(item);
+    tokens += c;
+  }
+  return kept;
+}
+
+/**
+ * 被明细上限挡在外面的部分，按"名字@方位"聚合成摘要行：
+ * 远处的信息不该只剩一个 "+N more"。按数量降序。
+ */
+export function summarizeOmitted(
+  items: ReadonlyArray<{ name: string; x: number; z: number }>,
+  feet: { x: number; z: number },
+  top = SUMMARY_LINES,
+): string[] {
+  const groups = new Map<string, { name: string; dir: string; count: number }>();
+  for (const item of items) {
+    const dir = compassOf(item.x - feet.x, item.z - feet.z);
+    const key = `${item.name}@${dir}`;
+    const found = groups.get(key);
+    if (found) found.count++;
+    else groups.set(key, { name: item.name, dir, count: 1 });
+  }
+  const sorted = [...groups.values()].sort(
+    (a, b) => b.count - a.count || a.name.localeCompare(b.name) || a.dir.localeCompare(b.dir),
+  );
+  const lines = sorted.slice(0, top).map((g) => `${g.name}×${g.count} ${g.dir}`);
+  // 被 top 挡掉的组要留个记号：远端信息可以粗，但不能悄悄消失。
+  if (sorted.length > lines.length) lines.push(`+${sorted.length - lines.length} more groups`);
+  return lines;
+}
+
+const ROMAN = ['I', 'II', 'III', 'IV', 'V'] as const;
+
+/**
+ * 药水效果。mineflayer 只给 `{id, amplifier, duration}` —— **没有名字**，
+ * 名字要从 mcData 的 `bot.registry.effects`（按 id 索引的对象表）查。
+ * duration 是游戏刻，折算成秒。
+ */
+function effectsOf(bot: Record<string, unknown>, entity: Record<string, unknown>): string[] {
+  const raw = entity['effects'];
+  const list: unknown[] = Array.isArray(raw)
+    ? raw
+    : raw != null && typeof raw === 'object'
+      ? Object.values(raw as Record<string, unknown>)
+      : [];
+  const registry = (bot['registry'] ?? {}) as { effects?: Record<string, unknown> };
+  const out: string[] = [];
+  for (const item of list) {
+    const e = item as { id?: unknown; name?: unknown; amplifier?: unknown; duration?: unknown } | null;
+    if (e == null) continue;
+    const id = num(e.id);
+    // 优先用实体自带的 name（本版本/未来版本可能有），否则查 mcData 注册表。
+    // 注册表按 id 索引，但每个条目自己也带 id——对不上就线性找一遍，
+    // 免得因为 id 基准（0 基 vs 1 基）不一致而默默报错名字。
+    let entry = id != null ? (registry.effects?.[String(id)] as { id?: unknown; displayName?: unknown; name?: unknown } | undefined) : undefined;
+    if (entry != null && typeof entry.id === 'number' && entry.id !== id) {
+      entry = Object.values(registry.effects ?? {}).find(
+        (value) => (value as { id?: unknown } | null)?.id === id,
+      ) as typeof entry;
+    }
+    const name =
+      str(e.name) ?? str(entry?.displayName) ?? str(entry?.name) ?? (id != null ? `effect#${id}` : null);
+    if (name == null) continue;
+    const amplifier = num(e.amplifier);
+    // 协议里 amplifier 0 = I 级，所以罗马数字下标就是 amplifier 本身。
+    const level =
+      amplifier != null && amplifier >= 0 ? ` ${ROMAN[Math.min(amplifier, ROMAN.length - 1)]}` : '';
+    const ticks = num(e.duration);
+    out.push(`${name}${level}${ticks != null ? ` ${Math.round(ticks / 20)}s` : ''}`);
+  }
+  return out;
+}
+
+/** 控制状态（潜行/疾跑），不是 pose 动画。读不到就不报。 */
+function postureOf(bot: Record<string, unknown>): string | null {
+  const get = bot['getControlState'] as ((control: string) => boolean) | undefined;
+  if (typeof get !== 'function') return null;
+  const parts: string[] = [];
+  try {
+    if (get.call(bot, 'sneak')) parts.push('sneaking');
+  } catch {
+    // 控制状态读不到就当他没潜行。
+  }
+  try {
+    if (get.call(bot, 'sprint')) parts.push('sprinting');
+  } catch {
+    // 同上。
+  }
+  return parts.length > 0 ? parts.join('+') : null;
+}
+
+/**
+ * 水平速度（格/秒）。mineflayer 的 `entity.velocity` 单位是**格/游戏刻**
+ * （protocol 的 1/8000 是"每刻多少格"），所以要 ×20 才是 /秒。
+ */
+function speedOf(entity: Record<string, unknown>): number | null {
+  const vel = (entity['velocity'] ?? {}) as { x?: unknown; z?: unknown };
+  const vx = num(vel.x);
+  const vz = num(vel.z);
+  if (vx == null || vz == null) return null;
+  return Math.round(Math.hypot(vx, vz) * 20 * 100) / 100;
+}
+
+/** 明细行的 token 粗估，用于预算封顶（口径与 compaction 一致）。 */
+function entityCost(e: LiveEntity): number {
+  return estimateTokens(`- ${e.name}#${e.id} ${e.distance}m (${e.x},${e.y},${e.z}) hp ${e.health ?? ''}`);
+}
+
+function blockCost(b: LiveBlock): number {
+  return estimateTokens(`- ${b.name} ${b.distance}m (${b.x},${b.y},${b.z})`);
+}
+
 export interface SampleContext {
   /** mineflayer bot 无类型，采样时全部防御性读取 */
   bot: any;
   vision?: any;
   goal?: string | null;
-  todos?: string[];
+  todos?: PlanTodo[];
   currentAction?: string | null;
   now?: () => number;
 }
@@ -157,19 +326,22 @@ export function sampleLiveState(ctx: SampleContext): LiveState {
       xpProgress: null,
       pose: null,
       onGround: null,
+      effects: [],
     },
-    held: { mainHand: null, offHand: null, armor: [] },
+    held: { mainHand: null, offHand: null, armor: [], mainHandDurability: null },
     backpack: { freeSlots: null, items: [] },
-    position: { x: null, y: null, z: null, yaw: null, pitch: null, dimension: null, biome: null },
-    environment: { timeOfDay: null, weather: 'Unknown', light: null, lightConfidence: 'unknown' },
+    position: { x: null, y: null, z: null, yaw: null, pitch: null, dimension: null, biome: null, speed: null },
+    environment: { timeOfDay: null, weather: 'Unknown', light: null, lightConfidence: 'unknown', day: null },
     entities: [],
     entitiesTruncated: 0,
+    entitiesSummary: [],
     blocks: [],
     blocksTruncated: 0,
+    blocksSummary: [],
     screenshot: { ref: null, unavailableReason: 'no vision data yet' },
     goal: ctx.goal ?? null,
     todos: ctx.todos ?? [],
-    meta: { gamemode: null, openScreen: null, currentAction: ctx.currentAction ?? null },
+    meta: { gamemode: null, openScreen: null, currentAction: ctx.currentAction ?? null, posture: null },
   };
 
   try {
@@ -184,8 +356,9 @@ export function sampleLiveState(ctx: SampleContext): LiveState {
       oxygen: num(bot.oxygenLevel),
       xpLevel: num(bot.experience?.level),
       xpProgress: num(bot.experience?.progress),
-      pose: str(entity.pose),
+      pose: poseOf(entity as Record<string, unknown>),
       onGround: typeof entity.onGround === 'boolean' ? entity.onGround : null,
+      effects: effectsOf(bot, entity as Record<string, unknown>),
     };
 
     const slots: unknown[] = Array.isArray(bot.inventory?.slots) ? bot.inventory.slots : [];
@@ -196,13 +369,21 @@ export function sampleLiveState(ctx: SampleContext): LiveState {
       const c = num(s?.count) ?? 1;
       return `${n}x${c}`;
     };
-    const heldItem = bot.heldItem as { name?: unknown; count?: unknown } | undefined;
+    const heldItem = bot.heldItem as
+      | { name?: unknown; count?: unknown; durabilityUsed?: unknown; maxDurability?: unknown }
+      | undefined;
+    const usedDurability = num(heldItem?.durabilityUsed);
+    const maxDurability = num(heldItem?.maxDurability);
     empty.held = {
       mainHand: heldItem ? `${str(heldItem.name) ?? 'unknown'}x${num(heldItem.count) ?? 1}` : null,
       offHand: slotName(45),
       armor: [slotName(8), slotName(7), slotName(6), slotName(5)].filter(
         (s): s is string => s != null && s !== 'null',
       ),
+      mainHandDurability:
+        usedDurability != null && maxDurability != null && maxDurability > 0
+          ? Math.round((1 - usedDurability / maxDurability) * 100) / 100
+          : null,
     };
 
     const packItems: string[] = [];
@@ -225,21 +406,25 @@ export function sampleLiveState(ctx: SampleContext): LiveState {
       pitch: num(entity.pitch),
       dimension: str(bot.game?.dimension),
       biome: biomeOf(bot, feet),
+      speed: speedOf(entity as Record<string, unknown>),
     };
 
     empty.environment = {
       timeOfDay: num(bot.time?.timeOfDay),
       weather: weatherOf(bot),
       ...lightOf(bot, feet),
+      day: num(bot.time?.day),
     };
 
     const seen = sampleEntities(bot, feet);
-    empty.entities = seen.slice(0, PERCEPTION_LIMIT);
+    empty.entities = budgetedList(seen, PERCEPTION_LIMIT, PERCEPTION_BUDGET_TOKENS, entityCost);
     empty.entitiesTruncated = Math.max(0, seen.length - empty.entities.length);
+    empty.entitiesSummary = summarizeOmitted(seen.slice(empty.entities.length), feet);
 
     const found = sampleBlocks(bot, feet);
-    empty.blocks = found.slice(0, PERCEPTION_LIMIT);
+    empty.blocks = budgetedList(found, PERCEPTION_LIMIT, PERCEPTION_BUDGET_TOKENS, blockCost);
     empty.blocksTruncated = Math.max(0, found.length - empty.blocks.length);
+    empty.blocksSummary = summarizeOmitted(found.slice(empty.blocks.length), feet);
 
     empty.screenshot = screenshotOf(ctx.vision);
 
@@ -247,6 +432,7 @@ export function sampleLiveState(ctx: SampleContext): LiveState {
       gamemode: str(bot.game?.gameMode),
       openScreen: bot.currentWindow != null ? (str(bot.currentWindow?.title) ?? 'open') : null,
       currentAction: ctx.currentAction ?? null,
+      posture: postureOf(bot),
     };
   } catch {
     // 半截快照也照常返回：调用方看到的是 null/unknown，而不是一次异常。
@@ -254,12 +440,57 @@ export function sampleLiveState(ctx: SampleContext): LiveState {
   return empty;
 }
 
+/** pose 在实体元数据里的下标（mcData: player/zombie/armor_stand 的 metadataKeys[6] === 'pose'）。 */
+const POSE_METADATA_INDEX = 6;
+/**
+ * 协议里的 pose 枚举（1.20.5+），按协议顺序书写。越界就退化成编号，
+ * 不假装知道——本地 mcData 里 `pose` 只是 varint，没有可核对的枚举名，
+ * 所以这里只影响可读性，不影响任何检测器。
+ */
+const POSE_NAMES = [
+  'standing',
+  'fall_flying',
+  'sleeping',
+  'swimming',
+  'spin_attack',
+  'sneaking',
+  'long_jumping',
+  'dying',
+  'croaking',
+  'using_tongue',
+  'sitting',
+  'roaring',
+  'sniffing',
+  'emerging',
+  'digging',
+] as const;
+
+/**
+ * 姿势名。mineflayer **不往实体上写 `pose` 字段**，真值在**元数据第 6 项**
+ * （实体是 prismarine-entity 实例，`metadata` 初始化为数组，mineflayer 用数字
+ * 下标往里写，所以 `Array.isArray` 成立）。
+ */
+function poseOf(entity: Record<string, unknown>): string | null {
+  const meta = entity['metadata'];
+  if (!Array.isArray(meta)) return null;
+  const raw = meta[POSE_METADATA_INDEX] as { value?: unknown } | number | undefined;
+  const value = typeof raw === 'number' ? raw : (raw as { value?: unknown } | undefined)?.value;
+  const idx = num(value);
+  if (idx == null) return null;
+  return POSE_NAMES[idx] ?? `pose#${idx}`;
+}
+
 function weatherOf(bot: Record<string, unknown>): LiveEnvironment['weather'] {
   try {
-    if ((bot as { thunderState?: unknown }).thunderState === true) return 'Thunderstorm';
-    const rain = (bot as { rainState?: unknown }).rainState;
-    if (rain === true || rain === 1) return 'Rain';
-    if (rain === false || rain === 0) return 'Clear';
+    // mineflayer 的 thunderState/rainState 是**数字**等级（rain.js 初值 0，
+    // 由 game_state_change 的 gameMode 赋值），不是布尔。
+    const w = bot as { thunderState?: unknown; rainState?: unknown; isRaining?: unknown };
+    if ((num(w.thunderState) ?? 0) > 0) return 'Thunderstorm';
+    // rainState 只有在服务端继续下发 rain_level_change 时才回落，而 isRaining
+    // 由 start_raining/stop_raining 直接维护——两个一起看才不会卡在"一直下雨"。
+    const rain = w.rainState;
+    if (w.isRaining === true || (num(rain) ?? 0) > 0) return 'Rain';
+    if (w.isRaining === false || num(rain) === 0) return 'Clear';
     return 'Unknown';
   } catch {
     return 'Unknown';
@@ -273,38 +504,59 @@ function lightOf(
   try {
     const blockAt = (bot as { blockAt?: (p: unknown) => unknown }).blockAt;
     if (typeof blockAt !== 'function') return { light: null, lightConfidence: 'unknown' };
-    const block = blockAt.call(bot, feet) as { light?: unknown; skyLight?: unknown } | null;
-    const light = num(block?.light ?? block?.skyLight);
-    if (light == null) return { light: null, lightConfidence: 'unknown' };
-    return { light, lightConfidence: skyExposed(bot, feet) ? 'high' : 'medium' };
+    const block = blockAt.call(bot, Vec3Of(feet)) as { light?: unknown; skyLight?: unknown } | null;
+    // prismarine-chunk 里 `light` 是**方块光**（火把/岩浆），`skyLight` 是**天光**，
+    // 两者独立且都能是 0——露天白天就是 `light 0 / skyLight 15`，所以
+    // `light ?? skyLight` 永远拿不到天光。而 chunk 里的 skyLight 不随时辰变化
+    // （半夜也是 15），判断"这里暗不暗"还得看白天黑夜：夜里天光不照亮。
+    const blockLight = num(block?.light);
+    const skyLight = num(block?.skyLight);
+    if (blockLight == null && skyLight == null) return { light: null, lightConfidence: 'unknown' };
+    const sky = isNightNow(bot) ? 0 : (skyLight ?? 0);
+    const light = Math.max(blockLight ?? 0, sky);
+    const exposed = skyExposed(bot, feet);
+    return { light, lightConfidence: exposed == null ? 'unknown' : 'high' };
   } catch {
     return { light: null, lightConfidence: 'unknown' };
   }
 }
 
-function skyExposed(bot: Record<string, unknown>, feet: { x: number; y: number; z: number }): boolean {
+/** 是否夜里（与 edges 的 isNight 同一套阈值）。 */
+function isNightNow(bot: Record<string, unknown>): boolean {
+  const timeOfDay = num((bot['time'] as { timeOfDay?: unknown } | undefined)?.timeOfDay);
+  return timeOfDay != null && timeOfDay >= 12542 && timeOfDay < 23460;
+}
+
+/**
+ * 头顶是否露天。**读不到任何柱状数据时返回 null**（无法判断），
+ * 不要像以前那样把"没数据"当成露天——那会把置信度抬到 high。
+ */
+function skyExposed(bot: Record<string, unknown>, feet: { x: number; y: number; z: number }): boolean | null {
   try {
     const blockAt = (bot as { blockAt?: (p: unknown) => unknown }).blockAt;
-    if (typeof blockAt !== 'function') return false;
+    if (typeof blockAt !== 'function') return null;
+    let sawData = false;
     for (let y = 1; y <= 10; y++) {
-      const above = blockAt.call(bot, { x: feet.x, y: feet.y + y, z: feet.z }) as {
+      const above = blockAt.call(bot, Vec3Of({ x: feet.x, y: feet.y + y, z: feet.z })) as {
         name?: unknown;
         transparent?: unknown;
       } | null;
-      if (above == null || above.name === 'air' || above.name === 'cave_air') continue;
+      if (above == null) continue;
+      sawData = true;
+      if (above.name === 'air' || above.name === 'cave_air') continue;
       if (above.transparent === true) continue;
       return false;
     }
-    return true;
+    return sawData ? true : null;
   } catch {
-    return false;
+    return null;
   }
 }
 
 function biomeOf(bot: Record<string, unknown>, feet: { x: number; y: number; z: number }): string | null {
   try {
     const blockAt = (bot as { blockAt?: (p: unknown) => unknown }).blockAt;
-    const block = (typeof blockAt === 'function' ? blockAt.call(bot, feet) : null) as {
+    const block = (typeof blockAt === 'function' ? blockAt.call(bot, Vec3Of(feet)) : null) as {
       biome?: { name?: unknown } | string | null;
     } | null;
     const biome = block?.biome;
@@ -330,6 +582,7 @@ function sampleEntities(
         displayName?: unknown;
         kind?: unknown;
         type?: unknown;
+        username?: unknown;
         position?: { x: number; y: number; z: number } | null;
         health?: unknown;
       };
@@ -338,12 +591,15 @@ function sampleEntities(
       if (d > PERCEPTION_RADIUS) continue;
       out.push({
         id: Number(e.id),
-        name: str(e.name ?? e.displayName) ?? 'unknown',
+        // 玩家的 `name` 是类型名 'player'，身份在 `username`（mineflayer addNewPlayer）。
+        name: str(e.username) ?? str(e.name ?? e.displayName) ?? 'unknown',
         kind: str(e.kind ?? e.type),
         distance: Math.round(d * 10) / 10,
         x: e.position.x,
         y: e.position.y,
         z: e.position.z,
+        // mineflayer 不给实体填 `health`（entities.js 里零命中）→ 恒为 null，
+        // 渲染时会省略 `hp`。留字段是为了将来有来源时不必改结构。
         health: num(e.health),
       });
     }
@@ -381,7 +637,7 @@ function sampleBlocks(
         for (let z = feet.z - r; z <= feet.z + r; z++) {
           let block: { name?: unknown } | null = null;
           try {
-            block = blockAt.call(bot, { x, y, z }) as { name?: unknown } | null;
+            block = blockAt.call(bot, Vec3Of({ x, y, z })) as { name?: unknown } | null;
           } catch {
             block = null;
           }
@@ -422,11 +678,12 @@ export function renderLiveState(s: LiveState): string {
   lines.push(
     `Body: health ${b.health ?? UNKNOWN} food ${b.food ?? UNKNOWN} saturation ${b.saturation ?? UNKNOWN} ` +
       `oxygen ${b.oxygen ?? UNKNOWN} xp ${b.xpLevel ?? UNKNOWN} pose ${b.pose ?? UNKNOWN} ` +
-      `onGround ${b.onGround ?? UNKNOWN}`,
+      `onGround ${b.onGround ?? UNKNOWN} effects ${b.effects.length > 0 ? b.effects.join(', ') : 'none'}`,
   );
   const h = s.held;
   lines.push(
-    `Held: main ${h.mainHand ?? 'empty'} off ${h.offHand ?? 'empty'} armor ${h.armor.length > 0 ? h.armor.join('/') : 'none'}`,
+    `Held: main ${h.mainHand ?? 'empty'}${h.mainHandDurability != null ? ` (durability ${Math.round(h.mainHandDurability * 100)}%)` : ''} ` +
+      `off ${h.offHand ?? 'empty'} armor ${h.armor.length > 0 ? h.armor.join('/') : 'none'}`,
   );
   lines.push(
     `Backpack (free ${s.backpack.freeSlots ?? UNKNOWN}): ${s.backpack.items.length > 0 ? s.backpack.items.join(', ') : 'empty'}`,
@@ -434,31 +691,53 @@ export function renderLiveState(s: LiveState): string {
   const p = s.position;
   lines.push(
     `Position: ${p.x ?? UNKNOWN},${p.y ?? UNKNOWN},${p.z ?? UNKNOWN} facing yaw ${p.yaw ?? UNKNOWN} pitch ${p.pitch ?? UNKNOWN} ` +
-      `dimension ${p.dimension ?? UNKNOWN} biome ${p.biome ?? UNKNOWN}`,
+      `speed ${p.speed ?? UNKNOWN} dimension ${p.dimension ?? UNKNOWN} biome ${p.biome ?? UNKNOWN}`,
   );
   const e = s.environment;
   lines.push(
-    `Environment: time ${e.timeOfDay ?? UNKNOWN} weather ${e.weather} light ${e.light ?? UNKNOWN} (confidence ${e.lightConfidence})`,
+    `Environment: day ${e.day ?? UNKNOWN} time ${e.timeOfDay ?? UNKNOWN} weather ${e.weather} light ${e.light ?? UNKNOWN} (confidence ${e.lightConfidence})`,
   );
   const entHead = `Nearby entities (within ${PERCEPTION_RADIUS}: ${s.entities.length}${s.entitiesTruncated > 0 ? `+${s.entitiesTruncated} more` : ''})`;
   lines.push(
     `${entHead}:\n${s.entities.map((x) => `- ${x.name}#${x.id} ${x.distance}m (${x.x},${x.y},${x.z})${x.health != null ? ` hp ${x.health}` : ''}`).join('\n') || 'none'}`,
   );
+  if (s.entitiesSummary.length > 0) {
+    lines.push(`- farther (merged): ${s.entitiesSummary.join(', ')}`);
+  }
   const blkHead = `Nearby key blocks (within ${PERCEPTION_RADIUS}: ${s.blocks.length}${s.blocksTruncated > 0 ? `+${s.blocksTruncated} more` : ''})`;
   lines.push(
     `${blkHead}:\n${s.blocks.map((x) => `- ${x.name} ${x.distance}m (${x.x},${x.y},${x.z})`).join('\n') || 'none'}`,
   );
+  if (s.blocksSummary.length > 0) {
+    lines.push(`- farther (merged): ${s.blocksSummary.join(', ')}`);
+  }
   if (s.screenshot.ref != null) {
     const age = Date.now() - s.screenshot.ref.takenAt;
     lines.push(`Screenshot: ${s.screenshot.ref.file} (taken ${Math.max(0, Math.round(age / 1000))}s ago)`);
   } else {
     lines.push(`Screenshot: none (${s.screenshot.unavailableReason ?? UNKNOWN})`);
   }
-  lines.push(`Goal: ${s.goal ?? 'none'} Todos: ${s.todos.length > 0 ? s.todos.join('; ') : 'none'}`);
   lines.push(
-    `Meta: gamemode ${s.meta.gamemode ?? UNKNOWN} screen ${s.meta.openScreen ?? 'none'} action ${s.meta.currentAction ?? 'idle'}`,
+    `Goal: ${s.goal ?? 'none'} Todos: ${
+      s.todos.length > 0 ? s.todos.map((t) => `${t.done ? '✓' : '○'}${t.text}`).join('; ') : 'none'
+    }`,
+  );
+  lines.push(
+    `Meta: gamemode ${s.meta.gamemode ?? UNKNOWN} screen ${s.meta.openScreen ?? 'none'} ` +
+      `action ${s.meta.currentAction ?? 'idle'} posture ${s.meta.posture ?? 'standing'}`,
   );
   return lines.join('\n');
 }
 
-export default { sampleLiveState, renderLiveState, PERCEPTION_RADIUS, PERCEPTION_LIMIT, KEY_BLOCKS };
+export default {
+  sampleLiveState,
+  renderLiveState,
+  compassOf,
+  budgetedList,
+  summarizeOmitted,
+  PERCEPTION_RADIUS,
+  PERCEPTION_LIMIT,
+  PERCEPTION_BUDGET_TOKENS,
+  SUMMARY_LINES,
+  KEY_BLOCKS,
+};

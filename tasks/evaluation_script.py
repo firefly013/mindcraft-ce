@@ -196,7 +196,7 @@ def check_folder_results(folder_path):
         return None
 
 def read_settings(file_path):
-    """Read and parse the settings.js file to get agent profiles."""
+    """Read and parse the settings.ts file to get agent profiles."""
     with open(file_path, 'r', encoding='utf-8') as file:
         content = file.read()
 
@@ -245,13 +245,12 @@ def launch_parallel_experiments(task_path,
                                 num_exp, 
                                 exp_name, 
                                 num_agents=2, 
-                                model="gpt-4o-mini",
-                                api="openai",
+                                model="deepseek-v4.1-flash",
                                 num_parallel=1,
                                 s3=False, 
                                 bucket_name="mindcraft-experiments", 
                                 template_profile="profiles/tasks/collab_profile.json", 
-                                  url="http://127.0.0.1:8000/v1", 
+                                  url=None, 
                                 max_messages=15,
                                 no_pruning=False,
                                 block_conversation=False, 
@@ -304,7 +303,6 @@ def launch_parallel_experiments(task_path,
                                  bucket_name=bucket_name, 
                                  template_profile=template_profile, 
                                  model=model,
-                                 api=api,
                                  num_agents=num_agents,
                                  url=url, 
                                  task_type=task_type, 
@@ -326,7 +324,6 @@ def launch_parallel_experiments(task_path,
         results["exp_name"] = exp_name
         results["template_profile"] = template_profile
         results["model"] = model
-        results["api"] = api
         results["num_agents"] = num_agents
         results["task_path"] = task_path
         results["task_type"] = task_type
@@ -348,11 +345,10 @@ def launch_server_experiment(task_path,
                              exp_name="exp", 
                              num_agents=2, 
                              model="gpt-4o",
-                             api="openai", 
                              s3=False, 
                              bucket_name="mindcraft-experiments", 
                              template_profile="profiles/tasks/collab_profile.json",
-                             url="http://127.0.0.1:8000/v1",
+                             url=None,
                              task_type="techtree", 
                              s3_path="", 
                              max_messages=15, 
@@ -382,11 +378,9 @@ def launch_server_experiment(task_path,
     if num_agents == 1: 
         agent_names = [f"Andy_{session_name}"]
         models = [model]
-        apis = [api]
     elif num_agents == 2:
         agent_names = [f"Andy_{session_name}", f"Jill_{session_name}"]
         models = [model] * 2
-        apis = [api] * 2
     else:
         # Lets use an ordered list of 10 human names.
         human_names = ["Andy", "Jill", "Bob", "Sally", "Mike", "Laura", "John", "Emma", "Tom", "Kate"]
@@ -395,9 +389,8 @@ def launch_server_experiment(task_path,
             name = human_names[i % len(human_names)]
             agent_names.append(f"{name}_{session_name}")
         models = [model] * num_agents
-        apis = [api] * num_agents
         
-    make_profiles(agent_names, models, apis, template_profile=template_profile, url=url)
+    make_profiles(agent_names, models, template_profile=template_profile, url=url)
 
     agent_profiles = [f"./{agent}.json" for agent in agent_names]
 
@@ -463,7 +456,7 @@ def run_script(task_path,
         assert os.path.exists(task_folder), f"Directory {task_folder} was not created"
         print(f"Created directory: {task_folder}")
         
-        cmd = f"node main.js --task_path \'{task_path}\' --task_id {task_id}"
+        cmd = f"node --import tsx main.ts --task_path \'{task_path}\' --task_id {task_id}"
         cp_cmd = f"cp {agent_names[0]}.json {server_path}bots/{agent_names[0]}/profile.json"
         for _ in range(num_exp):
             script_content += f"{cmd}\n"
@@ -495,7 +488,7 @@ def make_ops(agent_names, session_name):
     """Make the agents operators in the Minecraft world."""
     print('Making agents operators...')
 
-    cmd = f"node main.js --task_path tasks/example_tasks.json --task_id debug_{len(agent_names)}_agent_timeout"
+    cmd = f"node --import tsx main.ts --task_path tasks/example_tasks.json --task_id debug_{len(agent_names)}_agent_timeout"
 
     subprocess.run(["tmux", "send-keys", "-t", session_name, cmd, "C-m"])
 
@@ -543,29 +536,45 @@ def make_script_file_and_run(script_content,
     else:
         subprocess.run(script_file_run.split())
 
-def make_profiles(agent_names, models, apis, template_profile="profiles/collab_profile.json", url="http://127.0.0.1:8000/v1"):
+def make_profiles(agent_names, models, template_profile="profiles/collab_profile.json",
+                  url=None, base_profile="profiles/opencode.json"):
+    """生成每个 agent 的 profile。
+
+    端点的来源（后者覆盖前者）：
+      1. `base_profile` 的 model 对象（默认 profiles/opencode.json，即默认端点）；
+      2. 模板 profile 的 model 对象（如果它写成了对象而不是字符串）；
+      3. 显式传入的 `url`。
+    只覆盖 `model` 名。以前是**整块替换** model，于是"不传 --url 就走默认端点"
+    是假的——生成的 profile 没有 url，会直接打到官方 api.openai.com。
+    """
     assert len(agent_names) == len(models)
 
+    def read_model(path):
+        try:
+            with open(path, 'r') as f:
+                value = json.loads(f.read()).get("model")
+        except (OSError, ValueError):
+            return {}
+        return dict(value) if isinstance(value, dict) else {}
+
     with open(template_profile, 'r') as f:
-        content = f.read()
-    
-    profile = json.loads(content)
+        template = json.loads(f.read())
+
+    base = read_model(base_profile)
+    template_model = template.get("model")
+    if isinstance(template_model, dict):
+        base.update(template_model)
 
     for index in range(len(agent_names)):
+        model = dict(base)
+        model["api"] = "openai"
+        model["model"] = models[index]
+        if url:
+            model["url"] = url
+        # 模板的其它字段（prompt_set / cooldown 等）要保留，只覆盖 name 与 model。
+        profile = dict(template)
         profile["name"] = agent_names[index]
-        if apis[index] == "vllm":
-            profile["model"] = {
-                "api": "vllm",
-                "model": models[index], 
-                "url": url
-            }
-        elif apis[index] == "ollama":
-            profile["model"] = {
-                "api": "ollama",
-                "model": models[index]
-            }
-        else: 
-            profile["model"] = models[index]
+        profile["model"] = model
 
         with open(f"{agent_names[index]}.json", 'w') as f:
             json.dump(profile, f, indent=4)
@@ -714,7 +723,7 @@ def detach_process(command):
         return None
 
 def main():
-    # edit_settings("settings.js", {"profiles": ["./andy.json", "./jill.json"], "port": 55917})
+    # edit_settings("settings.ts", {"profiles": ["./profiles/opencode.json", "./profiles/gpt.json"], "port": 55917})
     # edit_server_properties_file("../server_data/", 55917)
 
     parser = argparse.ArgumentParser(description='Run Minecraft AI agent experiments')
@@ -728,10 +737,9 @@ def main():
     parser.add_argument('--bucket_name', default="mindcraft-experiments", help='Name of the s3 bucket')
     parser.add_argument('--add_keys', action='store_true', help='Create the keys.json to match the environment variables')
     parser.add_argument('--template_profile', default="profiles/tasks/crafting_profile.json", help='Model to use for the agents')
-    parser.add_argument('--model', default="gpt-4o-mini", help='Model to use for the agents')
-    parser.add_argument('--api', default="openai", help='API to use for the agents')
+    parser.add_argument('--model', default="deepseek-v4.1-flash", help='Model to use for the agents')
     # parser.add_argument('--world_name', default="Forest", help='Name of the world')
-    parser.add_argument('--url', default="http://127.0.0.1:8000/v1")
+    parser.add_argument('--url', default=None, help='OpenAI-compatible endpoint to point the agents at (default: provider default)')
     parser.add_argument('--max_messages', default=15, type=int, help='Maximum number of messages before summarizing')
     parser.add_argument('--no-pruning', action='store_true', help='Disable pruning of the actions')
     parser.add_argument('--block_conversation', action='store_true', help='Block conversation actions')
@@ -784,7 +792,6 @@ def main():
                                 bucket_name=args.bucket_name, 
                                 template_profile=args.template_profile, 
                                 model=args.model,
-                                api=args.api,
                                 num_agents=args.num_agents,
                                 url=args.url, 
                                 max_messages=args.max_messages,

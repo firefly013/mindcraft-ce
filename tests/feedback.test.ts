@@ -33,7 +33,7 @@ describe('buildFeedbackEntry', () => {
       { title: 't', body: 'b' },
       {
         at: 42,
-        plan: { goal: '盖房', todos: ['打地基'] },
+        plan: { goal: '盖房', todos: [{ text: '打地基', done: false }] },
         historyTail: [
           { role: 'user', content: 'hi' },
           { role: 'system', content: long },
@@ -41,7 +41,7 @@ describe('buildFeedbackEntry', () => {
       },
     );
     expect(entry.at).toBe(42);
-    expect(entry.plan).toEqual({ goal: '盖房', todos: ['打地基'] });
+    expect(entry.plan).toEqual({ goal: '盖房', todos: [{ text: '打地基', done: false }] });
     expect(entry.recent).toHaveLength(2);
     expect(entry.recent?.[1]?.summary.length).toBeLessThan(500);
   });

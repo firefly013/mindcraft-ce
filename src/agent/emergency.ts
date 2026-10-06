@@ -22,7 +22,8 @@ export const THREAT_RADIUS = 32;
 export const FLEE_DISTANCE = 24;
 export const SAFE_SECONDS = 10;
 
-const ALWAYS_HOSTILE = new Set([
+/** 始终敌对的名字（小写注册名）。edges 的边沿检测复用这一份，不再各抄一份。 */
+export const ALWAYS_HOSTILE = new Set([
   'zombie', 'husk', 'drowned', 'skeleton', 'stray', 'bogged', 'creeper',
   'spider', 'cave_spider', 'enderman', 'witch', 'slime', 'magma_cube',
   'ghast', 'blaze', 'piglin_brute', 'hoglin', 'zoglin', 'phantom',

@@ -33,7 +33,7 @@ export interface FeedbackHistoryItem {
 
 export interface FeedbackContext {
   at?: number;
-  plan?: { goal: string | null; todos: string[] } | null;
+  plan?: { goal: string | null; todos: Array<{ text: string; done: boolean }> } | null;
   historyTail?: FeedbackHistoryItem[] | null;
 }
 
@@ -41,7 +41,7 @@ export interface FeedbackEntry {
   at: number;
   title: string;
   body: string;
-  plan: { goal: string | null; todos: string[] } | null;
+  plan: { goal: string | null; todos: Array<{ text: string; done: boolean }> } | null;
   recent: Array<{ role: string; summary: string }> | null;
 }
 

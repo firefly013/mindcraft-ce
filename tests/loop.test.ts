@@ -38,7 +38,7 @@ function stubHistory(): { appends: Array<{ kind: string; level: number }>; appen
 }
 
 function scriptedModel(responses: LoopModelResponse[]): {
-  fn: (text: string, tools: unknown, choice: string) => Promise<LoopModelResponse>;
+  fn: (text: string, tools: unknown, image?: string | null) => Promise<LoopModelResponse>;
   calls: number;
 } {
   let calls = 0;
@@ -46,10 +46,10 @@ function scriptedModel(responses: LoopModelResponse[]): {
     get calls() {
       return calls;
     },
-    fn: (_text: string, _tools: unknown, _choice: string) => {
+    fn: (_text: string, _tools: unknown, _image?: string | null) => {
       void _text;
       void _tools;
-      void _choice;
+      void _image;
       const res = responses[Math.min(calls, responses.length - 1)];
       calls++;
       return Promise.resolve(res ?? { text: null, calls: [] });
@@ -106,6 +106,66 @@ describe('handleDecision', () => {
     expect(order).toEqual(['emergency']);
     expect(scheduler.describe().emergency).toBe(false);
     void loop;
+  });
+});
+
+/**
+ * 头号声明的端到端钉子：调度器挑出的"未见事件"必须一路走到模型。
+ *
+ * 之前本文件的 `assemble` 是 `() => ({ text: 'ctx', tools: [] })`——**忽略入参**，
+ * 所以把 `loop.ts` 里的 `assemble(begun.events)` 改成 `assemble([])` 也会全绿，
+ * 整个事件流特性（"模型被叫醒却不知道为什么"的修复）会静默死亡。这里焊死。
+ */
+describe('event delivery', () => {
+  function recordingLoop(): {
+    loop: AgentLoop;
+    scheduler: Scheduler;
+    assembled: unknown[][];
+    texts: string[];
+  } {
+    const scheduler = new Scheduler();
+    const assembled: unknown[][] = [];
+    const texts: string[] = [];
+    const loop = new AgentLoop({
+      scheduler,
+      runner: stubRunner(),
+      history: stubHistory(),
+      assemble: (events: unknown[]) => {
+        assembled.push(events);
+        return { text: `CTX(${events.length})`, tools: [] };
+      },
+      model: (text: string) => {
+        texts.push(text);
+        return Promise.resolve({ text: null, calls: [{ name: 'Finish', args: {} }] });
+      },
+    });
+    return { loop, scheduler, assembled, texts };
+  }
+
+  it('forwards the scheduler events to assemble, and the assembled text to the model', async () => {
+    const { loop, scheduler, assembled, texts } = recordingLoop();
+    const verdict = scheduler.pushEvent({ kind: 'World', level: 3, payload: { why: 'creeper' } });
+    expect(verdict.decision).toBe('start');
+    await loop.handleDecision(verdict.decision);
+
+    expect(assembled).toHaveLength(1);
+    expect(assembled[0]).toHaveLength(1);
+    expect((assembled[0]?.[0] as { payload?: { why?: string } }).payload?.why).toBe('creeper');
+    // 组装结果就是要发出去的尾巴，必须原样交给模型。
+    expect(texts).toEqual(['CTX(1)']);
+  });
+
+  it('hands each event to exactly one round', async () => {
+    const { loop, scheduler, assembled } = recordingLoop();
+    scheduler.pushEvent({ kind: 'World', level: 3, payload: { n: 1 } });
+    await loop.handleDecision('start');
+    scheduler.pushEvent({ kind: 'World', level: 3, payload: { n: 2 } });
+    await loop.handleDecision('start');
+
+    expect(assembled).toHaveLength(2);
+    expect(assembled[0]).toHaveLength(1);
+    expect(assembled[1]).toHaveLength(1);
+    expect((assembled[1]?.[0] as { payload?: { n?: number } }).payload?.n).toBe(2);
   });
 });
 

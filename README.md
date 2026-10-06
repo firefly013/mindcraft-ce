@@ -8,8 +8,7 @@
 <p align="center">
   <a href="docs/FAQ.md#common-issues">FAQ</a> | 
   <a href="https://discord.gg/mindcraft-ce">Discord Support</a> | 
-  <a href="https://mindcraft-ce.com">Website</a> | 
-  <a href="https://andy.mindcraft-ce.com">Andy API</a>
+  <a href="https://mindcraft-ce.com">Website</a>
 <br>
   <a href="https://www.youtube.com/watch?v=gRotoL8P8D8">Video Tutorial</a> | 
   <a href="https://kolbynottingham.com/mindcraft/">Blog Post</a> | 
@@ -38,32 +37,14 @@ Mindcraft CE is the experimental fork of Mindcraft, featuring unique implementat
 
 This is the default branch, but you can still access it [here](https://github.com/mindcraft-ce/mindcraft-ce/tree/develop).
 
-### 🦙 Andy API
-The [Andy API](https://andy.mindcraft-ce.com/) is Mindcraft CE's OpenAI-compatible model gateway. The current public service is a standalone gateway while the integrated Mindcraft compute-pool and Unleashed platform continue development. Mindcraft CE uses it by default through `andy/auto` in `andy.json`, and it remains usable by ordinary OpenAI-compatible clients.
-
-You can use the API without an API key. Adding an `ANDY_API_KEY` to `keys.json` enables authenticated account limits; keys do not multiply an account's capacity. The available models and service limits are live and may change, so use the API's model list and documentation for the current values.
-
-For OpenAI-compatible clients, use:
-
-```text
-https://andy.mindcraft-ce.com/api/v1/
-```
-
-> [!Note]
-> Andy API supports embeddings through `/api/v1/embeddings`. The `andy/auto` model selects an embedding-capable model automatically.
-
-You do not need to run the Andy API local client or open a port to use the API.
-
-The public endpoint and API contract are documented here independently of the gateway's internal implementation. Any future account or key migration will be announced in advance.
-
 ## Agent System
 
 You can access this on the [agent-system](https://github.com/mindcraft-ce/mindcraft-ce/tree/agent-system) branch.
 
 ### 🔧 Function Calling
-- **`use_function_calling`** — New tool-based AI interaction system in `settings.js`
+- **`use_function_calling`** — New tool-based AI interaction system in `settings.ts`
 - Enables structured tool calls instead of text-based commands
-- Supported across Claude, GPT, Gemini, Grok, DeepSeek, and Mistral models
+- Supported across any OpenAI-compatible chat model
 
 ### 🧠 RAG System (Retrieval-Augmented Generation)
 - **LanceDB Integration** — Vector database for intelligent context retrieval
@@ -78,16 +59,15 @@ You can access this on the [agent-system](https://github.com/mindcraft-ce/mindcr
 
 ### 👁️ Enhanced Vision & Models
 - Improved vision request handling across all model providers
-- Andy API TTS implementation
 
 ### 🎯 Other Improvements
 - 🐳 Docker support with improved container configuration
 - 📊 Multi-agent MineCollab framework
-- 🌐 OpenRouter integration for 100+ models
+- 🌐 Bring your own OpenAI-compatible endpoint (any gateway or local server)
 
 ### 🚧 Coming Soon
-- **Model Provider Repositories** — Install and update model providers from external repositories via `model_provider_repositories` in `settings.js`
-- **Tools Repositories** — Extend bot capabilities with community-created tools via `tools_provider_repositories` in `settings.js`
+- **Model Provider Repositories** — Install and update model providers from external repositories via `model_provider_repositories` in `settings.ts`
+- **Tools Repositories** — Extend bot capabilities with community-created tools via `tools_provider_repositories` in `settings.ts`
 - Both support auto-install/update and manual management through the Mindserver UI
 
 # Getting Started
@@ -95,7 +75,7 @@ You can access this on the [agent-system](https://github.com/mindcraft-ce/mindcr
 
 - [Minecraft Java Edition](https://www.minecraft.net/en-us/store/minecraft-java-bedrock-edition-pc) (up to and including v1.21.11)
 - [Node.js Installed](https://nodejs.org/) (Node.js 22 LTS, v22.13 or newer)
-- At least one API key from a supported API provider. See [supported APIs](#model-customization). OpenAI is the default.
+- An API key for the OpenAI-compatible endpoint you want to use. See [model customization](#model-customization). The default is the `opencode` gateway via `profiles/opencode.json` (key variable `OPENCODE_API_KEY`).
 
 > [!Important]
 > If installing node on windows, ensure you check `Automatically install the necessary tools`
@@ -108,13 +88,13 @@ You can access this on the [agent-system](https://github.com/mindcraft-ce/mindcr
 
 2. Download the [latest release](https://github.com/mindcraft-ce/mindcraft-ce/releases/latest) and unzip it, or clone the repository.
 
-3. Rename `keys.example.json` to `keys.json` and fill in your API keys (you only need one). The desired model is set in `andy.json` or other profiles. For other models refer to the table below.
+3. Rename `keys.example.json` to `keys.json` and fill in your API keys (you only need one). The desired model is set in the default profile (`profiles/opencode.json`) or another profile. For other models refer to [model customization](#model-customization).
 
-4. In terminal/command prompt, run `npm install` from the installed directory
+4. In terminal/command prompt, run `npm ci` from the installed directory (it installs the locked tree exactly). If you prefer `npm install`, you must pass `--legacy-peer-deps`: the declared `eslint` / `@eslint/js` pair has a peer conflict unrelated to this branch.
 
 5. Start a minecraft world and open it to LAN on localhost port `55916`
 
-6. Run `node main.js` from the installed directory
+6. Run `npm start` from the installed directory
 
 If you encounter issues, check the [FAQ](docs/FAQ.md#common-issues) or find support on [discord](https://discord.gg/mindcraft-ce). We are currently not very responsive to github issues. To run tasks please refer to [Minecollab Instructions](docs/minecollab.md#installation)
 
@@ -122,129 +102,69 @@ If you encounter issues, check the [FAQ](docs/FAQ.md#common-issues) or find supp
 # Configuration
 ## Model Customization
 
-You can configure project details in `settings.js`. [See file.](settings.js)
+You can configure project details in `settings.ts`. [See file.](settings.ts)
 
-You can configure the agent's name, model, and prompts in their profile like `andy.json`. The model can be specified with the `model` field, with values like `model: "gemini-3.1-pro"`. You will need the correct API key for the API provider you choose. See all supported APIs below.
+You can configure the agent's name, model, and prompts in their profile like `profiles/opencode.json`. There is now a **single** model provider: **`openai`**, a generic OpenAI-compatible client, so any OpenAI-compatible endpoint can be used by setting a `url`.
 
-<details>
-<summary><strong>⭐ VIEW SUPPORTED APIs ⭐</strong></summary>
+To configure it, set the following in the profile's `model` object:
 
-<table>
-  <thead>
-    <tr>
-      <th>API Name</th>
-      <th>Config Variable</th>
-      <th>Docs</th>
-    </tr>
-  </thead>
-  <tbody>
-    <tr>
-      <td><pre>andy</pre></td>
-      <td><pre>ANDY_API_KEY</pre> (optional)</td>
-      <td><a href="https://andy.mindcraft-ce.com/docs">docs</a></td>
-    </tr>
-    <tr>
-      <td><pre>openai</pre></td>
-      <td><pre>OPENAI_API_KEY</pre></td>
-      <td><a href="https://platform.openai.com/docs/models">docs</a></td>
-    </tr>
-    <tr>
-      <td><pre>google</pre></td>
-      <td><pre>GEMINI_API_KEY</pre></td>
-      <td><a href="https://ai.google.dev/gemini-api/docs/models/gemini">docs</a></td>
-    </tr>
-    <tr>
-      <td><pre>anthropic</pre></td>
-      <td><pre>ANTHROPIC_API_KEY</pre></td>
-      <td><a href="https://docs.anthropic.com/claude/docs/models-overview">docs</a></td>
-    </tr>
-    <tr>
-      <td><pre>xai</pre></td>
-      <td><pre>XAI_API_KEY</pre></td>
-      <td><a href="https://docs.x.ai/docs">docs</a></td>
-    </tr>
-    <tr>
-      <td><pre>deepseek</pre></td>
-      <td><pre>DEEPSEEK_API_KEY</pre></td>
-      <td><a href="https://api-docs.deepseek.com/">docs</a></td>
-    </tr>
-    <tr>
-      <td><pre>ollama (local)</pre></td>
-      <td>n/a</td>
-      <td><a href="https://ollama.com/library">docs</a></td>
-    </tr>
-    <tr>
-      <td><pre>qwen</pre></td>
-      <td><pre>QWEN_API_KEY</pre></td>
-      <td><a href="https://www.alibabacloud.com/help/en/model-studio/developer-reference/use-qwen-by-calling-api">Intl.</a>/<a href="https://help.aliyun.com/zh/model-studio/getting-started/models">cn</a></td>
-    </tr>
-    <tr>
-      <td><pre>mistral</pre></td>
-      <td><pre>MISTRAL_API_KEY</pre></td>
-      <td><a href="https://docs.mistral.ai/getting-started/models/models_overview/">docs</a></td>
-    </tr>
-    <tr>
-      <td><pre>replicate</pre></td>
-      <td><pre>REPLICATE_API_KEY</pre></td>
-      <td><a href="https://replicate.com/collections/language-models">docs</a></td>
-    </tr>
-    <tr>
-      <td><pre>groq (not grok)</pre></td>
-      <td><pre>GROQCLOUD_API_KEY</pre></td>
-      <td><a href="https://console.groq.com/docs/models">docs</a></td>
-    </tr>
-    <tr>
-      <td><pre>huggingface</pre></td>
-      <td><pre>HUGGINGFACE_API_KEY</pre></td>
-      <td><a href="https://huggingface.co/models">docs</a></td>
-    </tr>
-    <tr>
-      <td><pre>novita</pre></td>
-      <td><pre>NOVITA_API_KEY</pre></td>
-      <td><a href="https://novita.ai/model-api/product/llm-api?utm_source=github_mindcraft&utm_medium=github_readme&utm_campaign=link">docs</a></td>
-    </tr>
-    <tr>
-      <td><pre>openrouter</pre></td>
-      <td><pre>OPENROUTER_API_KEY</pre></td>
-      <td><a href="https://openrouter.ai/models">docs</a></td>
-    </tr>
-    <tr>
-      <td><pre>hyperbolic</pre></td>
-      <td><pre>HYPERBOLIC_API_KEY</pre></td>
-      <td><a href="https://docs.hyperbolic.xyz/docs/getting-started">docs</a></td>
-    </tr>
-    <tr>
-      <td><pre>vllm</pre></td>
-      <td>n/a</td>
-      <td>n/a</td>
-    </tr>
-    <tr>
-      <td><pre>cerebras</pre></td>
-      <td><pre>CEREBRAS_API_KEY</pre></td>
-      <td><a href="https://inference-docs.cerebras.ai/introduction">docs</a></td>
-    </tr>
-    <tr>
-      <td><pre>mercury</pre></td>
-      <td><pre>MERCURY_API_KEY</pre></td>
-      <td><a href="https://www.inceptionlabs.ai/">docs</a></td>
-    </tr>
-    <tr>
-      <td><pre>lmstudio</pre></td>
-      <td>n/a</td>
-      <td><a href="https://www.lmstudio.ai/">docs</a></td>
-    </tr>
-  </tbody>
-</table>
+- **`api`** — always `"openai"`. Optional: it is inferred when omitted, and no other value is accepted.
+- **`model`** — the model name sent to the endpoint.
+- **`url`** — optional base URL of the endpoint (defaults to the OpenAI API).
+- **`params`** — optional; every key is passed straight into the request body (e.g. `temperature`, or `thinking: { "type": "disabled" }`), plus two special keys:
+  - **`headers`** — an object of extra HTTP headers to send with every request. A value may contain `${VAR}`: the variable is read from the environment, or replaced with a fresh UUID when unset (used for per-process session ids).
+  - **`api_key_env`** — the name of the `keys.json` / environment variable holding the API key (default `OPENAI_API_KEY`).
 
-</details>
+You will need the API key named by `api_key_env` for the endpoint you choose.
+
+For a local server that needs no key (LM Studio, vLLM's OpenAI-compatible port, …) you may leave the
+key variable unset as long as a custom `url` is set: the client falls back to a placeholder key
+instead of refusing to start. Without a custom `url`, a missing `OPENAI_API_KEY` is still a hard error.
+
+### Worked Examples
+
+Minimal form — `profiles/gpt.json` (`api` is omitted; with a single provider it defaults to `openai`):
+
+```json
+{
+    "name": "gpt",
+    "model": {
+        "model": "gpt-5.4",
+        "params": {
+            "reasoning": { "effort": "low" }
+        }
+    }
+}
+```
+
+Custom endpoint, key variable and headers — `profiles/opencode.json` (the OpenCode Zen gateway):
+
+```json
+{
+    "name": "opencode",
+    "model": {
+        "api": "openai",
+        "model": "deepseek-v4.1-flash",
+        "url": "https://opencode.ai/zen/go/v1",
+        "params": {
+            "api_key_env": "OPENCODE_API_KEY",
+            "headers": { "x-opencode-session": "${OPENCODE_SESSION_ID}" },
+            "thinking": { "type": "disabled" }
+        }
+    }
+}
+```
+
+Any other OpenAI-compatible service is configured the same way: point `url` at its base URL and set `api_key_env` if its key is not stored in `OPENAI_API_KEY`. There is no provider-specific adapter to add or select.
+
 
 For more comprehensive model configuration and syntax, see [Model Specifications](#model-specifications).
 
-For local models, we recommend you use **LM Studio** for the Andy series of models. Ollama breaks current models, and should be avoided.
+For local models, use any OpenAI-compatible local server (LM Studio, vLLM, Ollama's OpenAI-compatible endpoint, …) and point the generic `openai` provider at its `url`. Ollama's native (non-OpenAI) API is not supported.
 Please see our [huggingface page for more info.](https://huggingface.co/collections/Mindcraft-CE)
 
 ## Online Servers
-To connect to online servers your bot will need an official Microsoft/Minecraft account. You can use your own personal one, but will need another account if you want to connect too and play with it. To connect, change these lines in `settings.js`:
+To connect to online servers your bot will need an official Microsoft/Minecraft account. You can use your own personal one, but will need another account if you want to connect too and play with it. To connect, change these lines in `settings.ts`:
 ```javascript
 "host": "111.222.333.444",
 "port": 55920,
@@ -255,13 +175,13 @@ To connect to online servers your bot will need an official Microsoft/Minecraft 
 > [!Important]
 > The bot's name in the profile.json must exactly match the Minecraft profile name! Otherwise the bot will spam talk to itself.
 
-To use different accounts, Mindcraft will connect with the account that the Minecraft launcher is currently using. You can switch accounts in the launcher, then run `node main.js`, then switch to your main account after the bot has connected.
+To use different accounts, Mindcraft will connect with the account that the Minecraft launcher is currently using. You can switch accounts in the launcher, then run `npm start`, then switch to your main account after the bot has connected.
 
 ## Tasks
 
 Tasks automatically start the bot with a prompt and a goal item to acquire or blueprint to construct. To run a simple task that involves collecting 4 oak_logs run 
 
-`node main.js --task_path tasks/basic/single_agent.json --task_id gather_oak_logs`
+`npm start -- --task_path tasks/basic/single_agent.json --task_id gather_oak_logs`
 
 Here is an example task json format: 
 
@@ -300,14 +220,14 @@ If you want more optimization and automatic launching of the minecraft world, yo
 Run the app in a docker container when connecting to remote servers.
 
 ```bash
-docker build -t mindcraft . && docker run --rm --add-host=host.docker.internal:host-gateway -p 8080:8080 -p 3000-3003:3000-3003 -e SETTINGS_JSON='{"auto_open_ui":false,"profiles":["./profiles/gemini.json"],"host":"host.docker.internal"}' --volume ./keys.json:/app/keys.json --name mindcraft mindcraft
+docker build -t mindcraft . && docker run --rm --add-host=host.docker.internal:host-gateway -p 8080:8080 -p 3000-3003:3000-3003 -e SETTINGS_JSON='{"auto_open_ui":false,"profiles":["./profiles/opencode.json"],"host":"host.docker.internal"}' --volume ./keys.json:/app/keys.json --name mindcraft mindcraft
 ```
 or simply
 ```bash
 docker-compose up --build
 ```
 
-When running in docker, if you want the bot to join your local minecraft server, you have to use a special host address `host.docker.internal` to call your localhost from inside your docker container. Put this into your [settings.js](settings.js):
+When running in docker, if you want the bot to join your local minecraft server, you have to use a special host address `host.docker.internal` to call your localhost from inside your docker container. Put this into your [settings.ts](settings.ts):
 
 ```javascript
 "host": "host.docker.internal", // instead of "localhost", to join your local minecraft from inside the docker container
@@ -317,7 +237,7 @@ To connect to an unsupported minecraft version, you can try to use [viaproxy](se
 
 # Bot Profiles
 
-Bot profiles are json files (such as `andy.json`) that define:
+Bot profiles are json files (such as `profiles/opencode.json`) that define:
 
 1. Bot backend LLMs to use for talking and embedding.
 2. Prompts used to influence the bot's behavior.
@@ -325,9 +245,9 @@ Bot profiles are json files (such as `andy.json`) that define:
 
 ## Model Specifications
 
-LLM models can be specified simply as `"model": "gpt-5.4"`, or more specifically with `"{api}/{model}"`, like `"openrouter/google/gemini-2.5-pro"`. See all supported APIs [here](#model-customization).
+LLM models can be specified simply as `"model": "gpt-5.4"`, or more specifically with `"{api}/{model}"`, like `"openai/deepseek-v4.1-flash"`. See [model customization](#model-customization) for the single supported API.
 
-The `model` field can be a string or an object. A model object must specify an `api`, and optionally a `model`, `url`, and additional `params`. You can also use different models/providers for chatting, vision, and voice synthesis. See the example below.
+The `model` field can be a string or an object. A model object may specify an `api` (always `"openai"`), a `model`, a `url`, and additional `params`. See the example below.
 
 ```json
 "model": {
@@ -338,26 +258,18 @@ The `model` field can be a string or an object. A model object must specify an `
     "max_tokens": 1000,
     "temperature": 1
   }
-},
-"vision_model": {
-  "api": "openai",
-  "model": "gpt-5.4",
-  "url": "https://api.openai.com/v1/"
-},
-"speak_model": "openai/tts-1/echo"
+}
 ```
 
-`model` is used for chat, `vision_model` is used for image interpretation, and `speak_model` is used for voice synthesis. `model` will be used by default for all other models if not specified. Not all APIs support vision or voice synthesis.
+There is no separate vision model: the round screenshot is attached to the same chat model each turn, so pick a model that supports images if you want the bot to use them.
 
-All apis have default models and urls, so those fields are optional. The `params` field is optional and can be used to specify additional parameters for the model. It accepts any key-value pairs supported by the api.
+`url` and `params` are optional, so `model` is the only required field. The `params` field accepts any key-value pairs supported by the endpoint, plus the special `headers` and `api_key_env` keys described in [model customization](#model-customization).
 
-## Voice Synthesis Models
-
-Voice synthesis models are used to narrate bot responses and specified with `speak_model`. This field is parsed differently than other models and only supports strings formatted as `"{api}/{model}/{voice}"`, like `"openai/tts-1/echo"`. We only support `openai` and `google` for voice synthesis.
+> If your endpoint does not need an API key (a local LM Studio / vLLM / Ollama server, for example), you can leave `api_key_env` pointing at a variable that is not set — the client falls back to a placeholder key. Pointing at the official OpenAI endpoint without a key is still an error.
 
 ## Specifying Profiles via Command Line
 
-By default, the program will use the profiles specified in `settings.js`. You can specify one or more agent profiles using the `--profiles` argument: `node main.js --profiles ./profiles/andy.json ./profiles/jill.json`
+By default, the program will use the profiles specified in `settings.ts`. You can specify one or more agent profiles using the `--profiles` argument: `npm start -- --profiles ./profiles/opencode.json ./profiles/jill.json`
 
 
 # Contributing

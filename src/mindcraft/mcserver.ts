@@ -146,7 +146,7 @@ export async function getServer(
 
     // Server not found
     if (server == null)
-        throw new Error(`MC server not found. (Host: ${host}, Port: ${port}) Check the host and port in settings.js, and ensure the server is running and open to public or LAN.`);
+        throw new Error(`MC server not found. (Host: ${host}, Port: ${port}) Check the host and port in settings.ts, and ensure the server is running and open to public or LAN.`);
 
     const serverString = `(Host: ${server.host}, Port: ${server.port}, Version: ${server.version})`;
 
@@ -161,7 +161,7 @@ export async function getServer(
     if (!isSupported)
         throw new Error(`MC server was found ${serverString}, but version is unsupported. Supported versions are: ${mc.supportedVersions.join(', ')}.`);
     else if (version !== 'auto' && server.version !== version)
-        throw new Error(`MC server was found ${serverString}, but version is incorrect. Expected ${version}, but found ${server.version}. Check the server version in settings.js.`);
+        throw new Error(`MC server was found ${serverString}, but version is incorrect. Expected ${version}, but found ${server.version}. Check the server version in settings.ts.`);
     else
         console.log(`MC server found. ${serverString}`);
 

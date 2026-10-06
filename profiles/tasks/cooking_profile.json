@@ -1,5 +1,5 @@
 {
     "name": "andy",
-    "model": "claude-3-5-sonnet-latest",
+    "model": "deepseek-v4.1-flash",
     "prompt_set": "cooking"
 }

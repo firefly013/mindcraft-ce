@@ -8,11 +8,16 @@ import { describe, expect, it } from 'vitest';
 import {
   classifyToolFailure,
   createEdgeWatcher,
+  facingDelta,
   isHeartbeatDue,
   isStuck,
+  isWeaponItem,
+  lockOnYaw,
   resolvePriority,
   schedulerLevelFor,
   shouldEmitHurt,
+  snapshotFromBot,
+  CREEPER_SWELL_DIR_INDEX,
   HEARTBEAT_MS,
   HURT_DEBOUNCE_MS,
   STUCK_MS,
@@ -225,5 +230,231 @@ describe('isHeartbeatDue', () => {
     const now = 1000000;
     expect(isHeartbeatDue(now - HEARTBEAT_MS, now)).toBe(true);
     expect(isHeartbeatDue(now - HEARTBEAT_MS + 1, now)).toBe(false);
+  });
+});
+
+/**
+ * 快照装配：实体级字段以前只声明不填（primed/swelling/hostile/
+ * lockedOn/heldWeapon），导致两条 L5 检测器永不触发。这里锁住
+ * "装配真的填了"这条契约，并证明检测器从真快照里能点亮。
+ */
+function fakeBot(entities: Record<string, unknown>): Record<string, unknown> {
+  return {
+    health: 20,
+    food: 20,
+    entity: {
+      id: 1,
+      position: { x: 0, y: 64, z: 0 },
+      velocity: { x: 0, y: 0, z: 0 },
+      yaw: 0,
+      metadata: [],
+      fallDistance: 0,
+    },
+    entities,
+    inventory: { slots: [], items: () => [] },
+    time: { timeOfDay: 0 },
+  };
+}
+
+describe('lockOnYaw / facingDelta', () => {
+  it('returns mineflayer yaw in RADIANS (0 = north/-Z, π/2 = west/-X, π = south/+Z)', () => {
+    // 正南：notchian 0 ↔ mineflayer π
+    expect(lockOnYaw(0, 0, 0, 10)).toBeCloseTo(Math.PI);
+    // 正西：mineflayer π/2
+    expect(lockOnYaw(0, 0, -10, 0)).toBeCloseTo(Math.PI / 2);
+    // 正北：mineflayer 0
+    expect(lockOnYaw(0, 0, 0, -10)).toBeCloseTo(0);
+    // 正东：mineflayer 3π/2
+    expect(lockOnYaw(0, 0, 10, 0)).toBeCloseTo((3 * Math.PI) / 2);
+  });
+
+  it('wraps around the circle in radians', () => {
+    expect(facingDelta(Math.PI * 2 - 0.1, 0.1)).toBeCloseTo(0.2);
+    expect(facingDelta(0.1, Math.PI * 2 - 0.1)).toBeCloseTo(0.2);
+    expect(facingDelta(0, Math.PI)).toBeCloseTo(Math.PI);
+  });
+});
+
+describe('isWeaponItem', () => {
+  it('accepts swords, axes, tridents, bows, crossbows, maces', () => {
+    expect(isWeaponItem('diamond_sword')).toBe(true);
+    expect(isWeaponItem('netherite_axe')).toBe(true);
+    expect(isWeaponItem('trident')).toBe(true);
+    expect(isWeaponItem('bow')).toBe(true);
+    expect(isWeaponItem('crossbow')).toBe(true);
+    expect(isWeaponItem('mace')).toBe(true);
+  });
+
+  it('rejects picks, shovels, blocks, food and junk', () => {
+    expect(isWeaponItem('diamond_pickaxe')).toBe(false);
+    expect(isWeaponItem('iron_shovel')).toBe(false);
+    expect(isWeaponItem('oak_planks')).toBe(false);
+    expect(isWeaponItem('bread')).toBe(false);
+    expect(isWeaponItem(undefined)).toBe(false);
+    expect(isWeaponItem(null)).toBe(false);
+  });
+});
+
+describe('snapshotFromBot entity fields', () => {
+  it('marks primed TNT and lights world.tnt.primed_nearby', () => {
+    const snap = snapshotFromBot(
+      fakeBot({ 5: { id: 5, name: 'tnt', type: 'other', position: { x: 2, y: 64, z: 0 } } }),
+    );
+    expect(snap.entities?.[0]?.primed).toBe(true);
+    expect(snap.entities?.[0]?.distance).toBeCloseTo(2);
+    expect(createEdgeWatcher().poll(snap).map((e) => e.type)).toContain('world.tnt.primed_nearby');
+  });
+
+  it('reads creeper fuse from metadata[16] and lights world.creeper.swelling', () => {
+    const metadata: unknown[] = [];
+    metadata[CREEPER_SWELL_DIR_INDEX] = 1;
+    const snap = snapshotFromBot(
+      fakeBot({
+        6: { id: 6, name: 'creeper', type: 'mob', kind: 'Hostile mobs', position: { x: 0, y: 64, z: 2 }, metadata },
+      }),
+    );
+    expect(snap.entities?.[0]?.swelling).toBe(true);
+    expect(createEdgeWatcher().poll(snap).map((e) => e.type)).toContain('world.creeper.swelling');
+  });
+
+  it('treats a defused creeper (swell_dir -1) as not swelling', () => {
+    const metadata: unknown[] = [];
+    metadata[CREEPER_SWELL_DIR_INDEX] = -1;
+    const snap = snapshotFromBot(
+      fakeBot({
+        6: { id: 6, name: 'creeper', type: 'mob', kind: 'Hostile mobs', position: { x: 0, y: 64, z: 2 }, metadata },
+      }),
+    );
+    expect(snap.entities?.[0]?.swelling).toBeUndefined();
+    expect(createEdgeWatcher().poll(snap).map((e) => e.type)).not.toContain('world.creeper.swelling');
+  });
+
+  it('also reads the { value } metadata shape', () => {
+    const metadata: unknown[] = [];
+    metadata[CREEPER_SWELL_DIR_INDEX] = { value: 1 };
+    const snap = snapshotFromBot(
+      fakeBot({
+        6: { id: 6, name: 'creeper', type: 'mob', kind: 'Hostile mobs', position: { x: 0, y: 64, z: 1 }, metadata },
+      }),
+    );
+    expect(snap.entities?.[0]?.swelling).toBe(true);
+  });
+
+  it('treats swell_dir 0 (the ignition tick) as swelling too', () => {
+    const metadata: unknown[] = [];
+    metadata[CREEPER_SWELL_DIR_INDEX] = 0;
+    const snap = snapshotFromBot(
+      fakeBot({
+        6: { id: 6, name: 'creeper', type: 'mob', kind: 'Hostile mobs', position: { x: 0, y: 64, z: 2 }, metadata },
+      }),
+    );
+    expect(snap.entities?.[0]?.swelling).toBe(true);
+  });
+
+  it('covers hostile mobs via the mcData category, not just the name list', () => {
+    const snap = snapshotFromBot(
+      fakeBot({ 7: { id: 7, name: 'creaking', type: 'mob', kind: 'Hostile mobs', position: { x: 0, y: 64, z: 4 } } }),
+    );
+    expect(snap.entities?.[0]?.hostile).toBe(true);
+    expect(createEdgeWatcher().poll(snap).map((e) => e.type)).toContain('entity.hostile_nearby');
+  });
+
+  it('marks a player holding a weapon and one facing the bot', () => {
+    const snap = snapshotFromBot(
+      fakeBot({
+        8: {
+          id: 8,
+          name: 'Steve',
+          type: 'player',
+          // 实体在 bot 南边（z=+3），所以"看向 bot"= 朝北 = mineflayer yaw 0。
+          position: { x: 0, y: 64, z: 3 },
+          yaw: 0,
+          heldItem: { name: 'diamond_sword' },
+        },
+      }),
+    );
+    // 玩家的手持物在实体上（mineflayer: entity.heldItem = equipment[0]）。
+    expect(snap.entities?.[0]?.isPlayer).toBe(true);
+    expect(snap.entities?.[0]?.heldWeapon).toBe(true);
+    expect(snap.entities?.[0]?.lockedOn).toBe(true);
+  });
+
+  it('leaves heldWeapon unset for a player holding a pickaxe', () => {
+    const snap = snapshotFromBot(
+      fakeBot({
+        8: { id: 8, name: 'Steve', type: 'player', position: { x: 0, y: 64, z: 3 }, heldItem: { name: 'iron_pickaxe' } },
+      }),
+    );
+    expect(snap.entities?.[0]?.heldWeapon).toBeUndefined();
+    expect(snap.entities?.[0]?.hostile).toBeUndefined();
+  });
+
+  it('does not mark a player facing away as locked on', () => {
+    const snap = snapshotFromBot(
+      fakeBot({ 8: { id: 8, name: 'Steve', type: 'player', position: { x: 0, y: 64, z: 3 }, yaw: Math.PI } }),
+    );
+    expect(snap.entities?.[0]?.lockedOn).toBeUndefined();
+  });
+
+  /**
+   * 回归线：entity.yaw 是 mineflayer 的**弧度**（0=北）。之前拿它当 notchian
+   * 角度（度）比，判定退化成"bot 是否在该实体正南 ±36°"，与朝向无关——
+   * 只测北边一个方向的用例抓不到，所以这里四个方位都钉住。
+   */
+  it.each([
+    ['from the north', 0, 3, 0],
+    ['from the south', 0, -3, Math.PI],
+    ['from the east', -3, 0, (3 * Math.PI) / 2],
+    ['from the west', 3, 0, Math.PI / 2],
+  ])('lockedOn is true when an entity %s faces the bot', (_label, ex, ez, facing) => {
+    const snap = snapshotFromBot(
+      fakeBot({ 8: { id: 8, name: 'Steve', type: 'player', position: { x: ex, y: 64, z: ez }, yaw: facing } }),
+    );
+    expect(snap.entities?.[0]?.lockedOn).toBe(true);
+  });
+
+  it('lockedOn is false when an entity in the same spot faces 90° away', () => {
+    const snap = snapshotFromBot(
+      fakeBot({ 8: { id: 8, name: 'Steve', type: 'player', position: { x: 0, y: 64, z: 3 }, yaw: Math.PI / 2 } }),
+    );
+    expect(snap.entities?.[0]?.lockedOn).toBeUndefined();
+  });
+
+  it('feeds the resolvePriority upgrade now that lockedOn is populated', () => {
+    const snapshot = {
+      health: 5,
+      entities: [{ id: 9, name: 'zombie', distance: 5, lockedOn: true }],
+    };
+    expect(resolvePriority({ type: 'entity.hostile_nearby', level: 3, key: 9 }, snapshot)).toBe(4);
+  });
+
+  it('never treats a PLAYER named creeper/tnt as a mob (L5 false positive)', () => {
+    // 玩家实体的 metadata[16] 是 `score`（默认 0），不是 `swell_dir`；而实体名
+    // 现在优先取 username，所以用户名恰好叫 creeper/tnt 的玩家会被判据命中，
+    // 直接触发 L5 EMERGENCY（停掉全部动作 + 进 emergency）。公开服上
+    // `creeper` 是常见用户名，所以两处都必须有 !isPlayer 守卫。
+    const metadata: unknown[] = [];
+    metadata[CREEPER_SWELL_DIR_INDEX] = 0; // 玩家的 score，默认值
+    const creeperNamed = snapshotFromBot(
+      fakeBot({
+        8: { id: 8, type: 'player', name: 'player', username: 'creeper', position: { x: 0, y: 64, z: 2 }, metadata },
+      }),
+    );
+    expect(creeperNamed.entities?.[0]?.name).toBe('creeper');
+    expect(creeperNamed.entities?.[0]?.swelling).toBeUndefined();
+    expect(creeperNamed.entities?.[0]?.primed).toBeUndefined();
+    const types = createEdgeWatcher().poll(creeperNamed).map((e) => e.type);
+    expect(types).not.toContain('world.creeper.swelling');
+
+    const tntNamed = snapshotFromBot(
+      fakeBot({ 9: { id: 9, type: 'player', name: 'player', username: 'tnt', position: { x: 0, y: 64, z: 2 } } }),
+    );
+    expect(tntNamed.entities?.[0]?.primed).toBeUndefined();
+    expect(createEdgeWatcher().poll(tntNamed).map((e) => e.type)).not.toContain('world.tnt.primed_nearby');
+  });
+
+  it('survives a bot with no entities table', () => {
+    expect(snapshotFromBot({ health: 20 }).entities).toBeUndefined();
+    expect(snapshotFromBot(null).entities).toBeUndefined();
   });
 });

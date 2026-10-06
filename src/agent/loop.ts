@@ -50,7 +50,6 @@ export interface LoopHistory {
 export interface LoopAssembled {
   text: string;
   tools: any;
-  toolChoice?: string;
   /** 本轮现拍示意图（base64 JPEG），没有就 null，调用方直接跳过。 */
   image?: string | null;
 }
@@ -60,7 +59,12 @@ export interface AgentLoopDeps {
   runner: LoopRunner;
   history: LoopHistory;
   assemble: (events: unknown[]) => LoopAssembled | Promise<LoopAssembled>;
-  model: (text: string, tools: unknown, toolChoice: string, image?: string | null) => Promise<LoopModelResponse>;
+  /**
+   * `tool_choice` 不在这里传：prompter 固定用 `required`（模型每轮至少调一个
+   * 工具、以 Finish 收尾，空响应卡不住循环）。以前这里有个 `toolChoice`
+   * 形参，但没有任何生产者、下游也是 `void` 掉，纯死路径。
+   */
+  model: (text: string, tools: unknown, image?: string | null) => Promise<LoopModelResponse>;
   stopExecutor?: (() => Promise<void>) | null;
   emergencyHandler?: (() => Promise<void>) | null;
 }
@@ -70,7 +74,7 @@ export class AgentLoop {
   private runner: LoopRunner;
   private history: LoopHistory;
   private assemble: (events: unknown[]) => LoopAssembled | Promise<LoopAssembled>;
-  private model: (text: string, tools: unknown, toolChoice: string, image?: string | null) => Promise<LoopModelResponse>;
+  private model: (text: string, tools: unknown, image?: string | null) => Promise<LoopModelResponse>;
   private stopExecutor: (() => Promise<void>) | null;
   private emergencyHandler: (() => Promise<void>) | null;
   rounds = 0;
@@ -131,10 +135,10 @@ export class AgentLoop {
       if (begun.reused) return;
       this.rounds++;
       const context = await this.assemble(begun.events);
-      // 缺省 required：模型必须至少调一个工具（以 Finish 收尾），
-      // 空响应永远卡不住循环。thinking 类开关保持关闭——有些网关
-      // 对 required+thinking 直接回 400。
-      const response = await this.model(context.text, context.tools, context.toolChoice ?? 'required', context.image ?? null);
+      // tool_choice 由 prompter 固定为 required：模型必须至少调一个工具
+      // （以 Finish 收尾），空响应永远卡不住循环。thinking 类开关保持关闭
+      // ——有些网关对 required+thinking 直接回 400。
+      const response = await this.model(context.text, context.tools, context.image ?? null);
       if (this.scheduler.describe().currentRequestId !== begun.requestId) {
         // 模型思考期间被抢占：事件归重启了，这个响应整体作废。
         return;

@@ -70,7 +70,6 @@ markdown_extensions:
 nav:
   - Home: index.md
   - FAQ: FAQ.md
-  - Andy Models: andy.md
   - MineCollab: minecollab.md
 
 extra_css:

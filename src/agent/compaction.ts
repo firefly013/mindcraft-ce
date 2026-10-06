@@ -32,6 +32,25 @@ export interface Compactable {
 export const FALLBACK_CONTEXT_WINDOW = 128_000;
 
 /**
+ * 历史尾巴默认预算：100 条 / 8000 token。对齐 VLM 的 assemble 常量——
+ * 之前本项目是"整份历史无条件全发"，条数只靠 max_messages 砍。
+ */
+export const DEFAULT_TAIL_ENTRIES = 100;
+export const DEFAULT_TAIL_TOKENS = 8000;
+
+/** profile.max_history_entries，缺省 100；<=0 表示不限条数。 */
+export function resolveHistoryEntries(profile: unknown): number {
+  const v = (profile as { max_history_entries?: unknown } | null)?.max_history_entries;
+  return typeof v === 'number' && Number.isFinite(v) ? v : DEFAULT_TAIL_ENTRIES;
+}
+
+/** profile.max_history_tokens，缺省 8000；<=0 表示不限 token。 */
+export function resolveHistoryTokens(profile: unknown): number {
+  const v = (profile as { max_history_tokens?: unknown } | null)?.max_history_tokens;
+  return typeof v === 'number' && Number.isFinite(v) ? v : DEFAULT_TAIL_TOKENS;
+}
+
+/**
  * 从 profile 读上下文窗口：profile.context_window > 0 就用，
  * 否则回退。回退值故意取常见下限——估大了会晚压仓。
  */
@@ -127,12 +146,18 @@ export async function maybeCompact<T extends Compactable>({
   }
   const tail = entries.slice(-keepLast);
   const head = entries.slice(0, Math.max(0, entries.length - tail.length));
+  // 没有可压的头部就别动：head 为空时总结只会调一次空模型、
+  // 然后返回 [摘要, ...原样全部]——长度 +1 且一条没删，下一轮
+  // 压力依旧，于是每来一条消息就调一次模型。宁可原样返回。
+  if (head.length === 0) {
+    return { compacted: false, level: 0, removed: 0, freedRatio, entries };
+  }
   const text = await summarize(head);
   const summaryEntry = makeSummary(text, at);
   return {
     compacted: true,
     level: 2,
-    removed: 0,
+    removed: head.length,
     freedRatio,
     entries: [summaryEntry, ...tail],
     summary: text,

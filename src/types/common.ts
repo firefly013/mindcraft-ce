@@ -43,7 +43,7 @@ export interface ToolResponse {
 /** Minimal model interface every wrapper must satisfy. */
 export interface AIModel {
   sendRequest(turns: ChatMessage[], systemMessage: string, stopSeq?: string): Promise<string>;
-  sendVisionRequest?(messages: ChatMessage[], systemMessage: string, imageBuffer: Buffer): Promise<string>;
+  // 独立的 sendVisionRequest 已删除：截图随 liveImage 走主循环，没有第二条视觉链。
   sendRequestWithTools?(
     turns: ChatMessage[],
     systemMessage: string,
@@ -62,14 +62,13 @@ export interface AIModel {
   ): Promise<ToolResponse>;
 }
 
-/** Profile JSON shape (andy.json etc. merged with defaults). */
+/** Profile JSON shape (profile JSON merged with defaults). */
 export interface AgentProfile {
   name: string;
   model: string;
   api?: string;
   url?: string;
   params?: Record<string, unknown>;
-  vision_model?: string;
   cooldown?: number;
   max_tokens?: number;
   skin?: { model: string; path: string };
@@ -91,7 +90,6 @@ export interface Settings {
   load_memory: boolean;
   init_message: string;
   only_chat_with: string[];
-  speak: boolean | string;
   chat_ingame: boolean;
   render_bot_view: boolean;
   allow_vision: boolean;

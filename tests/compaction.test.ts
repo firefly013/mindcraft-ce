@@ -80,18 +80,36 @@ describe('maybeCompact', () => {
       entry('model-old', 'model', 2, 0),
       entry('user-old', 'user', 3, 0),
     ];
-    const r = await maybeCompact({
+    // 三条都在 keepLast 里：没有可压的头部，所以什么都不做——不删、也不空调一次总结。
+    const short = await maybeCompact({
       entries,
       usageRatio: 1,
       now,
       summarize: () => 's',
       makeSummary: summaryOf,
     });
-    // 删不动（0/3 < 25%）→ 走总结，头部进总结，尾部保留。
-    expect(r.level).toBe(2);
-    expect(r.summary).toBe('s');
-    expect(r.entries[0]?.text).toBe('summary: s');
-    expect(r.entries.length).toBeGreaterThan(0);
+    expect(short.compacted).toBe(false);
+    expect(short.level).toBe(0);
+    expect(short.entries.map((e) => e.text)).toEqual(['tool-old', 'model-old', 'user-old']);
+
+    // 条目多到有头部时走 level-2：老 tool/model 是"被总结进去"，而不是"被当过期删掉"。
+    const many = [...entries, ...Array.from({ length: 25 }, (_, i) => entry(`m${i}`, 'tool', 2, 0))];
+    let summarized: E[] = [];
+    const long = await maybeCompact({
+      entries: many,
+      usageRatio: 1,
+      now,
+      summarize: (head) => {
+        summarized = head;
+        return 's';
+      },
+      makeSummary: summaryOf,
+    });
+    expect(long.level).toBe(2);
+    expect(long.summary).toBe('s');
+    const headTexts = summarized.map((e) => e.text);
+    expect(headTexts).toContain('tool-old');
+    expect(headTexts).toContain('model-old');
   });
 
   it('entries without kind/at are never obsolete', async () => {
