@@ -1,4 +1,5 @@
 import { VisionInterpreter } from './vision/vision_interpreter.js';
+import { closeSync, openSync, readSync, statSync } from 'node:fs';
 import { initBot } from '../utils/mcdata.js';
 import { executeToolCall } from './commands/to_openai_tools.js';
 import { ActionRunner } from './action_runner.js';
@@ -77,6 +78,8 @@ export class Agent {
     private lastPickupAt: number = 0;
     private pickingUp: boolean = false;
     private pickupStarved: boolean = false;
+    /** 开发者通道的读取位置（见 pollInbox）。 */
+    private inboxOffset: number = 0;
 
     /**
      * deliberative 层：pi-durable 会话 + 工具 + 尾巴注入 + 事件接入。
@@ -775,10 +778,43 @@ export class Agent {
     update(delta: number): void {
         void delta;
         this.checkTaskDone();
+        // 开发者通道：读 inbox 的新行（见 pollInbox）。
+        this.pollInbox();
         // 拾取是后台行为，**不能 await**：它最多要走 4 秒，await 会把边沿轮询
         // 一起冻住（update 本来就是串行的）。
         this.maybeAutoPickup();
         this.pollEdges();
+    }
+
+    /**
+     * 开发者通道：`bots/<name>/inbox.txt` 里**新增的每一行**都当一条用户消息投进去。
+     *
+     * 为什么需要：跑起来之后要跟机器人说话，原来只有两条路——人肉在游戏里打字，
+     * 或者重启（丢进度）。而临时起一个 mineflayer 客户端进服在这台服务器上会卡在
+     * 握手。文件通道不依赖任何协议细节，脚本能写、也能一次性给两个 bot 发。
+     *
+     * 记 offset 只读新增内容，所以重复调用不会重复投递。读到就立刻走
+     * `handleMessage`（L3），和玩家在游戏里说话是同一条路。
+     */
+    private pollInbox(): void {
+        const file = `./bots/${this.name}/inbox.txt`;
+        try {
+            const size = statSync(file).size;
+            if (size < this.inboxOffset) this.inboxOffset = 0; // 文件被重写过
+            if (size === this.inboxOffset) return;
+            const fd = openSync(file, 'r');
+            const buf = Buffer.alloc(size - this.inboxOffset);
+            readSync(fd, buf, 0, buf.length, this.inboxOffset);
+            closeSync(fd);
+            this.inboxOffset = size;
+            for (const raw of buf.toString('utf8').split('\n')) {
+                const line = raw.trim();
+                if (line === '') continue;
+                this.handleMessage('developer', line, KIND.USER, LEVEL.WAKE);
+            }
+        } catch {
+            // 没有 inbox 文件是常态，不是错误。
+        }
     }
 
     /**
