@@ -27,10 +27,6 @@ export const PROMPT_SETS: Record<string, Record<string, string>> = {
 
 // 工具描述与参数描述。键为去 ! 的工具名；类型/domain 留在命令定义处（代码约束）。
 export const TOOL_TEXT: Record<string, { description: string; params: Record<string, string> }> = {
-  stfu: {
-    description: '闭嘴别聊，但手头动作继续。',
-    params: {},
-  },
   restart: {
     description: '重启机器人进程。',
     params: {},
@@ -260,7 +256,6 @@ export const MESSAGES = {
   taskGoal: (goal: string): string => `你的任务目标：${goal}`,
   taskEnded: (score: number | string): string => `任务结束，得分：${score}`,
   actionTimeout: (mins: number): string => `动作超时（${mins} 分钟），正在强制停止。`,
-  shuttingUp: '闭嘴了。',
   restarting: '重启中。',
   exiting: '退出中。',
 };

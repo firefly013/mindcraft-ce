@@ -14,7 +14,7 @@ const profile = (over: Record<string, unknown> = {}): AgentProfile =>
 
 describe('td/tp', () => {
   it('returns descriptions for known tools', () => {
-    expect(td('stfu')).toBe(TOOL_TEXT.stfu.description);
+    expect(td('restart')).toBe(TOOL_TEXT.restart.description);
     expect(tp('goToPlayer', 'player_name')).toBe(TOOL_TEXT.goToPlayer.params.player_name);
   });
 
@@ -41,7 +41,6 @@ describe('MESSAGES', () => {
     expect(MESSAGES.modelUnsupported).toBe(
       '我的模型不支持原生工具调用，换个 OpenAI 兼容模型再试。',
     );
-    expect(MESSAGES.shuttingUp).toBe('闭嘴了。');
     expect(MESSAGES.restarting).toBe('重启中。');
     expect(MESSAGES.exiting).toBe('退出中。');
   });

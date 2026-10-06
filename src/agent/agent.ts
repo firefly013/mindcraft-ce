@@ -62,7 +62,6 @@ export class Agent {
     blocked_actions: string[] = [];
     bot: any; // mineflayer 无类型，bot 统一 any
     vision_interpreter: VisionInterpreter | undefined;
-    shut_up: boolean = false;
     respondFunc: ((username: string, message: string) => Promise<void>) | undefined;
     scheduler!: Scheduler;
     loopLog: Array<{ kind: string; level: number; payload: unknown }> = [];
@@ -235,8 +234,6 @@ export class Agent {
             if (settings.only_chat_with.length > 0 && !settings.only_chat_with.includes(username)) return;
             try {
                 if (ignore_messages.some((m) => message.startsWith(m))) return;
-
-                this.shut_up = false;
 
                 console.log(this.name, 'received message from', username, ':', message);
 
@@ -585,10 +582,6 @@ export class Agent {
         });
     }
 
-    shutUp(): void {
-        this.shut_up = true;
-    }
-
     handleMessage(
         source: string,
         message: string,
@@ -608,15 +601,12 @@ export class Agent {
         // 不再在这里往历史里塞一份：这条消息会作为事件经 `notify()` 进上下文
         // （L3 走 steer 输入）。两处都写就是同一请求里喂两遍。
         this.currentSource = source;
-        // 静音时不投递：解除静音后事件仍会被送达（旧实现里这里会永久丢事件）。
-        if (this.shut_up) return false;
         this.notify(kind, level, { source, message, ...extra });
         return true;
     }
 
     routeResponse(to_player: string, message: string): void {
         void to_player;
-        if (this.shut_up) return;
         this.openChat(message);
     }
 
@@ -658,10 +648,14 @@ export class Agent {
                 this.bot.lastDamageTaken = prev_health - this.bot.health;
                 // 挨打即事件（带伤害量）：阈值越线是另一组检测器的事，
                 // 这里只管"挨打了"这个事实；持续掉血 1.5 秒只报一次。
+                //
+                // **L2 而不是 L3**：掉血本身不该唤醒模型——`bot.health_low`（L3）
+                // 和 `bot.health_danger`（L5）才是该唤醒的那两档。真机日志里
+                // 一场骷髅战掉 8 次血就是 8 次 L3 唤醒。
                 const hurt = shouldEmitHurt(prev_health, this.bot.health, this.lastHurtEmitAt, Date.now());
                 if (hurt.fire) {
                     this.lastHurtEmitAt = Date.now();
-                    this.notify(KIND.WORLD, LEVEL.WAKE, {
+                    this.notify(KIND.WORLD, LEVEL.STATE, {
                         type: 'bot.hurt',
                         health: this.bot.health,
                         damage: hurt.damage,

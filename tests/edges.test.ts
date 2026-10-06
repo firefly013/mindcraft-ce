@@ -52,19 +52,28 @@ describe('hysteresis: fire once, reset, fire again', () => {
 });
 
 describe('keyed detectors: one armed state per object', () => {
-  it('two zombies fire independently; one leaving does not block the other', () => {
+  it('同一类型算一条边缘；不同种类各自独立', () => {
+    // 「身边有敌对生物」是**一类事实**，不是"第 1 号僵尸"——按 id 做边缘的话，
+    // 一晚上十几只怪各报一次（真机日志里就是这样刷屏的）。
     const w = createEdgeWatcher();
+    const near = (evts: Array<{ type: string; key: unknown }>): unknown[] =>
+      evts.filter((e) => e.type === 'entity.hostile_nearby').map((e) => e.key);
+
     const first = w.poll({ entities: [ent(1, 10), ent(2, 50)] });
-    expect(first.filter((e) => e.type === 'entity.hostile_nearby')).toHaveLength(1);
+    expect(near(first)).toEqual(['zombie']);
 
-    // 1 号在 32~40 滞回区里晃：不重发；2 号走进来：发。
-    const second = w.poll({ entities: [ent(1, 35), ent(2, 20)] });
-    expect(second.filter((e) => e.type === 'entity.hostile_nearby').map((e) => e.key)).toEqual([2]);
+    // 同类在 32~40 滞回区里晃：不重发
+    expect(near(w.poll({ entities: [ent(1, 35), ent(2, 20)] }))).toEqual([]);
 
-    // 1 号彻底离开 40 格再回来：再发一次。
-    expect(w.poll({ entities: [ent(1, 50)] })).toEqual([]);
-    const third = w.poll({ entities: [ent(1, 10)] });
-    expect(third.filter((e) => e.type === 'entity.hostile_nearby').map((e) => e.key)).toEqual([1]);
+    // 全部离开 40 格：解除 arm（不报事件）
+    expect(near(w.poll({ entities: [ent(1, 50), ent(2, 50)] }))).toEqual([]);
+
+    // 再进来：再报一次
+    expect(near(w.poll({ entities: [ent(1, 10)] }))).toEqual(['zombie']);
+
+    // 换一种怪：另一条边缘，独立触发
+    const other = w.poll({ entities: [ent(1, 10), ent(3, 10, { name: 'skeleton' })] });
+    expect(near(other)).toEqual(['skeleton']);
   });
 
   it('a dead entity disarms silently without an event', () => {
@@ -209,7 +218,7 @@ describe('resolvePriority: defaults are starting points', () => {
   };
 
   it('face-hugging hostile at critical health escalates to 5', () => {
-    expect(resolvePriority({ type: 'entity.hostile_nearby', level: 3, key: 1 }, snap)).toBe(5);
+    expect(resolvePriority({ type: 'entity.hostile_nearby', level: 3, key: 'zombie' }, snap)).toBe(5);
   });
 
   it('emergency stop words in chat escalate to 4', () => {
@@ -263,7 +272,8 @@ describe('event shape: delta plus action context, no Live State repeat', () => {
       dimension: 'overworld',
     });
     expect(e?.type).toBe('entity.hostile_nearby');
-    expect(e?.key).toBe(1);
+    // key 是**类型**（同类只报一次），不是实体 id
+    expect(e?.key).toBe('zombie');
     expect(e?.actionContext).toEqual({
       currentAction: 'action:collectBlocks',
       goal: 'gather wood',
@@ -498,7 +508,7 @@ describe('snapshotFromBot entity fields', () => {
       health: 5,
       entities: [{ id: 9, name: 'zombie', distance: 5, lockedOn: true }],
     };
-    expect(resolvePriority({ type: 'entity.hostile_nearby', level: 3, key: 9 }, snapshot)).toBe(4);
+    expect(resolvePriority({ type: 'entity.hostile_nearby', level: 3, key: 'zombie' }, snapshot)).toBe(4);
   });
 
   it('never treats a PLAYER named creeper/tnt as a mob (L5 false positive)', () => {

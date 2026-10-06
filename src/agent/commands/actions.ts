@@ -47,16 +47,8 @@ function runAsAction (actionFn: AgentActionFn, timeout = -1): AgentCommand['perf
 export const actionsList: AgentCommand[] = [
     // 注：停下走循环 Stop 工具（不占通道，忙时也能调）；
     // 旧 !stop 命令已删，避免跟 Stop 重名混淆。
-    {
-        name: '!stfu',
-        description: td('stfu'),
-        // eslint-disable-next-line require-await -- command interface requires a promise result
-        perform: async function (agent: any): Promise<void> {
-            agent.openChat(MESSAGES.shuttingUp);
-            agent.shutUp();
-            return;
-        }
-    },
+    // 旧 !stfu 也删了：它只是让 agent 不投递事件，模型本来就能不管噪音，
+    // 而"静音时直接丢事件"反而会吞掉该看见的东西。
     {
         name: '!restart',
         description: td('restart'),

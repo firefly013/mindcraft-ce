@@ -282,10 +282,14 @@ export const DETECTORS: readonly Detector[] = Object.freeze([
     fire: (s) => lte(s.oxygen, 5),
     clear: (s) => gte(s.oxygen, 15) },
   {
+    // 「身边有敌对生物」是**一类事实**，不是"第 14500 号僵尸"。
+    // 和 `hostile_far` 同样的毛病：按实体 id 做边缘，一晚上能报十几条，
+    // 每只走到 32 格内的怪各报一次（真机日志里就是这样刷屏的）。
+    // 按**类型**做边缘：这种怪进了 32 格报一次，全部离开 40 格才解除。
     type: 'entity.hostile_nearby', level: 3, kind: 'keyed',
-    keyOf: (s) => (s.entities ?? []).filter((e) => isHostileEntity(e) && !isPlayerEntity(e)).map((e) => e.id),
-    fire: (s, id) => within(s, id, 32),
-    clear: (s, id) => !within(s, id, 40),
+    keyOf: (s) => hostileTypeKeys(s),
+    fire: (s, name) => hostilesIn(s, name).some((d) => d <= 32),
+    clear: (s, name) => !hostilesIn(s, name).some((d) => d <= 40),
   },
   {
     // 「远处有敌对生物」是**一类事实**，不是"第 1401 号僵尸"。
@@ -315,8 +319,10 @@ export const DETECTORS: readonly Detector[] = Object.freeze([
   { type: 'world.rain_start', level: 2, kind: 'all',
     fire: (s) => s.isRain === true, clear: (s) => s.isRain !== true },
   { type: 'world.light_low', level: 3, kind: 'all',
-    fire: (s) => lte(s.light, 4),
-    clear: (s) => gte(s.light, 8) },
+    // 迟滞带放宽：原来是 4/8，在洞里走动时光照在 4~8 之间来回跳，边缘反复
+    // re-arm——真机日志里每 2 秒报一次。放宽到 3/12 让"进洞"只报一次。
+    fire: (s) => lte(s.light, 3),
+    clear: (s) => gte(s.light, 12) },
   { type: 'world.dimension_change', level: 3, kind: 'change',
     value: (s) => s.dimension ?? null, fireOn: (prev, next) => prev != null && next != null && prev !== next },
   { type: 'world.biome_change', level: 2, kind: 'change',
@@ -371,10 +377,19 @@ export function resolvePriority(descriptor: PriorityDescriptor, snapshot: EdgeSn
   const { type } = descriptor;
   const hp = num(snapshot.health);
   if (type === 'entity.hostile_nearby') {
-    const target = (snapshot.entities ?? []).find((e) => e.id === descriptor.key);
-    const dist = num(target?.distance);
+    // key 是**类型**（和边缘一致），所以按类型找最近的那只——不能再拿它当实体 id 用。
+    const name = String(descriptor.key ?? '');
+    const dists = hostilesIn(snapshot, name);
+    const dist = dists.length === 0 ? null : Math.min(...dists);
     if (dist != null && dist <= 3 && hp != null && hp <= 4) return 5;
-    if (target?.lockedOn === true && hp != null && hp <= 6) return 4;
+    const lockedOn = (snapshot.entities ?? []).some(
+      (e) =>
+        isHostileEntity(e) &&
+        !isPlayerEntity(e) &&
+        String(e.name ?? 'unknown') === name &&
+        e.lockedOn === true,
+    );
+    if (lockedOn && hp != null && hp <= 6) return 4;
     return descriptor.level;
   }
   if (type === 'player.chat.mention' || type === 'player.chat.private') {
