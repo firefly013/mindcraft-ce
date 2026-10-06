@@ -139,14 +139,17 @@ describe('装配层全栈', () => {
     await h.wiring.close();
   });
 
-  it('记忆从文档读到，并进尾巴', async () => {
+  it('记忆**不进**尾巴——它是压仓摘要，随历史一起发', async () => {
     const h = await openHarness();
     await h.wiring.state.setMemory('家在北边');
     await (await h.wiring.runtime.submit('看看我')).wait(ctx);
 
     const last = h.seen[0]?.[h.seen[0].length - 1];
-    expect(String(last?.['content'])).toContain('## 记忆摘要');
-    expect(String(last?.['content'])).toContain('家在北边');
+    // 尾巴只有快照
+    expect(String(last?.['content'])).toContain('## 当前世界快照');
+    expect(String(last?.['content'])).not.toContain('## 记忆摘要');
+    // 记忆本身仍可读（迁移来的旧记忆留着，供 $MEMORY 类旧提示词用）
+    expect(await h.wiring.state.memory()).toBe('家在北边');
     await h.wiring.close();
   });
 

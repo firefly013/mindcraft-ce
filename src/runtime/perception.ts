@@ -1,47 +1,34 @@
 /**
- * 每轮尾巴：**只在末尾注入 live state**（+ 记忆摘要）。
+ * 每轮尾巴：**只有世界快照**。
  *
- * ## 为什么这里没有 `## 事件` 块
+ * ## 为什么没有 `## 事件`
  *
- * 旧设计把事件渲染进尾巴，是因为事件当时**不在**模型的上下文里——它们只进
- * 了循环的审计缓冲。现在按 L1–L5 的原生映射（见 `events.ts`）：
+ * 按 L1–L5 的原生映射（见 `events.ts`），事件**本身就是消息**：
+ * L1/L2 走 `write` 被动 entry、L3 走 `steer` 输入。已经在上下文里了，
+ * 再在尾巴里渲染一遍就是重复喂。
  *
- *   L1/L2 → `write` 被动 entry
- *   L3    → `steer` 输入（就是一条 user 消息）
+ * ## 为什么没有 `## 记忆摘要`
  *
- * 事件**本身就是消息**，已经在上下文里了。再在尾巴里渲染一遍 `## 事件` 就是
- * 重复喂——所以这一段退役（`event_stream.ts` 的 `renderEvents` 留给前端/日志）。
+ * 记忆摘要现在**就是压仓摘要**——它作为对话里的第一条条目随整份历史发出
+ * （Pi 的投影：`system + 摘要 + 保留段`）。以前在这里又发一遍，等于把摘要
+ * 喂两次。主线（`92309d1`）已经把这一段删掉，这里跟随。
+ *
+ * 所以尾巴只剩一件事：**把这一刻的世界注入在请求末尾，且不进上下文**。
+ * 这正是本项目的核心诉求（`docs/agent-design.md` §4.1）。
  *
  * ## 为什么走 beforeRequest 而不是 section
  *
- * 记忆与快照每轮都在变，进 section 就会每轮追加一条 `pi.system`，前缀缓存全废。
- * 这条尾巴只影响本次请求、**不落 transcript**——这正是核心诉求：
- * "Live State 每次调用的最后注入，且不进上下文"。
- *
- * 拼装顺序与措辞与 `Agent.assembleContext`（`agent.ts:462-488`）保持一致：
- * `renderLiveState` 的文本是 token 与 prompt-cache 敏感契约，措辞不能顺手改。
+ * 快照每轮都在变，进 section 就会每轮追加一条 `pi.system`，前缀缓存全废。
+ * 这条尾巴只影响本次请求、**不落 transcript**。
  */
-import { composeTail } from '../agent/event_stream.js';
 import { renderLiveState, sampleLiveState, type SampleContext } from '../agent/live_state.js';
 
-export interface TailInputs {
-  /** 自然语言记忆；空串/纯空白则整段省略。 */
-  memory: string;
-  /** 感知采样上下文（bot / vision / goal / todos / currentAction）。 */
-  sample: SampleContext;
-}
-
-/**
- * 记忆 + 世界快照 → 尾巴。**纯函数**，顺序与省略规则都收在这里：
- * 记忆摘要 → 世界快照，空段由 `composeTail` 丢掉。
- */
-export function liveTailFromTexts(memory: string, liveText: string): string {
-  const trimmed = memory.trim();
-  const memoryText = trimmed === '' ? '' : `## 记忆摘要\n${trimmed}`;
-  return composeTail(memoryText, `## 当前世界快照\n${liveText}`);
+/** 尾巴的唯一内容：`## 当前世界快照` + 现采文本。 */
+export function liveTailFromText(liveText: string): string {
+  return `## 当前世界快照\n${liveText}`;
 }
 
 /** 现采一次并拼成尾巴。 */
-export function composeLiveTail(inputs: TailInputs): string {
-  return liveTailFromTexts(inputs.memory, renderLiveState(sampleLiveState(inputs.sample)));
+export function composeLiveTail(sample: SampleContext): string {
+  return liveTailFromText(renderLiveState(sampleLiveState(sample)));
 }

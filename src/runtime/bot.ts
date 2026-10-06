@@ -60,7 +60,7 @@ export interface BotWiring {
   intake: EventIntake;
   /** 记忆 / 地点 / 计划的读写门面。 */
   state: BotStateAccess;
-  /** 每轮尾巴（记忆 + 世界快照）。异步：记忆从文档里读。 */
+  /** 每轮尾巴（只有世界快照）。 */
   liveTail: () => Promise<string>;
   close: () => Promise<void>;
 }
@@ -85,10 +85,6 @@ export async function openBotWiring(options: BotWiringOptions): Promise<BotWirin
   const provider = options.provider ?? resolveProvider(options.profile);
   const compaction = compactionPolicyFromProfile(options.profile);
 
-  // `liveTail` 需要读记忆，而记忆门面要等会话开出来——用 holder 打破这个循环。
-  // 这个 hook 在 open 期间不会被调用，所以赋值的时序是安全的。
-  const holder: { state?: BotStateAccess } = {};
-
   const runtime = await openBotRuntime({
     name: options.name,
     provider,
@@ -96,16 +92,12 @@ export async function openBotWiring(options: BotWiringOptions): Promise<BotWirin
     ...(options.baseDir != null ? { baseDir: options.baseDir } : {}),
     ...(options.instanceId != null ? { instanceId: options.instanceId } : {}),
     systemPrompt: options.systemPrompt,
-    liveTail: async () => {
-      const memory = holder.state == null ? '' : await holder.state.memory();
-      return composeLiveTail({ memory, sample: options.sample() });
-    },
+    liveTail: () => composeLiveTail(options.sample()),
     tools: options.tools ?? [],
     ...(options.onSay != null ? { onSay: options.onSay } : {}),
   });
 
   const state = createStateAccess(runtime.session.harness, runtime.conversation.id);
-  holder.state = state;
 
   // 事件接入：可以接一个**早就建好的** intake（Agent 就是这么用的——
   // 运行时还没就绪时收到的事件会被暂存，attach 时按顺序补投）。
@@ -121,7 +113,7 @@ export async function openBotWiring(options: BotWiringOptions): Promise<BotWirin
     runtime,
     intake,
     state,
-    liveTail: async () => composeLiveTail({ memory: await state.memory(), sample: options.sample() }),
+    liveTail: () => Promise.resolve(composeLiveTail(options.sample())),
     close: () => runtime.close(),
   };
 }
