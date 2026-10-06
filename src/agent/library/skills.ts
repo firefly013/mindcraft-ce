@@ -1275,8 +1275,11 @@ export async function goToNearestBlock(bot: any, blockType: string, min_distance
         return false;
     }
     log(bot, `Found ${blockType} at ${block.position}. Navigating...`);
-    await goToPosition(bot, block.position.x, block.position.y, block.position.z, min_distance);
-    return true;
+    const arrived = await goToPosition(bot, block.position.x, block.position.y, block.position.z, min_distance);
+    // **把结果如实返回**：原来无条件 return true;，路径不可达时工具照样报成功——
+    // 模型反馈过"找不到目标时静默"，其实不是找不到，是找到了但走不过去，结果被吞了。
+    if (!arrived) log(bot, `Found ${block.name} at ${block.position} but could not reach it (path blocked or too far).`);
+    return arrived;
 }
 
 export async function goToNearestEntity(bot: any, entityType: string, min_distance: number = 2, range: number = 64): Promise<boolean> {
@@ -1295,8 +1298,11 @@ export async function goToNearestEntity(bot: any, entityType: string, min_distan
     }
     const distance: number = bot.entity.position.distanceTo(entity.position);
     log(bot, `Found ${entityType} ${distance} blocks away.`);
-    await goToPosition(bot, entity.position.x, entity.position.y, entity.position.z, min_distance);
-    return true;
+    const arrived = await goToPosition(bot, entity.position.x, entity.position.y, entity.position.z, min_distance);
+    // **把结果如实返回**：原来无条件 return true;，路径不可达时工具照样报成功——
+    // 模型反馈过"找不到目标时静默"，其实不是找不到，是找到了但走不过去，结果被吞了。
+    if (!arrived) log(bot, `Found ${entity.name} at ${entity.position} but could not reach it (path blocked or too far).`);
+    return arrived;
 }
 
 export async function goToPlayer(bot: any, username: string, distance: number = 3): Promise<boolean | undefined> {
