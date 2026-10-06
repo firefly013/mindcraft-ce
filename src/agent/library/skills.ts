@@ -1125,6 +1125,15 @@ export async function goToGoal(bot: any, goal: any, _persist?: boolean): Promise
     for (const movements of [nonDestructiveMovements, destructiveMovements]) {
         movements.maxDropDown = 2;
     }
+    // **算路超时也要放宽**：默认 thinkTimeout 只有 5 秒，长路径（从 100 格深的竖井
+    // 爬出来、绕过大片水域）根本算不完，就直接报 'Took to long to decide path to goal!'
+    // ——模型真机报的"goToCoordinates 完全不动"就是这个。物理诊断加上之后一眼就看到了。
+    try {
+        bot.pathfinder.thinkTimeout = 20_000;
+        bot.pathfinder.tickTimeout = 80;
+    } catch {
+        // 老版本没有这两个字段就算了。
+    }
     // 破坏性寻路也别太随便挖：让"挖"比"绕"贵，只有真绕不过去才动镐。
     destructiveMovements.digCost = 5;
 
