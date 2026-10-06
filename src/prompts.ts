@@ -27,6 +27,38 @@ export const PROMPT_SETS: Record<string, Record<string, string>> = {
 
 // 工具描述与参数描述。键为去 ! 的工具名；类型/domain 留在命令定义处（代码约束）。
 export const TOOL_TEXT: Record<string, { description: string; params: Record<string, string> }> = {
+  useBlock: {
+    description:
+      '用一个方块干活。**谁为 null 决定干什么**：input 有 output 空 = 存进去；input 空 output 有 = 取出来；' +
+      '两个都有 = 加工（output 是我期望出来的东西，对不上会明确报）；两个都空 = 直接用这个方块（开箱子读内容 / 睡 / 开关门 / 附魔台读可选附魔）。' +
+      'coords 给了就**走过去**用那一格；不给就用够得着的最近一个（多数情况不用给）。结果会逐段报告，失败也说清卡在哪一步。',
+    params: {
+      type: '方块名，例如 crafting_table / furnace / chest / anvil / bed。',
+      coords: '可选，"x,y,z"。给了就走到那一格再用；不给就用够得着的最近一个。',
+      input: '可选。放进去的东西，如 "3 stone" 或 [{"name":"stone","count":3}]。',
+      output: '可选。期望拿出来的东西（加工时是断言，对不上会报）。',
+    },
+  },
+  useEntity: {
+    description:
+      '对一个实体干活（喂食 / 剪羊毛 / 挤奶 / 和村民交易）。用 entity_id 指定是谁——Live State 的实体表里有 id。' +
+      '**会自己走过去**（实体会动，交给模型算距离不现实）。' +
+      'input 有 output 空 = 给它东西；input 空 output 有 = 想从它身上拿；两个都空 = 看它能提供什么（村民的交易列表）。',
+    params: {
+      entity_id: '实体 id（Live State 实体表里的 #N）。',
+      input: '可选。给它什么，如 "wheat"。',
+      output: '可选。想拿到什么，如 "wool"。',
+    },
+  },
+  craft: {
+    description:
+      '**背包内**合成（2×2，不需要工作台）：木板、木棍、工作台本身、火把这类。' +
+      '需要工作台的 3×3 配方用 useBlock(type=crafting_table, input=…, output=…)。output 是期望产出，做不出来会明确报。',
+    params: {
+      input: '放进去的材料，如 "1 oak_planks"。',
+      output: '期望产出，如 "4 stick"。',
+    },
+  },
   restart: {
     description: '重启机器人进程。',
     params: {},
