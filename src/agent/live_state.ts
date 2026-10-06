@@ -166,6 +166,11 @@ export function durabilityFraction(used: unknown, max: unknown): number | null {
   const u = num(used);
   const m = num(max);
   if (u == null || m == null || m <= 0) return null;
+  // **`max <= 1` 说明读到的不是耐久上限**。模型真机把这条根因挖出来了：
+  // "耐久原始读数 used=35 max=1（明显错）"——1 是**堆叠上限 stackSize**。
+  // 于是 `1 - 35/1` 被钳成 0，快照显示"耐久剩余 0%"、`tool.durability_low`
+  // 反复误报（白白唤醒请求）。读不到就说读不到，不要瞎报。
+  if (m <= 1) return null;
   return Math.min(1, Math.max(0, 1 - u / m));
 }
 

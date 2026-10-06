@@ -257,29 +257,92 @@ async function transferWithContainer(
     }
 
     let left = count <= 0 ? Number.MAX_SAFE_INTEGER : count;
+
+
     let moved = 0;
+
+
+    const countOf = (idx: number): number => {
+
+
+      const slot = container.slots?.[idx] as { name?: string; count?: number } | null | undefined;
+
+
+      return slot != null && slot.name === name ? Number(slot.count ?? 0) : 0;
+
+
+    };
+
+
     for (const src of source) {
-      if (left <= 0) break;
-      const stack = slots[src];
-      if (stack == null) continue;
-      const take = Math.min(left, stack.count ?? 1);
-      let dest: number | null = null;
-      for (let i = to.s; i < Math.min(to.e, slots.length); i++) {
-        const target = slots[i];
-        if (target == null) {
-          dest = i;
-          break;
+
+
+      // **每一格搬到搬不动为止**。原来只调用一次 moveOne 就按请求量计数——模型真机
+
+
+      // 报过"回执说挪了 cobblestone×408，开箱一看只进去 64 个（1 组）"：clickWindow
+
+
+      // 的 shift 点击一次只搬**一栈**。所以搬完要**回头读容器**，按实际减少量计数。
+
+
+      let guard = 0;
+
+
+      while (left > 0 && guard++ < 24) {
+
+
+        const have = countOf(src);
+
+
+        if (have <= 0) break;
+
+
+        const take = Math.min(left, have);
+
+
+        let dest: number | null = null;
+
+
+        for (let i = to.s; i < Math.min(to.e, slots.length); i++) {
+
+
+          const target = container.slots?.[i] as { name?: string } | null | undefined;
+
+
+          if (target == null) { dest = i; break; }
+
+
+          if (target.name === name) { dest = i; break; }
+
+
         }
-        if (target.name === name) {
-          dest = i;
-          break;
-        }
+
+
+        if (dest == null) return { ok: moved > 0, detail: `挪了 ${moved} 个后目标槽满了` };
+
+
+        await moveOne(bot, container, src, dest, take);
+
+
+        const after = countOf(src);
+
+
+        const actual = have - after;
+
+
+        if (actual <= 0) break; // 没搬动，别死循环
+
+
+        moved += actual;
+
+
+        left -= actual;
+
+
       }
-      if (dest == null) return { ok: moved > 0, detail: `挪了 ${moved} 个后目标槽满了` };
-      await moveOne(bot, container, src, dest, take);
-      moved += take;
-      left -= take;
-      slots[src] = null; // 本地账本跟着更新，下一轮不会重复搬同一格
+
+
     }
     return { ok: moved > 0, detail: moved > 0 ? `挪了 ${name}×${moved}` : `没能挪动 ${name}` };
   } catch (error: unknown) {
