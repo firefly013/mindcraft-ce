@@ -2164,7 +2164,15 @@ export async function useToolOn(bot: any, toolName: string, targetName: string):
      */
 
     const distance: number = toolName === 'water_bucket' && block.name !== 'lava' ? 1.5 : 2;
-    await goToPosition(bot, block.position.x, block.position.y, block.position.z, distance);
+    // **够得着就别走**。原来无条件先 goToPosition 走过去，而模型真机踩过这个坑：
+    // "灌水失败时它为了够到水面重新寻路，结果把人带偏 20 多格"——本来站在水边
+    // 1.5 格内，一走路反而走丢了。她的 workaround 就是"原地重试"，那本该是默认行为。
+    const reach: number = bot.entity.position.distanceTo(block.position);
+    if (reach > 4) {
+        await goToPosition(bot, block.position.x, block.position.y, block.position.z, distance);
+    } else {
+        log(bot, `Already within ${reach.toFixed(1)} blocks of ${block.name}, using it from here.`);
+    }
     await bot.lookAt(block.position.offset(0.5, 0.5, 0.5));
 
     // if block in view is closer than the target block, it is in our way. try to move closer
