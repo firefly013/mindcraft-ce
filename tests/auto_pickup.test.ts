@@ -3,7 +3,13 @@
  * 只挑最近的；读不到实体表就安静地什么都不做。
  */
 import { describe, expect, it } from 'vitest';
-import { nearestDropWithin, shouldAttemptPickup, PICKUP_INTERVAL_MS, PICKUP_RADIUS } from '../src/agent/auto_pickup.js';
+import {
+  nearestDropWithin,
+  shouldAttemptPickup,
+  markDiscarded,
+  PICKUP_INTERVAL_MS,
+  PICKUP_RADIUS,
+} from '../src/agent/auto_pickup.js';
 
 function botWith(entities: Array<Record<string, unknown>>, self = { x: 0, y: 64, z: 0 }): unknown {
   const map: Record<string, unknown> = { self: { id: 99, name: 'player', position: self } };
@@ -83,5 +89,31 @@ describe('nearestDropWithin', () => {
     expect(
       nearestDropWithin({ entity: { id: 1, position: { x: 0, y: 0, z: 0 } }, entities: { a: drop(2, NaN, 0, 0) } }, 8),
     ).toBeNull();
+  });
+});
+
+describe('markDiscarded', () => {
+  it('skips what the bot just threw away, then picks it again after the window', () => {
+    const bot = botWith([drop(1, 1, 64, 0, { displayName: 'cobblestone' })]);
+    // 没扔过：正常去捡。
+    expect(nearestDropWithin(bot, 8)?.id).toBe(1);
+
+    markDiscarded('cobblestone');
+    expect(nearestDropWithin(bot, 8)).toBeNull();
+
+    // 过了忽略窗口（30 秒）就重新可以捡——否则地上的东西永远收不回来。
+    const realNow = Date.now;
+    Date.now = (): number => realNow() + 31_000;
+    try {
+      expect(nearestDropWithin(bot, 8)?.id).toBe(1);
+    } finally {
+      Date.now = realNow;
+    }
+  });
+
+  it('does not skip a different item', () => {
+    markDiscarded('dirt');
+    const bot = botWith([drop(2, 1, 64, 0, { displayName: 'cobblestone' })]);
+    expect(nearestDropWithin(bot, 8)?.id).toBe(2);
   });
 });

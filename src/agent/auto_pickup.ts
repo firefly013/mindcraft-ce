@@ -40,6 +40,32 @@ export interface PickupTarget {
  * `displayName`/`metadata` 上，拾取不需要它）。**只认 item**：玩家、怪物、
  * 船、经验球都不该触发"走过去捡"。
  */
+/**
+ * 刚被 `discard` 扔掉的东西，短时间内**不要**去捡。
+ *
+ * 模型真机报过"discard 自己走回来捡回"：discard 的流程是走开 5 格 → 扔掉 →
+ * **再走回原地**，而自动拾取的半径是 8 格——走回去正好又进范围，等于白扔。
+ * 与其让模型跟自己的自动行为打架，不如记住刚扔了什么、一小段时间内跳过它。
+ */
+const discardedAt = new Map<string, number>();
+const DISCARD_IGNORE_MS = 30_000;
+
+/** 记下"刚扔了这个"，30 秒内自动拾取会跳过它。 */
+export function markDiscarded(name: string): void {
+  discardedAt.set(name, Date.now());
+}
+
+/** 这个掉落物是不是刚被自己扔掉的（且还在忽略窗口内）。 */
+function isJustDiscarded(name: string, now: number): boolean {
+  const at = discardedAt.get(name);
+  if (at == null) return false;
+  if (now - at > DISCARD_IGNORE_MS) {
+    discardedAt.delete(name);
+    return false;
+  }
+  return true;
+}
+
 export function nearestDropWithin(bot: unknown, radius: number): PickupTarget | null {
   const b = bot as
     | {
@@ -70,6 +96,8 @@ export function nearestDropWithin(bot: unknown, radius: number): PickupTarget | 
     };
     if (e.id === self.id) continue;
     if (e.name !== 'item') continue;
+    // 刚被自己扔掉的先别捡，否则 discard 等于白干。
+    if (isJustDiscarded(typeof e.displayName === 'string' ? e.displayName : '', Date.now())) continue;
     const ex = num(e.position?.x);
     const ey = num(e.position?.y);
     const ez = num(e.position?.z);

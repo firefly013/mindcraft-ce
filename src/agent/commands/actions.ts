@@ -1,4 +1,5 @@
 import * as skills from '../library/skills.js';
+import { markDiscarded } from '../auto_pickup.js';
 import { td, tp, MESSAGES } from '../../prompts.js';
 import { interactList } from './interact.js';
 
@@ -190,7 +191,16 @@ export const actionsList: AgentCommand[] = [
             const start_loc = agent.bot.entity.position;
             await skills.moveAway(agent.bot, 5);
             await skills.discard(agent.bot, item_name, num);
-            await skills.goToPosition(agent.bot, start_loc.x, start_loc.y, start_loc.z, 0);
+
+            // **不要再走回原地**：原来扔完就 goToPosition 回 start_loc，而自动拾取的半径是
+
+            // 8 格——走回去正好把刚扔的东西又捡回来（模型报过"discard 自己走回来捡回"）。
+
+            // 同时登记一下，30 秒内自动拾取会跳过这个物品名。
+
+            markDiscarded(item_name);
+
+            skills.log(agent.bot, `扔掉了 ${num} 个 ${item_name}（30 秒内自动拾取会跳过它）。`);
         })
     },
     {
