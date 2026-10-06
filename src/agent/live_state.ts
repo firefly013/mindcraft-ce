@@ -402,10 +402,17 @@ export function sampleLiveState(ctx: SampleContext): LiveState {
 
     const packItems: string[] = [];
     let free = 0;
-    for (let i = 9; i <= 35; i++) {
+    // **快捷栏（36-44）也要列出来**。原来只扫 9~35，模型看不见快捷栏里的东西，
+    // 于是"背包里明明有火把/镐"却报"没有"——两个模型各自做了对照实验钉死这条：
+    // 同一份 input，材料在主背包就成功、在快捷栏就失败（`torch×2` 在快捷栏却报
+    // `Don't have any torch to place`；`coal, stick` 在主背包直接产出 `torch×4`）。
+    // 当前手持那格前面标 `*`，免得模型再靠猜。
+    const heldSlot = Number((bot as { quickBarSlot?: unknown }).quickBarSlot);
+    const heldIndex = Number.isFinite(heldSlot) ? 36 + heldSlot : -1;
+    for (let i = 9; i <= 44; i++) {
       const n = slotName(i);
       if (n == null) free++;
-      else packItems.push(`[${i}]${n}`);
+      else packItems.push(`${i === heldIndex ? '*' : ''}[${i}]${n}`);
     }
     empty.backpack = {
       freeSlots: Array.isArray(bot.inventory?.slots) ? free : null,

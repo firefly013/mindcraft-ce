@@ -52,8 +52,17 @@ export interface ItemSpec {
  * 或者 `[{...}, {...}]`）。**归一失败要说清怎么改**，不能吞。
  */
 export function parseItems(raw: unknown): { items: ItemSpec[]; error?: string } {
-  if (raw == null) return { items: [] };
-  const list = Array.isArray(raw) ? raw : [raw];
+  const value = coerceJson(raw);
+  if (value == null) return { items: [] };
+  // **按逗号拆**：模型很自然会写 `"coal, stick"` / `"white_wool, white_wool, oak_planks"`。
+  // 不拆的话整串会被当成**一个物品名**去找，回显就成了"去重成 ×1"——真机上两个模型
+  // 都撞到这条，还各自做了对照实验来定位。
+  const source = Array.isArray(value)
+    ? value
+    : typeof value === 'string' && value.includes(',')
+      ? value.split(',')
+      : [value];
+  const list = source.map((entry) => (typeof entry === 'string' ? entry.trim() : entry)).filter((entry) => entry !== '');
   const items: ItemSpec[] = [];
   for (const entry of list) {
     if (typeof entry === 'string') {
@@ -162,9 +171,158 @@ export function blockNameAt(bot: unknown, x: number, y: number, z: number): stri
   }
 }
 
+/**
+ * 和容器（箱子/桶）之间挪物品。
+ *
+ * **故意不用 `skills.putInChest`/`takeFromChest`**：它们最终落到 mineflayer 的
+ * `window.deposit`/`withdraw`，而那两个只在窗口的 `[inventoryStart, inventoryEnd]`
+ * （箱子窗口是 `[27,63]`）里找物品。真机上模型撞到
+ * `Can't find oak_log in slots [27 - 63]`，可 `findInventoryItem` 明明找得到——
+ * 同一个物品，两条路结论相反。模型还做了对照：`"4 oak_log"` 失败、`"oak_log"`
+ * 成功（两者只差 count），把这条 bug 钉得很死。
+ *
+ * 这里改成**自己扫全部背包槽**再 `moveSlotItem`，失败时把扫了哪些槽、每格是什么
+ * 一并报出来——模型说光看 `[27 - 63]` 它完全没法自查。
+ */
+async function transferWithContainer(
+  bot: any,
+  chestBlock: { x: number; y: number; z: number },
+  name: string,
+  count: number,
+  direction: 'deposit' | 'withdraw',
+): Promise<{ ok: boolean; detail: string }> {
+  let container: any;
+  try {
+    const ok = await skills.goToPosition(bot, chestBlock.x, chestBlock.y, chestBlock.z, 2);
+    if (!ok) return { ok: false, detail: '走不到容器旁边' };
+    container = await bot.openContainer(chestBlock);
+  } catch (error: unknown) {
+    return { ok: false, detail: `打不开容器：${error instanceof Error ? error.message : String(error)}` };
+  }
+  try {
+    const slots: Array<{ name?: string; count?: number } | null> = container.slots ?? [];
+    const invStart = Number(container.inventoryStart ?? 9);
+    const invEnd = Number(container.inventoryEnd ?? slots.length);
+    const boxStart = Number(container.containerStart ?? 0);
+    const boxEnd = Number(container.containerEnd ?? invStart);
+    const from = direction === 'deposit' ? { s: invStart, e: invEnd } : { s: boxStart, e: boxEnd };
+    const to = direction === 'deposit' ? { s: boxStart, e: boxEnd } : { s: invStart, e: invEnd };
+
+    // 源：按名字找（扫**全部**源槽，不看数量写法）
+    const source: number[] = [];
+    for (let i = from.s; i < Math.min(from.e, slots.length); i++) {
+      if (slots[i]?.name === name) source.push(i);
+    }
+    if (source.length === 0) {
+      return {
+        ok: false,
+        detail: `扫了源槽 [${from.s},${from.e}) 没找到 ${name}。手上/背包现有：` +
+          slots
+            .map((s, i) => (s?.name != null ? `${i}:${s.name}×${s.count ?? 1}` : null))
+            .filter((s) => s != null)
+            .slice(0, 24)
+            .join(' '),
+      };
+    }
+
+    let left = count <= 0 ? Number.MAX_SAFE_INTEGER : count;
+    let moved = 0;
+    for (const src of source) {
+      if (left <= 0) break;
+      const stack = slots[src];
+      if (stack == null) continue;
+      const take = Math.min(left, stack.count ?? 1);
+      let dest: number | null = null;
+      for (let i = to.s; i < Math.min(to.e, slots.length); i++) {
+        const target = slots[i];
+        if (target == null) {
+          dest = i;
+          break;
+        }
+        if (target.name === name) {
+          dest = i;
+          break;
+        }
+      }
+      if (dest == null) return { ok: moved > 0, detail: `挪了 ${moved} 个后目标槽满了` };
+      await container.moveSlotItem(src, dest, take);
+      moved += take;
+      left -= take;
+      slots[src] = null; // 本地账本跟着更新，下一轮不会重复搬同一格
+    }
+    return { ok: moved > 0, detail: moved > 0 ? `挪了 ${name}×${moved}` : `没能挪动 ${name}` };
+  } catch (error: unknown) {
+    return { ok: false, detail: `挪物品时出错：${error instanceof Error ? error.message : String(error)}` };
+  } finally {
+    try {
+      await container?.close?.();
+    } catch {
+      /* 关不上就算了 */
+    }
+  }
+}
+
 /** 一步的结果行——逐段报告就是靠它拼出来的。 */
 function step(text: string): string {
   return `- ${text}`;
+}
+
+/**
+ * 跑一个技能，并把它自己写进 `bot.output` 的那几行**如实带回**。
+ *
+ * 为什么必须这样：技能内部 `log(bot, ...)` 写的是**具体原因**——"You have no
+ * fuel to smelt X" / "You do not have enough raw_iron to smelt" / "The furnace
+ * is currently smelting Y"。只看布尔值就会把真因换成一句笼统的"缺原料或燃料？"，
+ * 真机上两个模型就是这样被误导的：它们交叉验证了 7 种写法，最后一起推断出
+ * **错误的**根因（"熔炉需要原料槽+燃料槽两个入口"），还写进了正式反馈。
+ * 同样的流程，摊开就不再是黑盒。
+ */
+async function runSkill(
+  bot: unknown,
+  lines: string[],
+  fn: () => Promise<boolean>,
+  okText: string,
+  failText: string,
+): Promise<boolean> {
+  const read = (): string => String((bot as { output?: unknown })?.output ?? '');
+  const before = read();
+  let ok: boolean;
+  try {
+    ok = await fn();
+  } catch (error: unknown) {
+    // 技能内部抛异常（模型报过 `Cannot read properties of null (reading 'length')`
+    // 这种裸 JS 异常）：说清是哪一步炸的，别把内部异常原样吐出去。
+    lines.push(step(`${failText}：内部错误 ${error instanceof Error ? error.message : String(error)}`));
+    return false;
+  }
+  const after = read();
+  const delta = (after.startsWith(before) ? after.slice(before.length) : after).trim();
+  lines.push(step(ok ? okText : failText));
+  if (delta !== '') {
+    for (const line of delta.split('\n')) {
+      if (line.trim() !== '') lines.push(`    ${line.trim()}`);
+    }
+  }
+  return ok;
+}
+
+/**
+ * 物品规格的容错解析。
+ *
+ * **必须容忍 JSON 字符串**：工具 schema 把 `input`/`output` 声明成 string，
+ * 所以模型传数组时会被序列化成 `[{"name":"raw_copper","count":45},…]` 这样的
+ * **一个字符串**。真机上模型按文档写了数组，工具却把整段 JSON 当成一个物品名
+ * 去找，回"背包里没有 [{...}]"——模型自己把这条报上来了。
+ */
+function coerceJson(raw: unknown): unknown {
+  if (typeof raw !== 'string') return raw;
+  const text = raw.trim();
+  if (!text.startsWith('[') && !text.startsWith('{')) return raw;
+  try {
+    return JSON.parse(text) as unknown;
+  } catch {
+    return raw;
+  }
 }
 
 function itemText(items: readonly ItemSpec[]): string {
@@ -247,6 +405,7 @@ export const interactList: AgentCommand[] = [
       if (plan.kind === 'unsupported') return `useBlock 用不了：${plan.reason}`;
 
       // 定位：给了 coords 就过去；没给就用够得着的最近一个。
+      let located: { x: number; y: number; z: number } | null;
       if (typeof coords === 'string' && coords.trim() !== '') {
         const parts = coords.split(',').map((p) => Number(p.trim()));
         if (parts.length !== 3 || parts.some((n) => !Number.isFinite(n))) {
@@ -262,24 +421,24 @@ export const interactList: AgentCommand[] = [
         if (!ok) {
           return renderReport(lines, `走到 (${x},${y},${z}) 失败：路径被堵或到不了。可以先 goToCoordinates，或者换一个方块。`);
         }
+        located = { x, y, z };
       } else {
         const nearby = nearestReachableBlock(agent.bot, type);
         if (nearby == null) {
           return `身边 4 格内没有够得着的 ${type}。要么先 goToCoordinates 走过去再给 coords，要么先 placeHere 放一个。`;
         }
         lines.push(step(`用够得着的 ${type} @(${nearby.x},${nearby.y},${nearby.z})`));
+        located = nearby;
       }
 
       // 分派到已有技能。每一步都写进 lines，失败也写清楚。
       if (plan.kind === 'interact') {
         if (type === 'chest' || type === 'trapped_chest' || type === 'barrel') {
-          const ok = await skills.viewChest(agent.bot);
-          lines.push(step(ok ? '打开看了里面的东西' : '打开失败'));
+          await runSkill(agent.bot, lines, () => skills.viewChest(agent.bot), '打开看了里面的东西', '打开失败');
           return renderReport(lines);
         }
         if (type === 'bed') {
-          const ok = await skills.goToBed(agent.bot);
-          lines.push(step(ok ? '睡下了' : '睡不了（不是夜晚，或旁边有怪）'));
+          await runSkill(agent.bot, lines, () => skills.goToBed(agent.bot), '睡下了', '睡不了（不是夜晚，或旁边有怪）');
           return renderReport(lines);
         }
         lines.push(step(`直接用了 ${type}（没有 input/output，所以不改变它的内容）`));
@@ -287,22 +446,21 @@ export const interactList: AgentCommand[] = [
       }
 
       if (plan.kind === 'deposit') {
+        if (located == null) return renderReport(lines, '定位不到容器。');
         for (const item of parsedIn.items) {
-          const have = countInInventory(agent.bot, item.name);
-          if (have === 0) {
-            lines.push(step(`背包里没有 ${item.name}，跳过`));
-            continue;
-          }
-          const ok = await skills.putInChest(agent.bot, item.name, item.count);
-          lines.push(step(ok ? `放入 ${item.name}×${item.count}` : `放入 ${item.name} 失败`));
+          const result = await transferWithContainer(agent.bot, located, item.name, item.count, 'deposit');
+          lines.push(step(result.ok ? `放入 ${item.name}×${item.count}` : `放入 ${item.name} 失败`));
+          lines.push(`    ${result.detail}`);
         }
         return renderReport(lines);
       }
 
       if (plan.kind === 'withdraw') {
+        if (located == null) return renderReport(lines, '定位不到容器。');
         for (const item of parsedOut.items) {
-          const ok = await skills.takeFromChest(agent.bot, item.name, item.count);
-          lines.push(step(ok ? `取出 ${item.name}×${item.count}` : `取出 ${item.name} 失败（箱子里没有？）`));
+          const result = await transferWithContainer(agent.bot, located, item.name, item.count, 'withdraw');
+          lines.push(step(result.ok ? `取出 ${item.name}×${item.count}` : `取出 ${item.name} 失败`));
+          lines.push(`    ${result.detail}`);
         }
         return renderReport(lines);
       }
@@ -311,22 +469,29 @@ export const interactList: AgentCommand[] = [
       const wanted = parsedOut.items[0];
       if (wanted == null) return renderReport(lines, 'useBlock 用不了：加工要给出 output。');
       if (type === 'furnace' || type === 'blast_furnace' || type === 'smoker') {
-        const ok = await skills.smeltItem(agent.bot, wanted.name, wanted.count);
-        lines.push(step(ok ? `已点火，开始烧 ${wanted.name}×${wanted.count}` : `烧不了 ${wanted.name}（缺原料或燃料？）`));
-        // **不阻塞**：只把估计时间写进返回，取成品是另一次 useBlock（output 单独给）
-        return renderReport(
+        const ok = await runSkill(
+          agent.bot,
           lines,
-          '熔炉是异步的：约 10 秒一件，到点了再用 useBlock(type=furnace, output=...) 来取。',
+          () => skills.smeltItem(agent.bot, wanted.name, wanted.count),
+          `已点火，开始烧 ${wanted.name}×${wanted.count}`,
+          `烧不了 ${wanted.name}`,
         );
+        // **不阻塞**：只把估计时间写进返回，取成品是另一次 useBlock（output 单独给）。
+        // **失败时不写这句**——模型反馈过它很误导（"failed 还附 10 秒后来取"）。
+        return ok
+          ? renderReport(lines, '熔炉是异步的：约 10 秒一件，到点了再用 useBlock(type=furnace, output=...) 来取。')
+          : renderReport(lines, '上面那几行是熔炉自己报的原因；照着改（缺燃料就带煤/木炭，炉子里有别的东西就先取出来）。');
       }
       // 工作台 / 铁砧
       const have = countInInventory(agent.bot, wanted.name);
-      const ok = await skills.craftRecipe(agent.bot, wanted.name, wanted.count);
-      if (ok) {
-        lines.push(step(`产出 ${wanted.name}×${wanted.count}`));
-        return renderReport(lines);
-      }
-      lines.push(step(`做不出 ${wanted.name}`));
+      const crafted = await runSkill(
+        agent.bot,
+        lines,
+        () => skills.craftRecipe(agent.bot, wanted.name, wanted.count),
+        `产出 ${wanted.name}×${wanted.count}`,
+        `做不出 ${wanted.name}`,
+      );
+      if (crafted) return renderReport(lines);
       return renderReport(
         lines,
         `检查一下 input（现在给的是 ${itemText(parsedIn.items) || '空'}）够不够、配方对不对。` +
