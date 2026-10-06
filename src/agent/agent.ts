@@ -292,6 +292,23 @@ export class Agent {
 
     private currentSource: string = 'system';
 
+    /**
+     * 事件的**唯一入口**。
+     *
+     * 旧路径是 `loop.notify()` 同步拿 verdict、再 `handleDecision(verdict)`——
+     * 事件进的是手写调度器。新路径下**事件就是一条消息**：渲染成文本后交给
+     * `EventIntake`，由它按级别落到原生原语（L1/L2 `write`、L3 `steer`、
+     * L4 `abort`+`submit`、L5 `abort`+保命反射）。
+     *
+     * 10 个触发站点全部收口到这里，翻面时只改这一个函数体。
+     */
+    private notify(kind: Kind, level: Level, payload: unknown): void {
+        const verdict = this.loop.notify({ kind, level, payload });
+        void this.loop.handleDecision(verdict.decision).catch((err: unknown) => {
+            console.error('event decision failed:', err instanceof Error ? err.message : String(err));
+        });
+    }
+
     private buildLoop(): void {
         this.scheduler = new Scheduler();
         this.edgeWatcher = createEdgeWatcher();
@@ -443,8 +460,7 @@ export class Agent {
                 execute: (tool: string, toolArgs: Record<string, unknown>): Promise<string> =>
                     executeToolCall(this, tool, toolArgs),
                 notify: (payload: { call: string; result: LoopToolResult }): void => {
-                    const verdict = this.loop.notify({ kind: KIND.TOOL, level: LEVEL.WAKE, payload });
-                    void this.loop.handleDecision(verdict.decision);
+                    this.notify(KIND.TOOL, LEVEL.WAKE, payload);
                 },
             });
         }
@@ -606,8 +622,7 @@ export class Agent {
         // 而 modelCall 会因为 shut_up 直接早退——那样这些事件就再也补不回来
         // （事件流引入后的新副作用）。挡在门外，解除静音后它们仍会被送达。
         if (this.shut_up) return false;
-        const verdict = this.loop.notify({ kind, level, payload: { source, message, ...extra } });
-        await this.loop.handleDecision(verdict.decision);
+        this.notify(kind, level, { source, message, ...extra });
         return true;
     }
 
@@ -658,13 +673,10 @@ export class Agent {
                 const hurt = shouldEmitHurt(prev_health, this.bot.health, this.lastHurtEmitAt, Date.now());
                 if (hurt.fire) {
                     this.lastHurtEmitAt = Date.now();
-                    const verdict = this.loop.notify({
-                        kind: KIND.WORLD,
-                        level: LEVEL.WAKE,
-                        payload: { type: 'bot.hurt', health: this.bot.health, damage: hurt.damage },
-                    });
-                    void this.loop.handleDecision(verdict.decision).catch((err: unknown) => {
-                        console.error('hurt decision failed:', err instanceof Error ? err.message : String(err));
+                    this.notify(KIND.WORLD, LEVEL.WAKE, {
+                        type: 'bot.hurt',
+                        health: this.bot.health,
+                        damage: hurt.damage,
                     });
                 }
             }
@@ -672,14 +684,7 @@ export class Agent {
             // 低血边沿：掉进线以下发一次 L5，回到 12 以上才重新 armed。
             if (shouldTriggerEmergency(this.bot.health) && !this.lowHpArmed) {
                 this.lowHpArmed = true;
-                const verdict = this.loop.notify({
-                    kind: KIND.WORLD,
-                    level: LEVEL.EMERGENCY,
-                    payload: { health: this.bot.health },
-                });
-                void this.loop.handleDecision(verdict.decision).catch((err: unknown) => {
-                    console.error('emergency decision failed:', err instanceof Error ? err.message : String(err));
-                });
+                this.notify(KIND.WORLD, LEVEL.EMERGENCY, { health: this.bot.health });
             } else if (typeof this.bot.health === 'number' && this.bot.health >= 12) {
                 this.lowHpArmed = false;
             }
@@ -741,12 +746,7 @@ export class Agent {
                 if (now - this.lastCollectEmitAt < 2000) return;
                 this.lastCollectEmitAt = now;
                 const name = collected?.name ?? collected?.displayName ?? 'item';
-                const verdict = this.loop.notify({
-                    kind: KIND.WORLD,
-                    level: LEVEL.WAKE,
-                    payload: { type: 'inventory.collected', item: String(name) },
-                });
-                void this.loop.handleDecision(verdict.decision);
+                this.notify(KIND.WORLD, LEVEL.WAKE, { type: 'inventory.collected', item: String(name) });
             } catch (err: unknown) {
                 console.error('collect event failed:', err instanceof Error ? err.message : String(err));
             }
@@ -754,12 +754,10 @@ export class Agent {
         // 开箱：容器界面打开即事件（关箱不报，没信息量）。
         this.bot.on('windowOpen', (window: any) => {
             try {
-                const verdict = this.loop.notify({
-                    kind: KIND.WORLD,
-                    level: LEVEL.WAKE,
-                    payload: { type: 'inventory.container', title: String(window?.title ?? 'container') },
+                this.notify(KIND.WORLD, LEVEL.WAKE, {
+                    type: 'inventory.container',
+                    title: String(window?.title ?? 'container'),
                 });
-                void this.loop.handleDecision(verdict.decision);
             } catch (err: unknown) {
                 console.error('container event failed:', err instanceof Error ? err.message : String(err));
             }
@@ -789,14 +787,17 @@ export class Agent {
     async update(delta: number): Promise<void> {
         void delta;
         await this.checkTaskDone();
-        await this.pollEdges();
+        this.pollEdges();
     }
 
     /**
-     * 边沿轮询（300ms 一次）：现拼快照，过检测器，定级后泵入调度。
-     * 等级高的先处理；顺序执行，一次只跑一轮（update 本来就是串行的）。
+     * 边沿轮询（300ms 一次）：现拼快照，过检测器，定级后交给 `notify`。
+     * 等级高的先处理。
+     *
+     * 不再 async：事件的投递现在是一次同步 `notify`（`EventIntake` 内部把
+     * 异步动作串行化），这里没有可 await 的东西了。
      */
-    private async pollEdges(): Promise<void> {
+    private pollEdges(): void {
         if (!this.edgeWatcher || !this.loop || !this.bot) return;
         let snapshot;
         try {
@@ -825,12 +826,11 @@ export class Agent {
             isStuck(this.stuckPos, pos, this.stuckSince, now, this.scheduler.describe().actionId != null)
         ) {
             this.stuckSince = now;
-            const verdict = this.loop.notify({
-                kind: KIND.WORLD,
-                level: LEVEL.PREEMPT,
-                payload: { type: 'task.stuck', position: pos, action: snapshot.currentAction ?? null },
+            this.notify(KIND.WORLD, LEVEL.PREEMPT, {
+                type: 'task.stuck',
+                position: pos,
+                action: snapshot.currentAction ?? null,
             });
-            await this.loop.handleDecision(verdict.decision);
         }
         // 心跳：5 分钟无动作无请求，醒一次做反思，防睡死。
         if (
@@ -838,12 +838,7 @@ export class Agent {
             this.scheduler.describe().actionId == null
         ) {
             this.lastHeartbeatAt = now;
-            const heartbeat = this.loop.notify({
-                kind: KIND.WORLD,
-                level: LEVEL.WAKE,
-                payload: { type: 'system.heartbeat' },
-            });
-            await this.loop.handleDecision(heartbeat.decision);
+            this.notify(KIND.WORLD, LEVEL.WAKE, { type: 'system.heartbeat' });
         }
         if (events.length === 0) return;
         events.sort((a, b) => b.level - a.level);
@@ -852,17 +847,12 @@ export class Agent {
                 { type: event.type, level: event.level, key: event.key },
                 snapshot,
             );
-            const verdict = this.loop.notify({
-                kind: KIND.WORLD,
-                level: schedulerLevelFor(edgeLevel),
-                payload: {
-                    type: event.type,
-                    key: event.key,
-                    delta: event.delta,
-                    actionContext: event.actionContext,
-                },
+            this.notify(KIND.WORLD, schedulerLevelFor(edgeLevel), {
+                type: event.type,
+                key: event.key,
+                delta: event.delta,
+                actionContext: event.actionContext,
             });
-            await this.loop.handleDecision(verdict.decision);
         }
     }
 
@@ -883,12 +873,10 @@ export class Agent {
             if (res) {
                 // 任务完成/失败先进调度（失败 L4，成功 L3），再收尾退出。
                 const failed = typeof res.score === 'number' && res.score < 1;
-                const verdict = this.loop.notify({
-                    kind: KIND.WORLD,
-                    level: failed ? LEVEL.PREEMPT : LEVEL.WAKE,
-                    payload: { type: failed ? 'task.failed' : 'task.done', score: res.score },
+                this.notify(KIND.WORLD, failed ? LEVEL.PREEMPT : LEVEL.WAKE, {
+                    type: failed ? 'task.failed' : 'task.done',
+                    score: res.score,
                 });
-                await this.loop.handleDecision(verdict.decision);
                 await this.history.add('system', MESSAGES.taskEnded(res.score));
                 await this.history.save();
                 // await new Promise(resolve => setTimeout(resolve, 3000)); // Wait 3 second for save to complete
