@@ -722,7 +722,7 @@ export function renderLiveState(s: LiveState): string {
   );
   const h = s.held;
   lines.push(
-    `Held: main ${h.mainHand ?? 'empty'}${h.mainHandDurability != null ? ` (durability ${Math.round(h.mainHandDurability * 100)}%)` : ''} ` +
+    `Held: main ${h.mainHand ?? 'empty'}${h.mainHandDurability != null ? ` (耐久剩余 ${Math.round(h.mainHandDurability * 100)}%)` : ''} ` +
       `off ${h.offHand ?? 'empty'} armor ${h.armor.length > 0 ? h.armor.join('/') : 'none'}`,
   );
   lines.push(

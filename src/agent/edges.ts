@@ -41,6 +41,8 @@ export interface HeldSlot {
   slot: number | string;
   /** 剩余耐久比例 0~1。 */
   fraction?: number | null;
+  /** 手上这件东西的名字（`durability_low` 要告诉模型是哪件快坏了）。 */
+  item?: string;
 }
 
 export interface EdgeSnapshot {
@@ -544,6 +546,13 @@ function deltaFor(detector: Detector, key: string | number | null, snapshot: Edg
   if (detector.type.startsWith('bot.oxygen')) delta['oxygen'] = snapshot.oxygen;
   if (detector.type === 'world.light_low') delta['light'] = snapshot.light;
   if (detector.type === 'inventory.full') delta['freeSlots'] = snapshot.freeSlots;
+  // 手上那件工具快坏了——**说清是哪件、还剩多少**。模型反馈过这条事件不说是
+  // 哪个物品，它只能猜是哪把镐（key 固定是 'hand'，换手也不会变）。
+  if (detector.type === 'tool.durability_low') {
+    const held = (snapshot.heldSlots ?? []).find((h) => h.slot === 'hand');
+    delta['item'] = held?.item ?? null;
+    delta['remaining'] = held?.fraction ?? null;
+  }
   // 背包食物数 + 当前饥饿值一起给：前者是"还有没有存货"，后者是"现在饿不饿"。
   // 只给前者会让模型以为 `food_low` 是在说饥饿值（它反馈过这件事）。
   if (detector.type === 'inventory.food_items_low') {
@@ -616,12 +625,20 @@ export function snapshotFromBot(bot: unknown, extra: SnapshotExtra = {}): EdgeSn
       // 背包读不到就不报食物数。
     }
 
-    const held = (b['heldItem'] ?? null) as { durabilityUsed?: unknown; maxDurability?: unknown } | null;
+    const held = (b['heldItem'] ?? null) as {
+      name?: unknown;
+      durabilityUsed?: unknown;
+      maxDurability?: unknown;
+    } | null;
     // 与 Live State 共用同一个钳制过的算法：负的 fraction 会让
     // `tool.durability_low` 永远处于触发态（模型反馈过 -300%/-900%）。
     const fraction = durabilityFraction(held?.durabilityUsed, held?.maxDurability);
     if (fraction != null) {
-      snap.heldSlots = [{ slot: 'hand', fraction }];
+      // **带上物品名**：模型反馈过"durability_low 不说是哪个物品"，它只能猜是哪把
+      // 镐快坏了。手上一换东西 key 仍是 'hand'，所以名字必须在 delta 里。
+      snap.heldSlots = [
+        { slot: 'hand', fraction, ...(typeof held?.name === 'string' ? { item: held.name } : {}) },
+      ];
     }
 
     const time = num((b['time'] as { timeOfDay?: unknown } | undefined)?.timeOfDay);
