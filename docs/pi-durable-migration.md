@@ -235,4 +235,38 @@ pi-ai 额外  stream:true, stream_options:{include_usage:true}, store:false  ←
 
 **门禁**：`typecheck` 0 / `lint` 0 / 27 文件 352 测试全绿 / 覆盖率 100% / `build` 0 / `ALL PROMPT REFS OK`。
 
+### P3 已完成（回合语义 + 运行时装配）
+
+新增：
+
+| 文件 | 作用 |
+|---|---|
+| `src/runtime/entries.ts` | `SayEntry`（自定义 entry `mc.say`），Say 通道的独立记录 |
+| `src/runtime/loop.ts` | `withTerminate` / `createSayTool` / `createFinishTool` / `liveTailHook` / `systemSection` |
+| `src/runtime/runtime.ts` | `openBotRuntime()`：把 P1+P2+P3 拼成可驱动的 `BotRuntime` |
+| `tests/runtime_loop.test.ts` | 11 个测试（faux provider，不联网） |
+
+**核心语义映射：`control.terminate` ↔ "一轮一次模型调用"。**
+
+侦察发现 mindcraft-ce 的 ReAct **并不是**"工具结果自动续起下一轮"：`handleDecision` → `runRound`（一次模型请求）→ `runCalls` → `finishRequest`，下一轮由**新事件**触发。而 pi-durable 的 `terminate` 要求**整轮所有结果**都请求终止才结束 run。
+
+→ 所以 `withTerminate` 必须包在**每一个**工具外面，而不是只给 `Finish` 挂。只挂 `Finish` 的话，`[Look, Say]` 这种常见组合因为 Look 没请求 terminate，会白白多打一次模型。这一条有专门的载荷测试（`callCount === 1`）钉住。
+
+**保留 `Finish` 工具**：提示词里到处在教模型"用 Finish 收尾"，删掉会改提示词契约；它现在退化为一个显式 yield。
+
+**动态内容不进 section**（延续 P1 的结论）：静态提示词走 `section`（只发增量），每轮变化的事件/记忆/快照走 `beforeRequest`。测试验证：两轮之间提示词不变时 `pi.system` **只有 1 条**；尾巴只影响本次请求，`JSON.stringify(entries)` 里搜不到尾巴文本。
+
+**踩坑记录**：
+
+1. **建根会话时必须写模型**。`harness.root(ctx)` 不带 `agent.model` 的会话没有模型，generation 起不来，`submit()` 直接以 `unanswered` 结算——9 个测试同时失败才暴露出来。现在 `openBotSession` 接受 `model`，创建时写入，重开时比对不一致才 `configure()`（避免每次开库多一次 commit）。
+2. pi-durable 把系统提示词作为**独立的一条 system 消息**，且实测排在 user 输入**之后**。依赖消息顺序的断言不可靠，改为直接单测 hook。
+3. `execute` 契约要求返回 Promise，但没有 `await` 时写 `async` 会触发 `require-await`；改用 `() => Promise.resolve(...)`。
+
+**门禁**：`typecheck` 0 / `lint` 0 / **28 文件 363 测试全绿** / 覆盖率 100% / `build` 0 / `ALL PROMPT REFS OK`。
+
+### 仍未接线的部分（P4 起）
+
+`BotRuntime` 已经可用，但 `agent.ts` / `prompter.ts` **仍走旧路径**——双路径迁移，P4 把 52 个工具接过来、P5 接感知与双通道、P6 接压缩与文档，最后统一切换。
+
+
 

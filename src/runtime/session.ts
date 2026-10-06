@@ -14,6 +14,7 @@ import { BACKGROUND_CONTEXT } from '@earendil-works/chord/context';
 import {
   Harness,
   type Conversation,
+  type ModelRef,
   type RegistryReader,
   type ToolRegistration,
 } from '@earendil-works/pi-durable';
@@ -42,6 +43,15 @@ export interface BotSessionOptions<Tool extends ToolRegistration = ToolRegistrat
   name: string;
   models: Models;
   registry: RegistryReader<Tool>;
+  /**
+   * 会话使用的模型。
+   *
+   * 必须给：不写进 `pi.agent` 的会话没有模型，generation 起不来，`submit()`
+   * 会直接以 `unanswered` 结算（这个坑踩过一次）。
+   * 首次创建时随 `root()` 写入；重开时若存档里的与当前不一致则以当前为准
+   * （profile 换了模型要生效）。
+   */
+  model?: ModelRef;
   /** 落盘根目录，默认 `./bots/<name>`。 */
   baseDir?: string;
   /** 实例区分后缀，用于同名/同 profile 多开时避免撞同一个库文件。 */
@@ -69,7 +79,19 @@ export async function openBotSession<Tool extends ToolRegistration>(
     BACKGROUND_CONTEXT,
   );
   // 根 conversation 在首次调用时创建；重开同一个库会拿回同一个。
-  const conversation = await harness.root(BACKGROUND_CONTEXT);
+  const conversation = await harness.root(
+    BACKGROUND_CONTEXT,
+    options.model != null ? { agent: { model: options.model } } : undefined,
+  );
+
+  // `root()` 只在创建时应用 agent；重开时存档里的模型会赢。profile 换了模型
+  // 要能生效，所以这里比对一次、不一致才写（避免每次开库都多一次 commit）。
+  if (options.model != null) {
+    const agent = await conversation.agent(BACKGROUND_CONTEXT);
+    if (agent.model?.provider !== options.model.provider || agent.model?.modelId !== options.model.modelId) {
+      await conversation.configure({ model: options.model }, BACKGROUND_CONTEXT);
+    }
+  }
 
   return {
     harness,
