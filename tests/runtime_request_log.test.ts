@@ -1,10 +1,10 @@
 /**
  * 请求日志：D1（一文件一代、覆盖写）/ D2（压仓翻页）/ D3（= 模型实际收到的消息列）。
  */
-import { mkdtempSync, readdirSync, readFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { BACKGROUND_CONTEXT } from '@earendil-works/chord/context';
 import { createModels } from '@earendil-works/pi-ai';
 import type { Message } from '@earendil-works/pi-ai';
@@ -28,6 +28,7 @@ function tempDir(): string {
 }
 
 afterEach(() => {
+  vi.restoreAllMocks();
   while (tempDirs.length > 0) {
     const dir = tempDirs.pop();
     if (dir == null) continue;
@@ -150,10 +151,33 @@ describe('D3：日志 = 模型实际收到的消息列', () => {
   });
 
   it('写不进去不抛（日志是旁路，不是主链路）', () => {
-    // 用一个不可能创建的路径（Windows 上把文件当目录）
+    // 拿一个**文件**当目录用：mkdirSync 必然失败（ENOTDIR），
+    // 于是走到"写失败"那条兜底路径。
     const file = join(tempDir(), 'not-a-dir');
+    writeFileSync(file, 'x');
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
     const sink = createRequestLogSink({ dir: join(file, 'logs'), tools: () => [] });
     expect(() => sink.writeRequest([user('x')])).not.toThrow();
+    expect(error).toHaveBeenCalled();
+  });
+
+  it('content 序列化不了时降级成标记，不抛', () => {
+    // 循环引用：`contentText` 的 catch 分支
+    const circular: Record<string, unknown> = {};
+    circular['self'] = circular;
+    const dir = tempDir();
+    const sink = sinkIn(dir);
+    expect(() =>
+      sink.writeRequest([{ role: 'user', content: circular } as unknown as Message]),
+    ).not.toThrow();
+    expect(readFileSync(sink.file, 'utf8')).toContain('[unserializable]');
+  });
+
+  it('content 是 undefined（JSON.stringify 返回 undefined）→ 记 null', () => {
+    const dir = tempDir();
+    const sink = sinkIn(dir);
+    sink.writeRequest([{ role: 'user', content: undefined } as unknown as Message]);
+    expect(readFileSync(sink.file, 'utf8')).toContain('[user] null');
   });
 });
 

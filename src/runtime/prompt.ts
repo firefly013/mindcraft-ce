@@ -26,7 +26,17 @@ import type { AgentProfile } from '../types/common.js';
  * 未替换的占位符会警告——静默留一个 `$STATS` 在系统提示词里，模型会当成
  * 字面文本读，比报错更难查。
  */
-export function staticSystemPrompt(conversing: string, name: string): string {
+/**
+ * 把提示词模板渲染成静态系统提示词。
+ *
+ * 未替换的占位符会警告——静默留一个 `$STATS` 在系统提示词里，模型会当成
+ * 字面文本读，比报错更难查。
+ *
+ * 模板缺省（profile 把提示词集覆盖坏了）时返回空串：宁可没有系统提示词，
+ * 也不要发一个字面 `undefined` 出去。
+ */
+export function staticSystemPrompt(conversing: string | undefined, name: string): string {
+  if (conversing == null) return '';
   const text = conversing.replaceAll('$NAME', name);
   const remaining = text.match(/\$[A-Z_]+/g);
   if (remaining != null) {
@@ -43,5 +53,5 @@ export function staticSystemPrompt(conversing: string, name: string): string {
  */
 export function systemPromptFromProfile(profile: unknown, name: string): string {
   const prompts = resolvePromptSet(profile as AgentProfile | undefined) as Record<string, string>;
-  return staticSystemPrompt(prompts['conversing'] ?? '', name);
+  return staticSystemPrompt(prompts['conversing'], name);
 }

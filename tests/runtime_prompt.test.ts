@@ -32,6 +32,10 @@ describe('staticSystemPrompt', () => {
     expect(warn).toHaveBeenCalledTimes(1);
     expect(String(warn.mock.calls[0]?.[1])).toContain('$STATS');
   });
+
+  it('模板缺省（undefined）时返回空串，而不是字面 undefined', () => {
+    expect(staticSystemPrompt(undefined, 'Andy')).toBe('');
+  });
 });
 
 describe('systemPromptFromProfile', () => {

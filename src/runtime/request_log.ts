@@ -26,6 +26,7 @@ import { writeFileSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { CompactionTask, GenerationTask, hook, type HookRegistration } from '@earendil-works/pi-durable';
 import type { Message } from '@earendil-works/pi-ai';
+import { describeError } from './logger.js';
 
 /** 页号补零到 3 位：`request-001.log`。 */
 function pageFile(dir: string, page: number): string {
@@ -107,7 +108,7 @@ export function createRequestLogSink(options: RequestLogOptions): RequestLogSink
         writeFileSync(sink.file, `${header}\n\n${body}\n`);
       } catch (err: unknown) {
         // 日志写不进去不该拖垮 agent：这是旁路，不是主链路。
-        console.error('request log write failed:', err instanceof Error ? err.message : String(err));
+        console.error('request log write failed:', describeError(err));
       }
     },
     nextPage(): void {

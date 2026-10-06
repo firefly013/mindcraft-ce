@@ -49,18 +49,40 @@ export interface Logger extends ModuleLogger {
   readonly file: string;
 }
 
-/** 把任意值压成一行可读的短文本。 */
+/**
+ * 把任意抛出物转成一行可读文本。
+ *
+ * 单独抽出来是为了**能把它测干净**：内联写
+ * `error instanceof Error ? error.message : String(error)` 时，非 Error 那条
+ * 分支在真机上够不到（fs 只抛 Error），留着就是死分支、覆盖率也钉不住。
+ */
+export function describeError(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+/**
+ * 把任意值压成一行可读的短文本。
+ *
+ * 对象**原样嵌套**（日志更好读），但只在那确实能序列化时——`JSON.stringify`
+ * 对函数 / symbol 返回 `undefined`，原样放回去会让整个字段从 JSON 行里
+ * **消失**（`JSON.stringify` 会丢掉值为 undefined 的键），排错时看到的就是
+ * "字段没了"。
+ */
 function short(value: unknown): unknown {
   if (value == null || typeof value === 'number' || typeof value === 'boolean') return value;
-  let text: string;
   if (typeof value === 'string') {
-    text = value;
-  } else {
-    try {
-      text = JSON.stringify(value) ?? String(value);
-    } catch {
-      return '[unserializable]';
-    }
+    return value.length <= FIELD_LIMIT
+      ? value
+      : `${value.slice(0, FIELD_LIMIT)}…[+${value.length - FIELD_LIMIT}]`;
+  }
+  let text: string;
+  try {
+    const json = JSON.stringify(value);
+    // 函数 / symbol：JSON 里根本表示不出来，退成源码文本。
+    if (json == null) return String(value);
+    text = json;
+  } catch {
+    return '[unserializable]';
   }
   if (text.length <= FIELD_LIMIT) return value;
   return `${text.slice(0, FIELD_LIMIT)}…[+${text.length - FIELD_LIMIT}]`;
@@ -93,12 +115,9 @@ export function createLogger(options: LoggerOptions): Logger {
       mod,
     };
     for (const [key, value] of Object.entries(data ?? {})) record[key] = short(value);
-    let line: string;
-    try {
-      line = JSON.stringify(record);
-    } catch {
-      line = JSON.stringify({ ts: record['ts'], level, mod, note: '[unserializable data]' });
-    }
+    // `short()` 保证每个值都能序列化（长/循环/抛错的一律降级成字符串），
+    // 所以这里不需要再兜一层 try——那是够不到的分支。
+    const line = JSON.stringify(record);
     try {
       if (!ready) {
         mkdirSync(options.dir, { recursive: true });
@@ -109,7 +128,7 @@ export function createLogger(options: LoggerOptions): Logger {
       // 日志写不进去不许拖垮 agent。只在第一次说一声，免得刷屏。
       if (!ready) {
         ready = true;
-        console.error('agent log unavailable:', error instanceof Error ? error.message : String(error));
+        console.error('agent log unavailable:', describeError(error));
       }
     }
     if (level === 'warn' || level === 'error') {

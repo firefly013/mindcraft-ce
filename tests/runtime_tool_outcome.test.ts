@@ -52,6 +52,18 @@ describe('loopResultText', () => {
     expect(text).not.toContain('[object Object]');
   });
 
+  it('data 是函数 → String() 兜底（JSON.stringify 对函数返回 undefined）', () => {
+    // 箭头函数的源码里没有 `function` 关键字，所以只断言"给了可读的源码"
+    expect(outcomeText((): void => {})).toContain('=>');
+  });
+
+  it('data 循环引用 → [unserializable]，**不是** [object Object]', () => {
+    const circular: Record<string, unknown> = {};
+    circular['self'] = circular;
+    // [object Object] 看起来像一条真的回执，比没有信息更糟
+    expect(outcomeText(circular)).toBe('[unserializable]');
+  });
+
   it('args 超长会被截断（500 字），并标出来', () => {
     const text = loopResultText('X', { blob: 'a'.repeat(800) }, { status: 'completed', data: 'ok' });
     expect(text).toContain('…[截断]');

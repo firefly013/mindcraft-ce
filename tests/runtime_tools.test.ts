@@ -97,6 +97,21 @@ describe('工具注册项', () => {
     expect(tool.description).toBe('演示命令');
   });
 
+  it('没有 description 的命令退回用名字当描述（去掉 ! 前缀）', () => {
+    const tool = commandToRegistration({ ...demo, description: '' }, () => '');
+    expect(tool.description).toBe('demo');
+  });
+
+  it('args 整个为 null 也不崩（归一成空对象）', async () => {
+    let seen: unknown[] = [];
+    const tool = commandToRegistration(demo, (_command, ordered) => {
+      seen = ordered;
+      return 'ok';
+    });
+    await tool.execute(null as never, {} as never, {} as never);
+    expect(seen).toEqual([undefined, undefined, undefined]);
+  });
+
   it('位置参数按 params 的 key 顺序传入，null 归一为 undefined', async () => {
     let seen: unknown[] = [];
     const tool = commandToRegistration(demo, (_command, ordered) => {
@@ -136,10 +151,12 @@ describe('outcomeText', () => {
     expect(outcomeText({ a: 1 })).toBe('{"a":1}');
   });
 
-  it('循环引用退回 String()，不抛', () => {
+  it('循环引用 → [unserializable]，不抛也不给 [object Object]', () => {
     const circular: Record<string, unknown> = {};
     circular['self'] = circular;
-    expect(outcomeText(circular)).toBe('[object Object]');
+    // 以前退回 String() 会得到 `[object Object]`：它看起来像一条真的回执，
+    // 比没有信息更糟（项目本来就要求回执里不出现它）。
+    expect(outcomeText(circular)).toBe('[unserializable]');
   });
 });
 

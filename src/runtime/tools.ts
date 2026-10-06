@@ -55,7 +55,9 @@ export function outcomeText(data: unknown): string {
   try {
     return JSON.stringify(data) ?? String(data);
   } catch {
-    return String(data);
+    // 循环引用之类。**不能**退回 `String(data)`——那是 `[object Object]`，
+    // 看起来像一条真的回执，比没有信息更糟（项目本来就要求不出现它）。
+    return '[unserializable]';
   }
 }
 
@@ -77,7 +79,7 @@ export function commandToRegistration(
 ): ToolRegistration {
   return defineTool({
     name: stripBang(command.name),
-    description: command.description || command.name,
+    description: command.description || stripBang(command.name),
     parameters: commandParameters(command),
     execute: async (args) => {
       // 位置参数按 params 的 key 顺序取；`null` 归一为 `undefined`，这样 JS

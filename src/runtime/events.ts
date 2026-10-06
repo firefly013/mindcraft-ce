@@ -89,14 +89,17 @@ export class EventIntake {
 
   /** 收一个事件：**同步返回**（旧调度协议是同步的），异步动作排在链上。 */
   notify(event: GameEvent): void {
-    if (this.deps == null) {
+    const deps = this.deps;
+    if (deps == null) {
       // 运行时就绪前：暂存，接上后按顺序补投。
       this.waiting.push(event);
       return;
     }
+    // 把非空的 `deps` **捕获进闭包**：链上每个步骤都拿得到它，于是
+    // react/steer/interrupt 里不需要再写一层够不到的 `deps == null` 判断。
     this.chain = this.chain
-      .then(() => this.react(event))
-      .catch((error: unknown) => this.deps?.onError?.(error));
+      .then(() => this.react(event, deps))
+      .catch((error: unknown) => deps.onError?.(error));
   }
 
   /**
@@ -118,10 +121,7 @@ export class EventIntake {
     return this.outstanding.map((item) => item.event);
   }
 
-  private async react(event: GameEvent): Promise<void> {
-    const deps = this.deps;
-    // 只有 attach 之后才会被排进 chain，所以这里必然非空。
-    if (deps == null) return;
+  private async react(event: GameEvent, deps: EventIntakeDeps): Promise<void> {
     if (event.level <= LEVEL.STATE) {
       // L1/L2：只记账。**不 track**——`abort()` 明确"queued writes stay"，
       // 被动写入不会被撤回，不需要重新提交。
@@ -130,26 +130,24 @@ export class EventIntake {
       return;
     }
     if (event.level === LEVEL.WAKE) {
-      await this.steer(event);
+      await this.steer(event, deps);
       deps.onEvent?.(event, 'steer');
       return;
     }
     if (event.level === LEVEL.PREEMPT) {
-      await this.interrupt(event);
+      await this.interrupt(event, deps);
       deps.onEvent?.(event, 'preempt');
       return;
     }
     // L5：冻住 → 保命 → 接着干。
     // 紧急事件本身由反射消化，**不再喂给模型**（旧实现的 pushEvent 也把它
     // 标成 consumed，免得锁解除后它再唤醒一次请求）。
-    await this.interrupt(null);
+    await this.interrupt(null, deps);
     await deps.rescue();
     deps.onEvent?.(event, 'emergency');
   }
 
-  private async steer(event: GameEvent): Promise<void> {
-    const deps = this.deps;
-    if (deps == null) return;
+  private async steer(event: GameEvent, deps: EventIntakeDeps): Promise<void> {
     const submission = await deps.submit(event.text, 'steer');
     this.track(event, submission);
   }
@@ -160,14 +158,12 @@ export class EventIntake {
    * `alsoSubmit` 是"中断完要立刻发过去"的事件（L4 用它；L5 传 null）。
    * 被撤回的排队事件**先于**它重新提交，保持时间顺序。
    */
-  private async interrupt(alsoSubmit: GameEvent | null): Promise<void> {
-    const deps = this.deps;
-    if (deps == null) return;
+  private async interrupt(alsoSubmit: GameEvent | null, deps: EventIntakeDeps): Promise<void> {
     const withdrawn = this.outstanding.map((item) => item.event);
     this.outstanding = [];
     await deps.abort();
-    for (const pending of withdrawn) await this.steer(pending);
-    if (alsoSubmit != null) await this.steer(alsoSubmit);
+    for (const pending of withdrawn) await this.steer(pending, deps);
+    if (alsoSubmit != null) await this.steer(alsoSubmit, deps);
   }
 
   private track(event: GameEvent, submission: Submission): void {

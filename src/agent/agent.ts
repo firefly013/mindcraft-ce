@@ -2,7 +2,7 @@ import { VisionInterpreter } from './vision/vision_interpreter.js';
 import { initBot } from '../utils/mcdata.js';
 import { executeToolCall } from './commands/to_openai_tools.js';
 import { ActionRunner } from './action_runner.js';
-import { stopPvp, consume } from './library/skills.js';
+import { stopPvp, consume, goToPosition } from './library/skills.js';
 import pf from 'mineflayer-pathfinder';
 import { isHostile } from '../utils/mcdata.js';
 import { Scheduler, KIND, LEVEL } from './scheduler.js';
@@ -22,6 +22,15 @@ import { openBotWiring, type BotWiring } from '../runtime/bot.js';
 import { createFeedbackTool, createStopTool, createUpdatePlanTool } from '../runtime/control_tools.js';
 import { EventIntake } from '../runtime/events.js';
 import { actionChannelInvoker, buildGameTools } from '../runtime/game_tools.js';
+import {
+    AUTO_PICKUP_ID,
+    PICKUP_INTERVAL_MS,
+    PICKUP_RADIUS,
+    PICKUP_TIMEOUT_MS,
+    nearestDropWithin,
+    shouldAttemptPickup,
+    type PickupTarget,
+} from './auto_pickup.js';
 import { compactionLogHook, providerLogHook } from '../runtime/log_hooks.js';
 import { createLogger, nullLogger, type Logger } from '../runtime/logger.js';
 import { migrateLegacyState, readLegacySave } from '../runtime/legacy.js';
@@ -65,6 +74,10 @@ export class Agent {
     private lastHeartbeatAt: number = Date.now();
     edgeWatcher: EdgeWatcher | null = null;
     lowHpArmed: boolean = false;
+    /** 自动拾取：上次尝试时刻 / 是否正在捡（防重叠）/ 是否正被模型饿着。 */
+    private lastPickupAt: number = 0;
+    private pickingUp: boolean = false;
+    private pickupStarved: boolean = false;
 
     /**
      * deliberative 层：pi-durable 会话 + 工具 + 尾巴注入 + 事件接入。
@@ -754,7 +767,103 @@ export class Agent {
     update(delta: number): void {
         void delta;
         this.checkTaskDone();
+        // 拾取是后台行为，**不能 await**：它最多要走 4 秒，await 会把边沿轮询
+        // 一起冻住（update 本来就是串行的）。
+        this.maybeAutoPickup();
         this.pollEdges();
+    }
+
+    /**
+     * 自动拾取调度：到点、没在捡、身体空闲就试一次。
+     *
+     * 它是"最低优先级的房客"——通道被模型的动作占着就老实等着；反过来模型
+     * 要用身体时可以在 `ActionRunner` 里把它抢占掉（`Scheduler.preempt`），
+     * **模型永远不该因为后台行为吃到 ACTION_BUSY**。
+     */
+    private maybeAutoPickup(): void {
+        if (!this.bot || !this.scheduler) return;
+        const now = Date.now();
+        const target = nearestDropWithin(this.bot, PICKUP_RADIUS);
+        if (target == null) {
+            this.pickupStarved = false;
+            return;
+        }
+        const busy = this.scheduler.currentAction() != null;
+        if (
+            !shouldAttemptPickup({
+                busy,
+                pickingUp: this.pickingUp,
+                sinceLastAttemptMs: now - this.lastPickupAt,
+            })
+        ) {
+            // "有掉落物、但身体被模型占着"是最值得看见的一种失败：它意味着拾取
+            // 根本轮不上（模型连着发动作）。每次挨饿只记一行，不刷屏。
+            if (busy && !this.pickupStarved) {
+                this.pickupStarved = true;
+                this.log.with('pickup').warn({
+                    note: '通道忙，先不捡',
+                    target: target.name,
+                    distance: Number(target.distance.toFixed(1)),
+                    blockedBy: this.currentActionName(),
+                });
+            }
+            if (!busy) this.pickupStarved = false;
+            return;
+        }
+        this.pickupStarved = false;
+        this.lastPickupAt = now;
+        this.pickingUp = true;
+        void this.tryAutoPickup(target).finally(() => {
+            this.pickingUp = false;
+        });
+    }
+
+    /** 走一步去把指定掉落物踩进背包；失败/超时/被抢占都安静收场。 */
+    private async tryAutoPickup(target: PickupTarget): Promise<void> {
+        const claim = this.scheduler.startAction(AUTO_PICKUP_ID, { id: target.id });
+        if (!claim.accepted) return;
+        const log = this.log.with('pickup');
+        log.info({ phase: 'start', target: target.name, distance: Number(target.distance.toFixed(1)) });
+        const generation = claim.generation ?? 0;
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        const started = Date.now();
+        try {
+            const arrived = await Promise.race([
+                goToPosition(this.bot, target.x, target.y, target.z, 0)
+                    .then(() => true)
+                    .catch(() => false),
+                // 被抢占（generation 变了）也立刻收手：模型要用身体了。
+                (async (): Promise<boolean> => {
+                    while (this.scheduler.isCurrent(generation)) {
+                        await new Promise<void>((resolve) => setTimeout(resolve, 150));
+                    }
+                    return false;
+                })(),
+                new Promise<boolean>((resolve) => {
+                    timer = setTimeout(() => resolve(false), PICKUP_TIMEOUT_MS);
+                }),
+            ]);
+            if (!arrived) {
+                try {
+                    this.bot.pathfinder?.stop?.();
+                } catch {
+                    // 停不下来就算了，通道照样释放。
+                }
+            }
+            log.info({
+                phase: arrived ? 'arrived' : 'gave-up',
+                target: target.name,
+                ms: Date.now() - started,
+                preempted: !this.scheduler.isCurrent(generation),
+            });
+        } catch (err: unknown) {
+            log.error({ target: target.name, error: err instanceof Error ? err.message : String(err) });
+        } finally {
+            if (timer !== undefined) clearTimeout(timer);
+            // **只有这一代还活着才释放**：被 Stop/抢占过的话，通道已经不属于它了，
+            // 这时 releaseAction 会把模型刚认领的通道误放掉。
+            if (this.scheduler.isCurrent(generation)) this.scheduler.releaseAction();
+        }
     }
 
     /**
