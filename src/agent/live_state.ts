@@ -630,7 +630,13 @@ function sampleEntities(
       out.push({
         id: Number(e.id),
         // 玩家的 `name` 是类型名 'player'，身份在 `username`（mineflayer addNewPlayer）。
-        name: str(e.username) ?? str(e.name ?? e.displayName) ?? 'unknown',
+        // 掉落物的 `name` 是类型名 'item'，**真正的物品名在 displayName 里**。
+        // 原来优先取 name，于是列表里全是 'item#85889'——模型看不出那是什么东西，pia
+        // 反复问"脚边那两个吸不动的掉落物到底是什么物品"就是这个原因。
+        name:
+          str(e.username) ??
+          (str(e.name) === 'item' ? str(e.displayName) : (str(e.name) ?? str(e.displayName))) ??
+          'unknown',
         kind: str(e.kind ?? e.type),
         distance: Math.round(d * 10) / 10,
         x: e.position.x,
