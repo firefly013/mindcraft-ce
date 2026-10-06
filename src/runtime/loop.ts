@@ -32,6 +32,7 @@ import {
   type PromptSection,
   type ToolRegistration,
 } from '@earendil-works/pi-durable';
+import { td, tp } from '../prompts.js';
 import { SayEntry } from './entries.js';
 
 /** 单条 Say 的字符上限（沿用现有 `SAY_LINE_LIMIT`）。 */
@@ -64,8 +65,13 @@ export function withTerminate<T extends ToolRegistration>(tool: T): T {
 export function createSayTool(onSay: (text: string) => void = () => {}): ToolRegistration {
   return defineTool({
     name: 'Say',
-    description: `在游戏内聊天里说话。超过 ${SAY_LINE_LIMIT} 字会被截断。`,
-    parameters: Type.Object({ text: Type.String() }),
+    // 描述取自 `prompts.ts` 的 `td('Say')`，与旧 `getOpenAITools` 广告出去
+    // 的逐字一致——提示词里在教模型用这些工具，改文案就是改契约。
+    description: td('Say'),
+    parameters: Type.Object(
+      { text: Type.String({ description: tp('Say', 'text') }) },
+      { additionalProperties: false },
+    ),
     execute: async (args, api, context) => {
       const text = args.text.trim();
       // 空话拒绝：与现有行为一致，且不写 entry。
@@ -86,8 +92,8 @@ export function createSayTool(onSay: (text: string) => void = () => {}): ToolReg
 export function createFinishTool(): ToolRegistration {
   return defineTool({
     name: 'Finish',
-    description: '结束本轮推理，不改变身体动作。',
-    parameters: Type.Object({}),
+    description: td('Finish'),
+    parameters: Type.Object({}, { additionalProperties: false }),
     // 不用 async：没有 await，而 `execute` 契约要求返回 Promise。
     execute: () => Promise.resolve({ content: [{ type: 'text' as const, text: 'Finished.' }] }),
   });

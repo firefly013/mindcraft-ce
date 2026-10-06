@@ -264,9 +264,40 @@ pi-ai 额外  stream:true, stream_options:{include_usage:true}, store:false  ←
 
 **门禁**：`typecheck` 0 / `lint` 0 / **28 文件 363 测试全绿** / 覆盖率 100% / `build` 0 / `ALL PROMPT REFS OK`。
 
-### 仍未接线的部分（P4 起）
+### P4 已完成（52 个工具全部接入）
 
-`BotRuntime` 已经可用，但 `agent.ts` / `prompter.ts` **仍走旧路径**——双路径迁移，P4 把 52 个工具接过来、P5 接感知与双通道、P6 接压缩与文档，最后统一切换。
+新增：
+
+| 文件 | 作用 |
+|---|---|
+| `src/runtime/tool_schema.ts` | 命令参数 DSL → TypeBox schema（逐关键字等价） |
+| `src/runtime/tools.ts` | `commandToRegistration` / `outcomeText` / `blockedActionsHook` |
+| `src/runtime/control_tools.ts` | `Stop` / `UpdatePlan` / `Feedback`（`Finish`/`Say` 在 P3） |
+| `tests/runtime_tools.test.ts` | 60 个测试 |
+| `tests/runtime_control_tools.test.ts` | 16 个测试 |
+
+**做法：适配而不是重写。** 47 个 `perform` 实现一行没动——`commandToRegistration(command, invoke)` 只把**声明**搬过来（TypeBox schema + 位置参数调用约定 + 回执文本），`invoke` 注入以便单测，后续传入闭包住 agent 的实现即可。
+
+**等价性证据（最强的一条）**：对 `queryList.concat(actionsList)` 里**每一个**命令，把 TypeBox 生成的 schema 与旧 `commandToTool()` 的输出逐字段比对（47 个 `it.each`）。差异只有**一类**且被单独钉死：
+
+> 无参数命令时旧实现发 `"required":[]`，TypeBox 省略 `required`。JSON Schema 里二者语义等价。测试里有一条专门断言"原始差异只允许这一类"，其余任何漂移都会红。
+
+**`blocked_actions` 的安全修复**：旧实现只在 `getOpenAITools` / `getToolDocs` 里过滤**广告**——被隐藏的工具只要模型按名字直接调用就**照样执行**（`validateToolCall` 与 `executeToolCall` 都不查黑名单）。现在 `blockedActionsHook` 挂在 `ToolTask.beforeTool` 上，是真正拦得住的地方。名单存的是带 `!` 的命令名而工具名已 strip，所以两种写法都比对。
+
+**`UpdatePlan` 的旧格式兼容**：schema 是给模型看的**严格**形式，而 `PlanStore.update` 故意兼容纯字符串 todo。pi-durable 的 `prepareArguments` 正好是为"校验前修模型常见写法"设计的——于是两者都保住，不用把 schema 放宽。**并有集成测试证明它真的被 ToolTask 调用**（模型给 `['找矿洞']`，apply 收到 `[{text:'找矿洞',done:false}]`）。
+
+**踩坑记录**：
+
+1. `Say` 的 schema 我漏了 `{ additionalProperties: false }`——等价性测试当场抓住（新 schema 比旧广告宽松）。
+2. 控制工具的 `execute` 全是同步逻辑，写 `async` 触发 `require-await`；改成显式 `Promise.resolve`。
+3. 摘要文本来自 `apply` **返回的快照**而非入参；测试桩返回空计划导致断言写错——是测试的错，不是实现的错。
+
+**门禁**：`typecheck` 0 / `lint` 0 / **30 文件 439 测试全绿** / 覆盖率 100% / `build` 0 / `ALL PROMPT REFS OK`。
+
+### 仍未接线的部分（P5 起）
+
+`BotRuntime` + 52 个工具都已可用，但 `agent.ts` / `prompter.ts` **仍走旧路径**——双路径迁移。P5 接感知注入（`beforeRequest` 已在 P3 备好，需接 `sampleLiveState`/`renderLiveState`）与 Say 双通道的实际出口（游戏聊天/前端），P6 接压缩与文档，最后统一切换。
+
 
 
 
