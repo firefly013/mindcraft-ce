@@ -36,6 +36,7 @@
  * 同样的流程，摊开就不再是黑盒。
  */
 import * as skills from '../library/skills.js';
+import Vec3 from 'vec3';
 import { td, tp } from '../../prompts.js';
 import type { AgentCommand } from './actions.js';
 
@@ -197,7 +198,9 @@ async function transferWithContainer(
     if (!ok) return { ok: false, detail: '走不到容器旁边' };
     // `openContainer` 要的是 **Block 对象**，不是 `{x,y,z}`——传裸坐标它会报
     // `containerToOpen is neither a block nor an entity`（模型真机报回来的）。
-    const block = bot.blockAt?.({ x: chestBlock.x, y: chestBlock.y, z: chestBlock.z });
+    // 而 `blockAt` 要的是 **Vec3**（内部会调 `.floored()`），传裸对象会报
+    // `pos.floored is not a function`（模型紧接着报回来的第二条）。
+    const block = bot.blockAt?.(new Vec3(chestBlock.x, chestBlock.y, chestBlock.z));
     if (block == null) return { ok: false, detail: `(${chestBlock.x},${chestBlock.y},${chestBlock.z}) 那里没有方块` };
     container = await bot.openContainer(block);
   } catch (error: unknown) {
@@ -511,18 +514,34 @@ export const interactList: AgentCommand[] = [
       const wanted = parsedOut.items[0];
       if (wanted == null) return renderReport(lines, 'useBlock 用不了：加工要给出 output。');
       if (type === 'furnace' || type === 'blast_furnace' || type === 'smoker') {
+        // **`smeltItem` 要的是原料，不是产物**——它自己去查"这个能不能烧"。
+        // 真机上模型报过 `Cannot smelt iron_ingot`：我当时把 `output` 当输入传了，
+        // 等于问"铁锭能不能烧"。所以烧的是 input，output 只当断言用。
+        const raw = parsedIn.items[0];
+        if (raw == null) {
+          return renderReport(
+            lines,
+            '烧东西要给出 **input（原料）**：useBlock(type=furnace, input="1 raw_iron", output="1 iron_ingot")。' +
+              '燃料不用你操心，熔炉会自己从背包里找煤/木炭/木头。',
+          );
+        }
         const ok = await runSkill(
           agent.bot,
           lines,
-          () => skills.smeltItem(agent.bot, wanted.name, wanted.count),
-          `已点火，开始烧 ${wanted.name}×${wanted.count}`,
-          `烧不了 ${wanted.name}`,
+          () => skills.smeltItem(agent.bot, raw.name, raw.count),
+          `已点火，开始烧 ${raw.name}×${raw.count}`,
+          `烧不了 ${raw.name}`,
         );
         // **不阻塞**：只把估计时间写进返回，取成品是另一次 useBlock（output 单独给）。
         // **失败时不写这句**——模型反馈过它很误导（"failed 还附 10 秒后来取"）。
-        return ok
-          ? renderReport(lines, '熔炉是异步的：约 10 秒一件，到点了再用 useBlock(type=furnace, output=...) 来取。')
-          : renderReport(lines, '上面那几行是熔炉自己报的原因；照着改（缺燃料就带煤/木炭，炉子里有别的东西就先取出来）。');
+        if (!ok) {
+          return renderReport(lines, '上面那几行是熔炉自己报的原因；照着改（缺燃料就带煤/木炭，炉子里有别的东西就先取出来）。');
+        }
+        const expected = parsedOut.items[0];
+        return renderReport(
+          lines,
+          `熔炉是异步的：约 10 秒一件，到点了再用 useBlock(type=furnace, output="${expected?.name ?? raw.name}") 来取。`,
+        );
       }
       // 工作台 / 铁砧
       const have = countInInventory(agent.bot, wanted.name);
