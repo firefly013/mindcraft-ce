@@ -13,6 +13,7 @@ import { dirname } from 'node:path';
 import { BACKGROUND_CONTEXT } from '@earendil-works/chord/context';
 import {
   Harness,
+  type CompactionPolicy,
   type Conversation,
   type ModelRef,
   type RegistryReader,
@@ -52,6 +53,14 @@ export interface BotSessionOptions<Tool extends ToolRegistration = ToolRegistrat
    * （profile 换了模型要生效）。
    */
   model?: ModelRef;
+  /**
+   * 压仓策略。不给就用 pi-durable 的内置默认。
+   *
+   * 触发线是 `model.contextWindow - reserveTokens`——**窗口取自 pi-ai 目录**
+   * （OpenCode Go 的 `deepseek-v4.1-flash` = 1_000_000），不是 profile 里的
+   * 声明值。用 `compactionPolicyFromProfile()` 从 profile 解析。
+   */
+  compaction?: CompactionPolicy;
   /** 落盘根目录，默认 `./bots/<name>`。 */
   baseDir?: string;
   /** 实例区分后缀，用于同名/同 profile 多开时避免撞同一个库文件。 */
@@ -75,7 +84,11 @@ export async function openBotSession<Tool extends ToolRegistration>(
   const storage = await openNodeSqliteStorage(dbPath);
   const harness = await Harness.open(
     storage,
-    { models: options.models, registry: options.registry },
+    {
+      models: options.models,
+      registry: options.registry,
+      ...(options.compaction != null ? { settings: { compaction: options.compaction } } : {}),
+    },
     BACKGROUND_CONTEXT,
   );
   // 根 conversation 在首次调用时创建；重开同一个库会拿回同一个。

@@ -431,6 +431,25 @@ pi-ai 额外  stream:true, stream_options:{include_usage:true}, store:false  ←
 
 **一处需要定的差异**：pi-durable 的摘要提示词不可配置——`beforeCompact` 只能"拒绝或提供自己的摘要"，而 hook 里**没有模型访问权限**。主线新写的 `summary_system` / `saving_memory`（结构化检查点格式）因此无法直接喂给内置 CompactionTask。要么接受 pi-durable 的摘要格式，要么自写 compaction task。
 
+### 压缩接线已完成（`src/runtime/compaction.ts`）
+
+| profile | → | pi-durable |
+|---|---|---|
+| `reserve_tokens` | → | `CompactionPolicy.reserveTokens` |
+| `keep_recent_tokens` | → | `CompactionPolicy.keepRecentTokens` |
+| `background_tokens` | → | `CompactionPolicy.backgroundTokens` |
+| `compaction_enabled` | → | `CompactionPolicy.enabled` |
+| `context_window` | → | **不进 policy**：窗口取自 pi-ai 目录的 `model.contextWindow` |
+
+pi-durable 的内置默认是 `reserveTokens: 16384 / keepRecentTokens: 20000 / backgroundTokens: 32768`，与主线写进 profile 的值**一字不差**（两边都在照 Pi）。
+
+**8.7 倍阈值 bug 已修并有测试钉住**：触发线 = `contextWindow - reserveTokens` = `1_000_000 - 16_384` = **983_616**；旧实现回退 128_000 时是 `115_200`。比值断言落在 (8, 9) 之间。
+
+**顺带修了 P1 的一个漏洞**：主线的 `context_window` 写在 profile **顶层**，而 `readProfileModel` 原来只读 `model.params`——自定义端点会因此永远回退 128_000。现在顶层 / `model` 内层 / `params` 三处都认。
+
+**真集成验证**：小窗口（`contextWindow: 300`、`reserveTokens: 20`）+ 长对话 → `pi.compaction` entry 真的出现，且模型调用次数多于提交次数（每次压仓额外打一次模型做总结）。
+
+
 ## 设计注记：`stats` 工具**不是**冗余，别删
 
 **尾巴里的 Live State 和 `stats` 产出的 State 是互补的两件事：**

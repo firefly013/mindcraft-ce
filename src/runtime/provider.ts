@@ -38,6 +38,8 @@ export interface ProfileModel {
   modelId: string;
   url?: string;
   params: Record<string, unknown>;
+  /** profile 声明的上下文窗口（顶层 / `model` 内层 / `params` 三处都认）。 */
+  contextWindow?: number;
 }
 
 /** 一个 profile 解析出的 pi-ai 侧全部所需。 */
@@ -73,6 +75,9 @@ function asRecord(value: unknown): Record<string, unknown> {
  *   - 裸字符串：`"deepseek-v4.1-flash"`
  *   - `model` 为对象：`{ model: { model, url, params } }`（生产 profile 的写法）
  *   - 平铺：`{ model: "x", url, params }`
+ *
+ * `context_window` 三个位置都认：**profile 顶层**（主线的写法）、`model` 内层、
+ * 以及 `model.params` 里。只读 `params` 会让自定义端点拿错窗口。
  */
 export function readProfileModel(profile: unknown): ProfileModel {
   if (typeof profile === 'string' || profile instanceof String) {
@@ -80,18 +85,28 @@ export function readProfileModel(profile: unknown): ProfileModel {
   }
   const top = asRecord(profile);
   const raw = top['model'];
+  const declaredWindow = (source: Record<string, unknown>, params: Record<string, unknown>): number | undefined => {
+    for (const candidate of [source['context_window'], params['context_window']]) {
+      if (typeof candidate === 'number' && Number.isFinite(candidate) && candidate > 0) return candidate;
+    }
+    return undefined;
+  };
   if (raw != null && typeof raw === 'object' && !Array.isArray(raw)) {
     const nested = asRecord(raw);
+    const params = asRecord(nested['params']);
     return {
       modelId: stripApiPrefix(typeof nested['model'] === 'string' ? (nested['model'] as string) : ''),
       url: typeof nested['url'] === 'string' ? (nested['url'] as string) : undefined,
-      params: asRecord(nested['params']),
+      params,
+      contextWindow: declaredWindow(top, params) ?? declaredWindow(nested, params),
     };
   }
+  const params = asRecord(top['params']);
   return {
     modelId: stripApiPrefix(typeof raw === 'string' ? raw : ''),
     url: typeof top['url'] === 'string' ? (top['url'] as string) : undefined,
-    params: asRecord(top['params']),
+    params,
+    contextWindow: declaredWindow(top, params),
   };
 }
 
@@ -99,12 +114,11 @@ export function readProfileModel(profile: unknown): ProfileModel {
 function customModel(
   modelId: string,
   url: string,
-  params: Record<string, unknown>,
+  declaredWindow?: number,
 ): Model<'openai-completions'> {
-  const declared = params['context_window'];
   const contextWindow =
-    typeof declared === 'number' && Number.isFinite(declared) && declared > 0
-      ? declared
+    declaredWindow != null && Number.isFinite(declaredWindow) && declaredWindow > 0
+      ? declaredWindow
       : FALLBACK_CONTEXT_WINDOW;
   return {
     id: modelId,
@@ -130,7 +144,7 @@ function customModel(
  *   - 其它 `url`            → `createProvider()` 现造一个 OpenAI 兼容 provider
  */
 export function resolveProvider(profile: unknown): ResolvedProvider {
-  const { modelId, url, params } = readProfileModel(profile);
+  const { modelId, url, params, contextWindow } = readProfileModel(profile);
   const apiKeyEnv =
     typeof params['api_key_env'] === 'string' ? (params['api_key_env'] as string) : 'OPENAI_API_KEY';
   const headers = resolveHeaders(params['headers']);
@@ -167,7 +181,7 @@ export function resolveProvider(profile: unknown): ResolvedProvider {
         name: 'OpenAI-compatible endpoint',
         baseUrl: url,
         auth: { apiKey: envApiKeyAuth(apiKeyEnv, [apiKeyEnv]) },
-        models: [customModel(modelId, url, params)],
+        models: [customModel(modelId, url, contextWindow)],
         api: { 'openai-completions': openAICompletionsApi() },
       }),
     );

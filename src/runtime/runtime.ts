@@ -9,6 +9,7 @@ import { BACKGROUND_CONTEXT } from '@earendil-works/chord/context';
 import {
   createRegistry,
   defineExtension,
+  type CompactionPolicy,
   type Conversation,
   type ConversationWatch,
   type EntryDraft,
@@ -37,6 +38,11 @@ export interface BotRuntimeOptions {
   provider: ResolvedProvider;
   /** 落盘根目录，默认 `./bots/<name>`。 */
   baseDir?: string;
+  /**
+   * 压仓策略。用 `compactionPolicyFromProfile(profile)` 解析后传进来。
+   * 不给就用 pi-durable 的内置默认（与主线的 profile 默认值一致）。
+   */
+  compaction?: CompactionPolicy;
   /** 实例区分后缀，避免同名多开撞同一个库。 */
   instanceId?: string;
   /** 静态系统提示词。应当稳定，否则会破坏 prompt cache。 */
@@ -91,6 +97,7 @@ export async function openBotRuntime(options: BotRuntimeOptions): Promise<BotRun
     models: options.provider.models,
     registry,
     model: { provider: options.provider.model.provider, modelId: options.provider.model.id },
+    ...(options.compaction != null ? { compaction: options.compaction } : {}),
     baseDir: options.baseDir,
     instanceId: options.instanceId,
   });
