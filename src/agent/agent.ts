@@ -796,12 +796,15 @@ export class Agent {
                 sinceLastAttemptMs: now - this.lastPickupAt,
             })
         ) {
-            // "有掉落物、但身体被模型占着"是最值得看见的一种失败：它意味着拾取
-            // 根本轮不上（模型连着发动作）。每次挨饿只记一行，不刷屏。
-            if (busy && !this.pickupStarved) {
+            // "有掉落物、但通道被**模型的动作**占着"是最值得看见的一种失败：它
+            // 意味着拾取根本轮不上（模型连着发动作）。每次挨饿只记一行，不刷屏。
+            //
+            // 必须排除"被自己占着"（上一次拾取还没结束）——那是正常重叠，
+            // 报出来会变成 `blockedBy: autoPickup`，日志就在说假话了。
+            if (busy && !this.pickingUp && !this.pickupStarved) {
                 this.pickupStarved = true;
                 this.log.with('pickup').warn({
-                    note: '通道忙，先不捡',
+                    note: '通道被模型的动作占着，先不捡',
                     target: target.name,
                     distance: Number(target.distance.toFixed(1)),
                     blockedBy: this.currentActionName(),
