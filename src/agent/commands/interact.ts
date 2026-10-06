@@ -266,6 +266,36 @@ async function transferWithContainer(
   }
 }
 
+/**
+ * 给工具体加超时。
+ *
+ * 模型真机报过：`useBlock` 挂死 70s+、`Stop` 无效、"机器人被 useBlock 永久锁死，
+ * 只能 restart"。原因是这三个新工具是**裸 async**，不像老工具那样包在
+ * `ActionManager.runAction` 里，于是卡住就永远占着身体通道。
+ *
+ * 超时到点后 `ActionRunner.finish` 会继续走到 `releaseAction`，通道被放掉；
+ * 同时给模型一句"超时了、卡在哪一步"——比静默锁死好得多。
+ */
+function withTimeout<T>(work: Promise<T>, ms: number, onTimeout: T): Promise<T> {
+  return new Promise<T>((resolve) => {
+    const timer = setTimeout(() => resolve(onTimeout), ms);
+    void work.then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      (error: unknown) => {
+        clearTimeout(timer);
+        resolve(onTimeout === undefined ? (undefined as T) : onTimeout);
+        void error;
+      },
+    );
+  });
+}
+
+/** 单次 useBlock/useEntity/craft 最多跑多久（毫秒）。 */
+const TOOL_TIMEOUT_MS = 45_000;
+
 /** 一步的结果行——逐段报告就是靠它拼出来的。 */
 function step(text: string): string {
   return `- ${text}`;
@@ -290,17 +320,25 @@ async function runSkill(
 ): Promise<boolean> {
   const read = (): string => String((bot as { output?: unknown })?.output ?? '');
   const before = read();
-  let ok: boolean;
-  try {
-    ok = await fn();
-  } catch (error: unknown) {
-    // 技能内部抛异常（模型报过 `Cannot read properties of null (reading 'length')`
-    // 这种裸 JS 异常）：说清是哪一步炸的，别把内部异常原样吐出去。
-    lines.push(step(`${failText}：内部错误 ${error instanceof Error ? error.message : String(error)}`));
-    return false;
-  }
+  // **超时兜底**：技能可能长时间不返回（`smeltItem` 会一直循环到全烧完——
+  // 真机上就是它把通道占了 70s+，Stop 也没用）。到点就放弃，通道照样释放。
+  const timedOut = Symbol('timeout');
+  const ok = await withTimeout<boolean | typeof timedOut>(
+    fn(),
+    TOOL_TIMEOUT_MS,
+    timedOut,
+  );
   const after = read();
   const delta = (after.startsWith(before) ? after.slice(before.length) : after).trim();
+  if (ok === timedOut) {
+    lines.push(step(`${failText}：**超时**（${TOOL_TIMEOUT_MS / 1000} 秒没返回），已放弃并释放身体通道`));
+    if (delta !== '') {
+      for (const line of delta.split('\n')) {
+        if (line.trim() !== '') lines.push(`    ${line.trim()}`);
+      }
+    }
+    return false;
+  }
   lines.push(step(ok ? okText : failText));
   if (delta !== '') {
     for (const line of delta.split('\n')) {
