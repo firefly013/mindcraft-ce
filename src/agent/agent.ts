@@ -1,9 +1,6 @@
-import { History } from './history.js';
-import type { HistorySaveData } from './history.js';
 import { VisionInterpreter } from './vision/vision_interpreter.js';
-import { Prompter } from '../models/prompter.js';
 import { initBot } from '../utils/mcdata.js';
-import { executeToolCall, getOpenAITools, validateUpdatePlan, formatSay } from './commands/to_openai_tools.js';
+import { executeToolCall } from './commands/to_openai_tools.js';
 import { ActionRunner } from './action_runner.js';
 import { stopPvp, consume } from './library/skills.js';
 import pf from 'mineflayer-pathfinder';
@@ -11,8 +8,6 @@ import { isHostile } from '../utils/mcdata.js';
 import { Scheduler, KIND, LEVEL } from './scheduler.js';
 import type { Kind, Level } from './scheduler.js';
 import { STOP_WORDS, shouldEmitHurt, isStuck, isHeartbeatDue } from './edges.js';
-import { AgentLoop } from './loop.js';
-import type { LoopModelResponse, LoopRunner, LoopToolResult } from './loop.js';
 import { sampleLiveState, renderLiveState } from './live_state.js';
 import type { SampleContext } from './live_state.js';
 import { runEmergency, shouldTriggerEmergency, FOOD_VALUE } from './emergency.js';
@@ -21,10 +16,17 @@ import { validateFeedback, buildFeedbackEntry, appendFeedback } from './feedback
 import { PlanStore } from './plan.js';
 import type { PlanTodoInput } from './plan.js';
 import { createEdgeWatcher, resolvePriority, schedulerLevelFor, snapshotFromBot } from './edges.js';
-import { renderEvents, composeTail, EVENT_LOG_LIMIT } from './event_stream.js';
-import type { EventEntry } from './event_stream.js';
-import { createRequestLog } from './requestLog.js';
-import type { RequestLog } from './requestLog.js';
+import { EVENT_LOG_LIMIT, renderEventText } from './event_stream.js';
+import { defineExtension } from '@earendil-works/pi-durable';
+import { openBotWiring, type BotWiring } from '../runtime/bot.js';
+import { createFeedbackTool, createStopTool, createUpdatePlanTool } from '../runtime/control_tools.js';
+import { EventIntake } from '../runtime/events.js';
+import { buildGameTools } from '../runtime/game_tools.js';
+import { migrateLegacyState, readLegacySave } from '../runtime/legacy.js';
+import { systemPromptFromProfile } from '../runtime/prompt.js';
+import { compactionPageHook, createRequestLogSink, requestLogHook } from '../runtime/request_log.js';
+import { loopResultText, type ToolOutcome } from '../runtime/tools.js';
+import { BACKGROUND_CONTEXT } from '@earendil-works/chord/context';
 
 type EdgeWatcher = ReturnType<typeof createEdgeWatcher>;
 import { ActionManager } from './action_manager.js';
@@ -42,9 +44,7 @@ export class Agent {
     _disconnectHandled: boolean = false;
 
     actions!: ActionManager;
-    prompter: any; // 未迁移模块，交叉引用统一 any
     name: string = '';
-    history!: History;
     npc: any; // 未迁移模块，统一 any
     memory_bank!: MemoryBank;
     task: any; // 未迁移模块，统一 any
@@ -54,7 +54,6 @@ export class Agent {
     shut_up: boolean = false;
     respondFunc: ((username: string, message: string) => Promise<void>) | undefined;
     scheduler!: Scheduler;
-    loop!: AgentLoop;
     loopLog: Array<{ kind: string; level: number; payload: unknown }> = [];
     plan: PlanStore = new PlanStore();
     private lastHurtEmitAt: number = 0;
@@ -63,9 +62,22 @@ export class Agent {
     private stuckSince: number = 0;
     private lastHeartbeatAt: number = Date.now();
     edgeWatcher: EdgeWatcher | null = null;
-    requestLog: RequestLog | null = null;
-    toolHandlers = new Map<string, (args: unknown) => Promise<LoopToolResult>>();
     lowHpArmed: boolean = false;
+
+    /**
+     * deliberative 层：pi-durable 会话 + 工具 + 尾巴注入 + 事件接入。
+     *
+     * 异步装配（要开 SQLite、建 Harness），而 `start()` 是同步的——所以
+     * 装配在后台跑，**就绪前的事件由 `intake` 暂存**，接上时按顺序补投
+     * （`EventIntake.attach`）。连接建立到就绪之间的事件因此不会丢。
+     */
+    private wiring: BotWiring | null = null;
+    /** L1–L5 事件的唯一入口。`buildRuntime` 里接上运行时。 */
+    private readonly intake = new EventIntake();
+    /** 动作通道：占身体的动作走它（E1–E4 的契约住在这里）。 */
+    private actionRunner: ActionRunner | null = null;
+    /** profile 原文：供应商、压仓参数、提示词集都从它读。 */
+    private profile: Record<string, unknown> | null = null;
 
     start(load_mem = false, init_message: string | null = null, count_id = 0): void {
         this.count_id = count_id;
@@ -79,8 +91,8 @@ export class Agent {
             process.exit(1);
             return;
         }
-        this.prompter = new Prompter(this, profile);
-        this.name = (this.prompter.getName() || '').trim();
+        this.profile = profile as Record<string, unknown>;
+        this.name = String(this.profile['name'] ?? this.name).trim();
         console.log(`Initializing agent ${this.name}...`);
 
         // Validate Name Format
@@ -92,25 +104,16 @@ export class Agent {
             return;
         }
 
-        this.history = new History(this);
         this.memory_bank = new MemoryBank();
-        this.requestLog = createRequestLog({ dir: `./bots/${this.name}` });
 
-        // load mem first before doing task
-        let save_data: HistorySaveData | null = null;
-        if (load_mem) {
-            save_data = this.history.load();
-        }
-        let taskStart: number;
-        if (save_data) {
-            taskStart = save_data.taskStart;
-        } else {
-            taskStart = Date.now();
-        }
+        // 旧存档（memory.json）：这里只取 taskStart；记忆/地点/计划在运行时就绪后
+        // 由 migrateLegacyState 迁进 SQLite 文档（幂等，不覆盖已有新状态）。
+        const save_data = load_mem ? readLegacySave(`./bots/${this.name}`) : null;
+        const taskStart = save_data?.taskStart ?? Date.now();
         this.task = new Task(this, settings.task as TaskData | null, taskStart);
         // 原生工具黑名单：getOpenAITools 按此过滤，不再需要文本命令黑名单
         this.blocked_actions = settings.blocked_actions.concat(this.task.blocked_actions || []);
-        this.buildLoop();
+        this.buildRuntime();
 
         console.log(this.name, 'logging into minecraft...');
         this.bot = initBot(this.name);
@@ -145,8 +148,8 @@ export class Agent {
             serverProxy.login();
 
             // Set skin for profile, requires Fabric Tailor. (https://modrinth.com/mod/fabrictailor)
-            if (this.prompter.profile.skin)
-                this.bot.chat(`/skin set URL ${this.prompter.profile.skin.model} ${this.prompter.profile.skin.path}`);
+            const skin = this.profile?.['skin'] as { model: string; path: string } | undefined;
+            if (skin) this.bot.chat(`/skin set URL ${skin.model} ${skin.path}`);
             else
                 this.bot.chat(`/skin clear`);
         });
@@ -265,8 +268,12 @@ export class Agent {
 
         if (init_message && save_data) {
             // 载入旧存档时不会走 handleMessage（那会把开场白当成新事件重放），
-            // 但开场白本身得留在历史里。
-            this.history.add('system', init_message);
+            // 但开场白本身得留在上下文里。被动写一条 entry：不唤醒模型。
+            void this.wiring?.runtime.write({
+                kind: 'mc.init',
+                model: [{ role: 'user', content: init_message, timestamp: Date.now() }],
+                data: { source: 'system' },
+            });
         }
         if (init_message && !save_data) {
             await this.handleMessage('system', init_message);
@@ -294,119 +301,130 @@ export class Agent {
     /**
      * 事件的**唯一入口**。
      *
-     * 旧路径是 `loop.notify()` 同步拿 verdict、再 `handleDecision(verdict)`——
-     * 事件进的是手写调度器。新路径下**事件就是一条消息**：渲染成文本后交给
-     * `EventIntake`，由它按级别落到原生原语（L1/L2 `write`、L3 `steer`、
-     * L4 `abort`+`submit`、L5 `abort`+保命反射）。
+     * 事件就是一条消息：渲染成文本后交给 `EventIntake`，由它按级别落到原生
+     * 原语（L1/L2 `write` 被动 entry、L3 `steer` 引导、L4 `abort`+`submit`、
+     * L5 `abort`+保命反射+恢复）。
      *
-     * 10 个触发站点全部收口到这里，翻面时只改这一个函数体。
+     * `loopLog` 仍然留一份审计台账——它是"谁在什么时候叫醒了 agent"的唯一
+     * 记录，和模型看到什么无关，但排障时救命。
      */
     private notify(kind: Kind, level: Level, payload: unknown): void {
-        const verdict = this.loop.notify({ kind, level, payload });
-        void this.loop.handleDecision(verdict.decision).catch((err: unknown) => {
-            console.error('event decision failed:', err instanceof Error ? err.message : String(err));
-        });
+        this.loopLog.push({ kind, level, payload });
+        if (this.loopLog.length > EVENT_LOG_LIMIT) {
+            this.loopLog.splice(0, this.loopLog.length - EVENT_LOG_LIMIT);
+        }
+        this.intake.notify({ level, text: renderEventText(kind, level, payload) });
     }
 
-    private buildLoop(): void {
+    /**
+     * 装配 deliberative 层。
+     *
+     * 与旧的 `buildLoop` 的区别：没有手写循环、没有 `Prompter`、没有 `History`。
+     * 回合、历史、压仓、持久化全部由 pi-durable 的 `Conversation` 承担；我们
+     * 只提供**工具集**与**每轮尾巴**。
+     *
+     * `ActionRunner`（身体通道）**保留**：E1–E4 的契约住在这里，它不是
+     * "重复造轮子"，而是本项目的业务约束——同一时刻最多一个占用型动作。
+     */
+    private buildRuntime(): void {
         this.scheduler = new Scheduler();
         this.edgeWatcher = createEdgeWatcher();
-        const runner: LoopRunner = {
-            register: (name: string, handler: (args: unknown) => Promise<LoopToolResult>) => {
-                this.toolHandlers.set(name, handler);
-            },
-            call: (name: string, args: unknown) => this.runTool(name, args),
-        };
-        this.loop = new AgentLoop({
+        this.actionRunner = new ActionRunner({
             scheduler: this.scheduler,
-            runner,
-            history: {
-                append: (kind: string, level: number, payload: unknown) => {
-                    // 审计台账：只留最近一段，别让它无声长大。真正给模型
-                    // 看的事件走 assemble 的 events 参数（见 assembleContext）。
-                    this.loopLog.push({ kind, level, payload });
-                    if (this.loopLog.length > EVENT_LOG_LIMIT) {
-                        this.loopLog.splice(0, this.loopLog.length - EVENT_LOG_LIMIT);
-                    }
+            // pi-durable 自己会记工具结果；动作**完成**走 L3 消息（见 notify）。
+            // 这里不再往上下文补一条回执——那会把同一件事喂两遍。
+            record: () => Promise.resolve(),
+            speak: (text: string): void => {
+                this.routeResponse(this.currentSource, text);
+            },
+            execute: (tool: string, toolArgs: Record<string, unknown>): Promise<string> =>
+                executeToolCall(this, tool, toolArgs),
+            notify: (payload: { call: string; result: ToolOutcome }): void => {
+                this.notify(KIND.TOOL, LEVEL.WAKE, payload);
+            },
+        });
+        // 异步装配（要开 SQLite）；就绪前的事件由 intake 暂存，接上时补投。
+        void this.openRuntime();
+    }
+
+    /** 异步装配运行时。失败不拖垮 agent：日志留痕，事件仍在 intake 里等着。 */
+    private async openRuntime(): Promise<void> {
+        const profile = this.profile;
+        if (profile == null) return;
+        const baseDir = `./bots/${this.name}`;
+        const sink = createRequestLogSink({ dir: `${baseDir}/logs`, tools: () => this.toolNames() });
+        try {
+            const wiring = await openBotWiring({
+                name: this.name,
+                profile,
+                intake: this.intake,
+                baseDir,
+                systemPrompt: () => systemPromptFromProfile(profile, this.name),
+                sample: () => this.sampleContext(),
+                tools: [
+                    ...buildGameTools({
+                        execute: (name: string, args: Record<string, unknown>) =>
+                            this.invokeTool(name, args),
+                    }),
+                    createStopTool(() => this.fullStop()),
+                    createUpdatePlanTool((goal, todos) => this.plan.update(goal, todos)),
+                    createFeedbackTool({
+                        dir: () => baseDir,
+                        plan: () => this.plan.snapshot(),
+                        // 台账尾部当"历史摘要"：feedback 只需要一点上下文线索，
+                        // 不需要把整份对话塞进去。
+                        historyTail: () =>
+                            this.loopLog.slice(-10).map((entry) => ({
+                                role: 'system',
+                                content: JSON.stringify(entry.payload),
+                            })),
+                    }),
+                ],
+                onSay: (text: string): void => {
+                    this.routeResponse(this.currentSource, text);
                 },
-            },
-            assemble: (events: unknown[]) => this.assembleContext(events),
-            onEvent: (event) => {
-                // 事件进模型看得见的历史，恰好一次（正文不在这轮的尾巴里重发）。
-                this.history.addEvent(event);
-            },
-            model: (text: string, tools: unknown, image?: string | null) =>
-                this.modelCall(text, tools, image),
-            stopExecutor: async () => {
-                await this.fullStop();
-            },
-            emergencyHandler: () => this.runEmergency(),
-        });
-        // 双通道发言（有意设计，别改成单通道）：正文会在 modelCall 里自动
-        // 进聊天，充当"干活的动静"；Say 是专门说话的工具，两者并存。
-        // 这里只管 Say 的形状：空话拒绝，超长截断但记全文；
-        // 说出去的话记一条历史，免得下轮模型忘了自己说过什么。
-        this.toolHandlers.set('Say', (args: unknown) => {
-            const shaped = formatSay((args as { text?: unknown } | null)?.text);
-            if (!shaped.ok || shaped.line == null || shaped.full == null) {
-                return Promise.resolve({
-                    status: 'rejected',
-                    code: 'BAD_ARGS',
-                    reason: shaped.reason ?? 'Bad arguments.',
-                } as LoopToolResult);
-            }
-            this.routeResponse(this.currentSource, shaped.line);
-            void this.history.add(this.name, shaped.full, { kind: 'model', level: 2 });
-            return Promise.resolve({ status: 'completed', data: shaped.full } as LoopToolResult);
-        });
-        // UpdatePlan：模型自己写计划，整单替换进存储，下一轮快照即见。
-        this.toolHandlers.set('UpdatePlan', (args: unknown) => {
-            const checked = validateUpdatePlan(args);
-            if (!checked.ok) {
-                return Promise.resolve({
-                    status: 'rejected',
-                    code: checked.code ?? 'BAD_ARGS',
-                    reason: checked.errors?.join('; ') ?? 'Bad arguments.',
-                } as LoopToolResult);
-            }
-            const a = (args ?? {}) as { goal?: string | null; todos?: PlanTodoInput[] | null };
-            const snap = this.plan.update(a.goal, a.todos);
-            const summary =
-                `Plan updated. Goal: ${snap.goal ?? 'none'}. ` +
-                `Todos: ${snap.todos.length > 0 ? snap.todos.map((t) => `${t.done ? '[x]' : '[ ]'} ${t.text}`).join('; ') : 'none'}.`;
-            return Promise.resolve({ status: 'completed', data: summary } as LoopToolResult);
-        });
-        // Feedback：模型提使用意见，自动附计划快照和历史尾部摘要，
-        // 落盘 bots/<name>/feedback.jsonl。写失败显式拒绝——
-        // 意见被悄悄吞掉是这条工具唯一不能发生的事。
-        this.toolHandlers.set('Feedback', (args: unknown) => {
-            const checked = validateFeedback(args);
-            if (!checked.ok) {
-                return Promise.resolve({
-                    status: 'rejected',
-                    code: 'BAD_ARGS',
-                    reason: checked.errors?.join('; ') ?? 'Bad arguments.',
-                } as LoopToolResult);
-            }
-            const a = args as { title: string; body: string };
-            const entry = buildFeedbackEntry(
-                { title: a.title, body: a.body },
-                {
-                    plan: this.plan.snapshot(),
-                    historyTail: this.history.getHistory().map((t) => ({ role: t.role, content: t.content })),
-                },
+                rescue: () => this.runEmergency(),
+                extensions: [
+                    defineExtension({
+                        name: 'request-log',
+                        hooks: [requestLogHook(sink), compactionPageHook(sink)],
+                    }),
+                ],
+            });
+            this.wiring = wiring;
+            const migrated = await migrateLegacyState(
+                wiring.runtime.session.harness,
+                wiring.runtime.conversation.id,
+                readLegacySave(baseDir),
+                BACKGROUND_CONTEXT,
             );
-            try {
-                const file = appendFeedback(`./bots/${this.name}`, entry);
-                return Promise.resolve({ status: 'completed', data: `反馈已记录到 ${file}，谢谢，接着干活。` } as LoopToolResult);
-            } catch (err: unknown) {
-                return Promise.resolve({
-                    status: 'rejected',
-                    code: 'STORE_FAILED',
-                    reason: err instanceof Error ? err.message : String(err),
-                } as LoopToolResult);
+            if (migrated.memory || migrated.places > 0 || migrated.plan) {
+                console.log(
+                    `Migrated legacy state: memory=${migrated.memory} places=${migrated.places} plan=${migrated.plan}`,
+                );
             }
-        });
+        } catch (error: unknown) {
+            console.error('Runtime init failed:', error instanceof Error ? error.message : String(error));
+        }
+    }
+
+    /** 工具名列表（请求日志头用）。 */
+    private toolNames(): string[] {
+        return buildGameTools({ execute: () => '' }).map((tool) => tool.name);
+    }
+
+    /**
+     * 游戏工具的执行入口。
+     *
+     * **必须走 `ActionRunner`**：动作类工具要认领身体通道，直连
+     * `executeToolCall` 会绕过通道，E1（忙时同动作幂等）/E3（Stop 一次停干净）
+     * 当场失效。回执文本走 `loopResultText`，与旧 `runTool` 逐字一致。
+     */
+    private async invokeTool(name: string, args: Record<string, unknown>): Promise<string> {
+        const runner = this.actionRunner;
+        if (runner == null) return '工具通道尚未就绪，稍后再试。';
+        const result = await runner.run(name, args);
+        return loopResultText(name, args, result);
     }
 
     /** 全部停下：动作停、日志清、回到 idle。 */
@@ -414,91 +432,6 @@ export class Agent {
         await this.actions.stop();
         this.clearBotLogs();
         this.bot.emit('idle');
-    }
-
-    private actionRunner: ActionRunner | null = null;
-
-    /** 回执正文：对象 data 用 JSON 序列化，别再 [object Object] 了。 */
-    private outcomeText(data: unknown): string {
-        if (data == null) return '(no output)';
-        if (typeof data === 'string') return data === '' ? '(no output)' : data;
-        try {
-            return JSON.stringify(data) ?? String(data);
-        } catch {
-            return String(data);
-        }
-    }
-
-    /** 非控制工具走 ActionRunner：动作类即时回 accepted，查询类阻塞回内容。 */
-    private async runTool(name: string, args: unknown): Promise<LoopToolResult> {
-        const handler = this.toolHandlers.get(name);
-        if (handler) {
-            // 控制类调用也广播（Say 除外：它自己已经说话了），
-            // 回执同样记账：每次调用必有 outcome，模型才能对上号。
-            if (name !== 'Say') this.routeResponse(this.currentSource, MESSAGES.usedMarker(name));
-            const result = await handler(args);
-            const outcome =
-                result.status === 'completed'
-                    ? this.outcomeText(result.data)
-                    : `rejected: ${(result.reason ?? result.code ?? 'unknown') as string}`;
-            await this.history.add('system', MESSAGES.toolOutcome(name, args, outcome), {
-                kind: 'tool',
-                level: 2,
-            });
-            return result;
-        }
-        if (!this.actionRunner) {
-            this.actionRunner = new ActionRunner({
-                scheduler: this.scheduler,
-                record: async (outcome: string, tool: string, toolArgs: unknown): Promise<void> => {
-                    await this.history.add('system', MESSAGES.toolOutcome(tool, toolArgs, outcome), {
-                        kind: 'tool',
-                        level: 2,
-                    });
-                },
-                speak: (text: string): void => {
-                    this.routeResponse(this.currentSource, text);
-                },
-                execute: (tool: string, toolArgs: Record<string, unknown>): Promise<string> =>
-                    executeToolCall(this, tool, toolArgs),
-                notify: (payload: { call: string; result: LoopToolResult }): void => {
-                    this.notify(KIND.TOOL, LEVEL.WAKE, payload);
-                },
-            });
-        }
-        return this.actionRunner.run(name, args);
-    }
-
-    /**
-     * 每轮组装上下文。顺序很重要：
-     *   1. 先拍照——Live State 里的"截图文件名/时间"要引用这一轮刚拍的图，
-     *      否则文本和图差一拍；
-     *   2. 再现采 Live State；
-     *   3. 把这一轮未见的事件块放在快照**前面**，两张一起作为最后一条
-     *      user 消息发出，稳定前缀（system + 历史）不受影响。
-     */
-    private async assembleContext(events: unknown[] = []): Promise<{ text: string; tools: unknown; image?: string | null }> {
-        let image: string | null;
-        try {
-            image = (await this.vision_interpreter?.captureBase64?.()) ?? null;
-        } catch {
-            image = null;
-        }
-        const liveText = this.liveStateText();
-        // 未见事件必须让模型看到：它是"我为什么被叫醒"的唯一解释。
-        const eventsText = renderEvents(events as EventEntry[]);
-        // 记忆摘要不再单独成段：压仓后它就是历史里的第一条条目，
-        // 随整份历史一起发出去（Pi 的投影：system + 摘要 + 保留段）。
-        // 以前在这里又发一遍 `## 记忆摘要`，等于把摘要喂两次。
-        // 每段各带自己的标题；快照标题在这里给，适配器只负责原样发出去。
-        const liveBlock = `## 当前世界快照\n${liveText}`;
-        const text = composeTail(eventsText, liveBlock);
-        const tools = getOpenAITools(this);
-        this.requestLog?.logRequest({
-            text,
-            tools: tools.map((t) => t.function.name),
-        });
-        return { text, tools, image: image ?? null };
     }
 
     /**
@@ -529,40 +462,6 @@ export class Agent {
             goal: plan.goal ?? (typeof task?.goal === 'string' ? task.goal : null),
             todos: plan.todos,
             currentAction: this.actions.currentActionLabel,
-        };
-    }
-
-    private async modelCall(liveText: string, tools: unknown, image?: string | null): Promise<LoopModelResponse> {
-        void tools;
-        if (this.shut_up) return { text: null, calls: [] };
-        // 压仓检查点放在**每次请求之前**（Pi 的位置）：事件是同步入账的，
-        // 不能在里面 await 压缩；放在这里，事件堆积也会在下次请求前被算进去。
-        try {
-            await this.history.compactIfNeeded();
-        } catch (error: unknown) {
-            console.error('Compaction failed (request kept as-is):', error);
-        }
-        let res = await this.prompter.promptConvoTools(this.history.getHistory(), liveText, image ?? null);
-        // 上下文超限：压一次再试一次（Pi 的 overflow recovery）。
-        // 只给一次机会——压完还超，说明单条消息本身就装不下，
-        // 再压也只会把有用的东西越丢越多。
-        if (res?.overflow) {
-            console.warn('Context overflow: forcing compaction and retrying once.');
-            const compacted = await this.history.compactNow();
-            if (compacted) {
-                res = await this.prompter.promptConvoTools(this.history.getHistory(), liveText, image ?? null);
-            }
-        }
-        if (!res) return { text: null, calls: [] };
-        if (res.text?.trim()) {
-            // 双通道发言：正文自动进聊天，Say 工具同样可用。先都留着看效果。
-            // usage 挂在这条 assistant 条目上：它是压仓触发线的锚点。
-            await this.history.add(this.name, res.text, { kind: 'model', level: 2, usage: res.usage });
-            this.routeResponse(this.currentSource, res.text);
-        }
-        return {
-            text: res.text,
-            calls: res.tool_calls.map((c: { name: string; args: unknown }) => ({ name: c.name, args: c.args })),
         };
     }
 
@@ -627,14 +526,14 @@ export class Agent {
         this.shut_up = true;
     }
 
-    async handleMessage(
+    handleMessage(
         source: string,
         message: string,
         kind: Kind = KIND.USER,
         level: Level = LEVEL.WAKE,
         extra: Record<string, unknown> = {},
-    ): Promise<boolean> {
-        await this.checkTaskDone();
+    ): boolean {
+        this.checkTaskDone();
         if (!source || !message) {
             console.warn('Received empty message from', source);
             return false;
@@ -643,22 +542,12 @@ export class Agent {
         // 全中文：不再做翻译，直接使用原文
         console.log('received message from', source, ':', message);
 
-        // 不再在这里往历史里塞一份：这条消息会作为事件经 `loop.notify()` 进入
-        // 历史（`onEvent` → `history.addEvent`）。两处都写就是同一请求里喂两遍。
-        if (typeof this.prompter.chat_model.sendRequestWithTools !== 'function') {
-            const err = `Model ${this.prompter.chat_model.constructor?.name ?? 'unknown'} does not support native tool calling.`;
-            console.error(err);
-            this.routeResponse(source, MESSAGES.modelUnsupported);
-            return false;
-        }
+        // 不再在这里往历史里塞一份：这条消息会作为事件经 `notify()` 进上下文
+        // （L3 走 steer 输入）。两处都写就是同一请求里喂两遍。
         this.currentSource = source;
-        // 静音时不要把事件交给循环：beginRequest 会把事件标成 consumed，
-        // 而 modelCall 会因为 shut_up 直接早退——那样这些事件就再也补不回来
-        // （事件流引入后的新副作用）。挡在门外，解除静音后它们仍会被送达。
+        // 静音时不投递：解除静音后事件仍会被送达（旧实现里这里会永久丢事件）。
         if (this.shut_up) return false;
         this.notify(kind, level, { source, message, ...extra });
-        // 玩家消息立刻落盘（事件本身的入账在 handleDecision 里）。
-        this.history.save();
         return true;
     }
 
@@ -812,9 +701,9 @@ export class Agent {
         this.bot.emit('idle');
     }
 
-    async update(delta: number): Promise<void> {
+    update(delta: number): void {
         void delta;
-        await this.checkTaskDone();
+        this.checkTaskDone();
         this.pollEdges();
     }
 
@@ -826,7 +715,7 @@ export class Agent {
      * 异步动作串行化），这里没有可 await 的东西了。
      */
     private pollEdges(): void {
-        if (!this.edgeWatcher || !this.loop || !this.bot) return;
+        if (!this.edgeWatcher || !this.bot) return;
         let snapshot;
         try {
             const task = this.task as { goal?: unknown } | null;
@@ -890,24 +779,27 @@ export class Agent {
 
 
     cleanKill(msg = 'Killing agent process...', code = 1): void {
-        this.history.add('system', msg);
+        console.log(this.name, msg);
         this.bot.chat(code > 1 ? MESSAGES.restarting : MESSAGES.exiting);
-        this.history.save();
         process.exit(code);
     }
-    async checkTaskDone(): Promise<void> {
+    checkTaskDone(): void {
         if (this.task.data) {
             const res = this.task.isDone();
             if (res) {
-                // 任务完成/失败先进调度（失败 L4，成功 L3），再收尾退出。
+                // 任务完成/失败先进消息队列（失败 L4，成功 L3），再收尾退出。
                 const failed = typeof res.score === 'number' && res.score < 1;
                 this.notify(KIND.WORLD, failed ? LEVEL.PREEMPT : LEVEL.WAKE, {
                     type: failed ? 'task.failed' : 'task.done',
                     score: res.score,
                 });
-                await this.history.add('system', MESSAGES.taskEnded(res.score));
-                await this.history.save();
-                // await new Promise(resolve => setTimeout(resolve, 3000)); // Wait 3 second for save to complete
+                void this.wiring?.runtime.write({
+                    kind: 'mc.task-ended',
+                    model: [
+                        { role: 'user', content: MESSAGES.taskEnded(res.score), timestamp: Date.now() },
+                    ],
+                    data: { score: res.score },
+                });
                 console.log('Task finished:', res.message);
                 this.killAll();
             }

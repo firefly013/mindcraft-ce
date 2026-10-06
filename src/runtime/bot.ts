@@ -12,7 +12,7 @@
  * EventIntake(...) ─▶ L1–L5 → 原生原语（write / steer / abort+submit / abort+rescue）
  * ```
  */
-import type { EntryDraft, ToolRegistration } from '@earendil-works/pi-durable';
+import type { EntryDraft, Extension, ToolRegistration } from '@earendil-works/pi-durable';
 import type { SampleContext } from '../agent/live_state.js';
 import { compactionPolicyFromProfile } from './compaction.js';
 import { EventIntake, type GameEvent } from './events.js';
@@ -37,6 +37,8 @@ export interface BotWiringOptions {
   sample: () => SampleContext;
   /** 游戏工具。 */
   tools?: readonly ToolRegistration[];
+  /** 额外扩展（如请求日志 hook）。 */
+  extensions?: readonly Extension[];
   /** Say 通道出口（游戏内聊天 / 前端）。 */
   onSay?: (text: string) => void;
   /** L5 的保命反射，绕过模型。 */
@@ -94,6 +96,7 @@ export async function openBotWiring(options: BotWiringOptions): Promise<BotWirin
     systemPrompt: options.systemPrompt,
     liveTail: () => composeLiveTail(options.sample()),
     tools: options.tools ?? [],
+    ...(options.extensions != null ? { extensions: options.extensions } : {}),
     ...(options.onSay != null ? { onSay: options.onSay } : {}),
   });
 
