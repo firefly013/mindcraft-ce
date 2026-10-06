@@ -304,3 +304,53 @@ describe('运行时就绪前的事件不丢', () => {
     expect(h.submits).toHaveLength(0);
   });
 });
+
+/**
+ * L4 的"打断立刻插入"。
+ *
+ * 原来是一条 FIFO promise 链，等级只决定**做什么**、不决定**什么时候做**，
+ * 于是这条设计意图根本没实现。真机日志：pia 被骷髅射死，死亡事件
+ * 12:32:38 入队、12:32:57 才落地——**排在 30 条 L3 后面干等了 19 秒**，
+ * 最后还连同被 abort 的那一轮一起丢了。模型全程不知道自己死了。
+ */
+describe('L4 插队：打断立刻插入', () => {
+  it('L4 插到普通队列前面，不排在几十条 L3 后面', async () => {
+    const h = makeIntake();
+    // 模拟真机那场骷髅战：链路里已经堆了一批 L3
+    for (let i = 1; i <= 5; i++) h.intake.notify(event(`L3-${i}`, LEVEL.WAKE));
+    // 死亡事件是 L4
+    h.intake.notify(event('L4-death', LEVEL.PREEMPT));
+    await h.intake.settle();
+
+    const order = h.actions.map((a) => a.split(':')[0] ?? '');
+    expect(order.indexOf('L4-death')).toBeGreaterThanOrEqual(0);
+    // 关键：它必须插到**后面那几条** L3 前面
+    expect(order.indexOf('L4-death')).toBeLessThan(order.indexOf('L3-3'));
+    expect(order.indexOf('L4-death')).toBeLessThan(order.indexOf('L3-5'));
+  });
+
+  it('插队不破坏各自的先后：L4 之间有序，L3 之间也有序', async () => {
+    const h = makeIntake();
+    h.intake.notify(event('L3-a', LEVEL.WAKE));
+    h.intake.notify(event('L3-b', LEVEL.WAKE));
+    h.intake.notify(event('L4-1', LEVEL.PREEMPT));
+    h.intake.notify(event('L3-c', LEVEL.WAKE));
+    h.intake.notify(event('L4-2', LEVEL.PREEMPT));
+    await h.intake.settle();
+
+    const order = h.actions.map((a) => a.split(':')[0] ?? '');
+    expect(order.indexOf('L4-1')).toBeLessThan(order.indexOf('L4-2'));
+    expect(order.indexOf('L3-a')).toBeLessThan(order.indexOf('L3-b'));
+    expect(order.indexOf('L3-b')).toBeLessThan(order.indexOf('L3-c'));
+  });
+
+  it('L5（紧急）同样走优先通道', async () => {
+    const h = makeIntake();
+    for (let i = 1; i <= 4; i++) h.intake.notify(event(`L3-${i}`, LEVEL.WAKE));
+    h.intake.notify(event('L5-emergency', LEVEL.EMERGENCY));
+    await h.intake.settle();
+
+    const order = h.actions.map((a) => a.split(':')[0] ?? '');
+    expect(order.indexOf('L5-emergency')).toBeLessThan(order.indexOf('L3-3'));
+  });
+});

@@ -690,6 +690,12 @@ export class Agent {
         });
         this.bot.on('death', () => {
             this.actions.stop();
+            // 死着不该继续干活。真机日志里 pia 12:32:38 被骷髅射死，
+            // 12:32:39 还在 claim `moveAway` 躲怪——因为死亡只停了身体，
+            // 没中断模型那一轮推理。
+            this.requestInterrupt();
+            // **立刻中断推理**，不等事件队列（L4 也要 abort，但先做一遍更稳）。
+            void this.wiring?.runtime.abort();
         });
         this.bot.on('kicked', (reason: unknown) => {
             if (!this._disconnectHandled) {
@@ -708,12 +714,20 @@ export class Agent {
                     death_pos_text = `x: ${death_pos.x.toFixed(2)}, y: ${death_pos.y.toFixed(2)}, z: ${death_pos.z.toFixed(2)}`;
                 }
                 const dimention = this.bot.game.dimension;
-                void this.handleMessage(
-                    'system',
-                    MESSAGES.death(death_pos_text || 'unknown', dimention, message),
-                    KIND.WORLD,
-                    LEVEL.PREEMPT,
-                );
+                const text = MESSAGES.death(death_pos_text || 'unknown', dimention, message);
+                // **先写一条 L2 被动记录**。L4 会走 `abort()`，而 `abort()` 撤回
+                // 排队中的输入——真机上这条死亡消息 19 秒后才落地，最后连同被
+                // abort 的那一轮一起丢了，模型全程不知道自己死了。
+                // L2 是 write，pi-durable 明确"queued writes stay"，不参与撤回。
+                //
+                // 这里**不走 `handleMessage`**：它静音时会直接丢事件（`stfu`），
+                // 而死亡不该被静音吃掉。
+                this.notify(KIND.WORLD, LEVEL.STATE, { source: 'system', message: text });
+                // 再用 L4 把模型叫起来（优先通道，立刻插队）。
+                this.notify(KIND.WORLD, LEVEL.PREEMPT, {
+                    source: 'system',
+                    message: MESSAGES.deathWake(),
+                });
             }
         });
         this.bot.on('idle', () => {

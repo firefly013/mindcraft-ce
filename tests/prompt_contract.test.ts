@@ -7,7 +7,7 @@
  * 这里同时保护**有意设计**：Say + 自动散文双通道不能被当成冗余删掉。
  */
 import { describe, expect, it } from 'vitest';
-import { PROMPT_SETS } from '../src/prompts.js';
+import { PROMPT_SETS, MESSAGES } from '../src/prompts.js';
 
 const conversing = PROMPT_SETS['default']?.['conversing'] ?? '';
 
@@ -39,5 +39,20 @@ describe('conversing 提示词契约', () => {
 
   it('Feedback 通道保留', () => {
     expect(conversing).toContain('Feedback');
+  });
+
+  it('死亡是两条消息：L2 记事实 + L4 叫醒，唤醒语只给"该干什么"', () => {
+    // 为什么两条都发：L4 走 `abort()`，而 `abort()` 撤回排队中的输入——
+    // 真机上死亡消息 19 秒后才落地，最后连同被 abort 的那一轮一起丢了。
+    // L2 是 write（"queued writes stay"），不参与撤回，是那条兜底。
+    const record = MESSAGES.death('x: 1, y: 2, z: 3', 'overworld', 'pia drowned');
+    expect(record).toContain('你死在了');
+    expect(record).toContain('last_death_position');
+
+    const wake = MESSAGES.deathWake();
+    expect(wake).toContain('你死了');
+    expect(wake).toContain('立刻停下');
+    // 事实在 L2 那条里，唤醒语不复述——同一请求里喂两遍是浪费
+    expect(wake).not.toContain('last_death_position');
   });
 });

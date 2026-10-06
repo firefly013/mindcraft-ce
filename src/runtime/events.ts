@@ -19,6 +19,17 @@
  *
  * 之所以要缓冲，是因为 pi-durable 不知道"这个输入是从哪个事件来的"——它只认
  * 输入。所以这一层是薄薄一层账，不是另一套调度器。
+ *
+ * ## 为什么是**两条**队列，而不是一条 promise 链
+ *
+ * 原来是一条 FIFO 链：`chain = chain.then(() => react(event))`。等级只决定
+ * **做什么**，完全不决定**什么时候做**——于是"L4 打断立刻插入"只是设计意图，
+ * 没实现。真机日志里 pia 被骷髅射死，死亡事件 12:32:38 入队、12:32:57 才落地：
+ * **排在 30 条 L3 后面干等了 19 秒**，最后还连同被 abort 的那一轮一起丢了。
+ *
+ * 现在分两条：L4/L5 进 `urgent`，L1–L3 进 `normal`，泵**每次取下一个都先看
+ * urgent**。泵仍然是单线程串行的（write/steer/interrupt 都会改对话，必须互斥），
+ * 所以 L4 最多等**当前那一条**跑完，而不是等前面排的一整串。
  */
 import { BACKGROUND_CONTEXT } from '@earendil-works/chord/context';
 import type { Context } from '@earendil-works/chord';
@@ -50,8 +61,12 @@ export interface EventIntakeDeps {
 export class EventIntake {
   private deps: EventIntakeDeps | null;
   private readonly context: Context;
-  /** 串行化异步动作，保证 abort 与 submit 的相对顺序。 */
-  private chain: Promise<void> = Promise.resolve();
+  /** 优先通道：L4/L5。泵每次取下一个都先看它。 */
+  private urgent: GameEvent[] = [];
+  /** 普通通道：L1/L2/L3，先进先出。 */
+  private normal: GameEvent[] = [];
+  /** 正在排空的泵；null = 空闲。 */
+  private pump: Promise<void> | null = null;
   /** 已提交但**尚未落定**的输入——abort 会撤回它们。write 不进这里。 */
   private outstanding: Array<{ event: GameEvent; submission: Submission }> = [];
   /** 运行时还没接上时收到的事件，按顺序暂存。 */
@@ -87,7 +102,7 @@ export class EventIntake {
     return this.waiting.length;
   }
 
-  /** 收一个事件：**同步返回**（旧调度协议是同步的），异步动作排在链上。 */
+  /** 收一个事件：**同步返回**（旧调度协议是同步的），异步动作排在队列上。 */
   notify(event: GameEvent): void {
     const deps = this.deps;
     if (deps == null) {
@@ -95,25 +110,55 @@ export class EventIntake {
       this.waiting.push(event);
       return;
     }
-    // 把非空的 `deps` **捕获进闭包**：链上每个步骤都拿得到它，于是
-    // react/steer/interrupt 里不需要再写一层够不到的 `deps == null` 判断。
-    this.chain = this.chain
-      .then(() => this.react(event, deps))
-      .catch((error: unknown) => deps.onError?.(error));
+    // 按等级分流。**这就是"L4 打断立刻插入"的实现**——等级不决定做什么，
+    // 还决定插在谁前面。
+    if (event.level >= LEVEL.PREEMPT) this.urgent.push(event);
+    else this.normal.push(event);
+    void this.start(deps);
+  }
+
+  /**
+   * 起泵（已经在跑就什么都不做）。
+   *
+   * **推到微任务里起**：`notify` 必须同步返回、且同步阶段不产生任何副作用——
+   * 它是在 `bot.on('chat')` / 轮询回调里被就地调用的，当场干活会重入。
+   *
+   * 清 `pump` 这一步**必须与"判空"同步**（中间不能有 await）：否则中间进来的
+   * 事件会看到 `pump` 还在、把自己留在队列里没人取。`drain` 返回后紧接着就是
+   * 同一个微任务里的赋值，所以那个窗口不存在——不需要额外补一次检查。
+   */
+  private start(deps: EventIntakeDeps): Promise<void> {
+    if (this.pump == null) {
+      this.pump = Promise.resolve().then(async () => {
+        await this.drain(deps);
+        this.pump = null;
+      });
+    }
+    return this.pump;
+  }
+
+  /** 排空两个队列；每一步都重新取，所以优先通道永远插得进来。 */
+  private async drain(deps: EventIntakeDeps): Promise<void> {
+    for (;;) {
+      const event = this.urgent.shift() ?? this.normal.shift();
+      if (event === undefined) return;
+      try {
+        await this.react(event, deps);
+      } catch (error: unknown) {
+        // 一条事件处理失败不该让整个泵停摆——后面还有几十条在排队。
+        deps.onError?.(error);
+      }
+    }
   }
 
   /**
    * 等已排队的动作落定。
    *
-   * 必须**循环**：链会在动作执行过程中被替换（一次 interrupt 之后要重新提交
-   * 被撤回的事件，那会往链上追加工作）。只 await 一次会漏掉后追加的。
+   * 循环 await：处理过程中会不断入队（一次 interrupt 之后要重新提交被撤回的
+   * 事件，那又是新的入队）。只 await 一次会漏掉后追加的。
    */
   async settle(): Promise<void> {
-    let previous: Promise<void> | null = null;
-    while (previous !== this.chain) {
-      previous = this.chain;
-      await previous;
-    }
+    while (this.pump != null) await this.pump;
   }
 
   /** 尚未落定的输入事件（abort 撤回后需要重新提交的那些）。 */
