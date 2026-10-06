@@ -1,6 +1,7 @@
 import { VisionInterpreter } from './vision/vision_interpreter.js';
 import { closeSync, openSync, readSync, statSync } from 'node:fs';
 import { initBot } from '../utils/mcdata.js';
+import { expandTagRecipes } from '../utils/recipe_tags.js';
 import { executeToolCall } from './commands/to_openai_tools.js';
 import { ActionRunner } from './action_runner.js';
 import { stopPvp, consume, goToPosition } from './library/skills.js';
@@ -141,6 +142,21 @@ export class Agent {
 
         console.log(this.name, 'logging into minecraft...');
         this.bot = initBot(this.name);
+
+        // 补上 minecraft-data 丢掉的 tag 信息（`#planks` 被写死成 oak_planks）——不补的话
+
+        // "有桦木板"会被判成"没有橡木板"，crafting_table / chest / shield 全都做不出来
+
+        // （模型真机验收报的）。mineflayer 读的是它自己的 registry。
+
+        const addedRecipes = expandTagRecipes(this.bot?.registry);
+
+        if (addedRecipes > 0) {
+
+            this.log.with('lifecycle').info({ event: 'tag-recipes-expanded', added: addedRecipes });
+
+        }
+
 
         // Connection Handler
         const onDisconnect = (event: string, reason: unknown): void => {
