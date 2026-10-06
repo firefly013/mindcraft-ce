@@ -552,7 +552,7 @@ function deltaFor(detector: Detector, key: string | number | null, snapshot: Edg
     // 光报"没食物了"没有用——模型反馈过："系统只发了事件但**没有可执行的建议**，
     // 现在全靠我自己想"。把下一步直接写进事件里。
     delta['hint'] =
-      '没有食物了：searchForEntity 找 pig/cow/chicken/sheep → attack 杀掉 → smeltItem 把生肉烤熟 → consume 吃掉；' +
+      '没有食物了：searchForEntity 找 pig/cow/chicken/sheep → attack 杀掉 → useBlock(type=furnace, input=生肉, output=熟肉) 烤熟 → consume 吃掉；' +
       '旁边有小麦/胡萝卜/土豆就直接 collectBlocks 收。饿到 6 以下会掉血。';
   }
   return delta;

@@ -164,18 +164,6 @@ export const actionsList: AgentCommand[] = [
         })
     },
     {
-        name: '!givePlayer',
-        description: td('givePlayer'),
-        params: {
-            'player_name': { type: 'string', description: tp('givePlayer', 'player_name') },
-            'item_name': { type: 'ItemName', description: tp('givePlayer', 'item_name') },
-            'num': { type: 'int', description: tp('givePlayer', 'num'), domain: [1, Number.MAX_SAFE_INTEGER] }
-        },
-        perform: runAsAction(async (agent: any, player_name: string, item_name: string, num: number) => {
-            await skills.giveToPlayer(agent.bot, item_name, player_name, num);
-        })
-    },
-    {
         name: '!consume',
         description: td('consume'),
         params: {'item_name': { type: 'ItemName', description: tp('consume', 'item_name') }},
@@ -189,36 +177,6 @@ export const actionsList: AgentCommand[] = [
         params: {'item_name': { type: 'ItemName', description: tp('equip', 'item_name') }},
         perform: runAsAction(async (agent: any, item_name: string) => {
             await skills.equip(agent.bot, item_name);
-        })
-    },
-    {
-        name: '!putInChest',
-        description: td('putInChest'),
-        params: {
-            'item_name': { type: 'ItemName', description: tp('putInChest', 'item_name') },
-            'num': { type: 'int', description: tp('putInChest', 'num'), domain: [1, Number.MAX_SAFE_INTEGER] }
-        },
-        perform: runAsAction(async (agent: any, item_name: string, num: number) => {
-            await skills.putInChest(agent.bot, item_name, num);
-        })
-    },
-    {
-        name: '!takeFromChest',
-        description: td('takeFromChest'),
-        params: {
-            'item_name': { type: 'ItemName', description: tp('takeFromChest', 'item_name') },
-            'num': { type: 'int', description: tp('takeFromChest', 'num'), domain: [1, Number.MAX_SAFE_INTEGER] }
-        },
-        perform: runAsAction(async (agent: any, item_name: string, num: number) => {
-            await skills.takeFromChest(agent.bot, item_name, num);
-        })
-    },
-    {
-        name: '!viewChest',
-        description: td('viewChest'),
-        params: { },
-        perform: runAsAction(async (agent: any) => {
-            await skills.viewChest(agent.bot);
         })
     },
     {
@@ -245,36 +203,6 @@ export const actionsList: AgentCommand[] = [
         perform: runAsAction(async (agent: any, type: string, num: number) => {
             await skills.collectBlock(agent.bot, type, num);
         }, 10) // 10 分钟超时
-    },
-    {
-        name: '!craftRecipe',
-        description: td('craftRecipe'),
-        params: {
-            'recipe_name': { type: 'ItemName', description: tp('craftRecipe', 'recipe_name') },
-            'num': { type: 'int', description: tp('craftRecipe', 'num'), domain: [1, Number.MAX_SAFE_INTEGER] }
-        },
-        perform: runAsAction(async (agent: any, recipe_name: string, num: number) => {
-            await skills.craftRecipe(agent.bot, recipe_name, num);
-        })
-    },
-    {
-        name: '!smeltItem',
-        description: td('smeltItem'),
-        params: {
-            'item_name': { type: 'ItemName', description: tp('smeltItem', 'item_name') },
-            'num': { type: 'int', description: tp('smeltItem', 'num'), domain: [1, Number.MAX_SAFE_INTEGER] }
-        },
-        perform: runAsAction(async (agent: any, item_name: string, num: number) => {
-            await skills.smeltItem(agent.bot, item_name, num);
-        })
-    },
-    {
-        name: '!clearFurnace',
-        description: td('clearFurnace'),
-        params: { },
-        perform: runAsAction(async (agent: any) => {
-            await skills.clearNearestFurnace(agent.bot);
-        })
     },
         {
         name: '!placeHere',
@@ -307,38 +235,11 @@ export const actionsList: AgentCommand[] = [
         })
     },
     {
-        name: '!goToBed',
-        description: td('goToBed'),
-        perform: runAsAction(async (agent: any) => {
-            await skills.goToBed(agent.bot);
-        })
-    },
-    {
         name: '!stay',
         description: td('stay'),
         params: {'type': { type: 'int', description: tp('stay', 'type'), domain: [-1, Number.MAX_SAFE_INTEGER] }},
         perform: runAsAction(async (agent: any, seconds: number) => {
             await skills.stay(agent.bot, seconds);
-        })
-    },
-    {
-        name: '!showVillagerTrades',
-        description: td('showVillagerTrades'),
-        params: {'id': { type: 'int', description: tp('showVillagerTrades', 'id') }},
-        perform: runAsAction(async (agent: any, id: number) => {
-            await skills.showVillagerTrades(agent.bot, id);
-        })
-    },
-    {
-        name: '!tradeWithVillager',
-        description: td('tradeWithVillager'),
-        params: {
-            'id': { type: 'int', description: tp('tradeWithVillager', 'id') },
-            'index': { type: 'int', description: tp('tradeWithVillager', 'index'), domain: [1, Number.MAX_SAFE_INTEGER] },
-            'count': { type: 'int', description: tp('tradeWithVillager', 'count'), domain: [1, Number.MAX_SAFE_INTEGER] },
-        },
-        perform: runAsAction(async (agent: any, id: number, index: number, count: number) => {
-            await skills.tradeWithVillager(agent.bot, id, index, count);
         })
     },
     {
