@@ -1,4 +1,22 @@
-import assert from 'node:assert';
+/*
+ * 动作执行器（薄）：跑一个动作函数、维护执行状态、收集输出摘要。
+ *
+ * **身体通道的唯一真相是 Scheduler**（`action_runner.ts` 认领/释放，
+ * 同一时刻最多一个动作）。这里不再有自己的"忙/闲"判据去打断别人——
+ * 那正是以前"两套通道各自为政"的病根：
+ *   - `ActionManager.executing` 和 `Scheduler.action` 各说各话；
+ *   - 每个动作入口先 `await this.stop()` 打断上一个，于是模型被 L3
+ *     事件叫醒后重发同一动作时，会把**自己正在做的事**打断重来。
+ *
+ * 已删除的整套 resume 机制（`resume_func` / `_executeResume` /
+ * `cancelResume` / `bot.on('idle')` 重放钩子）：它只被 `followPlayer`
+ * 用过一次（`runAsAction(fn, true)`），做的是"每次 idle 就把上一个动作
+ * 偷偷重放一遍"。那是**绕过身体通道的隐藏决策者**：动作结束了却不由
+ * 模型决定要不要继续，于是"跟随"永远停不下来，而模型对此一无所知。
+ * 现在 `followPlayer` 是一个正常的占用型动作——一直占着通道，直到模型
+ * 调 `Stop`（见 docs/agent-design.md §6）。
+ */
+
 import { MESSAGES } from '../prompts.js';
 
 export type ActionFn = () => unknown;
@@ -11,9 +29,12 @@ export interface ActionResult {
 }
 
 export interface RunActionOptions {
+    /** 超时分钟数；<= 0 表示不设超时。 */
     timeout?: number;
-    resume?: boolean;
 }
+
+/** 停止一个卡住的动作的兜底等待上限（毫秒）。 */
+export const STOP_WAIT_MS = 10_000;
 
 export class ActionManager {
     agent: any; // 交叉引用 Agent，避免循环依赖
@@ -21,10 +42,6 @@ export class ActionManager {
     currentActionLabel: string;
     currentActionFn: ActionFn | null;
     timedout: boolean;
-    resume_func: ActionFn | null;
-    resume_name: string | null;
-    last_action_time: number;
-    recent_action_counter: number;
 
     constructor(agent: any) {
         this.agent = agent;
@@ -32,33 +49,31 @@ export class ActionManager {
         this.currentActionLabel = '';
         this.currentActionFn = null;
         this.timedout = false;
-        this.resume_func = null;
-        this.resume_name = '';
-        this.last_action_time = 0;
-        this.recent_action_counter = 0;
     }
 
-    resumeAction(actionFn?: ActionFn | null, timeout?: number): Promise<ActionResult> {
-        // 保留原 .js 逻辑：把 (actionFn, timeout) 直接透传给 _executeResume 的前两个形参
-        return this._executeResume(
-            actionFn as unknown as string | null,
-            timeout as unknown as ActionFn | null
-        );
+    /**
+     * 单发执行一个动作。
+     *
+     * 入口的 `stop()` 是**兜底**而不是常规路径：调度器的身体通道保证了
+     * 同一时刻只有一个动作，所以这里通常是空操作（`stop()` 在没执行时
+     * 立刻返回）。万一有路径绕过了通道，它最多做到"等上一个真的停下来"。
+     */
+    async runAction(actionLabel: string, actionFn: ActionFn, { timeout = -1 }: RunActionOptions = {}): Promise<ActionResult> {
+        return await this._executeAction(actionLabel, actionFn, timeout);
     }
 
-    runAction(actionLabel: string, actionFn: ActionFn, { timeout, resume = false }: RunActionOptions = {}): Promise<ActionResult> {
-        if (resume) {
-            return this._executeResume(actionLabel, actionFn, timeout);
-        } else {
-            return this._executeAction(actionLabel, actionFn, timeout);
-        }
-    }
-
+    /**
+     * 停掉正在跑的动作：不断请求打断，直到动作函数真的返回。
+     *
+     * 必须**等**：先释放通道再让身体继续动，就是"Stop 了但还在挖"。
+     * 超过 `STOP_WAIT_MS` 还没停下来才认输杀掉进程——这是最后的保险丝，
+     * 正常路径永远走不到。
+     */
     async stop(): Promise<void> {
         if (!this.executing) return;
         const timeout = setTimeout(() => {
             this.agent.cleanKill('Action refused stop after 10 seconds. Killing process.');
-        }, 10000);
+        }, STOP_WAIT_MS);
         while (this.executing) {
             this.agent.requestInterrupt();
             console.log('waiting for action to finish executing...');
@@ -67,54 +82,12 @@ export class ActionManager {
         clearTimeout(timeout);
     }
 
-    cancelResume(): void {
-        this.resume_func = null;
-        this.resume_name = null;
-    }
-
-    async _executeResume(actionLabel: string | null = null, actionFn: ActionFn | null = null, timeout = 10): Promise<ActionResult> {
-        const new_resume = actionFn != null;
-        if (new_resume) { // start new resume
-            this.resume_func = actionFn;
-            assert(actionLabel != null, 'actionLabel is required for new resume');
-            this.resume_name = actionLabel;
-        }
-        if (this.resume_func != null && (this.agent.isIdle() || new_resume)) {
-            this.currentActionLabel = this.resume_name as string;
-            const res = await this._executeAction(this.resume_name as string, this.resume_func, timeout);
-            this.currentActionLabel = '';
-            return res;
-        } else {
-            return { success: false, message: null, interrupted: false, timedout: false };
-        }
-    }
-
-    async _executeAction(actionLabel: string, actionFn: ActionFn, timeout = 10): Promise<ActionResult> {
+    async _executeAction(actionLabel: string, actionFn: ActionFn, timeout = -1): Promise<ActionResult> {
         let TIMEOUT: ReturnType<typeof setTimeout> | undefined;
         try {
-            if (this.last_action_time > 0) {
-                const time_diff = Date.now() - this.last_action_time;
-                if (time_diff < 20) {
-                    this.recent_action_counter++;
-                }
-                else {
-                    this.recent_action_counter = 0;
-                }
-                if (this.recent_action_counter > 3) {
-                    console.warn('Fast action loop detected, cancelling resume.');
-                    this.cancelResume(); // likely cause of repetition
-                }
-                if (this.recent_action_counter > 5) {
-                    console.error('Infinite action loop detected, shutting down.');
-                    this.agent.cleanKill('Infinite action loop detected, shutting down.');
-                    return { success: false, message: 'Infinite action loop detected, shutting down.', interrupted: false, timedout: false };
-                }
-            }
-            this.last_action_time = Date.now();
             console.log('executing action...\n');
 
-            // await current action to finish (executing=false), with 10 seconds timeout
-            // also tell agent.bot to stop various actions
+            // await current action to finish (executing=false)，兜底用。
             if (this.executing) {
                 console.log(`action "${actionLabel}" trying to interrupt current action "${this.currentActionLabel}"`);
             }
@@ -159,7 +132,6 @@ export class ActionManager {
             this.currentActionLabel = '';
             this.currentActionFn = null;
             if (TIMEOUT !== undefined) clearTimeout(TIMEOUT);
-            this.cancelResume();
             console.error("Action triggered catch:", err);
             // Log the full stack trace
             console.error(err instanceof Error ? err.stack : err);
@@ -205,5 +177,4 @@ export class ActionManager {
             await this.stop(); // last attempt to stop
         }, TIMEOUT_MINS * 60 * 1000);
     }
-
 }

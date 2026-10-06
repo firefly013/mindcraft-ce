@@ -251,7 +251,6 @@ def launch_parallel_experiments(task_path,
                                 bucket_name="mindcraft-experiments", 
                                 template_profile="profiles/tasks/collab_profile.json", 
                                   url=None, 
-                                max_messages=15,
                                 no_pruning=False,
                                 block_conversation=False, 
                                 run_in_tmux=True):
@@ -307,7 +306,6 @@ def launch_parallel_experiments(task_path,
                                  url=url, 
                                  task_type=task_type, 
                                  s3_path=s3_path, 
-                                 max_messages=max_messages,
                                  no_pruning=no_pruning,
                                  block_conversation=block_conversation, 
                                  run_in_tmux=run_in_tmux)
@@ -327,7 +325,6 @@ def launch_parallel_experiments(task_path,
         results["num_agents"] = num_agents
         results["task_path"] = task_path
         results["task_type"] = task_type
-        results["max_messages"] = max_messages
         with open(f"{experiments_folder}/results.txt", "w") as file:
             file.write(str(results))
         if s3: 
@@ -351,7 +348,6 @@ def launch_server_experiment(task_path,
                              url=None,
                              task_type="techtree", 
                              s3_path="", 
-                             max_messages=15, 
                              no_pruning=False,
                              block_conversation=False, 
                              run_in_tmux=True):
@@ -414,8 +410,6 @@ def launch_server_experiment(task_path,
         set_environment_variable_tmux_session(session_name, "MINECRAFT_PORT", server_port)
         set_environment_variable_tmux_session(session_name, "MINDSERVER_PORT", mindserver_port)
         set_environment_variable_tmux_session(session_name, "PROFILES", agent_profiles_str)
-        set_environment_variable_tmux_session(session_name, "MAX_MESSAGES", str(max_messages))
-        set_environment_variable_tmux_session(session_name, "LOG_ALL", "true")
         make_ops(agent_names, session_name)
     else: 
         agent_profiles_str = "["
@@ -424,8 +418,6 @@ def launch_server_experiment(task_path,
         agent_profiles_str += f"\"{agent_profiles[-1]}\"]"
         # print(agent_profiles_str)
         os.environ["PROFILES"] = agent_profiles_str
-        os.environ["MAX_MESSAGES"] = str(max_messages)
-        os.environ["LOG_ALL"] = "true"
     
     run_script(task_path, 
                task_ids, 
@@ -740,7 +732,6 @@ def main():
     parser.add_argument('--model', default="deepseek-v4.1-flash", help='Model to use for the agents')
     # parser.add_argument('--world_name', default="Forest", help='Name of the world')
     parser.add_argument('--url', default=None, help='OpenAI-compatible endpoint to point the agents at (default: provider default)')
-    parser.add_argument('--max_messages', default=15, type=int, help='Maximum number of messages before summarizing')
     parser.add_argument('--no-pruning', action='store_true', help='Disable pruning of the actions')
     parser.add_argument('--block_conversation', action='store_true', help='Block conversation actions')
     parser.add_argument('--check', metavar='FOLDER_PATH', help='Check and evaluate results in the specified folder without running experiments')
@@ -794,7 +785,6 @@ def main():
                                 model=args.model,
                                 num_agents=args.num_agents,
                                 url=args.url, 
-                                max_messages=args.max_messages,
                                 no_pruning=args.no_pruning, 
                                 block_conversation=args.block_conversation,
                                 run_in_tmux=not args.no_launch_world)

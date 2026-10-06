@@ -60,9 +60,25 @@ export class ActionRunner {
       await this.record(data, name, args);
       return { status: 'completed', data };
     }
-    const claim = this.scheduler.startAction(name);
+    const claim = this.scheduler.startAction(name, args);
     if (!claim.accepted) {
-      const reason = 'An action is already running. Stop() first, then retry.';
+      const running = this.scheduler.currentAction();
+      // 幂等：被拒的这次**就是**正在跑的那个动作。
+      // 模型被事件叫醒后常常把同一个动作再下一次，此时逼它 Stop
+      // 就等于让它把自己正在做的事打断重来——正是"反复卡住"的来源。
+      // 直接告诉它"已经在做了"，让它等结果。
+      if (claim.code === 'ACTION_BUSY' && running != null && running.id === name) {
+        const reason = `${name} 已经在跑了，不用重发，也不用 Stop——它跑完会自己报结果。`;
+        await this.record(`already running: ${reason}`, name, args);
+        return { status: 'accepted', data: { already_running: true, action_id: running.id, reason } };
+      }
+      // 确实是另一个动作：报清楚谁在跑、跑了多久，并把"要不要打断"
+      // 交还给模型，而不是命令它先 Stop。
+      const reason =
+        running != null
+          ? `另一个动作正在跑（${running.id}，已 ${Math.max(0, Math.round((Date.now() - running.startedAt) / 1000))} 秒）。` +
+            `它会自己报结果；只有你确实要改做别的事时，才需要先 Stop。`
+          : 'An action is already running. Stop() first, then retry.';
       await this.record(`rejected: ${reason}`, name, args);
       return { status: 'rejected', code: claim.code ?? 'ACTION_BUSY', reason };
     }

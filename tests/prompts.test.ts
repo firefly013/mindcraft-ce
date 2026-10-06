@@ -38,12 +38,9 @@ describe('MESSAGES', () => {
         "死亡点已存为 'last_death_position'，想回去可以找它。" +
         '之前的动作已停止，你已重生。',
     );
-    expect(MESSAGES.goalDone('g')).toBe('你刚成功完成了目标g。');
-    expect(MESSAGES.goalFailed('g')).toBe('你刚没能完成目标g。');
     expect(MESSAGES.modelUnsupported).toBe(
       '我的模型不支持原生工具调用，换个 OpenAI 兼容模型再试。',
     );
-    expect(MESSAGES.recentConvoPrefix).toBe('最近对话：\n');
     expect(MESSAGES.shuttingUp).toBe('闭嘴了。');
     expect(MESSAGES.restarting).toBe('重启中。');
     expect(MESSAGES.exiting).toBe('退出中。');

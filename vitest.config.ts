@@ -17,7 +17,8 @@ export default defineConfig({
         'src/prompts.ts',
         'src/models/_model_map.ts',
         'src/agent/memory_bank.ts',
-        'src/agent/tasks/construction_tasks.ts',
+        'src/agent/compaction.ts',
+        'src/agent/requestLog.ts',
       ],
       thresholds: {
         lines: 100,

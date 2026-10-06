@@ -1,6 +1,7 @@
 import { readFileSync, mkdirSync, writeFileSync } from 'fs';
-import { executeToolCall, getOpenAITools } from '../agent/commands/to_openai_tools.js';
-import { stringifyTurns } from '../utils/text.js';
+import { getOpenAITools } from '../agent/commands/to_openai_tools.js';
+import { serializeConversation } from '../utils/text.js';
+import { renderRequestLog } from '../agent/requestLog.js';
 import settings from '../agent/settings.js';
 import { resolvePromptSet, MESSAGES } from '../prompts.js';
 import { promises as fs } from 'fs';
@@ -102,59 +103,21 @@ export class Prompter {
     return this.profile.name;
   }
 
-  async replaceStrings(
-    prompt: string,
-    messages: ChatMessage[] | null,
-    to_summarize: ChatMessage[] = [],
-    last_goals: Record<string, boolean> | null = null,
-  ): Promise<string> {
-    prompt = prompt.replaceAll('$NAME', this.agent.name);
-
-    if (prompt.includes('$STATS')) {
-      let stats = ((await executeToolCall(this.agent, 'stats', {})) as string) + '\n';
-      stats += ((await executeToolCall(this.agent, 'entities', {})) as string) + '\n';
-      stats += (await executeToolCall(this.agent, 'nearbyBlocks', {})) as string;
-      prompt = prompt.replaceAll('$STATS', stats);
-    }
-    if (prompt.includes('$INVENTORY')) {
-      const inventory = (await executeToolCall(this.agent, 'inventory', {})) as string;
-      prompt = prompt.replaceAll('$INVENTORY', inventory);
-    }
-    if (prompt.includes('$ACTION')) {
-      prompt = prompt.replaceAll('$ACTION', this.agent.actions.currentActionLabel);
-    }
-    if (prompt.includes('$MEMORY')) prompt = prompt.replaceAll('$MEMORY', this.agent.history.memory);
-    if (prompt.includes('$TO_SUMMARIZE'))
-      prompt = prompt.replaceAll('$TO_SUMMARIZE', stringifyTurns(to_summarize));
-    if (prompt.includes('$CONVO'))
-      prompt = prompt.replaceAll(
-        '$CONVO',
-        MESSAGES.recentConvoPrefix + stringifyTurns(messages ?? []),
-      );
-    if (prompt.includes('$LAST_GOALS')) {
-      let goal_text = '';
-      for (const goal in last_goals ?? {}) {
-        if ((last_goals as Record<string, boolean>)[goal]) goal_text += MESSAGES.goalDone(goal) + '\n';
-        else goal_text += MESSAGES.goalFailed(goal) + '\n';
-      }
-      prompt = prompt.replaceAll('$LAST_GOALS', goal_text.trim());
-    }
-    if (prompt.includes('$BLUEPRINTS')) {
-      if (this.agent.npc.constructions) {
-        let blueprints = '';
-        for (const blueprint in this.agent.npc.constructions) {
-          blueprints += blueprint + ', ';
-        }
-        prompt = prompt.replaceAll('$BLUEPRINTS', blueprints.slice(0, -2));
-      }
-    }
-
-    // check if there are any remaining placeholders with syntax $<word>
-    const remaining = prompt.match(/\$[A-Z_]+/g);
+  /**
+   * 提示词占位符替换。
+   *
+   * 现在只剩 `$NAME`：快照/事件/记忆都作为消息尾巴发出去（见 assembleContext），
+   * 不再往提示词里塞动态数据——那些 `$STATS` / `$INVENTORY` / `$CONVO` 之类
+   * 的占位符是"模型看不到世界"时代的补丁，随着 Live State + 原生工具全部退役。
+   * 留着它们只会让后来人以为改提示词还能拿到数据。
+   */
+  replaceStrings(prompt: string): string {
+    const replaced = prompt.replaceAll('$NAME', this.agent.name);
+    const remaining = replaced.match(/\$[A-Z_]+/g);
     if (remaining !== null) {
       console.warn('Unknown prompt placeholders:', remaining.join(', '));
     }
-    return prompt;
+    return replaced;
   }
 
   async checkCooldown(): Promise<void> {
@@ -168,11 +131,15 @@ export class Prompter {
   /**
    * 原生工具调用版对话：tools 由全部命令转换而来，模型直接返回
    * tool_calls。extraTail 是现采的 Live State 文本，追加在正文最后
-   * （放末尾，不破坏前缀缓存）。返回 { text, tool_calls }，
+   * （放末尾，不破坏前缀缓存）。返回 { text, tool_calls, usage, overflow }，
    * 模型不支持时返回 null。
    *
    * tool_choice 默认 required：每轮至少调一个工具（想说话调 Say，
    * 收工调 Finish）。个别网关拒绝 required（400）时回落 auto 再试一次。
+   *
+   * 这里同时把**这一次请求的原文**写进请求日志（覆盖同一个文件）。
+   * 日志放这里而不是 agent 里：只有此处同时拿得到最终 system 正文、
+   * 全部历史消息和这一轮的尾巴。
    */
   async promptConvoTools(messages: ChatMessage[], extraTail = '', liveImage: string | null = null): Promise<ToolResponse | null> {
     if (typeof this.chat_model.sendRequestWithTools !== 'function') return null;
@@ -182,18 +149,18 @@ export class Prompter {
     if (current_msg_time !== this.most_recent_msg_time) return { text: '', tool_calls: [] };
 
     let prompt = this.prompts.conversing;
-    prompt = await this.replaceStrings(prompt, messages);
+    prompt = this.replaceStrings(prompt);
     const tools: OpenAITool[] = getOpenAITools(this.agent);
+    this.logRequest(prompt, messages, extraTail, liveImage, tools);
     const send = this.chat_model.sendRequestWithTools.bind(this.chat_model);
     try {
       const res = await send(messages, prompt, tools, 'required', extraTail, liveImage);
       console.log('Generated tool response:', JSON.stringify(res.tool_calls?.map((t) => t.name)));
-      await this._saveLog(prompt, messages, JSON.stringify(res), 'conversation-tools');
       let text = res.text ?? '';
       if (text.includes('</think>')) {
         text = text.split('</think>')[1] ?? '';
       }
-      return { text, tool_calls: res.tool_calls ?? [] };
+      return { text, tool_calls: res.tool_calls ?? [], usage: res.usage, overflow: res.overflow };
     } catch (error) {
       if (isBadRequest(error)) {
         // 网关不吃 required：回落 auto 重试一次，不断轮次。
@@ -204,7 +171,7 @@ export class Prompter {
           if (text.includes('</think>')) {
             text = text.split('</think>')[1] ?? '';
           }
-          return { text, tool_calls: res.tool_calls ?? [] };
+          return { text, tool_calls: res.tool_calls ?? [], usage: res.usage, overflow: res.overflow };
         } catch (retryError) {
           console.error(
             'Tool request failed:',
@@ -221,85 +188,71 @@ export class Prompter {
     }
   }
 
+  /**
+   * 把这次请求原文写进请求日志：覆盖写 `bots/<name>/logs/request-00N.log`。
+   * 内容按"实际发出的消息列"渲染——system 正文、每一轮历史、
+   * 这一轮的尾巴（有截图就标一条），一眼能看出模型此刻看到了什么。
+   */
+  private logRequest(
+    systemPrompt: string,
+    messages: ChatMessage[],
+    extraTail: string,
+    liveImage: string | null,
+    tools: OpenAITool[],
+  ): void {
+    const log = this.agent?.requestLog;
+    if (log == null) return;
+    log.logRequest({
+      text: renderRequestLog({
+        systemPrompt,
+        messages,
+        tail: extraTail,
+        imageChars: liveImage?.length ?? 0,
+      }),
+      tools: tools.map((t) => t.function.name),
+      round: this.agent?.loop?.rounds ?? null,
+    });
+  }
+
+  /**
+   * 摘要请求（Pi 的 generateSummary）。
+   *
+   * 一次调用、两条消息：system 是摘要助手契约，user 里依次是
+   * `<conversation>` 台账、可选的 `<previous-summary>`、然后是指令。
+   * 台账用 `[User]: / [Assistant]: / [Tool result]:` 序列化，而不是
+   * 原样多轮消息——摘要模型是在**读记录**，否则它会接着最后一条
+   * assistant 继续写下去。
+   *
+   * 头部第一条如果是上一轮压仓的摘要条目，说明这是**迭代压仓**，
+   * 走 update 版指令，把新内容并进旧摘要。
+   */
   async promptMemSaving(to_summarize: ChatMessage[]): Promise<string> {
     await this.checkCooldown();
-    let prompt = this.prompts.saving_memory;
-    prompt = await this.replaceStrings(prompt, null, to_summarize);
-    let resp = await this.chat_model.sendRequest([], prompt);
-    await this._saveLog(prompt, to_summarize, resp, 'memSaving');
+    const previous = to_summarize.find((turn) => turn.kind === 'summary');
+    const previousText =
+      typeof previous?.content === 'string'
+        ? previous.content.replace(/^\[记忆摘要\]\s*/, '')
+        : '';
+    const conversation = serializeConversation(to_summarize);
+    const parts = [`<conversation>\n${conversation}\n</conversation>`];
+    if (previousText.trim() !== '') {
+      parts.push(`<previous-summary>\n${previousText.trim()}\n</previous-summary>`);
+    }
+    parts.push(
+      previousText.trim() === ''
+        ? this.prompts.saving_memory
+        : this.prompts.saving_memory_update,
+    );
+    const prompt = parts.join('\n\n');
+    const system = this.prompts.summary_system;
+    let resp = await this.chat_model.sendRequest(
+      [{ role: 'user', content: prompt } as ChatMessage],
+      system,
+    );
     if (resp?.includes('</think>')) {
       const [, afterThink] = resp.split('</think>');
       resp = afterThink ?? resp;
     }
     return resp;
-  }
-
-  async promptGoalSetting(
-    messages: ChatMessage[],
-    last_goals: Record<string, boolean>,
-  ): Promise<{ name: string; quantity: number } | null> {
-    // deprecated
-    let system_message = this.profile.goal_setting as string;
-    system_message = await this.replaceStrings(system_message, messages);
-
-    let user_message = 'Use the below info to determine what goal to target next\n\n';
-    user_message += '$LAST_GOALS\n$STATS\n$INVENTORY\n$CONVO';
-    user_message = await this.replaceStrings(user_message, messages, [], last_goals);
-    const user_messages: ChatMessage[] = [{ role: 'user', content: user_message }];
-
-    const res = await this.chat_model.sendRequest(user_messages, system_message);
-
-    let goal: { name?: unknown; quantity?: unknown } | null = null;
-    try {
-      const data = (res.split('```')[1] ?? '').replace('json', '').trim();
-      goal = JSON.parse(data) as { name?: unknown; quantity?: unknown };
-    } catch (err) {
-      console.log('Failed to parse goal:', res, err);
-    }
-    if (
-      !goal ||
-      typeof goal.name !== 'string' ||
-      !goal.name ||
-      goal.quantity == null ||
-      isNaN(parseInt(String(goal.quantity)))
-    ) {
-      console.log('Failed to set goal:', res);
-      return null;
-    }
-    return { name: goal.name, quantity: parseInt(String(goal.quantity)) };
-  }
-
-  async _saveLog(
-    prompt: string,
-    messages: ChatMessage[] | null,
-    generation: string,
-    tag: string,
-  ): Promise<void> {
-    if (!settings.log_all_prompts) return;
-    const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
-    let logEntry: string;
-    const task_id = this.agent.task.task_id;
-    if (task_id == null) {
-      logEntry = `[${timestamp}] \nPrompt:\n${prompt}\n\nConversation:\n${JSON.stringify(messages, null, 2)}\n\nResponse:\n${generation}\n\n`;
-    } else {
-      logEntry = `[${timestamp}] Task ID: ${task_id}\nPrompt:\n${prompt}\n\nConversation:\n${JSON.stringify(messages, null, 2)}\n\nResponse:\n${generation}\n\n`;
-    }
-    const logFile = `${tag}_${timestamp}.txt`;
-    await this._saveToFile(logFile, logEntry);
-  }
-
-  async _saveToFile(logFile: string, logEntry: string): Promise<void> {
-    const task_id = this.agent.task.task_id;
-    let logDir: string;
-    if (task_id == null) {
-      logDir = path.join(__dirname, `../../bots/${this.agent.name}/logs`);
-    } else {
-      logDir = path.join(__dirname, `../../bots/${this.agent.name}/logs/${task_id}`);
-    }
-
-    await fs.mkdir(logDir, { recursive: true });
-
-    logFile = path.join(logDir, logFile);
-    await fs.appendFile(logFile, String(logEntry), 'utf-8');
   }
 }

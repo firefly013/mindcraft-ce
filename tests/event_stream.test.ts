@@ -44,23 +44,23 @@ describe('renderEvents', () => {
     expect(renderEvents(undefined)).toBe('');
   });
 
-  it('heads the block and emits one line per event, in order', () => {
+  it('emits only the wake marker — the bodies live in history, not twice', () => {
     const block = renderEvents([
       { seq: 1, kind: 'World', level: 5, payload: { type: 'a' } },
       { seq: 2, kind: 'Tool', level: 2, payload: { type: 'b' } },
     ]);
     const lines = block.split('\n');
-    expect(lines[0]).toBe('## 事件');
-    expect(lines).toHaveLength(3);
-    expect(lines[1]).toContain('#1 World/L5');
-    expect(lines[2]).toContain('#2 Tool/L2');
+    expect(lines[0]).toBe('## 本轮新事件');
+    expect(lines[1]).toBe('#1 #2');
+    // 关键：正文不再重发（否则同一条消息会在一个请求里出现两次）。
+    expect(block).not.toContain('"type":"a"');
   });
 });
 
 describe('composeTail', () => {
   it('puts live state last so the cacheable prefix stays stable', () => {
-    expect(composeTail('## 事件\n#1 World/L5 {"type":"a"}', '## 当前世界快照\n血量 20')).toBe(
-      '## 事件\n#1 World/L5 {"type":"a"}\n\n## 当前世界快照\n血量 20',
+    expect(composeTail('## 本轮新事件\n#1', '## 当前世界快照\n血量 20')).toBe(
+      '## 本轮新事件\n#1\n\n## 当前世界快照\n血量 20',
     );
   });
 
@@ -70,9 +70,9 @@ describe('composeTail', () => {
     expect(composeTail(undefined, null, 'live')).toBe('live');
   });
 
-  it('keeps events → memory → live in that order', () => {
-    expect(composeTail('## 事件\nevent', '## 记忆摘要\nmem', '## 当前世界快照\nlive')).toBe(
-      '## 事件\nevent\n\n## 记忆摘要\nmem\n\n## 当前世界快照\nlive',
+  it('keeps events → live in that order', () => {
+    expect(composeTail('## 本轮新事件\n#1', '## 当前世界快照\nlive')).toBe(
+      '## 本轮新事件\n#1\n\n## 当前世界快照\nlive',
     );
   });
 });

@@ -1,7 +1,5 @@
 import { readFileSync, writeFileSync, existsSync } from 'node:fs';
 import { getPosition } from '../library/world.js';
-import { ConstructionTaskValidator, Blueprint } from './construction_tasks.js';
-import { CookingTaskInitiator } from './cooking_tasks.js';
 import { MESSAGES } from '../../prompts.js';
 
 const PROGRESS_FILE = './hells_kitchen_progress.json';
@@ -252,7 +250,8 @@ function checkItemForSingleAgent(data: TaskData, agent: any): ItemCheckResult {
   };
 }
 
-class CookingCraftingTaskValidator {
+/** 目标物品是否齐了——唯一的任务校验方式（按背包物品判定）。 */
+class ItemPresenceValidator {
   private data: TaskData;
   private agent: any;  
 
@@ -282,21 +281,16 @@ export class Task {
   agent: any;  
   data: TaskData | null = null;
   taskStartTime: number;
-  validator:
-    | ConstructionTaskValidator
-    | CookingCraftingTaskValidator
-    | null = null;
+  validator: ItemPresenceValidator | null = null;
   reset_function: null = null;
   blocked_actions: string[] = [];
   task_data: TaskData | null;
   task_id?: string;
   task_type?: string;
-  blueprint?: Blueprint;
   goal?: string | null;
   taskTimeout?: number;
   restrict_to_inventory?: boolean;
   name: string;
-  initiator?: CookingTaskInitiator | null;
 
   constructor(agent: any, task_data: TaskData | null, taskStartTime: number | null = null) {
     this.agent = agent;
@@ -317,26 +311,14 @@ export class Task {
       }
       this.data = task_data;
       this.task_type = this.data.type;
-      if (this.task_type === 'construction' && this.data.blueprint) {
-        this.blueprint = new Blueprint(this.data.blueprint);
-        this.goal =
-          this.data.goal +
-          ' \n' +
-          this.blueprint.explain() +
-          ' \n' +
-          'make sure to place the lower levels of the blueprint first';
-      } else {
-        this.goal = this.data.goal as string;
-      }
+      this.goal = this.data.goal as string;
       this.taskTimeout = (this.data.timeout as number) || 300;
       // Set validator based on task_type
 
       // do goal initialization here
 
-      if (this.task_type === 'construction') {
-        this.validator = new ConstructionTaskValidator(this.data, this.agent);
-      } else if (this.task_type === 'cooking' || this.task_type === 'techtree') {
-        this.validator = new CookingCraftingTaskValidator(this.data, this.agent);
+      if (this.task_type === 'cooking' || this.task_type === 'techtree') {
+        this.validator = new ItemPresenceValidator(this.data, this.agent);
       } else {
         this.validator = null;
       }
@@ -431,12 +413,6 @@ export class Task {
 
     if (this.data === null) return;
 
-    if (this.task_type === 'cooking') {
-      this.initiator = new CookingTaskInitiator(this.data, this.agent.bot);
-    } else {
-      this.initiator = null;
-    }
-
     //wait for a bit so bots are teleported
     await new Promise((resolve) => setTimeout(resolve, 3000));
 
@@ -498,10 +474,6 @@ export class Task {
       await new Promise((resolve) => setTimeout(resolve, 500));
     }
 
-    if (this.initiator && this.agent.count_id === 0) {
-      await this.initiator.init();
-    }
-
     await this.teleportBots();
 
     await new Promise((resolve) => setTimeout(resolve, 500));
@@ -536,43 +508,10 @@ export class Task {
 
     // now all bots are teleport on top of each other (which kinda looks ugly)
     // Thus, we need to teleport them to random distances to make it look better
-
-    /*
-        Note : We don't want randomness for construction task as the reference point matters a lot.
-        Another reason for no randomness for construction task is because, often times the user would fly in the air,
-        then set a random block to dirt and teleport the bot to stand on that block for starting the construction,
-        */
-
-    if ((this.data as TaskData).type !== 'construction') {
-      const pos = getPosition(bot);
-      const xOffset = getRandomOffset(5);
-      const zOffset = getRandomOffset(5);
-      bot.chat(`/tp ${this.name} ${Math.floor(pos.x + xOffset)} ${pos.y + 3} ${Math.floor(pos.z + zOffset)}`);
-      await new Promise((resolve) => setTimeout(resolve, 200));
-    }
-
-    if ((this.data as TaskData).type === 'construction') {
-      //Ensures construction is cleaned out first. -> relies on cheats which are turned off?
-      if (this.blueprint) {
-        console.log('Cleaning out construction blueprint');
-        const result = this.blueprint.autoDelete();
-        const commands = result.commands;
-        const nearbyPosition = result.nearbyPosition;
-        console.log('nearby position', nearbyPosition);
-        const first_coord = (this.data as TaskData & { blueprint: { levels: Array<{ coordinates: number[] }> } }).blueprint.levels[0].coordinates;
-        bot.chat(`/tp @a ${first_coord[0]} ${first_coord[1]} ${first_coord[2]}`);
-        if (this.agent.agent_id === 0 && (this.data as TaskData).human_count > 0) {
-          for (let i = 0; i < ((this.data as TaskData).human_count as number); i++) {
-            const username = ((this.data as TaskData).usernames as string[])[i] as string;
-            await bot.chat(`/tp ${username} ${nearbyPosition.x} ${nearbyPosition.y} ${nearbyPosition.z}`);
-          }
-        }
-        for (const command of commands) {
-          bot.chat(command);
-        }
-      } else {
-        console.log('no construction blueprint?');
-      }
-    }
+    const pos = getPosition(bot);
+    const xOffset = getRandomOffset(5);
+    const zOffset = getRandomOffset(5);
+    bot.chat(`/tp ${this.name} ${Math.floor(pos.x + xOffset)} ${pos.y + 3} ${Math.floor(pos.z + zOffset)}`);
+    await new Promise((resolve) => setTimeout(resolve, 200));
   }
 }

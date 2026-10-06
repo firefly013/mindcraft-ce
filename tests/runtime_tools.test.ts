@@ -9,7 +9,7 @@ import { describe, expect, it } from 'vitest';
 import type { AgentCommand } from '../src/agent/commands/actions.js';
 import { actionsList } from '../src/agent/commands/actions.js';
 import { queryList } from '../src/agent/commands/queries.js';
-import { commandToTool } from '../src/agent/commands/to_openai_tools.js';
+import { commandToTool, getOpenAITools } from '../src/agent/commands/to_openai_tools.js';
 import { commandParameters } from '../src/runtime/tool_schema.js';
 import { blockedActionsHook, commandToRegistration, outcomeText } from '../src/runtime/tools.js';
 
@@ -36,8 +36,16 @@ function normalizeRequired(schema: unknown): unknown {
 }
 
 describe('schema 等价：全部命令工具', () => {
-  it('命令数量符合预期（47 个命令工具）', () => {
-    expect(ALL_COMMANDS).toHaveLength(47);
+  it('命令集合与旧广告同源（不写死数字）', () => {
+    // 别写死数量：工具集会随死子系统清理而变化（construction 下线时一次就
+    // 少了 4 个 blueprint 工具）。断言"非空 + 与旧广告逐项同源"——写死的
+    // 数字只会腐坏，测不出真问题。
+    expect(ALL_COMMANDS.length).toBeGreaterThan(0);
+    const advertised = getOpenAITools({}).map((tool) => tool.function.name);
+    const control = ['Finish', 'Stop', 'Say', 'UpdatePlan', 'Feedback'];
+    expect(ALL_COMMANDS.map((command) => command.name.replace(/^!/, ''))).toEqual(
+      advertised.filter((name) => !control.includes(name)),
+    );
   });
 
   it.each(ALL_COMMANDS.map((command) => [command.name, command] as const))(

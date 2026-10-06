@@ -11,13 +11,17 @@ import type { AgentProfile } from './types/common.js';
 export interface PromptSet {
     conversing: string;
     saving_memory: string;
+    saving_memory_update: string;
+    summary_system: string;
     [k: string]: string;
 }
 
 export const PROMPT_SETS: Record<string, Record<string, string>> = {
   "default": {
-    "conversing": "【语言要求：始终用简体中文回复玩家，简短、口语化。】\n你是一个名叫 $NAME 的 AI Minecraft 机器人：能和玩家聊天，也能调用原生工具（function calling）来看、移动、挖掘、建造、与世界互动。\n玩家让你做事就立刻调对应的工具去做，不要光动嘴。不要输出 !likeThis 这样的文本命令，永远走工具调用。\n你工作在 ReAct 循环里：需要工具就调，一轮可以调多个；不需要工具了就直接用正文回答，那一轮就结束了，没做完就继续调用工具，不要空等。\n两条独立通道：正文回答只结束本轮推理，正在执行的动作继续跑；Stop 只停下机器人全部动作，不结束推理。同一时刻最多一个占用型动作，调用被拒（通道忙）时先 Stop，再开新动作。\n被拒或失败的调用是信息，不是盲目重试的信号：物品不对、数量不对、目标不对、够不着、缺东西，一律报错并绕行，不掩盖。\n友好、随和、高效。回复要短，别老道歉；除非被问到，不要讲说明、不要列清单、不要拒绝请求。\n只以 $NAME 的身份回复，不要假扮别人。\n这非常重要，深呼吸，玩得开心 :)\n想跟玩家说话必须调 Say 工具；你的正文也会自动发出来，就当是干活的动静，只写一句正在做什么。每轮你会看到一张用粗略游戏数据重画的大概示意图，大概看布局方位就行，别纠结画质和怪异色块，更不要数上面的细节。\n本环境是测试环境：发现任何问题或有改进建议，请多用 Feedback 工具提出，帮我们改进，非常感谢！\n对话开始：",
-    "saving_memory": "【语言要求：用简体中文总结记忆。】\n你是一个名叫 $NAME 的 Minecraft 机器人，一直在用工具聊天玩游戏。\n根据下面的对话和你的旧记忆更新记忆。优先保留重要事实、学到的东西、有用的技巧、长期提醒。不要记 stats、背包、文档！只存聊天记录里的瞬时信息。限 500 字符，极简，压缩有用信息。\n旧记忆：'$MEMORY'\n最近对话：\n$TO_SUMMARIZE\n把旧记忆和最近对话总结成一段新记忆，只返回新记忆文本本身：",
+    "conversing": "【语言要求：始终用简体中文回复玩家，简短、口语化。】\n你是一个名叫 $NAME 的 AI Minecraft 机器人：能和玩家聊天，也能调用原生工具（function calling）来看、移动、挖掘、建造、与世界互动。\n玩家让你做事就立刻调对应的工具去做，不要光动嘴。不要输出 !likeThis 这样的文本命令，永远走工具调用。\n你工作在 ReAct 循环里：需要工具就调，一轮可以调多个；不需要工具了就直接用正文回答，那一轮就结束了，没做完就继续调用工具，不要空等。\n两条独立通道：正文回答只结束本轮推理，正在执行的动作继续跑；Stop 只停下机器人全部动作，不结束推理。\n同一时刻最多一个占用型动作。如果你要的动作已经在跑，工具会回你「已经在做了」——那是正常情况，不用重发、也不要为了重开而 Stop，它会自己报结果；只有你确实要改做另一件事的时候，才用 Stop。\n被事件叫醒不等于动作出错：挖到一半被叫醒是常态，先看快照里的 action 字段，别急着停。\n被拒或失败的调用是信息，不是盲目重试的信号：物品不对、数量不对、目标不对、够不着、缺东西，一律报错并绕行，不掩盖。\n友好、随和、高效。回复要短，别老道歉；除非被问到，不要讲说明、不要列清单、不要拒绝请求。\n只以 $NAME 的身份回复，不要假扮别人。\n这非常重要，深呼吸，玩得开心 :)\n想跟玩家说话必须调 Say 工具；你的正文也会自动发出来，就当是干活的动静，只写一句正在做什么。每轮你会看到一张用粗略游戏数据重画的大概示意图，大概看布局方位就行，别纠结画质和怪异色块，更不要数上面的细节。\n本环境是测试环境：发现任何问题或有改进建议，请多用 Feedback 工具提出，帮我们改进，非常感谢！\n对话开始：",
+    "summary_system": "你是上下文摘要助手。你的任务是读一段玩家与 AI 机器人的对话记录，按指定格式产出结构化摘要。\n不要继续这段对话，不要回答其中的问题，只输出摘要本身。",
+    "saving_memory": "The messages above are a conversation to summarize.\n\n把上面的对话记录压成一份结构化检查点摘要，供另一个 LLM 接着干活。严格使用下面的格式：\n\n## 目标\n[玩家或任务要我达成什么。一次会话里可能有多个目标，逐条列。]\n\n## 约束与偏好\n- [玩家提出过的约束、偏好、要求；没有就写「（无）」]\n\n## 进展\n### 已完成\n- [x] [做完的事]\n\n### 进行中\n- [ ] [当前在做的事]\n\n### 受阻\n- [挡住进度的问题；没有就写「（无）」]\n\n## 关键决定\n- **[决定]**：[为什么这么定]\n\n## 下一步\n1. [按顺序列出接下来该做什么]\n\n## 关键上下文\n- [继续干活需要的数据：坐标、物品、工具行为、报错原文]\n- [没有就写「（无）」]\n\n每节都要短。坐标、物品名、工具名、报错原文照抄，不要改写，不要脑补没发生的事。",
+    "saving_memory_update": "上面的对话是**新增**内容，请把它并入 <previous-summary> 里已有的摘要。\n\n更新规则：\n- 旧摘要里的信息全部保留\n- 加入新的进展、决定与上下文\n- 把「进行中」里已经做完的事移进「已完成」\n- 按实际情况改写「下一步」\n- 坐标、物品名、工具名、报错原文照抄\n- 已经不再相关的内容可以删掉\n\n格式与上一版完全相同：## 目标 / ## 约束与偏好 / ## 进展（已完成·进行中·受阻）/ ## 关键决定 / ## 下一步 / ## 关键上下文。",
   },
 };
 
@@ -160,7 +164,7 @@ export const TOOL_TEXT: Record<string, { description: string; params: Record<str
     params: { tool_name: '要用的工具名，不用工具就写 "hand"。', target: '目标：实体类型、方块类型，或 "nothing" 表示无目标。' },
   },
   stats: {
-    description: '看机器人的位置、血量、饱食、时间。',
+    description: '拍一张当前状态快照（和每轮自动给你的世界快照同源，但这一张会留在上下文里，可以用来和上一次对比：身上多了什么、走到哪了）。',
     params: {},
   },
   inventory: {
@@ -182,22 +186,6 @@ export const TOOL_TEXT: Record<string, { description: string; params: Record<str
   savedPlaces: {
     description: '列出所有记住的位置。',
     params: {},
-  },
-  checkBlueprintLevel: {
-    description: '查蓝图某层盖完没，还差哪些方块',
-    params: { levelNum: '要查的层号。' },
-  },
-  checkBlueprint: {
-    description: '查蓝图还差哪些方块没放',
-    params: {},
-  },
-  getBlueprint: {
-    description: '拿建筑的蓝图',
-    params: {},
-  },
-  getBlueprintLevel: {
-    description: '拿建筑的蓝图',
-    params: { levelNum: '要查的层号。' },
   },
   getCraftingPlan: {
     description: '给指定物品出一份完整合成计划：要哪些材料、各要多少、对照当前背包还缺什么、多什么。',
@@ -259,7 +247,6 @@ export const MESSAGES = {
     const out = outcome === '' ? '(无输出)' : outcome;
     return `工具 ${tool} ${argText} → ${out}`;
   },
-  recentConvoPrefix: '最近对话：\n',
   death: (posText: string, dimension: string, msg: string): string => `你死在了${dimension}维度 ${posText}，临终消息：'${msg}'。死亡点已存为 'last_death_position'，想回去可以找它。之前的动作已停止，你已重生。`,
   taskGoal: (goal: string): string => `你的任务目标：${goal}`,
   taskEnded: (score: number | string): string => `任务结束，得分：${score}`,
@@ -267,8 +254,6 @@ export const MESSAGES = {
   shuttingUp: '闭嘴了。',
   restarting: '重启中。',
   exiting: '退出中。',
-  goalDone: (goal: string): string => `你刚成功完成了目标${goal}。`,
-  goalFailed: (goal: string): string => `你刚没能完成目标${goal}。`,
 };
 
 /** 按 profile 选提示词集：profile.prompt_set 指定任务变体，同名键可覆盖 */
@@ -276,7 +261,7 @@ export function resolvePromptSet(profile: AgentProfile = {} as AgentProfile): Pr
   const setKey = typeof profile.prompt_set === 'string' ? profile.prompt_set : undefined;
   const base: Record<string, string> = (setKey && PROMPT_SETS[setKey]) || {};
   const merged = { ...PROMPT_SETS.default, ...base } as PromptSet;
-  for (const key of ['conversing', 'saving_memory'] as const) {
+  for (const key of ['conversing', 'saving_memory', 'saving_memory_update', 'summary_system'] as const) {
     const override = profile[key];
     if (typeof override === 'string') merged[key] = override;
   }

@@ -1,5 +1,8 @@
 {
     "name": "opencode",
+    "context_window": 1000000,
+    "reserve_tokens": 16384,
+    "keep_recent_tokens": 20000,
     "model": {
         "api": "openai",
         "model": "deepseek-v4.1-flash",

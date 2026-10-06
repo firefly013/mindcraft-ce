@@ -22,7 +22,7 @@ export interface AgentCommand {
 export type AgentActionFn = (agent: any, ...args: any[]) => Promise<unknown>;
 
 
-function runAsAction (actionFn: AgentActionFn, resume = false, timeout = -1): AgentCommand['perform'] {
+function runAsAction (actionFn: AgentActionFn, timeout = -1): AgentCommand['perform'] {
     let actionLabel: string | null = null;  // Will be set on first use
 
     const wrappedAction = async function (agent: any, ...args: any[]): Promise<string | null | undefined> {
@@ -35,7 +35,7 @@ function runAsAction (actionFn: AgentActionFn, resume = false, timeout = -1): Ag
         const actionFnWithAgent = async (): Promise<void> => {
             await actionFn(agent, ...args);
         };
-        const code_return = await agent.actions.runAction(`action:${actionLabel}`, actionFnWithAgent, { timeout, resume });
+        const code_return = await agent.actions.runAction(`action:${actionLabel}`, actionFnWithAgent, { timeout });
         if (code_return.interrupted && !code_return.timedout)
             return;
         return code_return.message;
@@ -92,9 +92,12 @@ export const actionsList: AgentCommand[] = [
             'player_name': {type: 'string', description: tp('followPlayer', 'player_name')},
             'follow_dist': {type: 'float', description: tp('followPlayer', 'follow_dist'), domain: [0, Infinity]}
         },
+        // 无限跟随：它一直占着身体通道，直到模型调 Stop 或被事件打断。
+        // 以前靠 ActionManager 的 resume 在每次 idle 时偷偷重放，等于
+        // 留了一个绕过通道的隐藏决策者；现在由模型自己决定要不要再跟。
         perform: runAsAction(async (agent: any, player_name: string, follow_dist: number) => {
             await skills.followPlayer(agent.bot, player_name, follow_dist);
-        }, true)
+        })
     },
     {
         name: '!goToCoordinates',
@@ -248,7 +251,7 @@ export const actionsList: AgentCommand[] = [
         },
         perform: runAsAction(async (agent: any, type: string, num: number) => {
             await skills.collectBlock(agent.bot, type, num);
-        }, false, 10) // 10 minute timeout
+        }, 10) // 10 分钟超时
     },
     {
         name: '!craftRecipe',
@@ -269,12 +272,7 @@ export const actionsList: AgentCommand[] = [
             'num': { type: 'int', description: tp('smeltItem', 'num'), domain: [1, Number.MAX_SAFE_INTEGER] }
         },
         perform: runAsAction(async (agent: any, item_name: string, num: number) => {
-            const success = await skills.smeltItem(agent.bot, item_name, num);
-            if (success) {
-                setTimeout(() => {
-                    agent.cleanKill('Safely restarting to update inventory.');
-                }, 500);
-            }
+            await skills.smeltItem(agent.bot, item_name, num);
         })
     },
     {

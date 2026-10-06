@@ -74,15 +74,6 @@ if (process.env.BLOCKED_ACTIONS) {
         settings.blocked_actions = parsedBlocked.map(String);
     }
 }
-if (process.env.MAX_MESSAGES) {
-    const parsedMax = Number(process.env.MAX_MESSAGES);
-    if (!Number.isNaN(parsedMax)) {
-        settings.max_messages = parsedMax;
-    }
-}
-if (process.env.LOG_ALL) {
-    settings.log_all_prompts = process.env.LOG_ALL;
-}
 if (process.env.SETTINGS_JSON) {
     try {
         const parsedSettings: unknown = JSON.parse(process.env.SETTINGS_JSON);
