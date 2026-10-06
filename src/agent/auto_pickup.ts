@@ -21,7 +21,18 @@ export const PICKUP_RADIUS = 8;
 /** 两次拾取尝试之间的最小间隔（毫秒）。 */
 export const PICKUP_INTERVAL_MS = 1500;
 /** 单次拾取最多走多久（毫秒）；超时就放弃，下一轮再说。 */
-export const PICKUP_TIMEOUT_MS = 4000;
+/**
+ * 走过去捡的**超时**。
+ *
+ * 原来是 **4 秒**——而检测半径是 8 格，8 格的寻路（还要绕路）根本走不完，
+ * 于是每次都在半路超时、掉落物永远捡不到。模型真机实测报的就是这件事：
+ * pia "自动拾取半径只有 ~1-2 格（不是 8）"——不是检测不到，是**走不到就放弃了**，
+ * 只有脚下 1~2 格的东西能在 4 秒内够着。
+ *
+ * 放到 12 秒：8 格直线约 2 秒，留足绕路和爬升的余量。
+ * 被模型抢占（generation 变了）仍然立刻收手，所以放长不会占着身体不放。
+ */
+export const PICKUP_TIMEOUT_MS = 12_000;
 
 export interface PickupTarget {
   id: number;
