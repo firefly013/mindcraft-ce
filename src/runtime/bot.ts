@@ -50,6 +50,8 @@ export interface BotWiringOptions {
    * `attach`——连接建立到就绪之间的事件因此不会丢（见 `EventIntake.attach`）。
    */
   intake?: EventIntake;
+  /** 事件落点观测：每个事件实际走了 write / steer / preempt / emergency。 */
+  onEvent?: (event: GameEvent, action: 'write' | 'steer' | 'preempt' | 'emergency') => void;
   /** 落盘根目录，默认 `./bots/<name>`。 */
   baseDir?: string;
   /** 实例区分后缀，避免同名多开撞同一个库。 */
@@ -110,6 +112,7 @@ export async function openBotWiring(options: BotWiringOptions): Promise<BotWirin
     write: (event) => runtime.write(eventEntryDraft(event)),
     abort: () => runtime.abort(),
     rescue: options.rescue,
+    ...(options.onEvent != null ? { onEvent: options.onEvent } : {}),
   });
 
   return {

@@ -78,6 +78,19 @@ describe('keyed detectors: one armed state per object', () => {
     ).toHaveLength(1);
   });
 
+  it('food_items_low 说清数的是**背包食物**，并把饥饿值一起带上', () => {
+    // 模型反馈过：旧名 `inventory.food_low` 配 `{foodCount: 0}` 读起来像
+    // "快饿死了"，而同一轮快照是 `food 20`（饥饿值满的），于是它误判。
+    const w = createEdgeWatcher();
+    const fired = w.poll({ foodCount: 0, food: 20 });
+    const ev = fired.find((e) => e.type === 'inventory.food_items_low');
+    expect(ev).toBeDefined();
+    // 两个字段一起给：foodItems = 还有没有存货，food = 现在饿不饿
+    expect(ev?.delta).toMatchObject({ foodItems: 0, food: 20 });
+    // 旧名不该再出现
+    expect(fired.some((e) => e.type === 'inventory.food_low')).toBe(false);
+  });
+
   it('hostile_far is keyed by TYPE, not by entity id', () => {
     // 「远处有敌对生物」是一类事实：同一种怪无论几只，只报一次。
     // 按 id 做边缘会刷屏——站夜里一分钟十几只怪各报一次（日志里就是这样）。

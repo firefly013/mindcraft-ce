@@ -19,6 +19,20 @@ import { MESSAGES } from '../prompts.js';
 import { isActionTool, validateToolCall } from './commands/to_openai_tools.js';
 import type { ToolOutcome } from '../runtime/tools.js';
 
+/**
+ * 身体通道上发生的事，供观测（日志 / 测试）。
+ *
+ * 这些正是 E1–E4 那套契约的**行为证据**：以前全是静默的，模型看不见、
+ * 排错时也看不见。
+ */
+export type ActionTrace =
+  | { kind: 'query'; name: string }
+  | { kind: 'claim'; name: string; actionId: string; generation: number }
+  | { kind: 'busy_same'; name: string; actionId: string }
+  | { kind: 'busy_other'; name: string; running: string; runningSeconds: number }
+  | { kind: 'done'; name: string; actionId: string }
+  | { kind: 'stale_discarded'; name: string };
+
 export interface ActionRunnerDeps {
   scheduler: Scheduler;
   /** 聊天历史写入（证据回填）。 */
@@ -29,6 +43,8 @@ export interface ActionRunnerDeps {
   execute: (name: string, args: Record<string, unknown>) => Promise<string>;
   /** 执行完上报：进调度等下一轮。 */
   notify: (payload: { call: string; result: ToolOutcome }) => void;
+  /** 可选：通道观测。缺省什么都不做。 */
+  trace?: (event: ActionTrace) => void;
 }
 
 export class ActionRunner {
@@ -37,6 +53,7 @@ export class ActionRunner {
   private speak: (text: string) => void;
   private execute: (name: string, args: Record<string, unknown>) => Promise<string>;
   private notify: (payload: { call: string; result: ToolOutcome }) => void;
+  private trace: (event: ActionTrace) => void;
 
   constructor(deps: ActionRunnerDeps) {
     this.scheduler = deps.scheduler;
@@ -44,6 +61,7 @@ export class ActionRunner {
     this.speak = deps.speak;
     this.execute = deps.execute;
     this.notify = deps.notify;
+    this.trace = deps.trace ?? ((): void => {});
   }
 
   /** 跑一个工具调用：动作类即时回 accepted，查询类阻塞回内容。 */
@@ -51,10 +69,12 @@ export class ActionRunner {
     const checked = validateToolCall(name, args);
     if (!checked.ok) {
       const reason = checked.errors?.join('; ') ?? 'Bad arguments.';
+      this.trace({ kind: 'query', name });
       await this.record(`rejected: ${reason}`, name, args);
       return { status: 'rejected', code: checked.code ?? 'BAD_ARGS', reason };
     }
     if (!isActionTool(name)) {
+      this.trace({ kind: 'query', name });
       this.speak(MESSAGES.usedMarker(name));
       const data = await this.execute(name, args as Record<string, unknown>);
       await this.record(data, name, args);
@@ -68,12 +88,20 @@ export class ActionRunner {
       // 就等于让它把自己正在做的事打断重来——正是"反复卡住"的来源。
       // 直接告诉它"已经在做了"，让它等结果。
       if (claim.code === 'ACTION_BUSY' && running != null && running.id === name) {
+        this.trace({ kind: 'busy_same', name, actionId: running.id });
         const reason = `${name} 已经在跑了，不用重发，也不用 Stop——它跑完会自己报结果。`;
         await this.record(`already running: ${reason}`, name, args);
         return { status: 'accepted', data: { already_running: true, action_id: running.id, reason } };
       }
       // 确实是另一个动作：报清楚谁在跑、跑了多久，并把"要不要打断"
       // 交还给模型，而不是命令它先 Stop。
+      this.trace({
+        kind: 'busy_other',
+        name,
+        running: running?.id ?? '(unknown)',
+        runningSeconds:
+          running == null ? 0 : Math.max(0, Math.round((Date.now() - running.startedAt) / 1000)),
+      });
       const reason =
         running != null
           ? `另一个动作正在跑（${running.id}，已 ${Math.max(0, Math.round((Date.now() - running.startedAt) / 1000))} 秒）。` +
@@ -83,6 +111,7 @@ export class ActionRunner {
       return { status: 'rejected', code: claim.code ?? 'ACTION_BUSY', reason };
     }
     const generation = claim.generation ?? 0;
+    this.trace({ kind: 'claim', name, actionId: claim.actionId ?? name, generation });
     this.speak(MESSAGES.usedMarker(name));
     // 后台跑，不等：这一轮的推理到此结束，结果以后报。
     void this.finish(name, args as Record<string, unknown>, generation);
@@ -101,9 +130,25 @@ export class ActionRunner {
     } catch (err: unknown) {
       data = `Tool ${name} failed: ${err instanceof Error ? err.message : String(err)}`;
     }
-    if (!this.scheduler.isCurrent(generation)) return;
+    // 过期（被 Stop / 急停作废）：就地丢弃，不记账、不放行。
+    // **但仍然报一条**：动作没了、通道空了，模型却看不到任何交代，只能反复拍
+    // 快照猜——它反馈过这件事（"viewChest / goToSurface 调用后再无音讯，
+    // 我不知道它是成功、失败还是被中断"）。报的是"被中断、没有结果"，
+    // 不假装成功。
+    if (!this.scheduler.isCurrent(generation)) {
+      this.trace({ kind: 'stale_discarded', name });
+      this.notify({
+        call: name,
+        result: {
+          status: 'completed',
+          data: `动作 ${name} 被中断（Stop / 急停作废了它），没有结果。`,
+        },
+      });
+      return;
+    }
     await this.record(data, name, args);
     this.scheduler.releaseAction();
+    this.trace({ kind: 'done', name, actionId: name });
     this.notify({ call: name, result: { status: 'completed', data } });
   }
 }

@@ -22,6 +22,8 @@ import { openBotWiring, type BotWiring } from '../runtime/bot.js';
 import { createFeedbackTool, createStopTool, createUpdatePlanTool } from '../runtime/control_tools.js';
 import { EventIntake } from '../runtime/events.js';
 import { actionChannelInvoker, buildGameTools } from '../runtime/game_tools.js';
+import { compactionLogHook, providerLogHook } from '../runtime/log_hooks.js';
+import { createLogger, nullLogger, type Logger } from '../runtime/logger.js';
 import { migrateLegacyState, readLegacySave } from '../runtime/legacy.js';
 import { systemPromptFromProfile } from '../runtime/prompt.js';
 import { compactionPageHook, createRequestLogSink, requestLogHook } from '../runtime/request_log.js';
@@ -78,6 +80,13 @@ export class Agent {
     private actionRunner: ActionRunner | null = null;
     /** profile 原文：供应商、压仓参数、提示词集都从它读。 */
     private profile: Record<string, unknown> | null = null;
+    /**
+     * 结构化日志：`bots/<name>/logs/agent-YYYYMMDD.log`（JSONL，同步写盘）。
+     *
+     * 在 `buildRuntime` 里建（那时才知道 bot 名）。在此之前用空实现，
+     * 调用方不用到处写 `?.`。
+     */
+    private log: Logger = nullLogger();
 
     start(load_mem = false, init_message: string | null = null, count_id = 0): void {
         this.count_id = count_id;
@@ -169,6 +178,7 @@ export class Agent {
                 await new Promise<void>((resolve) => setTimeout(resolve, 1000));
 
                 console.log(`${this.name} spawned.`);
+                this.log.with('lifecycle').info({ event: 'spawned', bot: this.name });
                 this.clearBotLogs();
 
                 this._setupEventHandlers(save_data, init_message);
@@ -313,6 +323,7 @@ export class Agent {
         if (this.loopLog.length > EVENT_LOG_LIMIT) {
             this.loopLog.splice(0, this.loopLog.length - EVENT_LOG_LIMIT);
         }
+        this.log.with('event').debug({ phase: 'queued', kind, level, payload });
         this.intake.notify({ level, text: renderEventText(kind, level, payload) });
     }
 
@@ -327,6 +338,8 @@ export class Agent {
      * "重复造轮子"，而是本项目的业务约束——同一时刻最多一个占用型动作。
      */
     private buildRuntime(): void {
+        this.log = createLogger({ dir: `./bots/${this.name}/logs` });
+        this.log.with('lifecycle').info({ event: 'build-runtime', bot: this.name });
         this.scheduler = new Scheduler();
         this.edgeWatcher = createEdgeWatcher();
         this.actionRunner = new ActionRunner({
@@ -341,6 +354,11 @@ export class Agent {
                 executeToolCall(this, tool, toolArgs),
             notify: (payload: { call: string; result: ToolOutcome }): void => {
                 this.notify(KIND.TOOL, LEVEL.WAKE, payload);
+            },
+            // 身体通道的观测：认领 / 忙时幂等 / 忙时别动作 / 完成 / 过期丢弃。
+            // 这些是 E1–E4 契约的行为证据，以前全静默。
+            trace: (event): void => {
+                this.log.with('action').info({ ...event });
             },
         });
         // 异步装配（要开 SQLite）；就绪前的事件由 intake 暂存，接上时补投。
@@ -389,7 +407,22 @@ export class Agent {
                         name: 'request-log',
                         hooks: [requestLogHook(sink), compactionPageHook(sink)],
                     }),
+                    // provider 终态响应（含 errorMessage）+ 压仓。这两件以前完全
+                    // 不可见——42 轮静默失败就是漏了前者。
+                    defineExtension({
+                        name: 'agent-log',
+                        hooks: [providerLogHook(this.log), compactionLogHook(this.log)],
+                    }),
                 ],
+                // 事件落点：write / steer / preempt / emergency。
+                onEvent: (event, action): void => {
+                    this.log.with('event').info({
+                        phase: 'delivered',
+                        level: event.level,
+                        action,
+                        text: event.text,
+                    });
+                },
             });
             this.wiring = wiring;
             const migrated = await migrateLegacyState(
@@ -420,10 +453,17 @@ export class Agent {
      * `executeToolCall` 会绕过通道，E1（忙时同动作幂等）/E3（Stop 一次停干净）
      * 当场失效。回执文本走 `loopResultText`，与旧 `runTool` 逐字一致。
      */
-    private invokeTool(name: string, args: Record<string, unknown>): Promise<string> {
+    private async invokeTool(name: string, args: Record<string, unknown>): Promise<string> {
+        const log = this.log.with('tool');
+        const started = Date.now();
         const runner = this.actionRunner;
-        if (runner == null) return Promise.resolve('工具通道尚未就绪，稍后再试。');
-        return actionChannelInvoker(runner)(name, args);
+        if (runner == null) {
+            log.warn({ name, args, note: '工具通道尚未就绪' });
+            return '工具通道尚未就绪，稍后再试。';
+        }
+        const text = await actionChannelInvoker(runner)(name, args);
+        log.info({ name, args, ms: Date.now() - started, result: text });
+        return text;
     }
 
     /** 全部停下：动作停、日志清、回到 idle。 */
@@ -789,6 +829,9 @@ export class Agent {
 
 
     cleanKill(msg = 'Killing agent process...', code = 1): void {
+        // **同步写盘**：紧接着就是 process.exit，异步日志会连同缓冲区一起丢——
+        // 而"退出前最后一行"恰恰是排错最需要的（静默死亡最难查）。
+        this.log.with('lifecycle').error({ event: 'exit', msg, code });
         console.log(this.name, msg);
         this.bot.chat(code > 1 ? MESSAGES.restarting : MESSAGES.exiting);
         process.exit(code);

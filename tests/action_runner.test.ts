@@ -106,7 +106,10 @@ describe('ActionRunner', () => {
     expect(h.notices[0]?.result.status).toBe('completed');
   });
 
-  it('a stale completion is dropped on the floor, never recorded or reported', async () => {
+  it('a stale completion is not recorded, but IS reported as interrupted', async () => {
+    // 行为改过（模型反馈）：以前过期就地丢弃、什么都不说，模型看到的是"调用后
+    // 再无音讯"，只能反复拍快照猜。现在仍然不记账（结果不作数），但报一条
+    // "被中断"，给它一个交代。
     const h = makeHarness();
     h.hold = true;
     await h.runner.run('goToPlayer', { player_name: 's', closeness: 2 });
@@ -115,7 +118,9 @@ describe('ActionRunner', () => {
     await tick();
     await tick();
     expect(h.records).toEqual([]);
-    expect(h.notices).toEqual([]);
+    expect(h.notices).toHaveLength(1);
+    expect(h.notices[0]?.call).toBe('goToPlayer');
+    expect(String((h.notices[0]?.result as { data?: unknown }).data)).toContain('被中断');
   });
 
   it('validation failures are recorded without claiming the channel', async () => {

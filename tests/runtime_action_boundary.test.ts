@@ -210,17 +210,21 @@ describe('动作跑完以 L3 事件回来（E 段的闭环）', () => {
     expect(b.scheduler.currentAction()).toBeNull();
   });
 
-  it('Stop 之后在途动作的完成回调**认得自己已过期**，不记账不上报', async () => {
+  it('Stop 之后在途动作的完成回调**认得自己已过期**：不记账，但**要报一条**', async () => {
     const b = makeBoundary();
     await b.runner.run('followPlayer', { player_name: 'bobo', follow_dist: 3 });
     await b.started;
 
     b.scheduler.stopAll();
     b.release();
-    await new Promise((resolve) => setTimeout(resolve, 20));
+    await until(() => b.notified.length > 0);
 
-    // 过期了就地丢弃：不记账、不上报
-    expect(b.notified).toHaveLength(0);
+    // 不记账：这次的结果不作数
     expect(b.records.some((line) => line.includes('跟随中'))).toBe(false);
+    // 但必须给模型一个交代。动作没了、通道空了却毫无音讯，模型只能反复拍快照猜
+    // ——它反馈过这件事（"viewChest / goToSurface 调用后再无音讯"）。
+    expect(b.notified).toHaveLength(1);
+    expect(b.notified[0]?.call).toBe('followPlayer');
+    expect(String((b.notified[0]?.result as { data?: unknown }).data)).toContain('被中断');
   });
 });

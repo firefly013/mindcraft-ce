@@ -324,7 +324,11 @@ export const DETECTORS: readonly Detector[] = Object.freeze([
   { type: 'inventory.full', level: 3, kind: 'all',
     fire: (s) => num(s.freeSlots) === 0,
     clear: (s) => gt(s.freeSlots, 0) },
-  { type: 'inventory.food_low', level: 3, kind: 'all',
+  // 「背包里没吃的了」——**不是**饥饿值低。模型反馈过这条：事件名
+  // `inventory.food_low` 配 `{foodCount: 0}` 读起来像"快饿死了"，而同一轮
+  // 快照显示 `food 20`（饥饿值是满的），于是它误判。
+  // 改名说清数的是**物品数量**，并把饥饿值一并带上，两者不会再混。
+  { type: 'inventory.food_items_low', level: 3, kind: 'all',
     fire: (s) => lte(s.foodCount, 8),
     clear: (s) => gte(s.foodCount, 12) },
   {
@@ -525,7 +529,12 @@ function deltaFor(detector: Detector, key: string | number | null, snapshot: Edg
   if (detector.type.startsWith('bot.oxygen')) delta['oxygen'] = snapshot.oxygen;
   if (detector.type === 'world.light_low') delta['light'] = snapshot.light;
   if (detector.type === 'inventory.full') delta['freeSlots'] = snapshot.freeSlots;
-  if (detector.type === 'inventory.food_low') delta['foodCount'] = snapshot.foodCount;
+  // 背包食物数 + 当前饥饿值一起给：前者是"还有没有存货"，后者是"现在饿不饿"。
+  // 只给前者会让模型以为 `food_low` 是在说饥饿值（它反馈过这件事）。
+  if (detector.type === 'inventory.food_items_low') {
+    delta['foodItems'] = snapshot.foodCount;
+    delta['food'] = snapshot.food;
+  }
   return delta;
 }
 
