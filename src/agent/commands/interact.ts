@@ -173,6 +173,30 @@ export function blockNameAt(bot: unknown, x: number, y: number, z: number): stri
 }
 
 /**
+ * 把一格里的东西挪到另一格。
+ *
+ * **逐级回退**：不同 mineflayer 版本把 `moveSlotItem` 放在不同地方——模型真机报过
+ * `container.moveSlotItem is not a function`。所以依次试 window 上的、bot 上的，
+ * 最后退到 `clickWindow` 的 shift 点击（整栈快速移动，够用且到处都有）。
+ */
+async function moveOne(bot: any, container: any, src: number, dest: number, count: number): Promise<void> {
+  if (typeof container?.moveSlotItem === 'function') {
+    await container.moveSlotItem(src, dest, count);
+    return;
+  }
+  if (typeof bot?.moveSlotItem === 'function') {
+    await bot.moveSlotItem(src, dest, count);
+    return;
+  }
+  if (typeof bot?.clickWindow === 'function') {
+    // mode 1 = shift 点击：整栈在背包与容器之间快速移动
+    await bot.clickWindow(src, 0, 1);
+    return;
+  }
+  throw new Error('这个 mineflayer 版本既没有 moveSlotItem 也没有 clickWindow，挪不了物品');
+}
+
+/**
  * 和容器（箱子/桶）之间挪物品。
  *
  * **故意不用 `skills.putInChest`/`takeFromChest`**：它们最终落到 mineflayer 的
@@ -252,7 +276,7 @@ async function transferWithContainer(
         }
       }
       if (dest == null) return { ok: moved > 0, detail: `挪了 ${moved} 个后目标槽满了` };
-      await container.moveSlotItem(src, dest, take);
+      await moveOne(bot, container, src, dest, take);
       moved += take;
       left -= take;
       slots[src] = null; // 本地账本跟着更新，下一轮不会重复搬同一格
