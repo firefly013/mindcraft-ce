@@ -212,3 +212,27 @@ pi-ai 额外  stream:true, stream_options:{include_usage:true}, store:false  ←
 
 **门禁**：`typecheck` 0 / `lint` 0 / **26 文件 345 测试全绿**（原 25/335）/ 覆盖率 100% / `build` 0 / `ALL PROMPT REFS OK`。
 
+### P2 已完成（SQLite 会话层 + 旧存档迁移）
+
+新增：
+
+| 文件 | 作用 |
+|---|---|
+| `src/runtime/state.ts` | `MemoryDoc` / `PlacesDoc` / `PlanDoc`（对应原 `memory.json` 的跨会话字段） |
+| `src/runtime/session.ts` | `openBotSession()`：`bots/<name>/session.db` + Harness + 根 conversation |
+| `src/runtime/legacy.ts` | `readLegacySave()` / `migrateLegacyState()`，幂等 |
+| `tests/runtime_session.test.ts` | 7 个测试 |
+
+**关键决定：只迁 memory / places / plan，`turns` 故意不迁。** 那是易失上下文——把上一局的对话原样塞进新会话没有意义，模型看到的世界已经变了。
+
+**SQLite 适配器走 Node 内置 `node:sqlite`**（`DatabaseSync`），没有第三方原生依赖；本机 Node v24.21.0 真机验证通过。
+
+**持久化证据**：写 memory/places/plan → `close()` → 重开同一个库 → 三个文档原值返回，且根 conversation **id 不变**（不是新建的）。
+
+**幂等证据**：文档已存在时不覆盖（`memory: false`），缺失的仍补迁（`places: 1, plan: true`）。
+
+**踩坑记录**：pi-durable 要求文档类型满足 `JsonObject`，而 TypeScript **只给对象字面量类型隐式索引签名，`interface` 没有**——所以 `PlanState` 必须写成 `type` 而不是 `interface`。
+
+**门禁**：`typecheck` 0 / `lint` 0 / 27 文件 352 测试全绿 / 覆盖率 100% / `build` 0 / `ALL PROMPT REFS OK`。
+
+
