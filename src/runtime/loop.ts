@@ -1,20 +1,24 @@
 /**
- * P3：把 mindcraft-ce 的回合语义搬到 pi-durable 上。
+ * 运行时原语：工具、尾巴注入、系统提示词 section。
  *
- * ## 核心映射：`control.terminate` ↔ "一轮一次模型调用"
+ * ## 回合语义：自然的 ReAct 工具循环（**没有**强制工具、**没有** Finish）
  *
- * mindcraft-ce 的 ReAct 实际是**一轮一次模型调用**：`handleDecision` →
- * `runRound`（一次模型请求）→ `runCalls`（执行该响应的全部工具调用）→
- * `finishRequest`。下一轮不是由工具结果自动续起的，而是由新事件/新消息触发
- * （`agent.ts:610`、`loop.ts:132/149`）。
+ * 这里曾经给每个工具挂 `control.terminate`，把语义钉成"一轮一次模型调用"——
+ * 那是从旧 mindcraft-ce（`tool_choice: 'required'` + `Finish`）继承来的枷锁。
  *
- * pi-durable 的 `control.terminate` 恰好是这个语义：**当整轮所有结果都请求
- * terminate 时，run 不再发起下一次模型请求**。所以这里统一给每个工具挂上它，
- * 而不是只挂在 `Finish` 上——只挂 Finish 的话，`[stats, Finish]` 这种常见组合
- * 因为 stats 没请求 terminate，会白白多打一次模型。
+ * 现在的目标是**一个普通的 Agent**（Pi / OpenCode / DSH 那种）：模型调工具 →
+ * 拿结果 → 再调 → …… 直到它自己不再调工具、给出最终回答。run 的结束就是
+ * "模型不调工具了"，不需要 `Finish` 这个工具，也不需要强制调用。
  *
- * 保留 `Finish` 工具本身：提示词里到处在教模型"用 Finish 收尾"，删掉会改
- * 提示词契约。它现在退化为一个显式 yield，语义与其它工具一致。
+ * 这么做还带来一个实际好处：`steer`（引导）**才活过来**。挂着 terminate 时
+ * run 在工具轮后立刻结束，steer 没有"正在进行的工作"可以加入，只能退化成
+ * `followUp`（多一次往返）——实测见 `tests/runtime_steer_vs_followup.test.ts`。
+ *
+ * ## 如果模型"只说一句话、不调工具"怎么办
+ *
+ * 这正是当初加 Finish 的原因。比强制工具干净的替代是 pi-durable 的
+ * `GenerationHooks.onYield`：模型给出最终回答时，hook 可以返回
+ * `{ continue: "还没做完，继续" }` 把它按回去接着干。需要时再挂，不必现在就上。
  *
  * ## 动态内容不进 section
  *
@@ -37,29 +41,6 @@ import { SayEntry } from './entries.js';
 
 /** 单条 Say 的字符上限（沿用现有 `SAY_LINE_LIMIT`）。 */
 export const SAY_LINE_LIMIT = 240;
-
-/**
- * 给工具挂上 `control.terminate`，实现"一轮一次模型调用"。
- *
- * 包在**所有**工具外面（含 Say / Finish），而不是逐个手写：漏一个就会出现
- * "整轮并非全部请求终止" → run 继续 → 多一次模型调用。集中在一处也好审。
- */
-export function withTerminate<T extends ToolRegistration>(tool: T): T {
-  // 泛型 T 的 `execute` 参数是依赖 TSchema 的元组，直接 `...callArgs` 展开
-  // TS 证不出来；这里按"擦除后的形状"调用，再整体断言回 T['execute']。
-  const original = tool.execute as unknown as (
-    args: unknown,
-    api: unknown,
-    context: unknown,
-  ) => Promise<Record<string, unknown> & { control?: Record<string, unknown> }>;
-
-  const wrapped = async (args: unknown, api: unknown, context: unknown) => {
-    const result = await original(args, api, context);
-    return { ...result, control: { ...result.control, terminate: true } };
-  };
-
-  return { ...tool, execute: wrapped as unknown as T['execute'] } as T;
-}
 
 /** `Say` 工具：说话走独立 entry，不污染工具结果文本。 */
 export function createSayTool(onSay: (text: string) => void = () => {}): ToolRegistration {
@@ -85,17 +66,6 @@ export function createSayTool(onSay: (text: string) => void = () => {}): ToolReg
       onSay(line);
       return { content: [{ type: 'text' as const, text: line }] };
     },
-  });
-}
-
-/** `Finish` 工具：显式收尾。保留是为了不改提示词契约。 */
-export function createFinishTool(): ToolRegistration {
-  return defineTool({
-    name: 'Finish',
-    description: td('Finish'),
-    parameters: Type.Object({}, { additionalProperties: false }),
-    // 不用 async：没有 await，而 `execute` 契约要求返回 Promise。
-    execute: () => Promise.resolve({ content: [{ type: 'text' as const, text: 'Finished.' }] }),
   });
 }
 

@@ -88,39 +88,59 @@ async function openHarness(overrides: Partial<{ tools: ToolRegistration[] }> = {
   return { runtime, faux, said, baseDir, setTail: (value) => (tail = value) };
 }
 
-describe('回合语义：一轮一次模型调用', () => {
-  it('工具轮结束后不再发起下一次模型请求', async () => {
+describe('回合语义：自然的 ReAct 工具循环', () => {
+  it('工具轮之后 run 继续，会再发一次模型请求', async () => {
     const h = await openHarness();
     h.faux.setResponses([
       fauxAssistantMessage([fauxToolCall('Look', {})], { stopReason: 'toolUse' }),
+      fauxAssistantMessage('看完了，是平原。'),
     ]);
     const submission = await h.runtime.submit('看看周围');
     expect((await submission.wait(ctx)).status).toBe('done');
-    expect(h.faux.state.callCount).toBe(1);
+    // 没有 terminate：工具跑完 run 不会结束，模型会拿到回执再答一次。
+    expect(h.faux.state.callCount).toBe(2);
     await h.runtime.close();
   });
 
-  it('一轮里多个工具调用也只打一次模型（载荷测试：只给 Finish 挂 terminate 会失败）', async () => {
+  it('模型不再调工具时 run 结束——这就是收尾，不需要 Finish', async () => {
+    const h = await openHarness();
+    h.faux.setResponses([
+      fauxAssistantMessage([fauxToolCall('Look', {})], { stopReason: 'toolUse' }),
+      fauxAssistantMessage('没了。'),
+    ]);
+    await (await h.runtime.submit('看看周围')).wait(ctx);
+
+    const page = await h.runtime.conversation.entries({}, 50, undefined, ctx);
+    // 最后一条 assistant 不带工具调用
+    const assistants = page.items.filter((e) => e.kind === 'pi.assistant');
+    expect(assistants.length).toBeGreaterThanOrEqual(2);
+    expect(JSON.stringify(assistants)).toContain('没了。');
+    expect(JSON.stringify(page.items)).not.toContain('Finish');
+    await h.runtime.close();
+  });
+
+  it('一轮里多个工具调用都执行，然后模型再答一次', async () => {
     const h = await openHarness();
     h.faux.setResponses([
       fauxAssistantMessage(
         [fauxToolCall('Look', {}), fauxToolCall('Say', { text: '我看到平原' })],
         { stopReason: 'toolUse' },
       ),
+      fauxAssistantMessage('汇报完毕。'),
     ]);
     const submission = await h.runtime.submit('看看周围并告诉我');
     expect((await submission.wait(ctx)).status).toBe('done');
-    // 整轮所有结果都请求 terminate 才结束；Look 与 Say 都必须带上。
-    expect(h.faux.state.callCount).toBe(1);
+    expect(h.faux.state.callCount).toBe(2);
     expect(h.said).toEqual(['我看到平原']);
     await h.runtime.close();
   });
 
-  it('纯文本作答也结束 run（自动散文通道）', async () => {
+  it('纯文本作答结束 run（自动散文通道）', async () => {
     const h = await openHarness();
     h.faux.setResponses([fauxAssistantMessage('我就站在这儿，哪儿也不去。')]);
     const submission = await h.runtime.submit('你在干嘛');
     expect((await submission.wait(ctx)).status).toBe('done');
+    // 没调工具 → 一次调用就结束
     expect(h.faux.state.callCount).toBe(1);
 
     const page = await h.runtime.conversation.entries({}, 50, undefined, ctx);

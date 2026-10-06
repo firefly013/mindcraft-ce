@@ -1,18 +1,13 @@
 /**
  * 实测钉住：in-flight run 下 pi-durable 三种提交语义的真实行为。
  *
- * 这是 L1–L5 → 原生原语 映射的**经验依据**，不是推测。前提是「每个工具都被
- * `withTerminate` 挂上 `control.terminate`」——也就是本项目"一轮一次模型调用"
- * 的设定。
+ * 这是 L1–L5 → 原生原语 映射的**经验依据**，不是推测。运行时是**自然的 ReAct
+ * 工具循环**（不挂 `control.terminate`、没有 `Finish`）。
  *
  * 实测结论：
- *   write    → 不唤醒模型（callCount 不增）          ⇒ L2「只记账，随下次请求带上」
- *   steer    → **加入正在跑的 run**，且**覆盖 terminate**（run 继续，第二次请求
- *              带上它）                              ⇒ 「引导」
- *   followUp → 本轮答完后开新一轮，第二次请求带上它   ⇒ L3「排队等本轮结束」
- *
- * L3 取 `followUp` 而不是 `steer`：旧 L3-busy 是「当前请求看不到它，本轮结束时
- * 由下一轮带上」，而 `steer` 会让当前轮**不结束**——那是行为改变。
+ *   write    → 空闲时**不唤醒模型**（callCount 保持 0）  ⇒ L1/L2「只记账」
+ *   steer    → 加入正在跑的 run，第 2 次请求就带上它      ⇒ 「引导」
+ *   followUp → 本轮答完后开新一轮，第 3 次请求才带上它    ⇒ 「排队」
  */
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -120,19 +115,17 @@ function userTexts(messages: Array<Record<string, unknown>> | undefined): string
 }
 
 describe('in-flight run 下的提交语义（实测）', () => {
-  it('write：被动 entry，不唤醒模型', async () => {
+  it('write：空闲时被动写 entry，不唤醒模型', async () => {
     const p = await openProbe();
-    const first = await p.runtime.submit('开始干活');
-    await p.started;
+    // 什么都不提交，先写一条 entry
     await p.runtime.write({ kind: 'mc.note', data: { text: '记一笔' } });
-    p.release();
-    expect((await first.wait(ctx)).status).toBe('done');
-    // 只打了第一轮：write 没有把 run 拉起来
-    expect(p.faux.state.callCount).toBe(1);
+    // 一次模型调用都没有：write 不会把 run 拉起来
+    expect(p.faux.state.callCount).toBe(0);
+    expect(p.seen).toHaveLength(0);
     await p.runtime.close();
   });
 
-  it('steer：加入正在跑的 run，并覆盖 control.terminate', async () => {
+  it('steer：加入正在跑的 run，第 2 次请求就带上', async () => {
     const p = await openProbe();
     const first = await p.runtime.submit('开始干活');
     await p.started;
@@ -141,12 +134,11 @@ describe('in-flight run 下的提交语义（实测）', () => {
     expect((await first.wait(ctx)).status).toBe('done');
     expect((await steer.wait(ctx)).status).toBe('done');
 
-    // 所有工具都请求了 terminate，steer 仍然让 run 继续了第二次模型调用。
     expect(p.faux.state.callCount).toBe(2);
     expect(userTexts(p.seen[1])).toEqual(['开始干活', '插一句话']);
   });
 
-  it('followUp：本轮答完后开新一轮，第二次请求带上它', async () => {
+  it('followUp：本轮答完后开新一轮，第 3 次请求才带上', async () => {
     const p = await openProbe();
     const first = await p.runtime.submit('开始干活');
     await p.started;
@@ -155,8 +147,10 @@ describe('in-flight run 下的提交语义（实测）', () => {
     expect((await first.wait(ctx)).status).toBe('done');
     expect((await follow.wait(ctx)).status).toBe('done');
 
-    expect(p.faux.state.callCount).toBe(2);
-    expect(userTexts(p.seen[1])).toEqual(['开始干活', '等会儿再说']);
+    // 多一次往返：第 2 次请求是"答完"的那一轮，没带上它
+    expect(p.faux.state.callCount).toBe(3);
+    expect(userTexts(p.seen[1])).toEqual(['开始干活']);
+    expect(userTexts(p.seen[2])).toEqual(['开始干活', '等会儿再说']);
     await p.runtime.close();
   });
 });

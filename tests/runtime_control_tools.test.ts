@@ -20,7 +20,7 @@ import {
   createUpdatePlanTool,
   normalizeUpdatePlanArguments,
 } from '../src/runtime/control_tools.js';
-import { createFinishTool, createSayTool } from '../src/runtime/loop.js';
+import { createSayTool } from '../src/runtime/loop.js';
 import type { ResolvedProvider } from '../src/runtime/provider.js';
 import { openBotRuntime } from '../src/runtime/runtime.js';
 
@@ -55,8 +55,9 @@ function toJson(schema: unknown): Record<string, unknown> {
 const emptyPlan = (): PlanSnapshot => ({ goal: null, todos: [] });
 
 function buildControlTools() {
+  // 只有 4 个：`Finish` 已按决策移除（自然的 ReAct 循环里"不再调工具"就是收尾），
+  // 旧的 `getOpenAITools` 仍然广告它——那条差异由下面的测试显式记录。
   return [
-    createFinishTool(),
     createStopTool(() => undefined),
     createSayTool(),
     createUpdatePlanTool(emptyPlan),
@@ -67,10 +68,13 @@ function buildControlTools() {
 describe('控制工具与旧广告一致', () => {
   const oldTools = new Map(getOpenAITools({}).map((tool) => [tool.function.name, tool.function]));
 
-  it('旧广告里确实有这 5 个控制工具', () => {
+  it('旧广告里有 5 个控制工具，我们只实现 4 个（Finish 已移除）', () => {
     for (const name of ['Finish', 'Stop', 'Say', 'UpdatePlan', 'Feedback']) {
       expect(oldTools.has(name)).toBe(true);
     }
+    const implemented = buildControlTools().map((tool) => tool.name);
+    expect(implemented).toEqual(['Stop', 'Say', 'UpdatePlan', 'Feedback']);
+    expect(implemented).not.toContain('Finish');
   });
 
   it.each(buildControlTools().map((tool) => [tool.name, tool] as const))(

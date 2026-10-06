@@ -374,18 +374,28 @@ pi-ai 额外  stream:true, stream_options:{include_usage:true}, store:false  ←
 
 **最关键的发现：`steer` 会覆盖 `control.terminate`。** 所有工具都请求了 terminate，`steer` 一来 run 就继续了第二次模型调用。这正是"引导"的语义。
 
-### 修正后的 L1–L5 映射
+### 最终决定：拆掉强制工具与 Finish，回归自然的 ReAct 循环
+
+原设计给**每个工具**挂 `control.terminate`，把语义钉成"一轮一次模型调用"——那是从旧 mindcraft-ce（`tool_choice: 'required'` + `Finish`）继承来的枷锁。
+
+**决定拆掉它**，因为目标就是"一个普通的 Agent"（Pi / OpenCode / DSH 那种）：模型调工具 → 拿结果 → 再调 → …… 直到它自己不再调工具、给出最终回答。**run 的结束就是"模型不调工具了"**，不需要 `Finish` 这个工具，也不需要强制调用。
+
+具体改动：`withTerminate` 与 `createFinishTool` 删除；`openBotRuntime` 原样安装工具，不做任何包装。
+
+**代价与兜底**：当初加 Finish 是因为模型"只说一句话、不调工具"。比强制工具干净的替代是 pi-durable 的 `GenerationHooks.onYield`——模型给出最终回答时，hook 可以返回 `{ continue: "还没做完，继续" }` 把它按回去接着干。**先按普通 Agent 的标准跑，不行再挂这个。**
+
+### 最终 L1–L5 映射
 
 | 级别 | 旧语义 | 新落点 |
 |---|---|---|
 | L1 | 只记账，从不唤醒 | `write`（被动 entry） |
-| L2 | 只记账，随下一次请求顺带发给模型 | `write`（同上；实测不增加模型调用） |
-| L3 空闲 | 立刻开请求 | `submit()` |
-| L3 忙 | 排队等本轮结束 | `submit({whenBusy:'followUp'})` |
+| L2 | 只记账，随下一次请求顺带发给模型 | `write`（实测空闲时不唤醒模型） |
+| L3 空闲 | 立刻开请求 | `submit({whenBusy:'steer'})` |
+| L3 忙 | 加入当前工作 | `submit({whenBusy:'steer'})` |
 | L4 | 取消当前回合、带事件重开 | `abort()` → `submit()` |
 | L5 | 取消 + 停动作 + 锁通道 | `abort()` → 保命反射 → 恢复 |
 
-**L3 取 `followUp` 而不是 `steer`**：旧 L3-busy 是「当前请求看不到它，本轮结束时由下一轮带上」，而 `steer` 会让当前轮**不结束**（实测），那是行为改变。`steer` 留给将来"要加入当前工作"的需求。
+**L3 统一用 `steer`**（用户决定）。注意：拆掉 terminate **之前**，`steer` 和 `followUp` 观测上完全一致——run 在工具轮后立刻结束，steer 没有"正在进行的工作"可以加入，只能退化成 followUp。拆掉之后 steer 才真正省一次往返。这也是拆 terminate 的动机之一。
 
 ### 两个必须处理的问题
 

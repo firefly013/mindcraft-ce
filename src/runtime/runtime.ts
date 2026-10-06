@@ -18,7 +18,7 @@ import {
   type ToolRegistration,
   type UserInput,
 } from '@earendil-works/pi-durable';
-import { createFinishTool, createSayTool, liveTailHook, systemSection, withTerminate } from './loop.js';
+import { createSayTool, liveTailHook, systemSection } from './loop.js';
 import type { ResolvedProvider } from './provider.js';
 import { openBotSession, type BotSession } from './session.js';
 
@@ -43,7 +43,7 @@ export interface BotRuntimeOptions {
   systemPrompt: () => string;
   /** 每轮请求前注入的动态尾巴（事件 / 记忆 / 世界快照）；空串则不加。 */
   liveTail: () => string;
-  /** 游戏工具；会自动挂上 `control.terminate`。 */
+  /** 游戏工具。原样安装，不做任何包装。 */
   tools?: readonly ToolRegistration[];
   /** Say 通道回调（写游戏内聊天 / 推前端）。 */
   onSay?: (text: string) => void;
@@ -77,11 +77,9 @@ export async function openBotRuntime(options: BotRuntimeOptions): Promise<BotRun
     sections: [systemSection(options.systemPrompt)],
     // 动态尾巴走 beforeRequest：只影响本次请求，不落 transcript。
     hooks: [liveTailHook(options.liveTail)],
-    tools: [
-      withTerminate(createSayTool(options.onSay)),
-      withTerminate(createFinishTool()),
-      ...(options.tools ?? []).map((tool) => withTerminate(tool)),
-    ],
+    // 自然的 ReAct 工具循环：不挂 control.terminate，也没有 Finish 工具。
+    // run 的结束就是"模型不再调工具"。见 loop.ts 顶部的说明。
+    tools: [createSayTool(options.onSay), ...(options.tools ?? [])],
   });
 
   const registry = createRegistry();
