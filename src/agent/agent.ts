@@ -598,6 +598,23 @@ export class Agent {
                 }
             },
             eat: (food: string): Promise<void> => consume(bot, food).then(() => undefined),
+            submerged: (): boolean => {
+                try {
+                    const p = bot.entity.position;
+                    return bot.blockAt(p)?.name === 'water' && bot.blockAt(p.offset(0, 1.6, 0))?.name === 'water';
+                } catch {
+                    return false;
+                }
+            },
+            swimUp: (): void => {
+                try {
+                    // 水里按 jump 就是上浮；顺便抬头，免得贴着天花板原地顶。
+                    bot.setControlState('jump', true);
+                    void bot.look(bot.entity.yaw, -Math.PI / 2, true);
+                } catch {
+                    // 拿不到实体就没什么可做的。
+                }
+            },
         });
     }
 

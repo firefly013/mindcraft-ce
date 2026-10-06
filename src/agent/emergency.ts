@@ -158,6 +158,15 @@ export interface EmergencyBot {
   stopAll(): void;
   fleeTo(x: number, z: number): void;
   eat(food: string): Promise<void>;
+  /**
+   * 头是不是泡在水里（真正淹没）。**可选**：不实现就当没溺水这回事。
+   *
+   * 为什么要单独一条：模型真机被淹死 5 次，每次都收到 L5 溺水事件，但
+   * runEmergency 只处理"威胁"和"吃"——**根本没有溺水分支**，事件响了没人管。
+   */
+  submerged?(): boolean;
+  /** 往上浮（在水里连跳 + 抬头）。可选，配合 submerged 用。 */
+  swimUp?(): void;
 }
 
 export interface EmergencyResult {
