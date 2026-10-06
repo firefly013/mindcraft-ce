@@ -9,7 +9,7 @@ import pf from 'mineflayer-pathfinder';
 import { isHostile } from '../utils/mcdata.js';
 import { Scheduler, KIND, LEVEL } from './scheduler.js';
 import type { Kind, Level } from './scheduler.js';
-import { STOP_WORDS, shouldEmitHurt, isStuck, isHeartbeatDue } from './edges.js';
+import { STOP_WORDS, shouldEmitHurt, isStuck, isStationaryAction, isHeartbeatDue } from './edges.js';
 import { sampleLiveState, renderLiveState } from './live_state.js';
 import type { SampleContext } from './live_state.js';
 import { runEmergency, shouldTriggerEmergency, FOOD_VALUE } from './emergency.js';
@@ -978,15 +978,42 @@ export class Agent {
         if (pos !== this.stuckPos) {
             this.stuckPos = pos;
             this.stuckSince = now;
-        } else if (
-            isStuck(this.stuckPos, pos, this.stuckSince, now, this.scheduler.describe().actionId != null)
-        ) {
-            this.stuckSince = now;
-            this.notify(KIND.WORLD, LEVEL.PREEMPT, {
-                type: 'task.stuck',
-                position: pos,
-                action: snapshot.currentAction ?? null,
-            });
+        } else {
+
+            const currentAction = this.scheduler.describe().actionId ?? null;
+
+            // **站着干活不算卡住**：开箱子/合成/查背包时位置当然不变。模型真机报过
+
+            // "误报 task.stuck"，每次误报都白花一次 PREEMPT 唤醒。
+
+            const stuck =
+
+                !isStationaryAction(currentAction) &&
+
+                isStuck(this.stuckPos, pos, this.stuckSince, now, currentAction != null);
+
+            if (stuck) {
+
+                const seconds = Math.round((now - this.stuckSince) / 1000);
+
+                this.stuckSince = now;
+
+                this.notify(KIND.WORLD, LEVEL.PREEMPT, {
+
+                    type: 'task.stuck',
+
+                    position: pos,
+
+                    action: currentAction,
+
+                    // 把"卡了多久"写进去，模型能据此判断是真卡还是刚起步。
+
+                    stuckForSeconds: seconds,
+
+                });
+
+            }
+
         }
         // 心跳：5 分钟无动作无请求，醒一次做反思，防睡死。
         if (

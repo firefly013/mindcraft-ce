@@ -888,6 +888,25 @@ export function isStuck(
   return now - since >= thresholdMs;
 }
 
+/**
+ * 这些动作**本来就该站着不动**，位置不变不能当"卡住"的证据。
+ *
+ * 模型真机报过"误报 task.stuck"：它开着箱子、合成、查背包的时候位置当然不变，
+ * 却被判成卡住并收到一次 PREEMPT 唤醒——白花一次请求，还让它以为出事了。
+ */
+const STATIONARY_ACTIONS: readonly string[] = [
+  'useBlock', 'useEntity', 'craft', 'inventory', 'stats', 'craftable',
+  'nearbyBlocks', 'entities', 'savedPlaces', 'getCraftingPlan', 'searchWiki',
+  'rememberHere', 'Say', 'Feedback', 'Stop',
+];
+
+/** 这个动作是不是"站着干活"那类（位置不变是正常的）。 */
+export function isStationaryAction(action: string | null | undefined): boolean {
+  if (action == null) return false;
+  const name = action.replace(/^action:/, '').replace(/^!/, '');
+  return STATIONARY_ACTIONS.includes(name);
+}
+
 /** 心跳：空闲超过间隔就醒一次做反思，防睡死。 */
 export const HEARTBEAT_MS = 5 * 60 * 1000;
 
