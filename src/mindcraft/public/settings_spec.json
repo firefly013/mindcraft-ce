@@ -54,21 +54,11 @@
     "blocked_actions": {
         "type": "array",
         "description": "List of actions that are blocked",
-        "default": ["!checkBlueprint", "!checkBlueprintLevel", "!getBlueprint", "!getBlueprintLevel"]
-    },
-    "max_messages": {
-        "type": "number",
-        "description": "Maximum number of recent messages to keep in context for LLM",
-        "default": 15
+        "default": []
     },
     "cheat": {
         "type": "boolean",
         "description": "Whether to allow server-cheat shortcuts (/tp, /setblock, instant place). Requires OP.",
-        "default": false
-    },
-    "log_all_prompts": {
-        "type": "boolean",
-        "description": "Whether to log all prompts to file. Can be very verbose.",
         "default": false
     },
     "chat_ingame": {

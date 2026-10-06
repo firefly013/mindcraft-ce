@@ -43,12 +43,16 @@ export function formatEventEntry(entry: EventEntry): string {
 }
 
 /**
- * 渲染整个未见事件块。没有事件返回空串，调用方就不追加空段
- * （不留一个只有标题的空段落骗模型）。
+ * 唤醒标记：**只报"本轮新到的事件是哪些序号"**，正文不再重发。
+ *
+ * 事件的正文现在由 `History.addEvent()` 记进历史（每个事件恰好一次），
+ * 这里只回答"我为什么被叫醒"。以前这里整段重发 payload，结果是同一条
+ * 玩家消息在同一请求里出现两次（历史里一次、`## 事件` 里一次）。
  */
 export function renderEvents(entries: readonly EventEntry[] | null | undefined): string {
   if (!Array.isArray(entries) || entries.length === 0) return '';
-  return ['## 事件', ...entries.map(formatEventEntry)].join('\n');
+  const ids = entries.map((entry) => (entry.seq == null ? '#?' : `#${entry.seq}`)).join(' ');
+  return `## 本轮新事件\n${ids}\n（正文已记在上面的历史里，按序号找；不用重复叙述。）`;
 }
 
 /**

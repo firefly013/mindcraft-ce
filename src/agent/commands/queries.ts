@@ -1,6 +1,5 @@
 import * as world from '../library/world.js';
 import * as mc from '../../utils/mcdata.js';
-import { checkLevelBlueprint, checkBlueprint } from '../tasks/construction_tasks.js';
 import { load } from 'cheerio';
 import { td, tp } from '../../prompts.js';
 import type { AgentCommand } from './actions.js';
@@ -14,49 +13,12 @@ export const queryList: AgentCommand[] = [
     {
         name: "!stats",
         description: td('stats'),
+        // stats = 模型**主动拍的一张状态照片**：内容与每轮注入的 Live State
+        // 同源（同一份采样，见 Agent.liveStateText），区别在于它是 Tool 回执，
+        // 会永久留在上下文里——所以模型可以拿它和上一次对比："我多了什么"。
+        // Live State 是感知（每轮现采、不入历史），stats 是记录（留存、可比对）。
         perform: function (agent: any): string {
-            const bot = agent.bot;
-            let res = 'STATS';
-            const pos = bot.entity.position;
-            // display position to 2 decimal places
-            res += `\n- Position: x: ${pos.x.toFixed(2)}, y: ${pos.y.toFixed(2)}, z: ${pos.z.toFixed(2)}`;
-            // Gameplay
-            res += `\n- Gamemode: ${bot.game.gameMode}`;
-            res += `\n- Health: ${Math.round(bot.health)} / 20`;
-            res += `\n- Hunger: ${Math.round(bot.food)} / 20`;
-            res += `\n- Biome: ${world.getBiomeName(bot)}`;
-            let weather = "Clear";
-            if (bot.rainState > 0)
-                weather = "Rain";
-            if (bot.thunderState > 0)
-                weather = "Thunderstorm";
-            res += `\n- Weather: ${weather}`;
-            // let block = bot.blockAt(pos);
-            // res += `\n- Artficial light: ${block.skyLight}`;
-            // res += `\n- Sky light: ${block.light}`;
-            // light properties are bugged, they are not accurate
-
-
-            if (bot.time.timeOfDay < 6000) {
-                res += '\n- Time: Morning';
-            } else if (bot.time.timeOfDay < 12000) {
-                res += '\n- Time: Afternoon';
-            } else {
-                res += '\n- Time: Night';
-            }
-
-            // get the bot's current action
-            let action = agent.actions.currentActionLabel;
-            if (agent.isIdle())
-                action = 'Idle';
-            res += `- Current Action: ${action}`;
-
-
-            const players = world.getNearbyPlayerNames(bot);
-
-            res += '\n- Nearby Players: ' + (players.length > 0 ? players.join(', ') : 'None.');
-
-            return pad(res);
+            return pad(`SNAPSHOT (留在上下文里，可和上一次对比)\n${agent.liveStateText()}`);
         }
     },
     {
@@ -209,46 +171,6 @@ export const queryList: AgentCommand[] = [
         // eslint-disable-next-line require-await -- command interface requires a promise result
         perform: async function (agent: any): Promise<string> {
             return "Saved place names: " + agent.memory_bank.getKeys();
-        }
-    },
-    {
-        name: '!checkBlueprintLevel',
-        description: td('checkBlueprintLevel'),
-        params: {
-            'levelNum': { type: 'int', description: tp('checkBlueprintLevel', 'levelNum'), domain: [0, Number.MAX_SAFE_INTEGER] }
-        },
-        perform: function (agent: any, levelNum: number): string {
-            const res = checkLevelBlueprint(agent, levelNum);
-            console.log(res);
-            return pad(res);
-        }
-    },
-    {
-        name: '!checkBlueprint',
-        description: td('checkBlueprint'),
-        perform: function (agent: any): string {
-            const res = checkBlueprint(agent);
-            return pad(res);
-        }
-    },
-    {
-        name: '!getBlueprint',
-        description: td('getBlueprint'),
-        perform: function (agent: any): string {
-            const res = agent.task.blueprint.explain();
-            return pad(res);
-        }
-    },
-    {
-        name: '!getBlueprintLevel',
-        description: td('getBlueprintLevel'),
-        params: {
-            'levelNum': { type: 'int', description: tp('getBlueprintLevel', 'levelNum'), domain: [0, Number.MAX_SAFE_INTEGER] }
-        },
-        perform: function (agent: any, levelNum: number): string {
-            const res = agent.task.blueprint.explainLevel(levelNum);
-            console.log(res);
-            return pad(res);
         }
     },
     {

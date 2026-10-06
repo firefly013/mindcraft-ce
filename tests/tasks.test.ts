@@ -35,20 +35,12 @@ describe('Task construction', () => {
     expect(t.name).toBe('botty');
   });
 
-  it('builds construction goals with the blueprint explanation', () => {
-    const t = new Task(
-      agent(),
-      data({
-        type: 'construction',
-        goal: 'build it',
-        blueprint: { levels: [{ level: 0, coordinates: [1, 2, 3], placement: [['stone']] }] },
-      }),
-    );
-    expect(t.task_type).toBe('construction');
-    expect(t.goal).toContain('build it');
-    expect(t.goal).toContain('Level 0: Start at coordinates X: 1, Y: 2, Z: 3');
-    expect(t.goal).toContain('lower levels');
-    expect(t.validator).not.toBeNull();
+  it('carries the plain goal for non-item task types', () => {
+    const t = new Task(agent(), data({ type: 'crafting', goal: 'build it' }));
+    expect(t.task_type).toBe('crafting');
+    expect(t.goal).toBe('build it');
+    // 蓝图/建造任务整套已删除：没有 construction 校验器，未知类型就是没有校验器。
+    expect(t.validator).toBeNull();
   });
 
   it('picks validators by type', () => {

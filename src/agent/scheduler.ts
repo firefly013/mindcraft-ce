@@ -94,11 +94,18 @@ export interface SchedulerSnapshot {
   pending: number;
 }
 
+/** 当前占着身体通道的动作：名字 + 调用参数 + 认领时刻。 */
+export interface CurrentAction {
+  id: string;
+  args: unknown;
+  startedAt: number;
+}
+
 export class Scheduler {
   private apiBusy = false;
   private currentRequestId = 0;
   private requestSeq = 0;
-  private action: { id: string } | null = null;
+  private action: CurrentAction | null = null;
   private generation = 0;
   private emergency = false;
   private eventSeq = 0;
@@ -184,19 +191,35 @@ export class Scheduler {
   /**
    * 认领动作通道。动作跑着（`ACTION_BUSY`）或 emergency 锁住
    * （`EMERGENCY_LOCKED`）就拒绝——不排队、不顶替。
+   *
+   * 记下名字与参数，是为了让调用方能回答"被拒的这次是不是就是
+   * 正在跑的那件事"：同一个动作重复下发应当幂等忽略，而不是逼模型
+   * 先 Stop 再重开（那会把模型自己正在做的事打断）。
    */
-  startAction(id: string): StartActionVerdict {
+  startAction(id: string, args: unknown = null): StartActionVerdict {
     if (this.emergency) return { accepted: false, code: 'EMERGENCY_LOCKED' };
     if (this.action != null) return { accepted: false, code: 'ACTION_BUSY' };
-    this.action = { id };
+    this.action = { id, args, startedAt: Date.now() };
     return { accepted: true, actionId: id, generation: this.generation };
   }
 
-  /** `Stop()`：丢掉动作，并让所有在途回调的 generation 失效。 */
-  stopAll(): { generation: number } {
+  /** 正在跑的动作；空闲时为 null。 */
+  currentAction(): CurrentAction | null {
+    return this.action == null ? null : { ...this.action };
+  }
+
+  /**
+   * `Stop()`：丢掉动作，并让所有在途回调的 generation 失效。
+   *
+   * 一并回报"刚才到底停掉了什么"：没在跑的时候 Stop 是空操作，
+   * 模型据此才能分清"我停掉了 collectBlocks"和"我什么也没停"。
+   */
+  stopAll(): { generation: number; hadAction: boolean; actionId: string | null } {
+    const hadAction = this.action != null;
+    const actionId = this.action?.id ?? null;
     this.action = null;
     this.generation++;
-    return { generation: this.generation };
+    return { generation: this.generation, hadAction, actionId };
   }
 
   /**

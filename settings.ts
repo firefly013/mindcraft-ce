@@ -27,17 +27,14 @@ const settings: Settings = {
 
     "chat_ingame": true, // bot responses are shown in minecraft chat
 
-    "render_bot_view": false, // show bot's view in browser at localhost:3000, 3001...
-
     "allow_vision": true, // 每轮现拍示意图进 Live State 主循环（粗略重绘，大概看布局）
-    "blocked_actions" : ["!checkBlueprint", "!checkBlueprintLevel", "!getBlueprint", "!getBlueprintLevel"] , // tools to disable.
+    "blocked_actions" : [], // tools to disable（按命令名，例如 "!searchWiki"）
     "cheat": false, // allow server-cheat shortcuts (/tp, /setblock, instant place) in skills. Requires OP.
 
-    "max_messages": 15, // max number of messages to keep in context
+    // 上下文不再有条数上限：唯一的裁剪机制是压仓，触发线是
+    // profile 的 context_window - reserve_tokens（见 src/agent/compaction.ts）。
 
     "spawn_timeout": 30, // num seconds allowed for the bot to spawn before throwing error. Increase when spawning takes a while.
-
-    "log_all_prompts": false, // log ALL prompts to file
 };
 
 export default settings;

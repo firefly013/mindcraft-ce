@@ -1,5 +1,16 @@
 # VLM-Bot 对齐现状（2026-10-06）
 
+> **⚠️ 后续变更（同日，另见 [agent-design.md](agent-design.md)）**：本文件记录的是
+> "对齐 VLM-Bot"阶段的结论，其中几条**已被后继决策推翻**，不要照它实现：
+> - §二.2「保持原生多轮 messages」——形态仍是原生多轮，但**改为完整上下文**，
+>   不再有"最近 100 条 / 8000 token"的尾巴截断（那是 VLM-Bot 的实现偏差）。
+> - §二.3「保留条数硬顶 + token 压力双线」——`max_messages` **已整体删除**；
+>   压仓改为 Pi 式：`contextTokens > contextWindow - reserveTokens`，
+>   锚点是 provider 报的真实 `usage`，切点按 `keepRecentTokens`。
+> - §三 与 §四 里提到的 `ActionManager` 双通道、蓝图/NPC 子系统、求值脚本中的
+>   建造/烹饪部分**均已删除或收编**。
+> 后续以 [agent-design.md](agent-design.md) 为准。
+
 > 本文取代原先的《VLM-Bot → mindcraft-ce 改造路线图》。
 > 原文档写于对齐开始前（基线 `cc9b6a3`），把移植写成未来计划；其中多数条目**已经完成**，
 > 少数经复核后被判定为**不该对齐**。以本文件为准。

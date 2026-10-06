@@ -47,6 +47,17 @@ export interface LoopHistory {
   append(kind: string, level: number, payload: unknown): void;
 }
 
+/**
+ * 事件入账钩子：把一个到达的事件写进**模型看得见的那份历史**。
+ * `seq` 由调度器分配，写进历史后模型就能用唤醒标记里的 `#序号` 对上号。
+ */
+export interface LoopEventRecord {
+  kind: string;
+  level: Level;
+  payload: unknown;
+  seq: number;
+}
+
 export interface LoopAssembled {
   text: string;
   tools: any;
@@ -67,6 +78,11 @@ export interface AgentLoopDeps {
   model: (text: string, tools: unknown, image?: string | null) => Promise<LoopModelResponse>;
   stopExecutor?: (() => Promise<void>) | null;
   emergencyHandler?: (() => Promise<void>) | null;
+  /**
+   * 每个到达的事件写进模型看得见的历史，恰好一次。
+   * 不接这个钩子，事件就只活在调度器与审计台账里，模型被叫醒却查不到原因。
+   */
+  onEvent?: ((event: LoopEventRecord) => void) | null;
 }
 
 export class AgentLoop {
@@ -77,6 +93,7 @@ export class AgentLoop {
   private model: (text: string, tools: unknown, image?: string | null) => Promise<LoopModelResponse>;
   private stopExecutor: (() => Promise<void>) | null;
   private emergencyHandler: (() => Promise<void>) | null;
+  private onEvent: ((event: LoopEventRecord) => void) | null;
   rounds = 0;
 
   constructor(deps: AgentLoopDeps) {
@@ -87,14 +104,23 @@ export class AgentLoop {
     this.model = deps.model;
     this.stopExecutor = deps.stopExecutor ?? null;
     this.emergencyHandler = deps.emergencyHandler ?? null;
+    this.onEvent = deps.onEvent ?? null;
 
     this.runner.register('Stop', async () => {
       // 先失效 generation：在途的完成回调看到过期会就地丢弃，
       // 再去停身体——顺序反了就会漏一条过期结果进下一轮。
       const stopped = this.scheduler.stopAll();
       await this.stopExecutor?.();
-      this.history.append('Model', 2, { stopped: true, generation: stopped.generation });
-      return { status: 'completed', data: { stopped: true, generation: stopped.generation } };
+      const data = {
+        stopped: true,
+        generation: stopped.generation,
+        // 真相：这次到底停掉了什么。"本来就没在跑"是一个有价值的事实，
+        // 免得模型以为自己停掉了一个动作而实际什么都没发生。
+        stopped_action: stopped.actionId,
+        had_action: stopped.hadAction,
+      };
+      this.history.append('Model', 2, data);
+      return { status: 'completed', data };
     });
     this.runner.register('Finish', () => Promise.resolve({ status: 'completed', data: { finish: true } }));
   }
@@ -104,8 +130,13 @@ export class AgentLoop {
     decision: string;
     seq: number;
   } {
+    // 审计台账（有上限）与调度分发，都在这里。
     this.history.append(event.kind, event.level, event.payload);
-    return this.scheduler.pushEvent(event);
+    const verdict = this.scheduler.pushEvent(event);
+    // 模型看得见的那一份：seq 由调度器给，模型凭它对应唤醒标记里的 #序号。
+    // 只在事件到达时写一次——工具往来/模型正文各自另有记账路径。
+    this.onEvent?.({ kind: event.kind, level: event.level, payload: event.payload, seq: verdict.seq });
+    return verdict;
   }
 
   /** 执行器异步消息：一律按 level-3 Tool 事件重进循环。 */

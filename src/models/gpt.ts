@@ -1,16 +1,67 @@
 import OpenAIApi from 'openai';
 import { randomUUID } from 'node:crypto';
 import { getKey, hasKey } from '../utils/keys.js';
-import { strictFormat } from '../utils/text.js';
+import { strictFormat, toLlmMessages } from '../utils/text.js';
 import type {
   AIModel,
   ChatMessage,
   OpenAITool,
+  TokenUsage,
   ToolResponse,
 } from '../types/common.js';
 
 /** 构造 OpenAI 客户端时的选项类型（不再手写一遍形状）。 */
 type OpenAIClientOptions = NonNullable<ConstructorParameters<typeof OpenAIApi>[0]>;
+
+/**
+ * provider 的 `usage` 归一化。
+ *
+ * 上下文占用量取 `total_tokens`（prompt + completion）：压仓判断的是
+ * "这个窗口还能装多少"，所以补全出来的 token 也要算进去。
+ * 老端点可能只给 prompt/completion 两项，缺 total 就自己加。
+ * 三项都拿不到时返回 undefined——宁可不压仓，也不要拿 0 当"空上下文"。
+ */
+export function normalizeUsage(raw: unknown): TokenUsage | undefined {
+  if (raw == null || typeof raw !== 'object') return undefined;
+  const u = raw as Record<string, unknown>;
+  const num = (v: unknown): number | null => (typeof v === 'number' && Number.isFinite(v) ? v : null);
+  const prompt = num(u['prompt_tokens']);
+  const completion = num(u['completion_tokens']);
+  const total = num(u['total_tokens']);
+  if (prompt == null && completion == null && total == null) return undefined;
+  const promptTokens = prompt ?? 0;
+  const completionTokens = completion ?? 0;
+  return {
+    promptTokens,
+    completionTokens,
+    totalTokens: total ?? promptTokens + completionTokens,
+  };
+}
+
+/**
+ * 这个错误是不是"上下文超限"。
+ *
+ * OpenAI 兼容端点报法不一：有 `code: 'context_length_exceeded'`，
+ * 也有中文/英文的自由文本。宁可多认几种，认错的代价只是一次多余压缩。
+ */
+export function isContextOverflow(err: unknown): boolean {
+  const e = err as { code?: unknown; message?: unknown; error?: { code?: unknown; message?: unknown } } | null;
+  const code = typeof e?.code === 'string' ? e.code : typeof e?.error?.code === 'string' ? e.error.code : '';
+  const msg =
+    typeof e?.message === 'string'
+      ? e.message
+      : typeof e?.error?.message === 'string'
+        ? e.error.message
+        : '';
+  const hay = `${code} ${msg}`.toLowerCase();
+  return (
+    hay.includes('context_length') ||
+    hay.includes('context length') ||
+    hay.includes('maximum context') ||
+    hay.includes('too many tokens') ||
+    hay.includes('reduce the length')
+  );
+}
 
 /**
  * headers 支持 `${VAR}` 占位，未设置的变量取一个新的 UUID。
@@ -106,10 +157,6 @@ export class GPT implements AIModel {
     systemMessage: string,
     stop_seq = '***',
   ): Promise<string> {
-    const messages = strictFormat(turns).map((message) => {
-      message.content += stop_seq;
-      return message;
-    });
     const model = this.model_name || 'gpt-5.4-mini';
 
     let res: string | null;
@@ -119,7 +166,9 @@ export class GPT implements AIModel {
       // if a custom URL is set, use chat.completions
       // because custom "OpenAI-compatible" endpoints likely do not have responses endpoint
       if (this.url) {
-        let msgs = [{ role: 'system', content: systemMessage } as ChatMessage].concat(turns);
+        let msgs = [{ role: 'system', content: systemMessage } as ChatMessage].concat(
+          toLlmMessages(turns),
+        );
         msgs = strictFormat(msgs);
         const pack: Record<string, unknown> = {
           model: model,
@@ -143,7 +192,7 @@ export class GPT implements AIModel {
         console.log('Received.');
         res = completion.choices[0]?.message.content ?? null;
       } else {
-        const msgs = strictFormat(turns);
+        const msgs = toLlmMessages(turns);
         const withStop = msgs.map((message) => {
           message.content += stop_seq;
           return message;
@@ -192,8 +241,10 @@ export class GPT implements AIModel {
     liveTail = '',
     liveImage: string | null = null,
   ): Promise<ToolResponse> {
+    // 只发 role + content：历史条目上的 kind/level/at/usage 是内部字段，
+    // 混进请求体既浪费 token 也可能被严格网关判成非法字段（Pi 的 convertToLlm）。
     const messages = [{ role: 'system', content: systemMessage } as ChatMessage].concat(
-      strictFormat(turns),
+      toLlmMessages(turns),
     );
     if (liveTail.trim() !== '' || liveImage != null) {
       if (liveImage != null) {
@@ -216,7 +267,8 @@ export class GPT implements AIModel {
         tool_choice: tool_choice as never,
         ...this.bodyParams(),
       } as never);
-      const msg = completion.choices[0]?.message;
+      const choice = completion.choices[0];
+      const msg = choice?.message;
       const tool_calls = (msg?.tool_calls ?? []).map((tc) => {
         const fn = (tc as { id?: string; function?: { name?: string; arguments?: string } }).function;
         let args: Record<string, unknown>;
@@ -227,9 +279,19 @@ export class GPT implements AIModel {
         }
         return { id: (tc as { id: string }).id, name: fn?.name ?? '', args };
       });
-      return { text: (msg?.content ?? '') as string, tool_calls };
+      return {
+        text: (msg?.content ?? '') as string,
+        tool_calls,
+        // usage 是压仓触发线的唯一可信输入，必须带回上层。
+        usage: normalizeUsage(completion.usage),
+        // finish_reason=length 说明这次回复被窗口截断了：即使还没报错，
+        // 也按溢出处理，让上层压缩后重试。
+        overflow: choice?.finish_reason === 'length',
+      };
     } catch (err) {
       console.log(err);
+      // 上下文超限不是"网络断了"，上层要据此压缩后重试一次。
+      if (isContextOverflow(err)) return { text: '', tool_calls: [], overflow: true };
       return { text: 'My brain disconnected, try again.', tool_calls: [] };
     }
   }

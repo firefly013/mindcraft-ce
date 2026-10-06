@@ -38,12 +38,10 @@ function tempDir(): string {
 }
 
 describe('History persistence', () => {
-  it('round-trips memory, turns, remembered places and the plan', async () => {
+  it('round-trips turns, remembered places and the plan', async () => {
     const dir = tempDir();
     const agent = makeAgent(dir);
     const h = new History(agent);
-    h.max_messages = 1000;
-    h.memory = 'remembered';
     await h.add('system', 'hello');
     agent.memory_bank.rememberPlace('home', 10, 64, -20);
     agent.plan.update('build a house', [
@@ -58,7 +56,6 @@ describe('History persistence', () => {
     const data = h2.load();
 
     expect(data?.taskStart).toBe(4242);
-    expect(h2.memory).toBe('remembered');
     expect(h2.turns.map((t) => t.content)).toEqual(['hello']);
     expect(restarted.memory_bank.recallPlace('home')).toEqual([10, 64, -20]);
     expect(restarted.plan.snapshot()).toEqual({
@@ -68,6 +65,22 @@ describe('History persistence', () => {
         { text: 'craft planks', done: false },
       ],
     });
+  });
+
+  it('persists the compaction summary as an entry and reloads it', async () => {
+    const dir = tempDir();
+    const agent = makeAgent(dir);
+    const h = new History(agent);
+    h.turns.push({ role: 'system', content: '[记忆摘要] carried over', kind: 'summary', level: 2 });
+    await h.add('bobo', 'hello');
+    await h.save();
+
+    const restarted = makeAgent(dir);
+    const h2 = new History(restarted);
+    h2.load();
+    expect(h2.memory).toBe('carried over');
+    // 摘要条目本身也发得出去（Pi 的投影：摘要就在历史头部）。
+    expect(h2.getHistory()[0]?.kind).toBe('summary');
   });
 
   it('loads a legacy save that has no places/plan keys', () => {
@@ -82,8 +95,11 @@ describe('History persistence', () => {
     const data = h2.load();
 
     expect(data?.taskStart).toBe(7);
+    // 旧存档把记忆放在独立字段里：载入时折算成头部的一条摘要条目，
+    // 不再单独发 `## 记忆摘要` 段——否则这段信息会凭空消失。
     expect(h2.memory).toBe('legacy memory');
-    expect(h2.turns.map((t) => t.content)).toEqual(['legacy']);
+    expect(h2.getHistory()[0]?.kind).toBe('summary');
+    expect(h2.turns.map((t) => t.content)).toEqual(['[记忆摘要] legacy memory', 'legacy']);
     // 老存档没有这两段：安静跳过，不能抛错、也不能清空成 null。
     expect(restarted.memory_bank.getKeys()).toBe('');
     expect(restarted.plan.snapshot()).toEqual({ goal: null, todos: [] });

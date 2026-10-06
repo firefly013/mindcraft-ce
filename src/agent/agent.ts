@@ -27,9 +27,7 @@ import type { RequestLog } from './requestLog.js';
 
 type EdgeWatcher = ReturnType<typeof createEdgeWatcher>;
 import { ActionManager } from './action_manager.js';
-import { NPCContoller } from './npc/controller.js';
 import { MemoryBank } from './memory_bank.js';
-import { addBrowserViewer } from './vision/browser_viewer.js';
 import { serverProxy, sendOutputToServer } from './mindserver_proxy.js';
 import settings from './settings.js';
 import { MESSAGES } from '../prompts.js';
@@ -94,7 +92,6 @@ export class Agent {
         }
 
         this.history = new History(this);
-        this.npc = new NPCContoller(this);
         this.memory_bank = new MemoryBank();
         this.requestLog = createRequestLog({ dir: `./bots/${this.name}` });
 
@@ -161,7 +158,6 @@ export class Agent {
         this.bot.once('spawn', async () => {
             try {
                 clearTimeout(spawnTimeout);
-                addBrowserViewer(this.bot, count_id);
                 console.log('Initializing vision intepreter...');
                 this.vision_interpreter = new VisionInterpreter(this, settings.allow_vision);
 
@@ -266,7 +262,9 @@ export class Agent {
             console.warn('commonSense options failed:', err instanceof Error ? err.message : String(err));
         }
 
-        if (init_message) {
+        if (init_message && save_data) {
+            // 载入旧存档时不会走 handleMessage（那会把开场白当成新事件重放），
+            // 但开场白本身得留在历史里。
             this.history.add('system', init_message);
         }
         if (init_message && !save_data) {
@@ -315,6 +313,10 @@ export class Agent {
                 },
             },
             assemble: (events: unknown[]) => this.assembleContext(events),
+            onEvent: (event) => {
+                // 事件进模型看得见的历史，恰好一次（正文不在这轮的尾巴里重发）。
+                this.history.addEvent(event);
+            },
             model: (text: string, tools: unknown, image?: string | null) =>
                 this.modelCall(text, tools, image),
             stopExecutor: async () => {
@@ -389,11 +391,10 @@ export class Agent {
         });
     }
 
-    /** 全部停下：动作停、日志清、续跑取消、回到 idle。 */
+    /** 全部停下：动作停、日志清、回到 idle。 */
     private async fullStop(): Promise<void> {
         await this.actions.stop();
         this.clearBotLogs();
-        this.actions.cancelResume();
         this.bot.emit('idle');
     }
 
@@ -466,6 +467,32 @@ export class Agent {
         } catch {
             image = null;
         }
+        const liveText = this.liveStateText();
+        // 未见事件必须让模型看到：它是"我为什么被叫醒"的唯一解释。
+        const eventsText = renderEvents(events as EventEntry[]);
+        // 记忆摘要不再单独成段：压仓后它就是历史里的第一条条目，
+        // 随整份历史一起发出去（Pi 的投影：system + 摘要 + 保留段）。
+        // 以前在这里又发一遍 `## 记忆摘要`，等于把摘要喂两次。
+        // 每段各带自己的标题；快照标题在这里给，适配器只负责原样发出去。
+        const liveBlock = `## 当前世界快照\n${liveText}`;
+        const text = composeTail(eventsText, liveBlock);
+        const tools = getOpenAITools(this);
+        this.requestLog?.logRequest({
+            text,
+            tools: tools.map((t) => t.function.name),
+        });
+        return { text, tools, image: image ?? null };
+    }
+
+    /**
+     * 现采一份 Live State 文本。
+     *
+     * **感知与"拍照"共用同一份采样**：请求尾巴每轮现采（不进历史），
+     * `stats` 工具则把这个文本作为 Tool 回执留在上下文里（永久留存，
+     * 模型可以和上一次对比"我现在多了什么"）。两者绝不能各采各的，
+     * 否则模型会看到两份互相矛盾的状态。
+     */
+    liveStateText(): string {
         const task = this.task as { goal?: unknown } | null;
         const plan = this.plan.snapshot();
         const live = sampleLiveState({
@@ -475,34 +502,35 @@ export class Agent {
             todos: plan.todos,
             currentAction: this.actions.currentActionLabel,
         });
-        const liveText = renderLiveState(live);
-        // 未见事件必须让模型看到：它是"我为什么被叫醒"的唯一解释。
-        const eventsText = renderEvents(events as EventEntry[]);
-        // 记忆从 system 前缀挪到尾巴：记忆一更新就换 system 会让
-        // 整个前缀缓存失效，而它本来就只有几百字、每轮重发不心疼。
-        // （压仓留下的 `kind:'summary'` 条目已在 getHistory 里剔除，不会重复。）
-        const memory = typeof this.history?.memory === 'string' ? this.history.memory.trim() : '';
-        const memoryText = memory === '' ? '' : `## 记忆摘要\n${memory}`;
-        // 每段各带自己的标题；快照标题在这里给，适配器只负责原样发出去。
-        const liveBlock = `## 当前世界快照\n${liveText}`;
-        const text = composeTail(eventsText, memoryText, liveBlock);
-        const tools = getOpenAITools(this);
-        this.requestLog?.logRequest({
-            text,
-            tools: tools.map((t) => t.function.name),
-        });
-        return { text, tools, image: image ?? null };
+        return renderLiveState(live);
     }
 
     private async modelCall(liveText: string, tools: unknown, image?: string | null): Promise<LoopModelResponse> {
         void tools;
         if (this.shut_up) return { text: null, calls: [] };
-        const history = this.history.getHistory();
-        const res = await this.prompter.promptConvoTools(history, liveText, image ?? null);
+        // 压仓检查点放在**每次请求之前**（Pi 的位置）：事件是同步入账的，
+        // 不能在里面 await 压缩；放在这里，事件堆积也会在下次请求前被算进去。
+        try {
+            await this.history.compactIfNeeded();
+        } catch (error: unknown) {
+            console.error('Compaction failed (request kept as-is):', error);
+        }
+        let res = await this.prompter.promptConvoTools(this.history.getHistory(), liveText, image ?? null);
+        // 上下文超限：压一次再试一次（Pi 的 overflow recovery）。
+        // 只给一次机会——压完还超，说明单条消息本身就装不下，
+        // 再压也只会把有用的东西越丢越多。
+        if (res?.overflow) {
+            console.warn('Context overflow: forcing compaction and retrying once.');
+            const compacted = await this.history.compactNow();
+            if (compacted) {
+                res = await this.prompter.promptConvoTools(this.history.getHistory(), liveText, image ?? null);
+            }
+        }
         if (!res) return { text: null, calls: [] };
         if (res.text?.trim()) {
             // 双通道发言：正文自动进聊天，Say 工具同样可用。先都留着看效果。
-            await this.history.add(this.name, res.text, { kind: 'model', level: 2 });
+            // usage 挂在这条 assistant 条目上：它是压仓触发线的锚点。
+            await this.history.add(this.name, res.text, { kind: 'model', level: 2, usage: res.usage });
             this.routeResponse(this.currentSource, res.text);
         }
         return {
@@ -588,13 +616,8 @@ export class Agent {
         // 全中文：不再做翻译，直接使用原文
         console.log('received message from', source, ':', message);
 
-        // Handle other user messages
-        await this.history.add(source, message, {
-            kind: source === 'system' ? 'world' : 'user',
-            level: 3,
-        });
-        this.history.save();
-
+        // 不再在这里往历史里塞一份：这条消息会作为事件经 `loop.notify()` 进入
+        // 历史（`onEvent` → `history.addEvent`）。两处都写就是同一请求里喂两遍。
         if (typeof this.prompter.chat_model.sendRequestWithTools !== 'function') {
             const err = `Model ${this.prompter.chat_model.constructor?.name ?? 'unknown'} does not support native tool calling.`;
             console.error(err);
@@ -607,6 +630,7 @@ export class Agent {
         // （事件流引入后的新副作用）。挡在门外，解除静音后它们仍会被送达。
         if (this.shut_up) return false;
         const verdict = this.loop.notify({ kind, level, payload: { source, message, ...extra } });
+        this.history.save();
         await this.loop.handleDecision(verdict.decision);
         return true;
     }
@@ -696,7 +720,6 @@ export class Agent {
             }
         });
         this.bot.on('death', () => {
-            this.actions.cancelResume();
             this.actions.stop();
         });
         this.bot.on('kicked', (reason: unknown) => {
@@ -725,13 +748,9 @@ export class Agent {
             }
         });
         this.bot.on('idle', () => {
+            // 动作结束后的清场：清掉残留的操作状态，避免上一个动作的
+            // 按键/寻路目标漏到下一个动作里。
             this.bot.clearControlStates();
-            this.bot.pathfinder.stop(); // clear any lingering pathfinder
-            setTimeout(() => {
-                if (this.isIdle()) {
-                    this.actions.resumeAction();
-                }
-            }, 1000);
         });
         // 拾取：自己捡起掉落物。连捡时 2 秒只报一次，免得刷屏开轮。
         this.bot.on('playerCollect', (collector: any, collected: any) => {
@@ -764,9 +783,6 @@ export class Agent {
                 console.error('container event failed:', err instanceof Error ? err.message : String(err));
             }
         });
-
-        // Init NPC controller
-        this.npc.init();
 
         // This update loop ensures that each update() is called one at a time, even if it takes longer than the interval
         const INTERVAL = 300;

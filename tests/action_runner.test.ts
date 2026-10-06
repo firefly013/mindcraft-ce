@@ -131,8 +131,11 @@ describe('ActionRunner', () => {
     const h = makeHarness();
     h.hold = true;
     await h.runner.run('goToPlayer', { player_name: 's', closeness: 2 });
-    const busy = await h.runner.run('collectBlocks', { type: 'oak_log' });
+    const busy = await h.runner.run('collectBlocks', { type: 'oak_log', num: 4 });
     expect(busy.status).toBe('rejected');
+    expect(busy.reason).toContain('goToPlayer');
+    // 拒绝文案不再命令模型先 Stop：要不要打断由模型自己判断。
+    expect(busy.reason).toContain('确实要改做别的事');
     expect(h.executed).toEqual(['goToPlayer']);
 
     h.resolveExecute('arrived');
@@ -140,6 +143,48 @@ describe('ActionRunner', () => {
     await tick();
     expect(h.notices).toHaveLength(1);
     expect(h.notices[0]?.call).toBe('goToPlayer');
+  });
+
+  it('re-issuing the SAME action while it runs is an idempotent no-op, not an error', async () => {
+    // 这是内测里"模型反复 Stop"的根因：被 L3 事件叫醒后把同一个动作
+    // 再下一次，旧行为报 "Stop() first, then retry"，模型就真的去停掉
+    // 自己正在做的事。
+    const h = makeHarness();
+    h.hold = true;
+    await h.runner.run('collectBlocks', { type: 'oak_log', num: 6 });
+    const again = await h.runner.run('collectBlocks', { type: 'oak_log', num: 4 });
+    expect(again.status).toBe('accepted');
+    expect(again.data).toMatchObject({ already_running: true, action_id: 'collectBlocks' });
+    // 没有真的再跑一次，也没占第二份通道。
+    expect(h.executed).toEqual(['collectBlocks']);
+    expect(h.scheduler.describe().actionId).toBe('collectBlocks');
+    // 记账里说明了"已经在做了"，而不是"rejected"。
+    expect(h.records.at(-1)).toContain('already running');
+    expect(h.records.at(-1)).not.toContain('rejected');
+
+    h.resolveExecute('done');
+    await tick();
+    await tick();
+    expect(h.notices).toHaveLength(1);
+  });
+
+  it('Stop reports what it actually stopped, and frees the channel for the next action', async () => {
+    const h = makeHarness();
+    h.hold = true;
+    await h.runner.run('collectBlocks', { type: 'oak_log', num: 4 });
+    const stopped = h.scheduler.stopAll();
+    expect(stopped).toMatchObject({ hadAction: true, actionId: 'collectBlocks' });
+    // 通道当场释放：下一个动作立刻能认领（不需要"再 Stop 一次"）。
+    expect(h.scheduler.describe().actionId).toBeNull();
+    h.hold = false;
+    const next = await h.runner.run('goToPlayer', { player_name: 's', closeness: 2 });
+    expect(next.status).toBe('accepted');
+    expect(h.scheduler.describe().actionId).toBe('goToPlayer');
+  });
+
+  it('Stop with nothing running is honestly reported as a no-op', () => {
+    const h = makeHarness();
+    expect(h.scheduler.stopAll()).toMatchObject({ hadAction: false, actionId: null });
   });
 
   it('an executing crash still reports a failure verdict when current', async () => {

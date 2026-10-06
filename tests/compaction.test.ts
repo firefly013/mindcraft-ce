@@ -1,26 +1,57 @@
 /**
- * Compaction 契约：90% 才动手，能删 25% 就删，否则总结。
- * 工具往来和模型原文永远不进删除名单。
+ * 压仓契约（照 Pi）：
+ *   - 触发线是 `contextTokens > contextWindow - reserveTokens`，
+ *     contextTokens 优先取 provider 报的真实 usage；
+ *   - 切点从最新往前累加，攒够 keepRecentTokens 就切，只在 user/assistant 边界切；
+ *   - 压仓只把头部换成一条摘要条目，尾部逐字保留，不删历史。
+ *
+ * 这里同时钉住"没有条数上限"这条：条目多但窗口很空时**不得**压仓。
  */
 import { describe, expect, it } from 'vitest';
 import {
-  COMPACT_AT,
-  DEFAULT_KEEP_LAST,
-  entriesTokens,
+  contextUsage,
+  DEFAULT_KEEP_RECENT_TOKENS,
+  DEFAULT_RESERVE_TOKENS,
+  estimateEntriesTokens,
   estimateTokens,
   FALLBACK_CONTEXT_WINDOW,
+  findCutPoint,
   maybeCompact,
-  resolveContextWindow,
-  WORLD_TTL_MS,
+  resolvePolicy,
+  shouldCompact,
 } from '../src/agent/compaction.js';
-import type { Compactable } from '../src/agent/compaction.js';
+import type { Compactable, CompactionPolicy } from '../src/agent/compaction.js';
 
 interface E extends Compactable {
   text: string;
 }
 
-const entry = (text: string, kind = 'tool', level = 2, at = 0): E => ({ text, kind, level, at });
-const summaryOf = (text: string, at: number): E => ({ text: `summary: ${text}`, kind: 'system', level: 2, at });
+const entry = (text: string, role = 'user', extra: Partial<E> = {}): E => ({
+  text,
+  role,
+  content: text,
+  ...extra,
+});
+
+const assistantWithUsage = (text: string, totalTokens: number): E =>
+  entry(text, 'assistant', { usage: { totalTokens } });
+
+const summaryOf = (text: string, at: number): E => ({
+  text: `summary: ${text}`,
+  role: 'system',
+  content: `summary: ${text}`,
+  kind: 'summary',
+  level: 2,
+  at,
+});
+
+const policy = (over: Partial<CompactionPolicy> = {}): CompactionPolicy => ({
+  enabled: true,
+  contextWindow: 1000,
+  reserveTokens: 100,
+  keepRecentTokens: 100,
+  ...over,
+});
 
 describe('estimateTokens', () => {
   it('overestimates: CJK ~1, ASCII ~1/4, always ceil', () => {
@@ -29,124 +60,216 @@ describe('estimateTokens', () => {
     expect(estimateTokens('')).toBe(0);
     expect(estimateTokens('abc你好')).toBeGreaterThanOrEqual(3);
   });
-});
 
-describe('resolveContextWindow', () => {
-  it('uses a positive configured window, else the conservative fallback', () => {
-    expect(resolveContextWindow({ context_window: 64000 })).toBe(64000);
-    expect(resolveContextWindow({})).toBe(FALLBACK_CONTEXT_WINDOW);
-    expect(resolveContextWindow(null)).toBe(FALLBACK_CONTEXT_WINDOW);
-    expect(resolveContextWindow({ context_window: -5 })).toBe(FALLBACK_CONTEXT_WINDOW);
-    expect(resolveContextWindow({ context_window: 'big' })).toBe(FALLBACK_CONTEXT_WINDOW);
+  it('counts an entry as role + content', () => {
+    expect(estimateEntriesTokens([])).toBe(0);
+    expect(estimateEntriesTokens([{ role: 'user', content: 'hi' }])).toBeGreaterThan(0);
+    // 空条目（没有正文）不占上下文。
+    expect(estimateEntriesTokens([{ role: 'system', content: '' }])).toBe(0);
   });
 });
 
-describe('entriesTokens', () => {
-  it('sums role+content estimates, tolerates missing fields', () => {
-    expect(entriesTokens([])).toBe(0);
-    expect(entriesTokens([{ role: 'user', content: 'hi' }])).toBeGreaterThan(0);
-    expect(entriesTokens([{}])).toBeGreaterThanOrEqual(0);
+describe('resolvePolicy', () => {
+  it('reads window / reserve / keep from the profile, with Pi defaults', () => {
+    expect(resolvePolicy({ context_window: 1_000_000 })).toEqual({
+      enabled: true,
+      contextWindow: 1_000_000,
+      reserveTokens: DEFAULT_RESERVE_TOKENS,
+      keepRecentTokens: DEFAULT_KEEP_RECENT_TOKENS,
+    });
+    expect(resolvePolicy({}).contextWindow).toBe(FALLBACK_CONTEXT_WINDOW);
+    expect(resolvePolicy(null).contextWindow).toBe(FALLBACK_CONTEXT_WINDOW);
+    expect(resolvePolicy({ context_window: -5 }).contextWindow).toBe(FALLBACK_CONTEXT_WINDOW);
+    expect(resolvePolicy({ context_window: 'big' }).contextWindow).toBe(FALLBACK_CONTEXT_WINDOW);
+    expect(resolvePolicy({ reserve_tokens: 500, keep_recent_tokens: 50 })).toMatchObject({
+      reserveTokens: 500,
+      keepRecentTokens: 50,
+    });
+  });
+
+  it('can be switched off', () => {
+    expect(resolvePolicy({ compaction_enabled: false }).enabled).toBe(false);
+  });
+});
+
+describe('contextUsage', () => {
+  it('anchors on the last real usage and estimates only what came after', () => {
+    const entries = [
+      entry('old'),
+      assistantWithUsage('a', 900),
+      entry('x'.repeat(400)), // 估算 ~100 token
+    ];
+    const usage = contextUsage(entries);
+    expect(usage.anchorIndex).toBe(1);
+    expect(usage.usageTokens).toBe(900);
+    expect(usage.trailingTokens).toBeGreaterThan(0);
+    expect(usage.tokens).toBe(900 + usage.trailingTokens);
+  });
+
+  it('falls back to a pure estimate when the provider reported nothing', () => {
+    const entries = [entry('a'), entry('b')];
+    const usage = contextUsage(entries);
+    expect(usage.anchorIndex).toBeNull();
+    expect(usage.usageTokens).toBe(0);
+    expect(usage.tokens).toBe(estimateEntriesTokens(entries));
+  });
+
+  it('ignores an anchor that predates the latest compaction', () => {
+    // 压仓之后头部被换成摘要；那条 assistant 的 usage 描述的是压仓前
+    // 那个更大的上下文，拿它当基线会让下一轮立刻又压一次。
+    const entries = [
+      assistantWithUsage('a', 999_999),
+      summaryOf('s', 1),
+      entry('after compaction'),
+    ];
+    const usage = contextUsage(entries);
+    expect(usage.anchorIndex).toBeNull();
+    expect(usage.tokens).toBeLessThan(999_999);
+  });
+
+  it('trusts the anchor when the summary carries no timestamp to compare against', () => {
+    // 老存档/外部注入的摘要条目可能没有 `at`：没有时间戳就没法判新旧，
+    // 这时退回"按下标"的规则——摘要之后第一条 assistant usage 仍然可信。
+    const bare: E = { text: 's', role: 'system', content: 's', kind: 'summary' };
+    const entries = [assistantWithUsage('old', 999_999), bare, assistantWithUsage('new', 500)];
+    const usage = contextUsage(entries);
+    expect(usage.anchorIndex).toBe(2);
+    expect(usage.usageTokens).toBe(500);
+  });
+});
+
+describe('shouldCompact', () => {
+  it('is a strict > against window - reserve', () => {
+    const p = policy({ contextWindow: 1000, reserveTokens: 100 });
+    expect(shouldCompact(900, p)).toBe(false);
+    expect(shouldCompact(901, p)).toBe(true);
+  });
+
+  it('respects enabled=false', () => {
+    expect(shouldCompact(1_000_000, policy({ enabled: false }))).toBe(false);
+  });
+});
+
+describe('findCutPoint', () => {
+  it('keeps a tail worth keepRecentTokens, cutting at a user/assistant boundary', () => {
+    const entries = Array.from({ length: 20 }, (_, i) => entry(`m${i}`.padEnd(40, 'x')));
+    const cut = findCutPoint(entries, 200);
+    expect(cut).toBeGreaterThan(0);
+    expect(cut).toBeLessThan(entries.length);
+    expect(['user', 'assistant']).toContain(entries[cut].role);
+    expect(estimateEntriesTokens(entries.slice(cut))).toBeGreaterThanOrEqual(200);
+  });
+
+  it('never starts the kept tail on a tool result', () => {
+    const entries = [
+      entry('u0'),
+      entry('a0', 'assistant'),
+      entry('tool0', 'system', { kind: 'tool' }),
+      entry('tool1', 'system', { kind: 'tool' }),
+    ];
+    const cut = findCutPoint(entries, 1);
+    expect(['user', 'assistant']).toContain(entries[cut].role);
+  });
+
+  it('returns 0 when the whole conversation fits the keep budget', () => {
+    const entries = [entry('short'), entry('short2')];
+    expect(findCutPoint(entries, DEFAULT_KEEP_RECENT_TOKENS)).toBe(0);
   });
 });
 
 describe('maybeCompact', () => {
-  it('below pressure does nothing and returns the same array', () => {
+  it('does nothing below the threshold and returns the same array', async () => {
     const entries = [entry('a'), entry('b')];
-    return maybeCompact({ entries, usageRatio: COMPACT_AT - 0.01 }).then((r) => {
-      expect(r.compacted).toBe(false);
-      expect(r.level).toBe(0);
-      expect(r.entries).toBe(entries);
-    });
+    const r = await maybeCompact({ entries, policy: policy(), summarize: () => 's', makeSummary: summaryOf });
+    expect(r.compacted).toBe(false);
+    expect(r.reason).toBe('below-threshold');
+    expect(r.entries).toBe(entries);
   });
 
-  it('level-1: deletes expired world noise when it frees enough', async () => {
-    const now = 1_000_000;
-    const fresh: E[] = [entry('keep1', 'tool'), entry('keep2', 'model')];
-    const stale: E[] = [
-      entry('old1', 'world', 3, now - WORLD_TTL_MS - 1),
-      entry('old2', 'world', 3, now - WORLD_TTL_MS - 1),
-    ];
-    const r = await maybeCompact({ entries: [...fresh, ...stale], usageRatio: 1, now });
-    expect(r.compacted).toBe(true);
-    expect(r.level).toBe(1);
-    expect(r.removed).toBe(2);
-    expect(r.entries.map((e) => e.text)).toEqual(['keep1', 'keep2']);
-  });
-
-  it('level-1 never touches tool/model traffic, however old', async () => {
-    const now = 1_000_000;
-    const entries = [
-      entry('tool-old', 'tool', 2, 0),
-      entry('model-old', 'model', 2, 0),
-      entry('user-old', 'user', 3, 0),
-    ];
-    // 三条都在 keepLast 里：没有可压的头部，所以什么都不做——不删、也不空调一次总结。
-    const short = await maybeCompact({
+  it('NEVER compacts on message count alone: many entries, huge window', async () => {
+    // 这正是 max_messages=15 干的坏事：窗口还很空就把历史压掉。
+    const entries = Array.from({ length: 500 }, (_, i) => entry(`turn ${i}`, i % 2 ? 'user' : 'assistant'));
+    const r = await maybeCompact({
       entries,
-      usageRatio: 1,
-      now,
-      summarize: () => 's',
+      policy: policy({ contextWindow: 1_000_000, reserveTokens: 16_384, keepRecentTokens: 20_000 }),
+      summarize: () => 'should not run',
       makeSummary: summaryOf,
     });
-    expect(short.compacted).toBe(false);
-    expect(short.level).toBe(0);
-    expect(short.entries.map((e) => e.text)).toEqual(['tool-old', 'model-old', 'user-old']);
-
-    // 条目多到有头部时走 level-2：老 tool/model 是"被总结进去"，而不是"被当过期删掉"。
-    const many = [...entries, ...Array.from({ length: 25 }, (_, i) => entry(`m${i}`, 'tool', 2, 0))];
-    let summarized: E[] = [];
-    const long = await maybeCompact({
-      entries: many,
-      usageRatio: 1,
-      now,
-      summarize: (head) => {
-        summarized = head;
-        return 's';
-      },
-      makeSummary: summaryOf,
-    });
-    expect(long.level).toBe(2);
-    expect(long.summary).toBe('s');
-    const headTexts = summarized.map((e) => e.text);
-    expect(headTexts).toContain('tool-old');
-    expect(headTexts).toContain('model-old');
+    expect(r.compacted).toBe(false);
+    expect(r.entries).toBe(entries);
   });
 
-  it('entries without kind/at are never obsolete', async () => {
-    const entries: E[] = [{ text: 'legacy' }, { text: 'legacy2' }];
-    const r = await maybeCompact({ entries, usageRatio: 1, now: 999 });
-    expect(r.removed).toBe(0);
-    expect(r.entries).toHaveLength(2);
-  });
-
-  it('level-2 keeps the tail verbatim and summarizes the head', async () => {
-    const entries = Array.from({ length: DEFAULT_KEEP_LAST + 10 }, (_, i) =>
-      entry(`m${i}`, i % 2 === 0 ? 'tool' : 'model'),
-    );
+  it('compacts on real usage from the provider', async () => {
+    const entries = [assistantWithUsage('a', 950), entry('trailing')];
     let summarized: E[] = [];
     const r = await maybeCompact({
       entries,
-      usageRatio: 1,
-      now: 1,
-      keepLast: DEFAULT_KEEP_LAST,
+      policy: policy({ contextWindow: 1000, reserveTokens: 100, keepRecentTokens: 1 }),
       summarize: (head) => {
         summarized = head;
-        return `first was ${head[0]?.text}`;
+        return 'SUMMARY';
       },
       makeSummary: summaryOf,
     });
-    expect(r.level).toBe(2);
-    expect(summarized).toHaveLength(10);
-    expect(r.summary).toBe('first was m0');
-    expect(r.entries.slice(1).map((e) => e.text)).toEqual(entries.slice(-DEFAULT_KEEP_LAST).map((e) => e.text));
+    expect(r.compacted).toBe(true);
+    expect(r.summary).toBe('SUMMARY');
+    expect(summarized).toHaveLength(1);
+    expect(r.entries[0].kind).toBe('summary');
   });
 
-  it('without a summarizer it reports level-1 with nothing removed', async () => {
-    const entries = [entry('a', 'tool'), entry('b', 'model')];
-    const r = await maybeCompact({ entries, usageRatio: 1, now: 1, summarize: null });
+  it('keeps the tail verbatim and prepends the summary entry', async () => {
+    const entries = Array.from({ length: 20 }, (_, i) =>
+      entry(`m${i}`.padEnd(40, 'x'), i % 2 ? 'user' : 'assistant'),
+    );
+    const r = await maybeCompact({
+      entries,
+      policy: policy({ contextWindow: 100, reserveTokens: 10, keepRecentTokens: 200 }),
+      summarize: (head) => `covered ${head.length}`,
+      makeSummary: summaryOf,
+    });
     expect(r.compacted).toBe(true);
-    expect(r.level).toBe(1);
-    expect(r.removed).toBe(0);
-    expect(r.entries).toHaveLength(2);
+    expect(r.entries[0].kind).toBe('summary');
+    const kept = r.entries.slice(1);
+    expect(r.keptCount).toBe(kept.length);
+    expect(kept.map((e) => e.text)).toEqual(entries.slice(entries.length - kept.length).map((e) => e.text));
+    expect(r.summarizedCount).toBe(entries.length - kept.length);
+  });
+
+  it('does nothing when the whole conversation is inside the keep budget', async () => {
+    const entries = [entry('a'), entry('b')];
+    const r = await maybeCompact({
+      entries,
+      policy: policy({ contextWindow: 4, reserveTokens: 1, keepRecentTokens: 100_000 }),
+      summarize: () => 's',
+      makeSummary: summaryOf,
+    });
+    expect(r.compacted).toBe(false);
+    expect(r.reason).toBe('nothing-to-summarize');
+  });
+
+  it('does nothing without a summarizer instead of making a no-op entry', async () => {
+    const entries = Array.from({ length: 20 }, (_, i) => entry(`m${i}`.padEnd(40, 'x')));
+    const r = await maybeCompact({
+      entries,
+      policy: policy({ contextWindow: 100, reserveTokens: 10, keepRecentTokens: 100 }),
+      summarize: null,
+      makeSummary: null,
+    });
+    expect(r.compacted).toBe(false);
+    expect(r.reason).toBe('no-summarizer');
+    expect(r.entries).toHaveLength(entries.length);
+  });
+
+  it('force bypasses the threshold (overflow recovery)', async () => {
+    const entries = Array.from({ length: 20 }, (_, i) => entry(`m${i}`.padEnd(40, 'x')));
+    const r = await maybeCompact({
+      entries,
+      policy: policy({ contextWindow: 1_000_000, reserveTokens: 16_384, keepRecentTokens: 200 }),
+      summarize: () => 'forced',
+      makeSummary: summaryOf,
+      force: true,
+    });
+    expect(r.compacted).toBe(true);
+    expect(r.summary).toBe('forced');
   });
 });

@@ -1,6 +1,19 @@
 // Shared core types for the Mindcraft TypeScript migration.
 // Keep this file dependency-free so every module can import it.
 
+/**
+ * 一次模型调用的 token 用量，来自 provider 的 `usage` 字段。
+ *
+ * 这是压缩触发线的唯一可信输入：字符估算法在中文上误差极大，
+ * 只有 provider 自己数的 token 才能用来判断"离上下文窗口还有多远"。
+ */
+export interface TokenUsage {
+  promptTokens: number;
+  completionTokens: number;
+  /** 上下文占用量的口径：prompt + completion（缺省由两者相加）。 */
+  totalTokens: number;
+}
+
 /** Single chat turn used by all model wrappers and history. */
 export interface ChatMessage {
   role: 'system' | 'user' | 'assistant';
@@ -15,6 +28,11 @@ export interface ChatMessage {
   level?: number;
   /** 写入时间戳（ms），World 条目过期用。 */
   at?: number;
+  /**
+   * 本条 assistant 回复的真实 token 用量。压仓用它当锚点：
+   * 这条之后新增的消息才需要估算，之前的量是 provider 报的实数。
+   */
+  usage?: TokenUsage;
 }
 
 /** OpenAI-style tool definition passed to models. */
@@ -38,6 +56,13 @@ export interface ToolCall {
 export interface ToolResponse {
   text: string;
   tool_calls: ToolCall[];
+  /** provider 报的 token 用量；端点不返回时缺省。 */
+  usage?: TokenUsage;
+  /**
+   * 请求因上下文超限被拒（`context_length_exceeded` / `stopReason: length`）。
+   * 上层据此压缩后重试一次——这是压仓触发线之外的兜底。
+   */
+  overflow?: boolean;
 }
 
 /** Minimal model interface every wrapper must satisfy. */
@@ -91,13 +116,10 @@ export interface Settings {
   init_message: string;
   only_chat_with: string[];
   chat_ingame: boolean;
-  render_bot_view: boolean;
   allow_vision: boolean;
   blocked_actions: string[];
   cheat: boolean;
-  max_messages: number;
   spawn_timeout: number;
-  log_all_prompts: boolean | string;
   task?: unknown;
   [key: string]: unknown;
 }
