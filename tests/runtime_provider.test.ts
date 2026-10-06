@@ -9,7 +9,7 @@
  * 全程**不联网**：fetch 注入成必失败函数，payload 由 `onPayload` 在发送前截获；
  * 旧适配器走注入的 stub client。
  */
-import { describe, expect, it } from 'vitest';
+import { beforeAll, describe, expect, it } from 'vitest';
 import { GPT } from '../src/models/gpt.js';
 import { PiModel } from '../src/runtime/model.js';
 import { resolveProvider } from '../src/runtime/provider.js';
@@ -17,6 +17,16 @@ import type { ChatMessage, OpenAITool } from '../src/types/common.js';
 
 const OFFLINE_URL = 'http://127.0.0.1:1/v1';
 const MISSING_KEY = 'DEFINITELY_MISSING_KEY_FOR_TEST';
+
+/**
+ * 调用模型的测试显式抬高超时。
+ *
+ * pi-ai 的 `openai-completions` 适配器是**惰性 import** 的：首次调用要冷加载
+ * OpenAI SDK。机器一有负载（例如刚跑完 `npm ci`），这一步就会逼近甚至越过
+ * vitest 默认的 5s 单测超时。这里既预热（`beforeAll`）又留足上限，让断言跑在
+ * 稳定的耗时上，而不是赌冷启动够快。
+ */
+const MODEL_CALL_TIMEOUT_MS = 30_000;
 
 /** 必失败的 fetch：请求发不出去，但 `onPayload` 已在发送前触发。 */
 const offlineFetch = (() =>
@@ -141,6 +151,12 @@ describe('payload 等价：PiModel vs GPT', () => {
   ];
   const TAIL = '## 当前世界快照\nhp=20';
 
+  // 预热一次：把适配器与 OpenAI SDK 的惰性 import 在计时开始前付掉。
+  beforeAll(async () => {
+    const { model } = capturingPi(LOCAL_PROFILE);
+    await model.sendRequestWithTools([{ role: 'user', content: 'warm' }], 'SYS', [], 'auto');
+  }, MODEL_CALL_TIMEOUT_MS);
+
   it('messages / tools / tool_choice 与旧适配器逐字节一致', async () => {
     const { model: pi, payloads } = capturingPi(LOCAL_PROFILE);
     await pi.sendRequestWithTools(turns, 'SYS', TOOLS, 'required', TAIL);
@@ -170,14 +186,14 @@ describe('payload 等价：PiModel vs GPT', () => {
     expect(messages).toHaveLength(5);
     expect(messages[0]).toMatchObject({ role: 'system', content: 'SYS' });
     expect(messages[4]).toMatchObject({ role: 'user', content: TAIL });
-  });
+  }, MODEL_CALL_TIMEOUT_MS);
 
   it('尾巴只有空白且无截图时不追加消息', async () => {
     const { model, payloads } = capturingPi(LOCAL_PROFILE);
     await model.sendRequestWithTools(turns, 'SYS', TOOLS, 'auto', '   ');
     // 3 条历史 + system 头；空白尾巴不追加消息
     expect((payloads[0]?.['messages'] as unknown[]).length).toBe(4);
-  });
+  }, MODEL_CALL_TIMEOUT_MS);
 
   it('带截图时尾巴与图合成同一条多模态 user 消息', async () => {
     const { model, payloads } = capturingPi(LOCAL_PROFILE);
@@ -192,7 +208,7 @@ describe('payload 等价：PiModel vs GPT', () => {
         { type: 'image_url', image_url: { url: 'data:image/jpeg;base64,QUJD' } },
       ],
     });
-  });
+  }, MODEL_CALL_TIMEOUT_MS);
 
   it('sendRequest 把 stop 放进请求体；模型名含 o1/o3/5 时删掉（复刻旧 URL 分支）', async () => {
     // 'llama-3-8b' 不含 o1/o3/5 → 应带 stop。
@@ -208,7 +224,7 @@ describe('payload 等价：PiModel vs GPT', () => {
     });
     await noStop.model.sendRequest(turns, 'SYS');
     expect(noStop.payloads[0]?.['stop']).toBeUndefined();
-  });
+  }, MODEL_CALL_TIMEOUT_MS);
 
   it('profile.params 原样进请求体，接线字段被剔除', async () => {
     const { model, payloads } = capturingPi({
@@ -229,5 +245,5 @@ describe('payload 等价：PiModel vs GPT', () => {
     expect(payload['temperature']).toBe(0.3);
     expect(payload).not.toHaveProperty('api_key_env');
     expect(payload).not.toHaveProperty('headers');
-  });
+  }, MODEL_CALL_TIMEOUT_MS);
 });
