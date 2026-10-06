@@ -528,8 +528,25 @@ export async function collectBlock(bot: any, blockType: string, num: number = 1,
         catch (err: unknown) {
             const e = err as { name?: string } | null | undefined;
             if (e?.name === 'NoChests') {
-                log(bot, `Failed to collect ${blockType}: Inventory full, no place to deposit.`);
-                break;
+                // **背包满不等于挖不了**。mineflayer 的 collectBlock 插件满包时会抛 NoChests，
+                // 但挖方块本身跟背包没关系，掉落物还能并进已有的半栈——模型真机报过
+                // "free 0 死锁：collectBlocks 只认空格子"，就是这里直接放弃造成的。
+                // 同一个函数上面已经有能用的手动路径，回退过去就是了。
+                try {
+                    await goToPosition(bot, block.position.x, block.position.y, block.position.z, 2);
+                    await bot.dig(block);
+                    await pickupNearbyItems(bot);
+                    collected++;
+                    log(bot, `背包满了，改用"自己挖 + 捡"的方式收了 ${blockType}（掉落物能并进已有的半栈）。`);
+                    continue;
+                } catch (fallbackErr: unknown) {
+                    const fmsg: string = fallbackErr instanceof Error ? fallbackErr.message : String(fallbackErr);
+                    log(
+                        bot,
+                        `Failed to collect ${blockType}: 背包满了，而且手动挖也失败（${fmsg}）。先 discard 一批，或者找个箱子存起来。`,
+                    );
+                    break;
+                }
             }
             else {
                 const msg: string = err instanceof Error ? err.message : String(err);
