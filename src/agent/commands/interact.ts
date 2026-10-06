@@ -386,6 +386,14 @@ function withTimeout<T>(work: Promise<T>, ms: number, onTimeout: T): Promise<T> 
 /** 单次 useBlock/useEntity/craft 最多跑多久（毫秒）。 */
 const TOOL_TIMEOUT_MS = 45_000;
 
+/** 把一个容器槽描述成一行（空槽也说出来，别让人猜）。 */
+function slotLine(slot: unknown, label: string): string {
+  const s2 = slot as { name?: unknown; count?: unknown } | null | undefined;
+  const name = typeof s2?.name === 'string' ? s2.name : null;
+  if (name == null) return label + '：空';
+  return label + '：' + name + '×' + String(s2?.count ?? 1);
+}
+
 /** 一步的结果行——逐段报告就是靠它拼出来的。 */
 function step(text: string): string {
   return `- ${text}`;
@@ -572,6 +580,46 @@ export const interactList: AgentCommand[] = [
         if (type === 'bed') {
           await runSkill(agent.bot, lines, () => skills.goToBed(agent.bot), '睡下了', '睡不了（不是夜晚，或旁边有怪）');
           return renderReport(lines);
+        }
+
+        if (type === 'furnace' || type === 'blast_furnace' || type === 'smoker') {
+
+          // **打开熔炉要看得到槽里的东西**。模型真机报过"furnace 打开时不像箱子那样列内容"——
+
+          // 她怀疑炉子里有残留物占着输入槽（这正是"加了煤却烧不了铁"的原因），但看不到，
+
+          // 只能靠反复试各种写法去猜。箱子能列内容，炉子没理由不能。
+
+          if (located == null) return renderReport(lines, '定位不到熔炉。');
+
+          try {
+
+            const furnaceBlock = agent.bot.blockAt?.(new Vec3(located.x, located.y, located.z));
+
+            const container: any = await agent.bot.openContainer(furnaceBlock);
+
+            lines.push(step('打开看了炉子里面'));
+
+            lines.push('    ' + slotLine(container.inputItem?.(), '原料槽'));
+
+            lines.push('    ' + slotLine(container.fuelItem?.(), '燃料槽'));
+
+            lines.push('    ' + slotLine(container.outputItem?.(), '产物槽'));
+
+            lines.push('    （想清空某一槽就用 useBlock(type=furnace, output="…") 把东西取出来）');
+
+            await container.close?.();
+
+            return renderReport(lines);
+
+          } catch (error: unknown) {
+
+            lines.push(step('打开熔炉失败：' + (error instanceof Error ? error.message : String(error))));
+
+            return renderReport(lines);
+
+          }
+
         }
         lines.push(step(`直接用了 ${type}（没有 input/output，所以不改变它的内容）`));
         return renderReport(lines);
