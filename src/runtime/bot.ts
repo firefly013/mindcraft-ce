@@ -41,6 +41,13 @@ export interface BotWiringOptions {
   onSay?: (text: string) => void;
   /** L5 的保命反射，绕过模型。 */
   rescue: () => Promise<void>;
+  /**
+   * 已有的接入层。给了就把运行时**接**上去，而不是新建。
+   *
+   * `Agent` 在 `start()` 里先建 intake、注册事件监听，等 SQLite 打开后再
+   * `attach`——连接建立到就绪之间的事件因此不会丢（见 `EventIntake.attach`）。
+   */
+  intake?: EventIntake;
   /** 落盘根目录，默认 `./bots/<name>`。 */
   baseDir?: string;
   /** 实例区分后缀，避免同名多开撞同一个库。 */
@@ -100,7 +107,10 @@ export async function openBotWiring(options: BotWiringOptions): Promise<BotWirin
   const state = createStateAccess(runtime.session.harness, runtime.conversation.id);
   holder.state = state;
 
-  const intake = new EventIntake({
+  // 事件接入：可以接一个**早就建好的** intake（Agent 就是这么用的——
+  // 运行时还没就绪时收到的事件会被暂存，attach 时按顺序补投）。
+  const intake = options.intake ?? new EventIntake();
+  intake.attach({
     submit: (text, whenBusy) => runtime.submit(text, { whenBusy }),
     write: (event) => runtime.write(eventEntryDraft(event)),
     abort: () => runtime.abort(),

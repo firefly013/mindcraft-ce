@@ -213,3 +213,94 @@ describe('同步返回 / 异常隔离', () => {
     expect(h.submits.map((s) => s.text)).toEqual(['good']);
   });
 });
+
+/**
+ * 运行时就绪前的事件。
+ *
+ * SQLite 打开要几毫秒，而 edges 的轮询和 bot.on(...) 在连接建立后**立刻**
+ * 就开始产生事件了。没有这个缓冲，连接后到就绪之间的事件会真丢——而
+ * "丢一个事件就是丢一份工作"。
+ */
+describe('运行时就绪前的事件不丢', () => {
+  function makeDeferredIntake() {
+    const submits: Submitted[] = [];
+    const writes: GameEvent[] = [];
+    const actions: string[] = [];
+    const releasers: Array<() => void> = [];
+    const fakeSubmission = (): Submission => {
+      let release!: () => void;
+      const settled = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      releasers.push(release);
+      return {
+        id: 'sub' as unknown as Submission['id'],
+        status: () => Promise.resolve({} as never),
+        wait: () => settled.then(() => ({ status: 'done' }) as never),
+        abort: () => Promise.resolve('aborted' as const),
+      } as Submission;
+    };
+    const deps = {
+      submit: (text: string, whenBusy: string) => {
+        submits.push({ text, whenBusy });
+        return Promise.resolve(fakeSubmission());
+      },
+      write: (event: GameEvent) => {
+        writes.push(event);
+        return Promise.resolve(fakeSubmission());
+      },
+      abort: () => Promise.resolve(),
+      rescue: () => Promise.resolve(),
+      onEvent: (event: GameEvent, action: string) => actions.push(`${event.text}:${action}`),
+    };
+    return { intake: new EventIntake(), deps, submits, writes, actions };
+  }
+
+  it('attach 之前的事件被暂存，不进链、不触发动作', () => {
+    const h = makeDeferredIntake();
+    h.intake.notify(event('L3', LEVEL.WAKE));
+    h.intake.notify(event('L2', LEVEL.STATE));
+
+    expect(h.intake.attached).toBe(false);
+    expect(h.intake.waitingCount).toBe(2);
+    expect(h.submits).toHaveLength(0);
+    expect(h.writes).toHaveLength(0);
+  });
+
+  it('attach 后**按顺序**补投，一个都不丢', async () => {
+    const h = makeDeferredIntake();
+    h.intake.notify(event('先', LEVEL.WAKE));
+    h.intake.notify(event('后', LEVEL.WAKE));
+    h.intake.attach(h.deps);
+    await h.intake.settle();
+
+    expect(h.intake.attached).toBe(true);
+    expect(h.intake.waitingCount).toBe(0);
+    expect(h.submits.map((s) => s.text)).toEqual(['先', '后']);
+    expect(h.actions).toEqual(['先:steer', '后:steer']);
+  });
+
+  it('attach 后新来的事件直接进链', async () => {
+    const h = makeDeferredIntake();
+    h.intake.attach(h.deps);
+    h.intake.notify(event('L2', LEVEL.STATE));
+    await h.intake.settle();
+    expect(h.intake.waitingCount).toBe(0);
+    expect(h.writes.map((e) => e.text)).toEqual(['L2']);
+  });
+
+  it('重复 attach 抛错（不许悄悄换掉运行时）', () => {
+    const h = makeDeferredIntake();
+    h.intake.attach(h.deps);
+    expect(() => h.intake.attach(h.deps)).toThrow();
+  });
+
+  it('先缓冲的 L5 补投时照样走 abort + 保命', async () => {
+    const h = makeDeferredIntake();
+    h.intake.notify(event('紧急', LEVEL.EMERGENCY));
+    h.intake.attach(h.deps);
+    await h.intake.settle();
+    expect(h.actions).toEqual(['紧急:emergency']);
+    expect(h.submits).toHaveLength(0);
+  });
+});

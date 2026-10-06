@@ -16,6 +16,7 @@ import { fauxAssistantMessage, fauxProvider, fauxToolCall } from '@earendil-work
 import { defineTool } from '@earendil-works/pi-durable';
 import { openBotWiring, type BotWiring } from '../src/runtime/bot.js';
 import { SayEntry } from '../src/runtime/entries.js';
+import { EventIntake } from '../src/runtime/events.js';
 import type { ResolvedProvider } from '../src/runtime/provider.js';
 
 const ctx = BACKGROUND_CONTEXT;
@@ -55,7 +56,7 @@ interface Harness {
   seen: Array<Array<Record<string, unknown>>>;
 }
 
-async function openHarness(): Promise<Harness> {
+async function openHarness(intake?: EventIntake): Promise<Harness> {
   const faux = fauxProvider({ models: [{ id: 'mc-test' }] });
   const models = createModels();
   models.setProvider(faux.provider);
@@ -98,6 +99,7 @@ async function openHarness(): Promise<Harness> {
       rescueCount += 1;
       return Promise.resolve();
     },
+    ...(intake != null ? { intake } : {}),
   });
 
   return { wiring, faux, said, rescues: () => rescueCount, seen };
@@ -211,6 +213,25 @@ describe('装配层全栈', () => {
     const page = await h.wiring.runtime.conversation.entries({}, 50, undefined, ctx);
     expect(page.items.some((entry) => entry.kind === 'pi.tool-result')).toBe(true);
     expect(JSON.stringify(page.items)).toContain('是平原。');
+    await h.wiring.close();
+  });
+
+  it('运行时就绪前的事件被补投，一个都不丢', async () => {
+    // Agent 的用法：先建 intake、注册事件监听，等 SQLite 打开后再接运行时。
+    const intake = new EventIntake();
+    intake.notify({ level: 2 as never, text: '连接期间的噪声' });
+    expect(intake.attached).toBe(false);
+    expect(intake.waitingCount).toBe(1);
+
+    const h = await openHarness(intake);
+    await intake.settle();
+    expect(intake.attached).toBe(true);
+    expect(intake.waitingCount).toBe(0);
+
+    // L2 走 write：不唤醒模型，但下一次请求能看到
+    expect(h.faux.state.callCount).toBe(0);
+    await (await h.wiring.runtime.submit('继续')).wait(ctx);
+    expect(userTexts(h.seen[0])).toContain('连接期间的噪声');
     await h.wiring.close();
   });
 

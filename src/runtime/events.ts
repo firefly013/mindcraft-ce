@@ -48,23 +48,55 @@ export interface EventIntakeDeps {
 }
 
 export class EventIntake {
-  private readonly deps: EventIntakeDeps;
+  private deps: EventIntakeDeps | null;
   private readonly context: Context;
   /** 串行化异步动作，保证 abort 与 submit 的相对顺序。 */
   private chain: Promise<void> = Promise.resolve();
   /** 已提交但**尚未落定**的输入——abort 会撤回它们。write 不进这里。 */
   private outstanding: Array<{ event: GameEvent; submission: Submission }> = [];
+  /** 运行时还没接上时收到的事件，按顺序暂存。 */
+  private waiting: GameEvent[] = [];
 
-  constructor(deps: EventIntakeDeps, context: Context = BACKGROUND_CONTEXT) {
-    this.deps = deps;
+  constructor(deps?: EventIntakeDeps, context: Context = BACKGROUND_CONTEXT) {
+    this.deps = deps ?? null;
     this.context = context;
+  }
+
+  /**
+   * 接上运行时，并把等待中的事件**按顺序**补投，一个都不丢。
+   *
+   * 为什么需要这个阶段：SQLite 打开要几毫秒，而 `edges` 的轮询和
+   * `bot.on(...)` 在连接建立后**立刻**就开始产生事件了。没有这个缓冲，
+   * 连接后到就绪之间的事件会真丢——而"丢一个事件就是丢一份工作"。
+   */
+  attach(deps: EventIntakeDeps): void {
+    if (this.deps != null) throw new Error('EventIntake 已经接上运行时，不能重复接');
+    this.deps = deps;
+    const queued = this.waiting;
+    this.waiting = [];
+    for (const event of queued) this.notify(event);
+  }
+
+  /** 运行时是否已接上。 */
+  get attached(): boolean {
+    return this.deps != null;
+  }
+
+  /** 还没接上运行时、正在等待的事件数。 */
+  get waitingCount(): number {
+    return this.waiting.length;
   }
 
   /** 收一个事件：**同步返回**（旧调度协议是同步的），异步动作排在链上。 */
   notify(event: GameEvent): void {
+    if (this.deps == null) {
+      // 运行时就绪前：暂存，接上后按顺序补投。
+      this.waiting.push(event);
+      return;
+    }
     this.chain = this.chain
       .then(() => this.react(event))
-      .catch((error: unknown) => this.deps.onError?.(error));
+      .catch((error: unknown) => this.deps?.onError?.(error));
   }
 
   /**
@@ -87,33 +119,38 @@ export class EventIntake {
   }
 
   private async react(event: GameEvent): Promise<void> {
+    const deps = this.deps;
+    // 只有 attach 之后才会被排进 chain，所以这里必然非空。
+    if (deps == null) return;
     if (event.level <= LEVEL.STATE) {
       // L1/L2：只记账。**不 track**——`abort()` 明确"queued writes stay"，
       // 被动写入不会被撤回，不需要重新提交。
-      await this.deps.write(event);
-      this.deps.onEvent?.(event, 'write');
+      await deps.write(event);
+      deps.onEvent?.(event, 'write');
       return;
     }
     if (event.level === LEVEL.WAKE) {
       await this.steer(event);
-      this.deps.onEvent?.(event, 'steer');
+      deps.onEvent?.(event, 'steer');
       return;
     }
     if (event.level === LEVEL.PREEMPT) {
       await this.interrupt(event);
-      this.deps.onEvent?.(event, 'preempt');
+      deps.onEvent?.(event, 'preempt');
       return;
     }
     // L5：冻住 → 保命 → 接着干。
     // 紧急事件本身由反射消化，**不再喂给模型**（旧实现的 pushEvent 也把它
     // 标成 consumed，免得锁解除后它再唤醒一次请求）。
     await this.interrupt(null);
-    await this.deps.rescue();
-    this.deps.onEvent?.(event, 'emergency');
+    await deps.rescue();
+    deps.onEvent?.(event, 'emergency');
   }
 
   private async steer(event: GameEvent): Promise<void> {
-    const submission = await this.deps.submit(event.text, 'steer');
+    const deps = this.deps;
+    if (deps == null) return;
+    const submission = await deps.submit(event.text, 'steer');
     this.track(event, submission);
   }
 
@@ -124,9 +161,11 @@ export class EventIntake {
    * 被撤回的排队事件**先于**它重新提交，保持时间顺序。
    */
   private async interrupt(alsoSubmit: GameEvent | null): Promise<void> {
+    const deps = this.deps;
+    if (deps == null) return;
     const withdrawn = this.outstanding.map((item) => item.event);
     this.outstanding = [];
-    await this.deps.abort();
+    await deps.abort();
     for (const pending of withdrawn) await this.steer(pending);
     if (alsoSubmit != null) await this.steer(alsoSubmit);
   }
