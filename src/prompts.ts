@@ -123,6 +123,20 @@ export const TOOL_TEXT: Record<string, { description: string; params: Record<str
     description: '往指定坐标放一个方块。搭建筑、摆下界门门框（4x5 黑曜石）用它——placeHere 只能放脚下，摆不了门框。',
     params: { type: '要放的方块类型。', x: '目标 x 坐标。', y: '目标 y 坐标。', z: '目标 z 坐标。' },
   },
+  allowDangerousOps: {
+    description: '授权自己做一段时间危险操作（默认禁止的）：pour_water（用桶倒水）、' +
+      'pour_lava（倒岩浆）、ignite（主动点火）、sleep_in_bed（在下界/末地睡觉——那两处的床会炸）、' +
+      'enter_deep_water（进深水/向深水寻路）。只在真需要时用，比如浇黑曜石前开 pour_water、点地狱门前开 ignite。',
+    params: {
+      minutes: '授权多少分钟（1~120）。到点自动收回。',
+      reason: '为什么需要（写清在做什么，方便复盘）。',
+      ops: '要授权哪几项，逗号分隔；留空 = 全部授权。',
+    },
+  },
+  denyDangerousOps: {
+    description: '提前收回危险操作授权（不用等它过期）。',
+    params: {},
+  },
   mineBlock: {
     description: '挖掉指定坐标的那一格。往头顶/斜上方开路、在竖井里挖落脚位用它——collectBlocks 只找最近的、digDown 只会往下。够不着（超过 4.5 格）会明说。',
     params: { x: '目标 x 坐标。', y: '目标 y 坐标。', z: '目标 z 坐标。' },

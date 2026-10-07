@@ -1,9 +1,14 @@
 import * as skills from '../library/skills.js';
 import { markDiscarded } from '../auto_pickup.js';
+import { permits } from '../permits.js';
+import { DANGEROUS_OPS, isAuthorizable } from '../dangerous_ops.js';
 import { td, tp, MESSAGES } from '../../prompts.js';
 import { interactList } from './interact.js';
 
 // 命令参数定义（domain / optional / default 等保留原样透传）
+/** 给工具回执加个空行，读起来不挤在一起（和 queries.ts 同款）。 */
+const pad = (str: string): string => '\n' + str + '\n';
+
 export interface CommandParamDef {
     type: string;
     description?: string;
@@ -355,4 +360,36 @@ export const actionsList: AgentCommand[] = [
     // 工具（craftRecipe / smeltItem / putInChest / takeFromChest / viewChest /
     // tradeWithVillager / showVillagerTrades / goToBed / clearFurnace / givePlayer）。
     ...interactList,
+    // 危险操作许可：默认禁止倒水/倒岩浆/点火/在下界末地睡觉/进深水，
+    // 要用得先用这两个工具明确授权一段时间（注册表见 dangerous_ops.ts）。
+    {
+        name: '!allowDangerousOps',
+        description: td('allowDangerousOps'),
+        params: {
+            'minutes': { type: 'int', description: tp('allowDangerousOps', 'minutes'), domain: [1, 120] },
+            'reason': { type: 'string', description: tp('allowDangerousOps', 'reason') },
+            'ops': { type: 'string', description: tp('allowDangerousOps', 'ops') }
+        },
+        perform: function (agent: any, minutes: number, reason: string, ops: string): string {
+            void agent;
+            const wanted: string[] = String(ops ?? '').split(',').map((t) => t.trim()).filter((t) => t !== '');
+            const unknown: string[] = wanted.filter((id) => !isAuthorizable(id));
+            if (unknown.length > 0) {
+                return pad(
+                    `没有这些危险操作：${unknown.join('、')}。可用的有：${DANGEROUS_OPS.map((o) => o.id).join('、')}。`,
+                );
+            }
+            permits.grant(wanted.length > 0 ? wanted : null, minutes, reason, Date.now());
+            return pad(`已授权 ${minutes} 分钟（原因：${reason}）。${permits.describe(Date.now())}`);
+        }
+    },
+    {
+        name: '!denyDangerousOps',
+        description: td('denyDangerousOps'),
+        params: {},
+        perform: function (): string {
+            permits.revoke();
+            return pad(`已收回危险操作授权。${permits.describe(Date.now())}`);
+        }
+    },
 ];

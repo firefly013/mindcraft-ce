@@ -3,9 +3,27 @@ import * as world from "./world.js";
 import pf from 'mineflayer-pathfinder';
 import Vec3 from 'vec3';
 import settings from "../../../settings.js";
+import { permits, opContextFor } from "../permits.js";
+import { refuseText } from "../dangerous_ops.js";
 
 export function log(bot: any, ...messages: any[]): void {
     bot.output += messages.join(' ') + '\n';
+}
+
+/**
+ * 危险操作闸门。
+ *
+ * 默认禁止倒水/倒岩浆/点火/在下界或末地睡觉/进深水；只有三种例外：身上着火
+ * （实时判定）、模型用 allowDangerousOps 授权、我们写死的保命代码。判据和记录
+ * 全在 dangerous_ops/permits 里，这里只负责"问一句、不让就写回执"。
+ *
+ * 回执**必须带上怎么授权** —— 这一夜反复证明：把下一步写出来，模型才能自己走得通。
+ */
+function allowDangerousOp(bot: any, opId: string): boolean {
+    const verdict = permits.isAllowed(opId, opContextFor(bot), Date.now());
+    if (verdict.allowed) return true;
+    log(bot, verdict.op != null ? refuseText(verdict.op) : `默认不允许这个操作（${opId}）。`);
+    return false;
 }
 
 async function autoLight(bot: any): Promise<boolean> {
@@ -732,6 +750,10 @@ export async function placeBlock(bot: any, blockType: string, x: number, y: numb
     }
     else if (item_name === 'lava') {
         item_name = 'lava_bucket';
+    }
+    // 用桶"放水/放岩浆"是同一个危险操作，只是走 placeBlock 这条路。
+    if (item_name === 'water_bucket' || item_name === 'lava_bucket') {
+        if (!allowDangerousOp(bot, item_name === 'water_bucket' ? 'pour_water' : 'pour_lava')) return false;
     }
     let block_item: any = bot.inventory.findInventoryItem(item_name);
     if (!block_item && bot.game.gameMode === 'creative' && !bot.restrict_to_inventory) {
@@ -1626,6 +1648,10 @@ export async function goToBed(bot: any): Promise<boolean> {
      * @example
      * await skills.goToBed(bot);
      **/
+    // 床在**下界和末地都会炸**（末地那个能一下把人秒了）。主世界睡觉不拦
+    // —— op 的 when() 只在会炸的维度才判危险。
+    if (!allowDangerousOp(bot, 'sleep_in_bed')) return false;
+
     const beds: any[] = bot.findBlocks({
         matching: (block: any) => {
             return block.name.includes('bed');
@@ -2271,6 +2297,14 @@ export async function useToolOn(bot: any, toolName: string, targetName: string):
         log(bot, `Could not equip ${toolName}.`);
         return false;
     }
+    // **倒水 / 倒岩浆 / 点火默认禁止**。注意区分：
+    //   - 倒水/倒岩浆：传的是 water_bucket / lava_bucket
+    //   - 打水（把空桶灌满）：传的是 bucket —— 这个闸门**不拦**，主线照常
+    if (toolName === 'water_bucket' || toolName === 'lava_bucket') {
+        if (!allowDangerousOp(bot, toolName === 'water_bucket' ? 'pour_water' : 'pour_lava')) return false;
+    }
+    if (toolName === 'flint_and_steel' && !allowDangerousOp(bot, 'ignite')) return false;
+
     if (toolName.includes('bucket')) {
         // **必须验证**：`activateItem` 只是发一个"用物品"包，服务端采不采纳要看
         // 十字准星是否真的对着目标。模型真机报过"连续两次 useOn(水桶, water)，
