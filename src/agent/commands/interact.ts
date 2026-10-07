@@ -269,6 +269,18 @@ async function transferWithContainer(
       };
     }
 
+    // **基线**：搬之前箱子里这个物品有多少。最后用它和服务端重开后的数字对比，
+    // 由"箱子到底多了没有"决定成败——而不是由"我点了几个槽"决定。
+    const countInBox = (slotsArr: Array<{ name?: string; count?: number } | null>): number => {
+      let total = 0;
+      for (let i = boxStart; i < Math.min(boxEnd, slotsArr.length); i++) {
+        const it = slotsArr[i];
+        if (it?.name === name) total += Number(it.count ?? 1);
+      }
+      return total;
+    };
+    const boxBefore = countInBox(container.slots ?? []);
+
     let left = count <= 0 ? Number.MAX_SAFE_INTEGER : count;
 
 
@@ -388,10 +400,18 @@ async function transferWithContainer(
       `inventoryEnd=${container.inventoryEnd ?? '?'} containerStart=${container.containerStart ?? '?'} ` +
       `containerEnd=${container.containerEnd ?? '?'}；我用的是 [${from.s},${from.e}) -> [${to.s},${to.e})`;
     const boxText = boxNow.length > 0 ? boxNow.join('、') : '（空）';
+    // **成败由服务端说了算**：重开后箱子里这个物品比之前多了多少，才是真正搬进去
+    // 的数量。"我点了几个槽"（moved）只是本地账——模型真机报过"挪了 114、箱子没变"，
+    // 就是本地账在撒谎（箱子其实满了，服务端拒收）。
+    const boxAfter = countInBox(freshSlots);
+    const landed = boxAfter - boxBefore;
     return {
-      ok: moved > 0,
+      ok: landed > 0,
       detail:
-        (moved > 0 ? `挪了 ${name}×${moved}` : `没能挪动 ${name}`) +
+        (landed > 0
+          ? `真的进了 ${name}×${landed}`
+          : `${name} 一个都没进去` +
+            (moved > 0 ? `（本地账记了"挪了 ${moved}"，但服务端没接受——箱子多半满了）` : '')) +
         `；重开箱子看到的（服务端口径）：${boxText}；${geom}`,
     };
   } catch (error: unknown) {
