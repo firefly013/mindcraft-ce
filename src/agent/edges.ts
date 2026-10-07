@@ -48,7 +48,6 @@ export interface HeldSlot {
 export interface EdgeSnapshot {
   health?: number | null;
   food?: number | null;
-  oxygen?: number | null;
   light?: number | null;
   freeSlots?: number | null;
   foodCount?: number | null;
@@ -63,6 +62,8 @@ export interface EdgeSnapshot {
   inLava?: boolean | null;
   belowVoid?: boolean | null;
   inWater?: boolean | null;
+  /** **头那一格是水**（可靠事实，与坏掉的 oxygenLevel 无关）。 */
+  headInWater?: boolean | null;
   /** 头也在水里（真正淹没）——不依赖坏掉的 oxygenLevel。 */
   submerged?: boolean | null;
   onFire?: boolean | null;
@@ -244,6 +245,11 @@ function metadataValue(entity: unknown, index: number): number | null {
 export const DETECTORS: readonly Detector[] = Object.freeze([
   // L5 保命（host 侧读布尔旗，边沿+分级在这里）。
   { type: 'world.lava.contact', level: 5, kind: 'flag', flag: 'inLava' },
+  // **入水也有事件**（用户问的缺口）：原来只有"头+脚都泡在水里"才有 L5 紧急，
+  // 脚刚碰到水什么都不发生——预警比危险晚了一档（模型真机就是"氧气掉到 0 才
+  // 知道自己在水里"）。inWater 是可靠信号（脚下方块是水），白白不用是浪费。
+  // kind:flag 是**上升沿触发一次**，所以踩进水里叫一次、上岸复位，不会刷屏。
+  { type: 'world.water.contact', level: 3, kind: 'flag', flag: 'inWater' },
   {
     type: 'world.lava.about_to_enter', level: 5, kind: 'all',
     fire: (s) => s.nextIsLava === true && s.moving === true,
@@ -549,7 +555,6 @@ function deltaFor(detector: Detector, key: string | number | null, snapshot: Edg
   if (key != null) delta['key'] = key;
   if (detector.type.startsWith('bot.health')) delta['health'] = snapshot.health;
   if (detector.type.startsWith('bot.hunger')) delta['food'] = snapshot.food;
-  if (detector.type.startsWith('bot.oxygen')) delta['oxygen'] = snapshot.oxygen;
   if (detector.type === 'world.light_low') delta['light'] = snapshot.light;
   if (detector.type === 'inventory.full') delta['freeSlots'] = snapshot.freeSlots;
   // 手上那件工具快坏了——**说清是哪件、还剩多少**。模型反馈过这条事件不说是
@@ -593,9 +598,7 @@ export function snapshotFromBot(bot: unknown, extra: SnapshotExtra = {}): EdgeSn
   const b = bot as Record<string, unknown>;
   try {
     snap.health = num(b['health']);
-    snap.food = num(b['food']);
-    snap.oxygen = num((b as { oxygenLevel?: unknown }).oxygenLevel);
-
+    snap.food = num(b['food']);
     const entity = (b['entity'] ?? {}) as Record<string, unknown>;
     const pos = (entity['position'] ?? {}) as { x?: unknown; y?: unknown; z?: unknown };
     const feet = { x: num(pos.x) ?? 0, y: num(pos.y) ?? 0, z: num(pos.z) ?? 0 };
@@ -712,6 +715,9 @@ export function snapshotFromBot(bot: unknown, extra: SnapshotExtra = {}): EdgeSn
 
         const headBlock = headPos == null ? null : anyBot.blockAt?.(headPos);
 
+        // 头那一格是不是水（可靠事实）。**不用 oxygenLevel**：那个字段在 1.20.6 上
+        // 取不到 air_supply，恒为 20、还会冒出 -1，拿它当依据只会发假警报。
+        snap.headInWater = headBlock?.['name'] === 'water' ? true : undefined;
         snap.submerged =
 
           feetName === 'water' && headBlock?.['name'] === 'water' ? true : undefined;
