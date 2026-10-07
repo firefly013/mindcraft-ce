@@ -531,9 +531,13 @@ export async function collectBlock(bot: any, blockType: string, num: number = 1,
             }
             else if ((mc as any).mustCollectManually(blockType)) {
                 await goToPosition(bot, block.position.x, block.position.y, block.position.z, 2);
-                await bot.dig(block);
-                await pickupNearbyItems(bot);
-                success = true;
+                // 统一走 digWithTimeout：裸 bot.dig 会在方块中途变化时永不 resolve。
+                if (!(await digWithTimeout(bot, block, `@(${block.position.x},${block.position.y},${block.position.z})`))) {
+                    log(bot, `挖 ${blockType} 超时，跳过这一格。`);
+                } else {
+                    await pickupNearbyItems(bot);
+                    success = true;
+                }
             }
             else {
                 await bot.collectBlock.collect(block);
@@ -552,7 +556,11 @@ export async function collectBlock(bot: any, blockType: string, num: number = 1,
                 // 同一个函数上面已经有能用的手动路径，回退过去就是了。
                 try {
                     await goToPosition(bot, block.position.x, block.position.y, block.position.z, 2);
-                    await bot.dig(block);
+                    // 统一走 digWithTimeout：裸 bot.dig 会在方块中途变化时永不 resolve。
+                    if (!(await digWithTimeout(bot, block, `@(${block.position.x},${block.position.y},${block.position.z})`))) {
+                        log(bot, `挖 ${blockType} 超时，跳过这一格。`);
+                        continue;
+                    }
                     await pickupNearbyItems(bot);
                     collected++;
                     log(bot, `背包满了，改用"自己挖 + 捡"的方式收了 ${blockType}（掉落物能并进已有的半栈）。`);
@@ -610,6 +618,44 @@ export async function pickupNearbyItems(bot: any): Promise<boolean> {
 }
 
 
+/**
+ * 挖一个方块，**带按硬度分档的超时**。
+ *
+ * 为什么必须分档：mineflayer 的 `bot.dig` promise 在方块中途被改、被打断、
+ * 或者 bot 被 Stop 过之后会**永不 resolve**。固定 8 秒一刀切会两头不讨好——
+ * 挖土嫌久，挖黑曜石（硬度 50，钻石镐也要 ~9.4 秒）又根本不够。
+ *
+ * 模型真机给的证据非常干净：同一格 `mineBlock(36,9,10)` 调了 3 次，
+ * **空回执 ×2 + 卡死 280 秒 ×1**，而**同一片区域的另外 17 格全部正常**——
+ * 唯一的差别就是"那一格是最难挖的黑曜石"。
+ * （当时 8 秒超时只加在 `breakBlockAt` 上，`mineBlock` 走的是另一个入口，
+ * 压根没有超时。）
+ *
+ * 分档：`5000 + 硬度 × 800`，下限 8 秒、上限 30 秒。
+ * 黑曜石(50)→30 秒，远古残骸(30)→29 秒，石头(1.5)→8 秒，泥土(0.5)→8 秒。
+ */
+async function digWithTimeout(bot: any, block: any, where: string): Promise<boolean> {
+    const hardness: number =
+        typeof block?.hardness === 'number' ? block.hardness : typeof block?.blockEnum?.hardness === 'number' ? block.blockEnum.hardness : 0;
+    const timeoutMs = Math.min(30_000, Math.max(8_000, 5_000 + hardness * 800));
+    const timer = new Promise<'timeout'>((resolve) => setTimeout(() => resolve('timeout'), timeoutMs));
+    const dug = await Promise.race([bot.dig(block, true).then(() => 'ok' as const), timer]);
+    if (dug === 'timeout') {
+        try {
+            bot.stopDigging();
+        } catch {
+            // 停不下来就算了，下面照样如实报。
+        }
+        log(
+            bot,
+            `挖 ${block?.name ?? '?'} ${where} **超时 ${Math.round(timeoutMs / 1000)} 秒没挖完**` +
+                `（这方块硬度 ${hardness}，是慢方块；多半是中途被打断、方块变了、或者上一个动作被 Stop 过）。已停下，不再干等。`,
+        );
+        return false;
+    }
+    return true;
+}
+
 export async function breakBlockAt(bot: any, x: number, y: number, z: number): Promise<boolean> {
     /**
      * Break the block at the given position. Will use the bot's equipped item.
@@ -653,17 +699,7 @@ export async function breakBlockAt(bot: any, x: number, y: number, z: number): P
         // digDown 静默卡死 115 / 140 / 152 秒（`task.stuck {action:"digDown",
         // stuckForSeconds:152}`，speed 0 一格没动），她的 workaround 是"Stop() 一下就继续"。
         // 有超时就不需要人肉 Stop 了。
-        const digTimeout = new Promise<'timeout'>((resolve) => setTimeout(() => resolve('timeout'), 8000));
-        const dug = await Promise.race([bot.dig(block, true).then(() => 'ok' as const), digTimeout]);
-        if (dug === 'timeout') {
-            try {
-                bot.stopDigging();
-            } catch {
-                // 停不下来就算了，下面照样如实报。
-            }
-            log(bot, `挖 ${block.name} @(${x.toFixed(1)},${y.toFixed(1)},${z.toFixed(1)}) **超时 8 秒没挖完**（多半是方块中途变了、或者上一个动作被 Stop 过）。已停下，不再干等。`);
-            return false;
-        }
+        if (!(await digWithTimeout(bot, block, `@(${x.toFixed(1)},${y.toFixed(1)},${z.toFixed(1)})`))) return false;
         log(bot, `Broke ${block.name} at x:${x.toFixed(1)}, y:${y.toFixed(1)}, z:${z.toFixed(1)}.`);
     }
     else {
@@ -2035,7 +2071,9 @@ export async function mineBlockAt(bot: any, x: number, y: number, z: number): Pr
     try {
         // 尽力换上合适的工具；换不上也让 dig 自己试（原版手也能挖土/木）。
         try { await bot.tool?.equipForBlock?.(target); } catch { /* best-effort */ }
-        await bot.dig(target);
+        // **同一个入口**：mineBlock 以前是裸的 await bot.dig()，8 秒超时没覆盖到它
+        // （模型真机报"mineBlock 挖黑曜石空回执×2 + 卡死 280 秒"，而其他 17 格全正常）。
+        if (!(await digWithTimeout(bot, target, `@(${x},${y},${z})`))) return false;
         log(bot, `挖掉了 ${target.name} @(${x},${y},${z})。`);
         return true;
     } catch (err: unknown) {
