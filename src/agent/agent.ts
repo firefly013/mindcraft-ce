@@ -1,5 +1,5 @@
 import { VisionInterpreter } from './vision/vision_interpreter.js';
-import { closeSync, openSync, readSync, statSync } from 'node:fs';
+import { closeSync, openSync, readFileSync, readSync, statSync } from 'node:fs';
 import { initBot } from '../utils/mcdata.js';
 import { expandTagRecipes } from '../utils/recipe_tags.js';
 import { executeToolCall } from './commands/to_openai_tools.js';
@@ -81,6 +81,27 @@ export class Agent {
     private pickupStarved: boolean = false;
     /** 开发者通道的读取位置（见 pollInbox）。 */
     private inboxOffset: number = 0;
+    /**
+     * 队友 bot 的名字（从 settings.profiles 那些 profile 文件里读）。
+     *
+     * **用来区分"人"和"队友"**：队友之间是高频背景音，走事件就够；
+     * 而**玩家（人）在跟你说话是必须回应的**，得投成真正的用户回合。
+     */
+    private teammateNames: Set<string> = new Set();
+
+    /** 从 profile 文件里读队友名字（读不到就当没有，不影响主流程）。 */
+    private loadTeammateNames(): void {
+        const raw = (settings as { profiles?: unknown }).profiles;
+        const files: string[] = Array.isArray(raw) ? (raw as string[]) : [];
+        for (const f of files) {
+            try {
+                const profile = JSON.parse(readFileSync(f, 'utf8')) as { name?: unknown };
+                if (typeof profile.name === 'string' && profile.name !== '') this.teammateNames.add(profile.name);
+            } catch {
+                // 读不到就算了，最坏情况是队友的话也走用户回合。
+            }
+        }
+    }
 
     /**
      * deliberative 层：pi-durable 会话 + 工具 + 尾巴注入 + 事件接入。
@@ -140,6 +161,7 @@ export class Agent {
         this.blocked_actions = settings.blocked_actions.concat(this.task.blocked_actions || []);
         this.buildRuntime();
 
+        this.loadTeammateNames();
         console.log(this.name, 'logging into minecraft...');
         this.bot = initBot(this.name);
 
@@ -252,6 +274,23 @@ export class Agent {
                 // 聊天默认 L3 唤醒；喊急停词的直接抢占当前请求。
                 const lower = message.toLowerCase();
                 const urgent = STOP_WORDS.some((w) => lower.includes(w.toLowerCase()));
+                // **人和队友走不同的路**：
+                //   - 队友的话是高频背景音（他们一直在互相报坐标），投成**事件**就够；
+                //   - **玩家（人）在跟你说话，是必须回应的** —— 投成**真正的用户回合**。
+                //
+                // 真机现象：玩家在聊天框问"你们能听到我说话吗？"，两个 bot 收到了、也进了上下文
+                // （日志里同一句话被重复渲染了 120+ 次），但**一句话不回**。因为它是**事件**、
+                // 不是"有人在问我"——事件尾巴每个请求都重放一遍，模型看多了就当背景噪音。
+                // 用户回合不一样：它进对话历史，模型必须对它产出一轮。
+                if (!this.teammateNames.has(username)) {
+                    const text =
+                        '玩家 ' + username + ' 对你说：' + message +
+                        (whisper ? '（这是私聊，别人听不到）' : '') +
+                        '\n**有人在直接跟你说话，先用 Say（或正文）回一句，再继续手上的活。**';
+                    void this.wiring?.runtime.submit(text);
+                    return;
+                }
+
                 await this.handleMessage(
                     username,
                     message,
@@ -260,9 +299,6 @@ export class Agent {
                     {
                         whisper,
                         mention: lower.includes(this.name.toLowerCase()),
-                        // **有人在跟你说话，不是环境噪音。** 真机现象：玩家在聊天框问"你们能听到我说话吗？"，
-                        // 两个 bot 收到了、也进了上下文，但**都在忙着挖矿，把它当事件略过去了**，一句话不回。
-                        // 他们没有"这是在问我"的依据 —— 加上这个标记，配合系统提示里那条规矩。
                         expectReply: true,
                     },
                 );
