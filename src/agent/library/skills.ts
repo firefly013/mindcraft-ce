@@ -192,7 +192,7 @@ export async function smeltItem(bot: any, itemName: string, num: number = 1): Pr
     if (bot.entity.position.distanceTo(furnaceBlock.position) > 4) {
         await goToNearestBlock(bot, 'furnace', 4, furnaceRange);
     }
-    await bot.lookAt(furnaceBlock.position);
+    await bot.lookAt(furnaceBlock.position.offset(0.5, 0.5, 0.5), true);
 
     console.log('smelting...');
     const furnace: any = await bot.openFurnace(furnaceBlock);
@@ -879,7 +879,7 @@ export async function placeBlock(bot: any, blockType: string, x: number, y: numb
         }
         else {
             await bot.equip(block_item, 'hand');
-            await bot.lookAt(buildOffBlock.position.offset(0.5, 0.5, 0.5));
+            await bot.lookAt(buildOffBlock.position.offset(0.5, 0.5, 0.5), true);
             await bot.placeBlock(buildOffBlock, faceVec);
             log(bot, `Placed ${blockType} at ${target_dest}.`);
             await new Promise(resolve => setTimeout(resolve, 200));
@@ -1147,7 +1147,7 @@ export async function giveToPlayer(bot: any, itemType: string, username: string,
         }
     }
 
-    await bot.lookAt(player.position);
+    await bot.lookAt(player.position, true);
     if (await discard(bot, itemType, num)) {
         let given = false;
         bot.once('playerCollect', (collector: any, collected: any) => {
@@ -1663,7 +1663,7 @@ export async function useDoor(bot: any, door_pos: any = null): Promise<boolean> 
     }
 
     const door_block: any = bot.blockAt(door_pos);
-    await bot.lookAt(door_pos);
+    await bot.lookAt(door_pos, true);
     if (!door_block._properties.open)
         await bot.activateBlock(door_block);
 
@@ -2291,7 +2291,7 @@ export async function useToolOn(bot: any, toolName: string, targetName: string):
     } else {
         log(bot, `Already within ${reach.toFixed(1)} blocks of ${block.name}, using it from here.`);
     }
-    await bot.lookAt(block.position.offset(0.5, 0.5, 0.5));
+    await bot.lookAt(block.position.offset(0.5, 0.5, 0.5), true);
 
     // if block in view is closer than the target block, it is in our way. try to move closer
     const viewBlocked = (): boolean => {
@@ -2322,7 +2322,7 @@ export async function useToolOn(bot: any, toolName: string, targetName: string):
         for (const [sx, sy, sz] of spots) {
             try {
                 await goToPosition(bot, sx, sy, sz, 1);
-                await bot.lookAt(block.position.offset(0.5, 0.5, 0.5));
+                await bot.lookAt(block.position.offset(0.5, 0.5, 0.5), true);
             } catch {
                 continue;
             }

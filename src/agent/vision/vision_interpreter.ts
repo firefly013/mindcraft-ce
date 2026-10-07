@@ -53,10 +53,10 @@ export class VisionInterpreter {
         }
 
         if (direction === 'with') {
-            await bot.look(player.yaw, player.pitch);
+            await bot.look(player.yaw, player.pitch, true);
             result = `Looking in the same direction as ${player_name}\n`;
         } else {
-            await bot.lookAt(new Vec3(player.position.x, player.position.y + player.height, player.position.z));
+            await bot.lookAt(new Vec3(player.position.x, player.position.y + player.height, player.position.z), true);
             result = `Looking at player ${player_name}\n`;
 
         }
@@ -74,7 +74,7 @@ export class VisionInterpreter {
         // **瞄准点也要改**：原来瞄的是 `y + 2` —— 那是目标方块**上方 1.5 格**，
         // 准星自然对不上（模型真机一晚上的"桶灌不上 / 准星那块石头"都可能是它）。
         // 要对准方块**中心**：+0.5。
-        await bot.lookAt(new Vec3(x + 0.5, y + 0.5, z + 0.5));
+        await bot.lookAt(new Vec3(x + 0.5, y + 0.5, z + 0.5), true);
         // `lookAt` 是异步生效的（要等几个 tick 才反映到准星上），读之前让一步。
         await new Promise((resolve) => setTimeout(resolve, 150));
         

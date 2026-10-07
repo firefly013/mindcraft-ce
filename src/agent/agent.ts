@@ -257,7 +257,14 @@ export class Agent {
                     message,
                     KIND.USER,
                     urgent ? LEVEL.PREEMPT : LEVEL.WAKE,
-                    { whisper, mention: lower.includes(this.name.toLowerCase()) },
+                    {
+                        whisper,
+                        mention: lower.includes(this.name.toLowerCase()),
+                        // **有人在跟你说话，不是环境噪音。** 真机现象：玩家在聊天框问"你们能听到我说话吗？"，
+                        // 两个 bot 收到了、也进了上下文，但**都在忙着挖矿，把它当事件略过去了**，一句话不回。
+                        // 他们没有"这是在问我"的依据 —— 加上这个标记，配合系统提示里那条规矩。
+                        expectReply: true,
+                    },
                 );
             } catch (error: unknown) {
                 console.error('Error handling message:', error);
