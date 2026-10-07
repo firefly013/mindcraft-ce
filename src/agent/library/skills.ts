@@ -2013,10 +2013,22 @@ export async function digDown(bot: any, distance: number = 10): Promise<boolean>
      * await skills.digDown(bot, 10);
      **/
 
-    const start_block_pos: any = bot.blockAt(bot.entity.position).position;
+    // **每一轮都从机器人"现在"的位置重新取列**。
+    //
+    // 原来只在开头取一次 `start_block_pos`，之后一律用 `start - i`。可是机器人挖下去会
+    // **横向漂移**：模型真机那次 digDown 从 x=35.6 出发，最后人在 x=33.5（漂了 1.5 格），
+    // 于是它检查的竖列**已经不是机器人所在的竖列**了——**脚下的岩浆从来没被检查过**，
+    // 这就是"遇到岩浆不停止"。真机日志里 digDown 停过 14 次"drop below"、10 次"water"，
+    // **从没报过 lava**，也印证了这一点。
     for (let i = 1; i <= distance; i++) {
-        const targetBlock: any = bot.blockAt(start_block_pos.offset(0, -i, 0));
-        let belowBlock: any = bot.blockAt(start_block_pos.offset(0, -i-1, 0));
+        const here: any = bot.blockAt(bot.entity.position);
+        if (here == null) {
+            log(bot, `Dug down ${i - 1} blocks, but lost track of where I am (chunk unloaded?).`);
+            return false;
+        }
+        // 从当前脚下方块往下数第 i 格（i=1 就是正下方那一格）
+        const targetBlock: any = bot.blockAt(here.position.offset(0, -i, 0));
+        let belowBlock: any = bot.blockAt(here.position.offset(0, -i - 1, 0));
 
         if (!targetBlock || !belowBlock) {
             log(bot, `Dug down ${i-1} blocks, but reached the end of the world.`);
@@ -2026,7 +2038,8 @@ export async function digDown(bot: any, distance: number = 10): Promise<boolean>
         // Check for lava, water
         if (targetBlock.name === 'lava' || targetBlock.name === 'water' ||
             belowBlock.name === 'lava' || belowBlock.name === 'water') {
-            log(bot, `Dug down ${i-1} blocks, but reached ${belowBlock ? belowBlock.name : '(lava/water)'}`);
+            const hazard: string = targetBlock.name === 'lava' || targetBlock.name === 'water' ? targetBlock.name : belowBlock.name;
+            log(bot, `Dug down ${i-1} blocks, but reached ${hazard} (stopping before digging into it).`);
             return false;
         }
 
