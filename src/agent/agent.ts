@@ -808,8 +808,34 @@ export class Agent {
         // 拾取是后台行为，**不能 await**：它最多要走 4 秒，await 会把边沿轮询
         // 一起冻住（update 本来就是串行的）。
         this.maybeAutoPickup();
+        // 兜底关窗：残留的开着的容器界面会废掉一整类世界交互（见 maybeCloseStaleScreen）。
+        this.maybeCloseStaleScreen();
         this.pollEdges();
     }
+    /**
+     * 兜底关窗。
+     *
+     * **为什么需要**：只要有一个容器界面还开着，一整类"对着世界动手"的操作就
+     * 全都废掉——`placeBlock` / `useBlock` / `useOn` 都要求手上没开着界面。
+     * 而失败的样子是**回执各说各的**，模型根本看不出"我界面还开着"。
+     * 真机抓到过这个现象（pib 报 `screen: open`，pia 说这条"可能比准星更值钱"，
+     * 因为准星只影响需要瞄准的动作，界面残留影响一**大类**）。
+     *
+     * **只在身体空闲时关**：正在跑容器动作时（`useBlock` 全程都在动作里）绝不能碰，
+     * 否则会把模型正在用的界面关掉。
+     */
+    private maybeCloseStaleScreen(): void {
+        if (this.scheduler?.currentAction() != null) return;
+        const win = (this.bot as { currentWindow?: unknown } | null)?.currentWindow;
+        if (win == null) return;
+        try {
+            this.bot.closeWindow(win as never);
+            this.log.with('lifecycle').info({ event: 'screen-closed', why: 'leaked-open-window' });
+        } catch {
+            // 关不掉就算了，下一轮还会再试。
+        }
+    }
+
 
     /**
      * 开发者通道：`bots/<name>/inbox.txt` 里**新增的每一行**都当一条用户消息投进去。
