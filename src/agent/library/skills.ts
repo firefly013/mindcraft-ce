@@ -1197,6 +1197,14 @@ export async function goToGoal(bot: any, goal: any, _persist?: boolean): Promise
     // 多绕几步也比摔死强，何况它手上有 mineBlock/placeBlock 可以自己开路。
     for (const movements of [nonDestructiveMovements, destructiveMovements]) {
         movements.maxDropDown = 2;
+        // **关掉冲刺和跑酷**。冲刺不只是快：movements.js:664 有一行
+        //   const maxD = this.allowSprinting ? 4 : 2
+        // ——开着冲刺时，寻路会认为"跳/落 4 格"是可达的，于是敢往边缘冲。
+        // 模型真机证据（pib）：38.5,9.92,10.84 → **被 sprint 往北拖 20+ 格** → 34.99,0.64
+        // （直接坠落，血只剩 6）。跑酷同理，会主动往缺口跳。
+        // 安全比快重要：多绕几步，也比摔死强。
+        movements.allowSprinting = false;
+        movements.allowParkour = false;
     }
     // **算路超时也要放宽**：默认 thinkTimeout 只有 5 秒，长路径（从 100 格深的竖井
     // 爬出来、绕过大片水域）根本算不完，就直接报 'Took to long to decide path to goal!'
