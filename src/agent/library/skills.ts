@@ -2145,14 +2145,30 @@ export async function useToolOn(bot: any, toolName: string, targetName: string):
     } else {
         let block: any;
         if (targetName === 'water' || targetName === 'lava') {
-            // we want to get liquid source blocks, not flowing blocks
-            // so search for blocks with metadata 0 (not flowing)
-            const blocks: any[] = world.getNearestBlocksWhere(bot, (block: any) => block.name === targetName && block.metadata === 0, 64, 1);
-            if (blocks.length === 0) {
-                log(bot, `Could not find any source ${targetName}.`);
+            // **要水源方块**（流动水装不进桶），但**不能因为"够近的那格不是水源"就跑去远处**。
+            //
+            // 模型真机实测（成功率 1/4）：站在 (43.4,63,1.6)、**脚下 1.6 格就是水**，
+            // useOn(bucket,"water") 却跑去 **16 格外的 (27,62,7)** 并失败。原因是这里只认
+            // `metadata === 0` 的方块，近处那格没被匹配上，就一路找到远处去了。
+            //
+            // 改成：**近处的任何水/岩浆优先**（桶能不能装由服务端说了算，失败了下面会
+            // 如实报），只有近处完全没有时才去找水源方块。
+            const anyLiquid: any[] = world.getNearestBlocksWhere(bot, (b: any) => b.name === targetName, 64, 8);
+            const source: any = anyLiquid.find((b: any) => b.metadata === 0) ?? null;
+            const nearest: any = anyLiquid[0] ?? null;
+            if (nearest == null && source == null) {
+                log(bot, `Could not find any ${targetName} within 64 blocks.`);
                 return false;
             }
-            block = blocks[0];
+            // 近处那格在 3 格内就直接用它；否则用最近的水源。
+            const nearEnough: any = nearest != null && bot.entity.position.distanceTo(nearest.position) <= 3 ? nearest : null;
+            block = nearEnough ?? source ?? nearest;
+            const chosenDist: number = bot.entity.position.distanceTo(block.position);
+            log(
+                bot,
+                `Using ${block.name} at ${block.position} (${chosenDist.toFixed(1)} blocks away` +
+                    `${block.metadata === 0 ? ', source block' : ', NOT a source block — bucket may not fill'}).`,
+            );
         }
         else {
             block = world.getNearestBlock(bot, targetName, 64);
