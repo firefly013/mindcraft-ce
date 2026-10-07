@@ -630,7 +630,22 @@ export async function breakBlockAt(bot: any, x: number, y: number, z: number): P
                 return false;
             }
         }
-        await bot.dig(block, true);
+        // **给 dig 加超时**。mineflayer 的 `bot.dig` promise 在方块中途被改、
+        // 被打断、或者 bot 被 Stop 过之后会**永不 resolve**——模型真机三次数据点：
+        // digDown 静默卡死 115 / 140 / 152 秒（`task.stuck {action:"digDown",
+        // stuckForSeconds:152}`，speed 0 一格没动），她的 workaround 是"Stop() 一下就继续"。
+        // 有超时就不需要人肉 Stop 了。
+        const digTimeout = new Promise<'timeout'>((resolve) => setTimeout(() => resolve('timeout'), 8000));
+        const dug = await Promise.race([bot.dig(block, true).then(() => 'ok' as const), digTimeout]);
+        if (dug === 'timeout') {
+            try {
+                bot.stopDigging();
+            } catch {
+                // 停不下来就算了，下面照样如实报。
+            }
+            log(bot, `挖 ${block.name} @(${x.toFixed(1)},${y.toFixed(1)},${z.toFixed(1)}) **超时 8 秒没挖完**（多半是方块中途变了、或者上一个动作被 Stop 过）。已停下，不再干等。`);
+            return false;
+        }
         log(bot, `Broke ${block.name} at x:${x.toFixed(1)}, y:${y.toFixed(1)}, z:${z.toFixed(1)}.`);
     }
     else {
