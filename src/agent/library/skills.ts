@@ -2160,6 +2160,16 @@ export async function useToolOn(bot: any, toolName: string, targetName: string):
     }
 
     targetName = targetName.toLowerCase();
+
+    // **危险操作闸门必须放在最前**，覆盖全部三个分支。
+    // 教训来自真机：模型用 useOn(flint_and_steel, "nothing") 点火，那条走的是
+    // `targetName === 'nothing'` 分支，**根本不经过 useToolOnBlock** —— 闸门加在下层
+    // 就等于没加，回执直接是 "Equipped flint_and_steel. / Used flint_and_steel."，零拦截。
+    if (toolName === 'water_bucket' || toolName === 'lava_bucket') {
+        if (!allowDangerousOp(bot, toolName === 'water_bucket' ? 'pour_water' : 'pour_lava')) return false;
+    }
+    if (toolName === 'flint_and_steel' && !allowDangerousOp(bot, 'ignite')) return false;
+
     if (targetName === 'nothing') {
         const equipped: boolean = await equip(bot, toolName);
         if (!equipped) {

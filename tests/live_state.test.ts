@@ -164,6 +164,12 @@ describe('renderLiveState', () => {
     );
     for (const head of [
       'Body:',
+
+      // 危险操作许可必须出现在快照里：模型得能看见"我现在能不能倒水/点火"，
+
+      // 而不是靠"试一下被拒"来发现——那是最贵的一种发现方式。
+
+      'DangerousOps:',
       'Held:',
       'Backpack',
       'Position (此刻):',

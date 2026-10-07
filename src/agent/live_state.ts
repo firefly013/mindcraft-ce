@@ -15,6 +15,7 @@
  */
 
 import { estimateTokens } from '../utils/tokens.js';
+import { permits } from './permits.js';
 import type { PlanTodo } from './plan.js';
 import { Vec3 } from 'vec3';
 
@@ -135,6 +136,12 @@ export interface LiveState {
   screenshot: LiveScreenshot;
   goal: string | null;
   todos: PlanTodo[];
+  /**
+   * 危险操作许可的现状（还有没有授权、授权哪几项、还剩多少秒）。
+   * **必须让模型看得见** —— 否则它不知道自己现在能不能倒水/点火，
+   * 只能靠"试一下被拒"来发现，那是最贵的一种发现方式。
+   */
+  dangerousOps: string;
   meta: LiveMeta;
 }
 
@@ -371,6 +378,7 @@ export function sampleLiveState(ctx: SampleContext): LiveState {
     screenshot: { ref: null, unavailableReason: 'no vision data yet' },
     goal: ctx.goal ?? null,
     todos: ctx.todos ?? [],
+    dangerousOps: '（还没采样）',
     meta: { gamemode: null, openScreen: null, currentAction: ctx.currentAction ?? null, posture: null },
   };
 
@@ -466,6 +474,8 @@ export function sampleLiveState(ctx: SampleContext): LiveState {
 
     empty.screenshot = screenshotOf(ctx.vision);
 
+    // 危险操作许可：库里的单例是唯一真相，快照只负责转述。
+    empty.dangerousOps = permits.describe(Date.now());
     empty.meta = {
       gamemode: str(bot.game?.gameMode),
       openScreen: bot.currentWindow != null ? (str(bot.currentWindow?.title) ?? 'open') : null,
@@ -746,6 +756,9 @@ export function renderLiveState(s: LiveState): string {
       `xp ${b.xpLevel ?? UNKNOWN} pose ${b.pose ?? UNKNOWN} ` +
       `onGround ${b.onGround ?? UNKNOWN} effects ${b.effects.length > 0 ? b.effects.join(', ') : 'none'}`,
   );
+  // 危险操作许可：默认全禁，要用得先授权。**必须让模型看得见**——否则
+  // 它不知道自己现在能不能倒水/点火，只能靠"试一下被拒"来发现，那是最贵的发现方式。
+  lines.push(`DangerousOps: ${s.dangerousOps}`);
   const h = s.held;
   lines.push(
     `Held: main ${h.mainHand ?? 'empty'}${h.mainHandDurability != null ? ` (耐久剩余 ${Math.round(h.mainHandDurability * 100)}%${h.mainHandDurabilityRaw != null ? `，原始 ${h.mainHandDurabilityRaw}` : ''})` : ''} ` +

@@ -380,7 +380,8 @@ export const actionsList: AgentCommand[] = [
                 );
             }
             permits.grant(wanted.length > 0 ? wanted : null, minutes, reason, Date.now());
-            return pad(`已授权 ${minutes} 分钟（原因：${reason}）。${permits.describe(Date.now())}`);
+            // describe() 里已经带了"原因"，这里不再重复一遍（真机反馈：原因重复两遍）。
+            return pad(`已授权 ${minutes} 分钟。${permits.describe(Date.now())}`);
         }
     },
     {
