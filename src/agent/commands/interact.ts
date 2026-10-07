@@ -180,18 +180,26 @@ export function blockNameAt(bot: unknown, x: number, y: number, z: number): stri
  * 最后退到 `clickWindow` 的 shift 点击（整栈快速移动，够用且到处都有）。
  */
 async function moveOne(bot: any, container: any, src: number, dest: number, count: number): Promise<void> {
+  // **优先 shift 点击（原子操作）**。
+  //
+  // 模型真机给的线索：「挪了 cobblestone×12」**真的从背包消失了**（[34]12→没了、
+  // free 0→1），**但重开箱子看内容没变化**——东西离开了背包却没到箱子。
+  // 这是典型的**物品卡在光标上**：moveSlotItem 是"点起 + 放下"两次点击，第二次没落地，
+  // 物品就留在 cursor，关箱子时被丢到地上。
+  //
+  // shift 点击（mode 1）**一次点击搬整栈、根本不碰光标**，没有中间状态可丢。
+  // 所以先试它；只有它不可用时才退回两次点击的 moveSlotItem。
+  if (typeof bot?.clickWindow === 'function') {
+      await bot.clickWindow(src, 0, 1);
+      return;
+  }
   if (typeof container?.moveSlotItem === 'function') {
-    await container.moveSlotItem(src, dest, count);
-    return;
+      await container.moveSlotItem(src, dest, count);
+      return;
   }
   if (typeof bot?.moveSlotItem === 'function') {
-    await bot.moveSlotItem(src, dest, count);
-    return;
-  }
-  if (typeof bot?.clickWindow === 'function') {
-    // mode 1 = shift 点击：整栈在背包与容器之间快速移动
-    await bot.clickWindow(src, 0, 1);
-    return;
+      await bot.moveSlotItem(src, dest, count);
+      return;
   }
   throw new Error('这个 mineflayer 版本既没有 moveSlotItem 也没有 clickWindow，挪不了物品');
 }
