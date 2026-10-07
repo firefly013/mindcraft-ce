@@ -541,3 +541,38 @@ describe('snapshotFromBot entity fields', () => {
     expect(snapshotFromBot(null).entities).toBeUndefined();
   });
 });
+
+describe('kind: repeat（条件成立期间反复报，按 intervalMs 节流）', () => {
+  // 用真实的 world.water.contact 测：它就是 kind:'repeat'、1 秒一次。
+  it('沾到水就一直报，但一秒最多一次；上岸后重新计时', () => {
+    const w = createEdgeWatcher();
+    const realNow = Date.now;
+    let clock = 1_000_000;
+    Date.now = (): number => clock;
+    try {
+      const inWater = { inWater: true };
+
+      // 第一次：立刻报（还没报过）。
+      expect(w.poll(inWater).filter((e) => e.type === 'world.water.contact')).toHaveLength(1);
+
+      // 同一秒内再轮询多次：**不能再报**（否则每 tick 一个会打爆上下文）。
+      clock += 200;
+      expect(w.poll(inWater).filter((e) => e.type === 'world.water.contact')).toHaveLength(0);
+      clock += 400;
+      expect(w.poll(inWater).filter((e) => e.type === 'world.water.contact')).toHaveLength(0);
+
+      // 满 1 秒：再报一次。
+      clock += 500;
+      expect(w.poll(inWater).filter((e) => e.type === 'world.water.contact')).toHaveLength(1);
+
+      // 上岸：停掉，并且计时清零。
+      clock += 5000;
+      expect(w.poll({ inWater: false }).filter((e) => e.type === 'world.water.contact')).toHaveLength(0);
+
+      // 再次沾水：**立刻**报（不该还压着刚才那次的时间戳）。
+      expect(w.poll(inWater).filter((e) => e.type === 'world.water.contact')).toHaveLength(1);
+    } finally {
+      Date.now = realNow;
+    }
+  });
+});

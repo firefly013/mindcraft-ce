@@ -90,7 +90,7 @@ export interface EdgeEvent {
   } | null;
 }
 
-type DetectorKind = 'flag' | 'all' | 'keyed' | 'change';
+type DetectorKind = 'flag' | 'all' | 'keyed' | 'change' | 'repeat';
 
 export interface Detector {
   type: string;
@@ -102,6 +102,8 @@ export interface Detector {
   keyOf?: (s: EdgeSnapshot) => Array<string | number>;
   value?: (s: EdgeSnapshot) => unknown;
   fireOn?: (prev: unknown, next: unknown) => boolean;
+  /** 仅 kind:'repeat' 用：条件成立时，最多每这么多毫秒报一次。 */
+  intervalMs?: number;
 }
 
 /** 边沿等级换算成调度等级。 */
@@ -249,7 +251,11 @@ export const DETECTORS: readonly Detector[] = Object.freeze([
   // 脚刚碰到水什么都不发生——预警比危险晚了一档（模型真机就是"氧气掉到 0 才
   // 知道自己在水里"）。inWater 是可靠信号（脚下方块是水），白白不用是浪费。
   // kind:flag 是**上升沿触发一次**，所以踩进水里叫一次、上岸复位，不会刷屏。
-  { type: 'world.water.contact', level: 3, kind: 'flag', flag: 'inWater' },
+  // **沾到水就一直报，1 秒一次**（用户的要求）。
+  // 目的：机器人在水里时**一直有事件把它拉起来**，防止站在水里空闲到自己淹死。
+  // 不是每 tick 报一个（那会打爆上下文），而是按 intervalMs 节流；上岸就停。
+  { type: 'world.water.contact', level: 3, kind: 'repeat', intervalMs: 1000,
+    fire: (s) => s.inWater === true },
   {
     type: 'world.lava.about_to_enter', level: 5, kind: 'all',
     fire: (s) => s.nextIsLava === true && s.moving === true,
@@ -451,6 +457,8 @@ export function createEdgeWatcher({ detectors = DETECTORS }: { detectors?: reado
   armed: Map<string, boolean>;
 } {
   const armed = new Map<string, boolean>();
+  /** kind:'repeat' 上次报出的时刻（按检测器 type 记）。 */
+  const lastRepeat = new Map<string, number>();
   const last = new Map<string, unknown>();
   const seenDiscrete = new Set<string>();
 
@@ -480,6 +488,23 @@ export function createEdgeWatcher({ detectors = DETECTORS }: { detectors?: reado
           out.push(describe(detector, null, snapshot));
         } else if (was && !on) {
           armed.set(detector.type, false);
+        }
+      } else if (detector.kind === 'repeat') {
+        // **条件成立期间反复报**，但按 intervalMs 节流。
+        //
+        // 用户要的场景：机器人在水里时，**一直有事件把它拉起来**，防止它站在水里
+        // 空闲到把自己淹死。不是每 tick 报一个（那会打爆上下文），而是 1 秒一次。
+        const on = detector.fire?.(snapshot) === true;
+        if (!on) {
+          lastRepeat.delete(detector.type);
+        } else {
+          const now = Date.now();
+          const prev = lastRepeat.get(detector.type);
+          const every = detector.intervalMs ?? 1000;
+          if (prev == null || now - prev >= every) {
+            lastRepeat.set(detector.type, now);
+            out.push(describe(detector, null, snapshot));
+          }
         }
       } else if (detector.kind === 'change') {
         const value = detector.value?.(snapshot);
