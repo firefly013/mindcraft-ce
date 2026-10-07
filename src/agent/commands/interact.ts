@@ -380,12 +380,19 @@ async function transferWithContainer(
       const it = freshSlots[i];
       if (it?.name != null) boxNow.push(`${it.name}×${it.count ?? 1}`);
     }
+    // **把窗口几何摊开**：槽位索引算错是这条 bug 最可能的残留，而光看"挪了 N"
+    // 分不出来。模型真机到现在还没测通，那就让它把"窗口长什么样、我用了哪几个槽"
+    // 直接写出来——这一夜每一次卡住都是靠这个破的。
+    const geom =
+      `窗口: slots=${container.slots?.length ?? '?'} inventoryStart=${container.inventoryStart ?? '?'} ` +
+      `inventoryEnd=${container.inventoryEnd ?? '?'} containerStart=${container.containerStart ?? '?'} ` +
+      `containerEnd=${container.containerEnd ?? '?'}；我用的是 [${from.s},${from.e}) -> [${to.s},${to.e})`;
     const boxText = boxNow.length > 0 ? boxNow.join('、') : '（空）';
     return {
       ok: moved > 0,
       detail:
         (moved > 0 ? `挪了 ${name}×${moved}` : `没能挪动 ${name}`) +
-        `；重开箱子看到的（服务端口径）：${boxText}`,
+        `；重开箱子看到的（服务端口径）：${boxText}；${geom}`,
     };
   } catch (error: unknown) {
     return { ok: false, detail: `挪物品时出错：${error instanceof Error ? error.message : String(error)}` };
