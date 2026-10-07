@@ -43,9 +43,8 @@ export class VisionInterpreter {
     }
 
     async lookAtPlayer(player_name: string, direction: string): Promise<string> {
-        if (!this.allow_vision) {
-            return "Vision is disabled. Use other methods to describe the environment.";
-        }
+        // **同一个毛病**：这里也被 `allow_vision` 挡住了（默认 false），于是
+        // "看向某个玩家"从来没生效过。转头是机械动作，跟能不能截图无关。
         let result: string;
         const bot = this.agent.bot;
         const player = bot.players[player_name]?.entity;
@@ -67,14 +66,23 @@ export class VisionInterpreter {
     }
 
     async lookAtPosition(x: number, y: number, z: number): Promise<string> {
-        if (!this.allow_vision) {
-            return "Vision is disabled. Use other methods to describe the environment.";
-        }
         const bot = this.agent.bot;
-        await bot.lookAt(new Vec3(x, y + 2, z));
-        const result = `Looking at coordinate ${x}, ${y}, ${z}\n`;
-
-        return result + this.getCenterBlockInfo();
+        // **转头是纯机械动作，和"能不能截图"毫无关系** —— 原来它被 `allow_vision` 挡住了
+        // （那个开关默认 false），于是这个工具**从来没转过一次头**，每次都返回同一句
+        // "Vision is disabled."。模型真机报过 "lookAtPosition 转向不生效，两次调用逐字相同"。
+        //
+        // **瞄准点也要改**：原来瞄的是 `y + 2` —— 那是目标方块**上方 1.5 格**，
+        // 准星自然对不上（模型真机一晚上的"桶灌不上 / 准星那块石头"都可能是它）。
+        // 要对准方块**中心**：+0.5。
+        await bot.lookAt(new Vec3(x + 0.5, y + 0.5, z + 0.5));
+        // `lookAt` 是异步生效的（要等几个 tick 才反映到准星上），读之前让一步。
+        await new Promise((resolve) => setTimeout(resolve, 120));
+        const pos = bot.entity?.position;
+        const facing =
+            pos == null
+                ? ''
+                : ` (now yaw ${(bot.entity.yaw ?? 0).toFixed(2)} pitch ${(bot.entity.pitch ?? 0).toFixed(2)})`;
+        return `Looking at ${x}, ${y}, ${z} —— center of that block${facing}。` + this.getCenterBlockInfo();
     }
 
     getCenterBlockInfo(): string {
