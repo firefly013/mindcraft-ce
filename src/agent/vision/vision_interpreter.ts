@@ -76,14 +76,30 @@ export class VisionInterpreter {
         // 要对准方块**中心**：+0.5。
         await bot.lookAt(new Vec3(x + 0.5, y + 0.5, z + 0.5));
         // `lookAt` 是异步生效的（要等几个 tick 才反映到准星上），读之前让一步。
-        await new Promise((resolve) => setTimeout(resolve, 120));
+        await new Promise((resolve) => setTimeout(resolve, 150));
+        
+        // **以准星为地面真相**：`bot.blockAtCursor` 才是"我到底看着哪一格"，
+        // 而那正是决定"动作成不成"的东西（模型 pib 说得对：视线不在方块上，
+        // MC 客户端就不会发破坏包，超时是必然的）。
+        //
+        // 模型真机做过"先算后验"的对照：她手算 yaw=1.98、准星反推 1.96（**一致**），
+        // 但 `bot.entity.yaw` 报 1.24（**差 42°**）—— 说明"瞄"是对的、"报朝向"的那个
+        // 字段不可靠（它是服务端回显的，有延迟和量化）。所以回执的主判据是准星，
+        // yaw/pitch 只作为参考读数附在后面。
         const pos = bot.entity?.position;
-        const facing =
-            pos == null
-                ? ''
-                : ` (now yaw ${(bot.entity.yaw ?? 0).toFixed(2)} pitch ${(bot.entity.pitch ?? 0).toFixed(2)})`;
-        return `Looking at ${x}, ${y}, ${z} —— center of that block${facing}。` + this.getCenterBlockInfo();
-    }
+        const cursor: any = bot.blockAtCursor?.(128) ?? null;
+        const cp = cursor?.position;
+        const onTarget: boolean = cp != null && cp.x === x && cp.y === y && cp.z === z;
+        const cursorText: string =
+            cp == null
+                ? '准星前方 128 格内没有方块'
+                : `准星落在 ${cursor.name} @(${cp.x},${cp.y},${cp.z})`;
+        const verdict: string = onTarget
+            ? '✓ 就是你要的那一格'
+            : `✗ 不是你要的 (${x},${y},${z}) —— 可能被挡、太远、或坐标不对；对准了再动手`;
+        const facing: string = pos == null ? '' : `（参考读数：yaw ${(bot.entity.yaw ?? 0).toFixed(2)} pitch ${(bot.entity.pitch ?? 0).toFixed(2)}）`;
+        return `Looking at ${x}, ${y}, ${z}（方块中心）。${cursorText} —— ${verdict}${facing}`;
+        }
 
     getCenterBlockInfo(): string {
         const bot = this.agent.bot;
