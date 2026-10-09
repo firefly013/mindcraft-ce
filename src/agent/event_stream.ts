@@ -56,6 +56,28 @@ export function renderEvents(entries: readonly EventEntry[] | null | undefined):
 }
 
 /**
+ * 单条事件的**消息文本**。
+ *
+ * 事件现在作为消息进入上下文，所以要能单独读懂——没有 `#seq`（没有批次了），
+ * 但保留 `kind/Llevel` 与 JSON 原文：坐标、伤害量、物品名这些结构化信息
+ * 一个都不能改写，模型要靠它们做判断。
+ *
+ * 形状刻意贴近旧的台账行，模型已经习惯读 `kind/L3 {...}` 这种写法。
+ */
+export function renderEventText(kind: string, level: number, payload: unknown): string {
+  let body: string;
+  try {
+    body = JSON.stringify(payload) ?? 'null';
+  } catch {
+    body = '[unserializable]';
+  }
+  if (body.length > ENTRY_LIMIT) {
+    body = `${body.slice(0, ENTRY_LIMIT)}…[truncated ${body.length - ENTRY_LIMIT} chars]`;
+  }
+  return `[事件] ${kind}/L${level} ${body}`;
+}
+
+/**
  * 最后一条 user 消息的正文：事件 → 记忆 → Live 快照。
  * 快照永远收尾——它是这一轮最新鲜的东西，也是缓存前缀的边界。
  * 空块直接丢掉，不留只有标题的空段。
@@ -64,4 +86,4 @@ export function composeTail(...blocks: Array<string | null | undefined>): string
   return blocks.filter((block): block is string => typeof block === 'string' && block !== '').join('\n\n');
 }
 
-export default { formatEventEntry, renderEvents, composeTail, ENTRY_LIMIT, EVENT_LOG_LIMIT };
+export default { formatEventEntry, renderEvents, renderEventText, composeTail, ENTRY_LIMIT, EVENT_LOG_LIMIT };

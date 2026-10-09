@@ -14,24 +14,12 @@
  * 快照失败而发不出去。
  */
 
-import { estimateTokens } from './compaction.js';
+import { estimateTokens } from '../utils/tokens.js';
+import { permits } from './permits.js';
+import { safeguards } from './safeguards.js';
+import { getVillagerProfession } from './library/world.js';
 import type { PlanTodo } from './plan.js';
 import { Vec3 } from 'vec3';
-
-/**
- * 主手耐久比例：1 = 全新，0 = 报废；读不到就 null。
- *
- * **必须钳到 [0,1]**。mineflayer 的 `durabilityUsed`（NBT Damage）可能大于
- * mcData 给的 `maxDurability`，直接算 `1 - used/max` 会得到负数——模型侧
- * 看到的就是 `Held: stone_pickaxe (durability -300%)` 这种鬼话（它还据此
- * 反馈过 bug）；更糟的是负值会让 `tool.durability_low` 永远处于触发态。
- */
-export function durabilityFraction(used: unknown, max: unknown): number | null {
-  const u = num(used);
-  const m = num(max);
-  if (u == null || m == null || m <= 0) return null;
-  return Math.min(1, Math.max(0, 1 - u / m));
-}
 
 /**
  * `bot.blockAt` 只接受 Vec3：mineflayer 把参数原样交给 prismarine-world，
@@ -64,6 +52,14 @@ export interface LiveHeld {
   armor: string[];
   /** 主手剩余耐久比例 0~1；空手或无耐久物品为 null。 */
   mainHandDurability: number | null;
+  /**
+   * 主手耐久的**原始读数**（used / max），用来诊断。
+   *
+   * 模型报过"耐久剩余 0%"但工具明显没坏（挖了 36 格），而 `prismarine-item` 的
+   * `durabilityUsed` 是 getter，读不到 NBT 时会退化成 0 或 max，容易把"读不到"
+   * 说成"快报废"。把两个原始数摊开，一眼能分清是读数错了还是真坏了。
+   */
+  mainHandDurabilityRaw: string | null;
 }
 
 export interface LiveBackpack {
@@ -102,6 +98,15 @@ export interface LiveEntity {
   y: number;
   z: number;
   health: number | null;
+  /**
+   * 实体的一句话附加信息（村民职业 `Farmer L2`、婴儿 `baby`）。
+   *
+   * 原来是 `!entities` 工具独有的，模型非调那个工具不可——而它就在
+   * 快照里却不说自己是干什么的。搬过来后那个工具再无独有价值。
+   * 用**可选**字段且非村民一律 `undefined`：快照的结构断言（toEqual）
+   * 会忽略 undefined，加了字段也不破坏既有测试。
+   */
+  tag?: string;
 }
 
 export interface LiveBlock {
@@ -142,6 +147,14 @@ export interface LiveState {
   screenshot: LiveScreenshot;
   goal: string | null;
   todos: PlanTodo[];
+  /**
+   * 危险操作许可的现状（还有没有授权、授权哪几项、还剩多少秒）。
+   * **必须让模型看得见** —— 否则它不知道自己现在能不能倒水/点火，
+   * 只能靠"试一下被拒"来发现，那是最贵的一种发现方式。
+   */
+  dangerousOps: string;
+  /** 保命程序开关现状（正常 / 已关闭 + 剩多少）。和危险操作许可是**两件事**。 */
+  safeguards: string;
   meta: LiveMeta;
 }
 
@@ -158,6 +171,28 @@ export const PERCEPTION_LIMIT = 16;
 export const PERCEPTION_BUDGET_TOKENS = 1024;
 /** 聚合摘要最多出几行，避免"远合并"自己又变成一坨。 */
 export const SUMMARY_LINES = 6;
+
+/**
+ * 主手耐久比例：1 = 全新，0 = 报废；读不到就 null。
+ *
+ * **必须钳到 [0,1]**。mineflayer 的 `durabilityUsed`（NBT Damage）可能大于
+ * mcData 给的 `maxDurability`，直接算 `1 - used/max` 会得到负数——模型侧
+ * 看到的就是 `Held: stone_pickaxe (durability -300%)` 这种鬼话（它还据此
+ * 反馈过 bug）；更糟的是负值会让 `tool.durability_low` 永远处于触发态。
+ *
+ * `edges.ts` 也用它——两处必须是同一个算法，否则快照和边缘检测会各说各话。
+ */
+export function durabilityFraction(used: unknown, max: unknown): number | null {
+  const u = num(used);
+  const m = num(max);
+  if (u == null || m == null || m <= 0) return null;
+  // **`max <= 1` 说明读到的不是耐久上限**。模型真机把这条根因挖出来了：
+  // "耐久原始读数 used=35 max=1（明显错）"——1 是**堆叠上限 stackSize**。
+  // 于是 `1 - 35/1` 被钳成 0，快照显示"耐久剩余 0%"、`tool.durability_low`
+  // 反复误报（白白唤醒请求）。读不到就说读不到，不要瞎报。
+  if (m <= 1) return null;
+  return Math.min(1, Math.max(0, 1 - u / m));
+}
 
 function num(value: unknown): number | null {
   return typeof value === 'number' && Number.isFinite(value) ? value : null;
@@ -343,7 +378,7 @@ export function sampleLiveState(ctx: SampleContext): LiveState {
       onGround: null,
       effects: [],
     },
-    held: { mainHand: null, offHand: null, armor: [], mainHandDurability: null },
+    held: { mainHand: null, offHand: null, armor: [], mainHandDurability: null, mainHandDurabilityRaw: null },
     backpack: { freeSlots: null, items: [] },
     position: { x: null, y: null, z: null, yaw: null, pitch: null, dimension: null, biome: null, speed: null },
     environment: { timeOfDay: null, weather: 'Unknown', light: null, lightConfidence: 'unknown', day: null },
@@ -356,6 +391,8 @@ export function sampleLiveState(ctx: SampleContext): LiveState {
     screenshot: { ref: null, unavailableReason: 'no vision data yet' },
     goal: ctx.goal ?? null,
     todos: ctx.todos ?? [],
+    dangerousOps: '（还没采样）',
+    safeguards: '（还没采样）',
     meta: { gamemode: null, openScreen: null, currentAction: ctx.currentAction ?? null, posture: null },
   };
 
@@ -396,14 +433,25 @@ export function sampleLiveState(ctx: SampleContext): LiveState {
         (s): s is string => s != null && s !== 'null',
       ),
       mainHandDurability: durabilityFraction(usedDurability, maxDurability),
+      mainHandDurabilityRaw:
+        usedDurability != null || maxDurability != null
+          ? `used=${usedDurability ?? '?'} max=${maxDurability ?? '?'}`
+          : null,
     };
 
     const packItems: string[] = [];
     let free = 0;
-    for (let i = 9; i <= 35; i++) {
+    // **快捷栏（36-44）也要列出来**。原来只扫 9~35，模型看不见快捷栏里的东西，
+    // 于是"背包里明明有火把/镐"却报"没有"——两个模型各自做了对照实验钉死这条：
+    // 同一份 input，材料在主背包就成功、在快捷栏就失败（`torch×2` 在快捷栏却报
+    // `Don't have any torch to place`；`coal, stick` 在主背包直接产出 `torch×4`）。
+    // 当前手持那格前面标 `*`，免得模型再靠猜。
+    const heldSlot = Number((bot as { quickBarSlot?: unknown }).quickBarSlot);
+    const heldIndex = Number.isFinite(heldSlot) ? 36 + heldSlot : -1;
+    for (let i = 9; i <= 44; i++) {
       const n = slotName(i);
       if (n == null) free++;
-      else packItems.push(`[${i}]${n}`);
+      else packItems.push(`${i === heldIndex ? '*' : ''}[${i}]${n}`);
     }
     empty.backpack = {
       freeSlots: Array.isArray(bot.inventory?.slots) ? free : null,
@@ -440,6 +488,9 @@ export function sampleLiveState(ctx: SampleContext): LiveState {
 
     empty.screenshot = screenshotOf(ctx.vision);
 
+    // 危险操作许可：库里的单例是唯一真相，快照只负责转述。
+    empty.dangerousOps = permits.describe(Date.now());
+    empty.safeguards = safeguards.describe(Date.now());
     empty.meta = {
       gamemode: str(bot.game?.gameMode),
       openScreen: bot.currentWindow != null ? (str(bot.currentWindow?.title) ?? 'open') : null,
@@ -579,6 +630,31 @@ function biomeOf(bot: Record<string, unknown>, feet: { x: number; y: number; z: 
   }
 }
 
+/**
+ * 实体的一句话附加标注。
+ *
+ * **玩家标`player`**：实体的 `name` 字段对玩家存的是 username 而不是类型名
+ * （见下面 sampleEntities 的注释），所以一个叫 Notch 的玩家在快照里长这样：
+ * `- Notch#12 8m (...)` —— 跟`- zombie#7 3m (...)` 结构上一模一样，模型
+ * 分不出这是人还是怪物。而它要决定"打不打得起"，就必须先知道那是谁。
+ *
+ * 村民标职业/婴儿（婴儿不能交易，没标模型会白跑一趟换交易）。
+ */
+function entityTag(e: Record<string, unknown>): string | undefined {
+  try {
+    // 玩家：`name` 恒为 'player'，身份在 `username`。自己已在上面 continue 掉了。
+    if (str(e.name) === 'player') return 'player';
+    if (str(e.name) !== 'villager') return undefined;
+    // 判定与旧 `!entities` 逐字一致：metadata[16] === 1 是婴儿。
+    const meta = e.metadata as unknown[] | null | undefined;
+    if (Array.isArray(meta) && meta[16] === 1) return 'baby';
+    const prof = getVillagerProfession(e);
+    return typeof prof === 'string' && prof !== '' && prof !== 'Unknown' ? prof : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 function sampleEntities(
   bot: Record<string, unknown>,
   feet: { x: number; y: number; z: number },
@@ -604,7 +680,13 @@ function sampleEntities(
       out.push({
         id: Number(e.id),
         // 玩家的 `name` 是类型名 'player'，身份在 `username`（mineflayer addNewPlayer）。
-        name: str(e.username) ?? str(e.name ?? e.displayName) ?? 'unknown',
+        // 掉落物的 `name` 是类型名 'item'，**真正的物品名在 displayName 里**。
+        // 原来优先取 name，于是列表里全是 'item#85889'——模型看不出那是什么东西，pia
+        // 反复问"脚边那两个吸不动的掉落物到底是什么物品"就是这个原因。
+        name:
+          str(e.username) ??
+          (str(e.name) === 'item' ? str(e.displayName) : (str(e.name) ?? str(e.displayName))) ??
+          'unknown',
         kind: str(e.kind ?? e.type),
         distance: Math.round(d * 10) / 10,
         x: e.position.x,
@@ -613,6 +695,7 @@ function sampleEntities(
         // mineflayer 不给实体填 `health`（entities.js 里零命中）→ 恒为 null，
         // 渲染时会省略 `hp`。留字段是为了将来有来源时不必改结构。
         health: num(e.health),
+        tag: entityTag(e as Record<string, unknown>),
       });
     }
   } catch {
@@ -702,67 +785,138 @@ function screenshotOf(vision: unknown): LiveScreenshot {
 
 const UNKNOWN = 'unknown';
 
-/** 把快照渲成追加在请求末尾的文本块（放最后，不破坏前缀缓存）。 */
-export function renderLiveState(s: LiveState): string {
-  const lines: string[] = [];
-  const b = s.body;
-  lines.push(
-    `Body: health ${b.health ?? UNKNOWN} food ${b.food ?? UNKNOWN} saturation ${b.saturation ?? UNKNOWN} ` +
-      `oxygen ${b.oxygen ?? UNKNOWN} xp ${b.xpLevel ?? UNKNOWN} pose ${b.pose ?? UNKNOWN} ` +
-      `onGround ${b.onGround ?? UNKNOWN} effects ${b.effects.length > 0 ? b.effects.join(', ') : 'none'}`,
-  );
-  const h = s.held;
-  lines.push(
-    `Held: main ${h.mainHand ?? 'empty'}${h.mainHandDurability != null ? ` (durability ${Math.round(h.mainHandDurability * 100)}%)` : ''} ` +
-      `off ${h.offHand ?? 'empty'} armor ${h.armor.length > 0 ? h.armor.join('/') : 'none'}`,
-  );
-  lines.push(
-    `Backpack (free ${s.backpack.freeSlots ?? UNKNOWN}): ${s.backpack.items.length > 0 ? s.backpack.items.join(', ') : 'empty'}`,
-  );
-  const p = s.position;
-  lines.push(
-    `Position: ${p.x ?? UNKNOWN},${p.y ?? UNKNOWN},${p.z ?? UNKNOWN} facing yaw ${p.yaw ?? UNKNOWN} pitch ${p.pitch ?? UNKNOWN} ` +
-      `speed ${p.speed ?? UNKNOWN} dimension ${p.dimension ?? UNKNOWN} biome ${p.biome ?? UNKNOWN}`,
-  );
-  const e = s.environment;
-  lines.push(
-    `Environment: day ${e.day ?? UNKNOWN} time ${e.timeOfDay ?? UNKNOWN} weather ${e.weather} light ${e.light ?? UNKNOWN} (confidence ${e.lightConfidence})`,
-  );
-  const entHead = `Nearby entities (within ${PERCEPTION_RADIUS}: ${s.entities.length}${s.entitiesTruncated > 0 ? `+${s.entitiesTruncated} more` : ''})`;
-  lines.push(
-    `${entHead}:\n${s.entities.map((x) => `- ${x.name}#${x.id} ${x.distance}m (${x.x},${x.y},${x.z})${x.health != null ? ` hp ${x.health}` : ''}`).join('\n') || 'none'}`,
-  );
-  if (s.entitiesSummary.length > 0) {
-    lines.push(`- farther (merged): ${s.entitiesSummary.join(', ')}`);
+/**
+ * 把逐格清单聚成"我总共有几个"：`[12]oak_logx16` + `[9]oak_logx4` → `oak_logx20`。
+ *
+ * 旧 `!inventory` 给的正是这个聚合（模型问"我有几个木头"时，让它把 36 格
+ * 心算一遍是找错）。搬进快照后那个工具再无独有价值。
+ * 名字里出现 `x数字` 只在末尾认一次（mc 物品名不会以 x+数字结尾）。
+ */
+export function aggregateTotals(items: readonly string[]): string[] {
+  const counts = new Map<string, number>();
+  for (const raw of items) {
+    const m = /^(?:\*)?\[\d+\](.+?)x(\d+)$/.exec(raw);
+    if (m == null) continue;
+    const name = m[1];
+    const count = Number(m[2]);
+    if (typeof name !== 'string' || !Number.isFinite(count)) continue;
+    counts.set(name, (counts.get(name) ?? 0) + count);
   }
-  const blkHead = `Nearby key blocks (within ${PERCEPTION_RADIUS}: ${s.blocks.length}${s.blocksTruncated > 0 ? `+${s.blocksTruncated} more` : ''})`;
-  lines.push(
-    `${blkHead}:\n${s.blocks.map((x) => `- ${x.name} ${x.distance}m (${x.x},${x.y},${x.z})`).join('\n') || 'none'}`,
-  );
-  if (s.blocksSummary.length > 0) {
-    lines.push(`- farther (merged): ${s.blocksSummary.join(', ')}`);
-  }
-  if (s.screenshot.ref != null) {
-    const age = Date.now() - s.screenshot.ref.takenAt;
-    lines.push(`Screenshot: ${s.screenshot.ref.file} (taken ${Math.max(0, Math.round(age / 1000))}s ago)`);
-  } else {
-    lines.push(`Screenshot: none (${s.screenshot.unavailableReason ?? UNKNOWN})`);
-  }
-  lines.push(
+  return [...counts.entries()]
+    .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+    .map(([name, count]) => `${name}x${count}`);
+}
+
+/**
+ * 快照的段落名。`stats(type=…)` 就是按它挑"要看哪一方面"——
+ * 段落是**同一份采样**的不同切面，不存在第二套数据。
+ */
+export const LIVE_SECTION_KEYS = [
+  'body', 'ops', 'held', 'backpack', 'position', 'environment',
+  'entities', 'blocks', 'screenshot', 'goal', 'meta',
+] as const;
+
+export type LiveSectionKey = (typeof LIVE_SECTION_KEYS)[number];
+
+/** 每段渲成若干行：有的段有附带行（backpack 的 totals、entities 的 farther merged）。 */
+const SECTION_RENDERERS: Record<LiveSectionKey, (s: LiveState) => string[]> = {
+  body: (s) => {
+    const b = s.body;
+    // oxygen 故意不显示：mineflayer 的 oxygenLevel 在 1.20.6 上取不到 air_supply，
+    // 会出现 -1、"干燥洞窟里 0"这种不可能的读数（模型真机报过），摆出来只会误导判断。
+    // 水下安全改用 submerged（头+脚都是水）那条独立信号。
+    return [
+      `Body: health ${b.health ?? UNKNOWN} food ${b.food ?? UNKNOWN} saturation ${b.saturation ?? UNKNOWN} ` +
+        `xp ${b.xpLevel ?? UNKNOWN} pose ${b.pose ?? UNKNOWN} ` +
+        `onGround ${b.onGround ?? UNKNOWN} effects ${b.effects.length > 0 ? b.effects.join(', ') : 'none'}`,
+    ];
+  },
+  // 危险操作许可：默认全禁，要用得先授权。**必须让模型看得见**——否则
+  // 它不知道自己现在能不能倒水/点火，只能靠"试一下被拒"来发现，那是最贵的发现方式。
+  ops: (s) => [`DangerousOps: ${s.dangerousOps}`, `Safeguards: ${s.safeguards}`],
+  held: (s) => {
+    const h = s.held;
+    return [
+      `Held: main ${h.mainHand ?? 'empty'}${h.mainHandDurability != null ? ` (耐久剩余 ${Math.round(h.mainHandDurability * 100)}%${h.mainHandDurabilityRaw != null ? `，原始 ${h.mainHandDurabilityRaw}` : ''})` : ''} ` +
+        `off ${h.offHand ?? 'empty'} armor ${h.armor.length > 0 ? h.armor.join('/') : 'none'}`,
+    ];
+  },
+  backpack: (s) => {
+    const lines = [
+      `Backpack (free ${s.backpack.freeSlots ?? UNKNOWN}): ${s.backpack.items.length > 0 ? s.backpack.items.join(', ') : 'empty'}`,
+    ];
+    const totals = aggregateTotals(s.backpack.items);
+    if (totals.length > 0) lines.push(`- totals: ${totals.join(', ')}`);
+    return lines;
+  },
+  position: (s) => {
+    const p = s.position;
+    return [
+      `Position (此刻): ${p.x ?? UNKNOWN},${p.y ?? UNKNOWN},${p.z ?? UNKNOWN} facing yaw ${p.yaw ?? UNKNOWN} pitch ${p.pitch ?? UNKNOWN} ` +
+        `speed ${p.speed ?? UNKNOWN} dimension ${p.dimension ?? UNKNOWN} biome ${p.biome ?? UNKNOWN}`,
+    ];
+  },
+  environment: (s) => {
+    const e = s.environment;
+    return [
+      `Environment: day ${e.day ?? UNKNOWN} time ${e.timeOfDay ?? UNKNOWN} weather ${e.weather} light ${e.light ?? UNKNOWN} (confidence ${e.lightConfidence})`,
+    ];
+  },
+  entities: (s) => {
+    const head = `Nearby entities (within ${PERCEPTION_RADIUS}: ${s.entities.length}${s.entitiesTruncated > 0 ? `+${s.entitiesTruncated} more` : ''})`;
+    const lines = [
+      `${head}:\n${s.entities.map((x) => `- ${x.name}#${x.id} ${x.distance}m (${x.x},${x.y},${x.z})${x.health != null ? ` hp ${x.health}` : ''}${x.tag != null ? ` (${x.tag})` : ''}`).join('\n') || 'none'}`,
+    ];
+    if (s.entitiesSummary.length > 0) {
+      lines.push(`- farther (merged): ${s.entitiesSummary.join(', ')}`);
+    }
+    return lines;
+  },
+  blocks: (s) => {
+    const head = `Nearby key blocks (within ${PERCEPTION_RADIUS}: ${s.blocks.length}${s.blocksTruncated > 0 ? `+${s.blocksTruncated} more` : ''})`;
+    const lines = [
+      `${head}:\n${s.blocks.map((x) => `- ${x.name} ${x.distance}m (${x.x},${x.y},${x.z})`).join('\n') || 'none'}`,
+    ];
+    if (s.blocksSummary.length > 0) {
+      lines.push(`- farther (merged): ${s.blocksSummary.join(', ')}`);
+    }
+    return lines;
+  },
+  screenshot: (s) => {
+    if (s.screenshot.ref != null) {
+      const age = Date.now() - s.screenshot.ref.takenAt;
+      return [`Screenshot: ${s.screenshot.ref.file} (taken ${Math.max(0, Math.round(age / 1000))}s ago)`];
+    }
+    return [`Screenshot: none (${s.screenshot.unavailableReason ?? UNKNOWN})`];
+  },
+  goal: (s) => [
     `Goal: ${s.goal ?? 'none'} Todos: ${
       s.todos.length > 0 ? s.todos.map((t) => `${t.done ? '✓' : '○'}${t.text}`).join('; ') : 'none'
     }`,
-  );
-  lines.push(
+  ],
+  meta: (s) => [
     `Meta: gamemode ${s.meta.gamemode ?? UNKNOWN} screen ${s.meta.openScreen ?? 'none'} ` +
       `action ${s.meta.currentAction ?? 'idle'} posture ${s.meta.posture ?? 'standing'}`,
-  );
+  ],
+};
+
+/** 只渲指定段落（`stats(type=…)` 用）。顺序以 `keys` 为准。 */
+export function renderSections(s: LiveState, keys: readonly LiveSectionKey[]): string {
+  const lines: string[] = [];
+  for (const key of keys) lines.push(...SECTION_RENDERERS[key](s));
   return lines.join('\n');
+}
+
+/** 把快照渲成追加在请求末尾的文本块（放最后，不破坏前缀缓存）。 */
+export function renderLiveState(s: LiveState): string {
+  return renderSections(s, LIVE_SECTION_KEYS);
 }
 
 export default {
   sampleLiveState,
   renderLiveState,
+  renderSections,
+  aggregateTotals,
   compassOf,
   budgetedList,
   summarizeOmitted,

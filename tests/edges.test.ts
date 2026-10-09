@@ -52,19 +52,28 @@ describe('hysteresis: fire once, reset, fire again', () => {
 });
 
 describe('keyed detectors: one armed state per object', () => {
-  it('two zombies fire independently; one leaving does not block the other', () => {
+  it('同一类型算一条边缘；不同种类各自独立', () => {
+    // 「身边有敌对生物」是**一类事实**，不是"第 1 号僵尸"——按 id 做边缘的话，
+    // 一晚上十几只怪各报一次（真机日志里就是这样刷屏的）。
     const w = createEdgeWatcher();
+    const near = (evts: Array<{ type: string; key: unknown }>): unknown[] =>
+      evts.filter((e) => e.type === 'entity.hostile_nearby').map((e) => e.key);
+
     const first = w.poll({ entities: [ent(1, 10), ent(2, 50)] });
-    expect(first.filter((e) => e.type === 'entity.hostile_nearby')).toHaveLength(1);
+    expect(near(first)).toEqual(['zombie']);
 
-    // 1 号在 32~40 滞回区里晃：不重发；2 号走进来：发。
-    const second = w.poll({ entities: [ent(1, 35), ent(2, 20)] });
-    expect(second.filter((e) => e.type === 'entity.hostile_nearby').map((e) => e.key)).toEqual([2]);
+    // 同类在 32~40 滞回区里晃：不重发
+    expect(near(w.poll({ entities: [ent(1, 35), ent(2, 20)] }))).toEqual([]);
 
-    // 1 号彻底离开 40 格再回来：再发一次。
-    expect(w.poll({ entities: [ent(1, 50)] })).toEqual([]);
-    const third = w.poll({ entities: [ent(1, 10)] });
-    expect(third.filter((e) => e.type === 'entity.hostile_nearby').map((e) => e.key)).toEqual([1]);
+    // 全部离开 40 格：解除 arm（不报事件）
+    expect(near(w.poll({ entities: [ent(1, 50), ent(2, 50)] }))).toEqual([]);
+
+    // 再进来：再报一次
+    expect(near(w.poll({ entities: [ent(1, 10)] }))).toEqual(['zombie']);
+
+    // 换一种怪：另一条边缘，独立触发
+    const other = w.poll({ entities: [ent(1, 10), ent(3, 10, { name: 'skeleton' })] });
+    expect(near(other)).toEqual(['skeleton']);
   });
 
   it('a dead entity disarms silently without an event', () => {
@@ -76,6 +85,19 @@ describe('keyed detectors: one armed state per object', () => {
     expect(
       w.poll({ entities: [ent(1, 10)] }).filter((e) => e.type === 'entity.hostile_nearby'),
     ).toHaveLength(1);
+  });
+
+  it('food_items_low 说清数的是**背包食物**，并把饥饿值一起带上', () => {
+    // 模型反馈过：旧名 `inventory.food_low` 配 `{foodCount: 0}` 读起来像
+    // "快饿死了"，而同一轮快照是 `food 20`（饥饿值满的），于是它误判。
+    const w = createEdgeWatcher();
+    const fired = w.poll({ foodCount: 0, food: 20 });
+    const ev = fired.find((e) => e.type === 'inventory.food_items_low');
+    expect(ev).toBeDefined();
+    // 两个字段一起给：foodItems = 还有没有存货，food = 现在饿不饿
+    expect(ev?.delta).toMatchObject({ foodItems: 0, food: 20 });
+    // 旧名不该再出现
+    expect(fired.some((e) => e.type === 'inventory.food_low')).toBe(false);
   });
 
   it('hostile_far is keyed by TYPE, not by entity id', () => {
@@ -105,7 +127,8 @@ describe('keyed detectors: one armed state per object', () => {
   it('hostile_far keeps different types on independent edges', () => {
     const w = createEdgeWatcher();
     const far = (id: number, d: number, name: string) => ({ id, name, distance: d });
-    const fired = w.poll({ entities: [far(1, 50, 'zombie'), far(2, 55, 'skeleton')] })
+    const fired = w
+      .poll({ entities: [far(1, 50, 'zombie'), far(2, 55, 'skeleton')] })
       .filter((e) => e.type === 'entity.hostile_far')
       .map((e) => e.key)
       .sort();
@@ -115,9 +138,9 @@ describe('keyed detectors: one armed state per object', () => {
   it('hostile_far ignores mobs inside the perception radius', () => {
     const w = createEdgeWatcher();
     // 32 以内属于 hostile_nearby 的辖区，远区不该抢报。
-    expect(
-      w.poll({ entities: [ent(1, 20)] }).filter((e) => e.type === 'entity.hostile_far'),
-    ).toEqual([]);
+    expect(w.poll({ entities: [ent(1, 20)] }).filter((e) => e.type === 'entity.hostile_far')).toEqual(
+      [],
+    );
   });
 
   it('durability_low stays armed while the hand flickers between tools', () => {
@@ -137,7 +160,8 @@ describe('keyed detectors: one armed state per object', () => {
     expect(w.poll(hand(0.05)).map((e) => e.type)).toContain('tool.durability_low');
   });
 
-  it('player.nearby uses its own 5/8 band per player', () => {    const w = createEdgeWatcher();
+  it('player.nearby uses its own 5/8 band per player', () => {
+    const w = createEdgeWatcher();
     const player = (id: number, d: number) => ({ id, name: 'steve', kind: 'player', distance: d });
     expect(w.poll({ entities: [player(7, 4)] }).map((e) => e.type)).toContain('player.nearby');
     expect(w.poll({ entities: [player(7, 6)] })).toEqual([]);
@@ -194,7 +218,7 @@ describe('resolvePriority: defaults are starting points', () => {
   };
 
   it('face-hugging hostile at critical health escalates to 5', () => {
-    expect(resolvePriority({ type: 'entity.hostile_nearby', level: 3, key: 1 }, snap)).toBe(5);
+    expect(resolvePriority({ type: 'entity.hostile_nearby', level: 3, key: 'zombie' }, snap)).toBe(5);
   });
 
   it('emergency stop words in chat escalate to 4', () => {
@@ -248,7 +272,8 @@ describe('event shape: delta plus action context, no Live State repeat', () => {
       dimension: 'overworld',
     });
     expect(e?.type).toBe('entity.hostile_nearby');
-    expect(e?.key).toBe(1);
+    // key 是**类型**（同类只报一次），不是实体 id
+    expect(e?.key).toBe('zombie');
     expect(e?.actionContext).toEqual({
       currentAction: 'action:collectBlocks',
       goal: 'gather wood',
@@ -483,7 +508,7 @@ describe('snapshotFromBot entity fields', () => {
       health: 5,
       entities: [{ id: 9, name: 'zombie', distance: 5, lockedOn: true }],
     };
-    expect(resolvePriority({ type: 'entity.hostile_nearby', level: 3, key: 9 }, snapshot)).toBe(4);
+    expect(resolvePriority({ type: 'entity.hostile_nearby', level: 3, key: 'zombie' }, snapshot)).toBe(4);
   });
 
   it('never treats a PLAYER named creeper/tnt as a mob (L5 false positive)', () => {
@@ -514,5 +539,40 @@ describe('snapshotFromBot entity fields', () => {
   it('survives a bot with no entities table', () => {
     expect(snapshotFromBot({ health: 20 }).entities).toBeUndefined();
     expect(snapshotFromBot(null).entities).toBeUndefined();
+  });
+});
+
+describe('kind: repeat（条件成立期间反复报，按 intervalMs 节流）', () => {
+  // 用真实的 world.water.contact 测：它就是 kind:'repeat'、1 秒一次。
+  it('沾到水就一直报，但一秒最多一次；上岸后重新计时', () => {
+    const w = createEdgeWatcher();
+    const realNow = Date.now;
+    let clock = 1_000_000;
+    Date.now = (): number => clock;
+    try {
+      const inWater = { inWater: true };
+
+      // 第一次：立刻报（还没报过）。
+      expect(w.poll(inWater).filter((e) => e.type === 'world.water.contact')).toHaveLength(1);
+
+      // 同一秒内再轮询多次：**不能再报**（否则每 tick 一个会打爆上下文）。
+      clock += 200;
+      expect(w.poll(inWater).filter((e) => e.type === 'world.water.contact')).toHaveLength(0);
+      clock += 400;
+      expect(w.poll(inWater).filter((e) => e.type === 'world.water.contact')).toHaveLength(0);
+
+      // 满 1 秒：再报一次。
+      clock += 500;
+      expect(w.poll(inWater).filter((e) => e.type === 'world.water.contact')).toHaveLength(1);
+
+      // 上岸：停掉，并且计时清零。
+      clock += 5000;
+      expect(w.poll({ inWater: false }).filter((e) => e.type === 'world.water.contact')).toHaveLength(0);
+
+      // 再次沾水：**立刻**报（不该还压着刚才那次的时间戳）。
+      expect(w.poll(inWater).filter((e) => e.type === 'world.water.contact')).toHaveLength(1);
+    } finally {
+      Date.now = realNow;
+    }
   });
 });

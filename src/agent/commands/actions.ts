@@ -1,7 +1,15 @@
 import * as skills from '../library/skills.js';
+import { markDiscarded } from '../auto_pickup.js';
+import { permits } from '../permits.js';
+import { safeguards } from '../safeguards.js';
+import { DANGEROUS_OPS, isAuthorizable } from '../dangerous_ops.js';
 import { td, tp, MESSAGES } from '../../prompts.js';
+import { interactList } from './interact.js';
 
 // 命令参数定义（domain / optional / default 等保留原样透传）
+/** 给工具回执加个空行，读起来不挤在一起（和 queries.ts 同款）。 */
+const pad = (str: string): string => '\n' + str + '\n';
+
 export interface CommandParamDef {
     type: string;
     description?: string;
@@ -16,13 +24,35 @@ export interface AgentCommand {
     name: string;
     description: string;
     params?: Record<string, CommandParamDef>;
-    perform: (agent: any, ...args: any[]) => unknown;
+    perform: CommandPerform;
+    /**
+     * 这条命令的回执要**附一张现拍的截图**。默认不给。
+     *
+     * 只有真正需要"看画面"的命令才开（目前只有 `!stats`）：图片是按 token 计费
+     * 的重货，白送一张进上下文，等于每调用一次就烧一笔钱。所以默认纯文本，
+     * 让模型**按需**要图 —— 这也正好是 `!stats` 的语义（"我现在要看一眼"）。
+     */
+    withScreenshot?: boolean;
 }
 
 export type AgentActionFn = (agent: any, ...args: any[]) => Promise<unknown>;
 
+/**
+ * 命令的执行体。用带调用签名的接口而不是裸函数类型，是为了能挂 `longRunning`
+ * 这个**运行时**标记 —— 它比手工维护一份"哪些命令耗时长"的清单可靠：
+ * 清单会漏、会过期，而这个标记是 `runAsAction` 自己打上去的，走身体通道就一定有。
+ */
+export interface CommandPerform {
+    (agent: any, ...args: any[]): unknown;
+    /**
+     * 走身体通道（`actions.runAction`）= **长时间命令**（能跑几分钟）。
+     * 由 `runAsAction` 自动打上，别手工设。CLI 据此强制异步。
+     */
+    longRunning?: boolean;
+}
 
-function runAsAction (actionFn: AgentActionFn, timeout = -1): AgentCommand['perform'] {
+
+function runAsAction (actionFn: AgentActionFn, timeout = -1): CommandPerform {
     let actionLabel: string | null = null;  // Will be set on first use
 
     const wrappedAction = async function (agent: any, ...args: any[]): Promise<string | null | undefined> {
@@ -41,37 +71,23 @@ function runAsAction (actionFn: AgentActionFn, timeout = -1): AgentCommand['perf
         return code_return.message;
     };
 
-    return wrappedAction;
+    // **它跑在身体通道里，而且 `timeout` 默认 -1（没有上限）** —— 寻路几分钟是常态。
+    // 打上这个标记，外部 CLI 就不用猜哪些命令要异步：谁走身体通道谁就是长命令。
+    (wrappedAction as CommandPerform).longRunning = true;
+    return wrappedAction as CommandPerform;
 }
 
 export const actionsList: AgentCommand[] = [
     // 注：停下走循环 Stop 工具（不占通道，忙时也能调）；
     // 旧 !stop 命令已删，避免跟 Stop 重名混淆。
-    {
-        name: '!stfu',
-        description: td('stfu'),
-        // eslint-disable-next-line require-await -- command interface requires a promise result
-        perform: async function (agent: any): Promise<void> {
-            agent.openChat(MESSAGES.shuttingUp);
-            agent.shutUp();
-            return;
-        }
-    },
+    // 旧 !stfu 也删了：它只是让 agent 不投递事件，模型本来就能不管噪音，
+    // 而"静音时直接丢事件"反而会吞掉该看见的东西。
     {
         name: '!restart',
         description: td('restart'),
         // eslint-disable-next-line require-await -- command interface requires a promise result
         perform: async function (agent: any): Promise<void> {
             agent.cleanKill();
-        }
-    },
-    {
-        name: '!clearChat',
-        description: td('clearChat'),
-        // eslint-disable-next-line require-await -- command interface requires a promise result
-        perform: async function (agent: any): Promise<string> {
-            agent.history.clear();
-            return agent.name + "'s chat history was cleared, starting new conversation from scratch.";
         }
     },
     {
@@ -171,18 +187,6 @@ export const actionsList: AgentCommand[] = [
         })
     },
     {
-        name: '!givePlayer',
-        description: td('givePlayer'),
-        params: {
-            'player_name': { type: 'string', description: tp('givePlayer', 'player_name') },
-            'item_name': { type: 'ItemName', description: tp('givePlayer', 'item_name') },
-            'num': { type: 'int', description: tp('givePlayer', 'num'), domain: [1, Number.MAX_SAFE_INTEGER] }
-        },
-        perform: runAsAction(async (agent: any, player_name: string, item_name: string, num: number) => {
-            await skills.giveToPlayer(agent.bot, item_name, player_name, num);
-        })
-    },
-    {
         name: '!consume',
         description: td('consume'),
         params: {'item_name': { type: 'ItemName', description: tp('consume', 'item_name') }},
@@ -199,36 +203,6 @@ export const actionsList: AgentCommand[] = [
         })
     },
     {
-        name: '!putInChest',
-        description: td('putInChest'),
-        params: {
-            'item_name': { type: 'ItemName', description: tp('putInChest', 'item_name') },
-            'num': { type: 'int', description: tp('putInChest', 'num'), domain: [1, Number.MAX_SAFE_INTEGER] }
-        },
-        perform: runAsAction(async (agent: any, item_name: string, num: number) => {
-            await skills.putInChest(agent.bot, item_name, num);
-        })
-    },
-    {
-        name: '!takeFromChest',
-        description: td('takeFromChest'),
-        params: {
-            'item_name': { type: 'ItemName', description: tp('takeFromChest', 'item_name') },
-            'num': { type: 'int', description: tp('takeFromChest', 'num'), domain: [1, Number.MAX_SAFE_INTEGER] }
-        },
-        perform: runAsAction(async (agent: any, item_name: string, num: number) => {
-            await skills.takeFromChest(agent.bot, item_name, num);
-        })
-    },
-    {
-        name: '!viewChest',
-        description: td('viewChest'),
-        params: { },
-        perform: runAsAction(async (agent: any) => {
-            await skills.viewChest(agent.bot);
-        })
-    },
-    {
         name: '!discard',
         description: td('discard'),
         params: {
@@ -239,7 +213,16 @@ export const actionsList: AgentCommand[] = [
             const start_loc = agent.bot.entity.position;
             await skills.moveAway(agent.bot, 5);
             await skills.discard(agent.bot, item_name, num);
-            await skills.goToPosition(agent.bot, start_loc.x, start_loc.y, start_loc.z, 0);
+
+            // **不要再走回原地**：原来扔完就 goToPosition 回 start_loc，而自动拾取的半径是
+
+            // 8 格——走回去正好把刚扔的东西又捡回来（模型报过"discard 自己走回来捡回"）。
+
+            // 同时登记一下，30 秒内自动拾取会跳过这个物品名。
+
+            markDiscarded(item_name);
+
+            skills.log(agent.bot, `扔掉了 ${num} 个 ${item_name}（30 秒内自动拾取会跳过它）。`);
         })
     },
     {
@@ -253,36 +236,6 @@ export const actionsList: AgentCommand[] = [
             await skills.collectBlock(agent.bot, type, num);
         }, 10) // 10 分钟超时
     },
-    {
-        name: '!craftRecipe',
-        description: td('craftRecipe'),
-        params: {
-            'recipe_name': { type: 'ItemName', description: tp('craftRecipe', 'recipe_name') },
-            'num': { type: 'int', description: tp('craftRecipe', 'num'), domain: [1, Number.MAX_SAFE_INTEGER] }
-        },
-        perform: runAsAction(async (agent: any, recipe_name: string, num: number) => {
-            await skills.craftRecipe(agent.bot, recipe_name, num);
-        })
-    },
-    {
-        name: '!smeltItem',
-        description: td('smeltItem'),
-        params: {
-            'item_name': { type: 'ItemName', description: tp('smeltItem', 'item_name') },
-            'num': { type: 'int', description: tp('smeltItem', 'num'), domain: [1, Number.MAX_SAFE_INTEGER] }
-        },
-        perform: runAsAction(async (agent: any, item_name: string, num: number) => {
-            await skills.smeltItem(agent.bot, item_name, num);
-        })
-    },
-    {
-        name: '!clearFurnace',
-        description: td('clearFurnace'),
-        params: { },
-        perform: runAsAction(async (agent: any) => {
-            await skills.clearNearestFurnace(agent.bot);
-        })
-    },
         {
         name: '!placeHere',
         description: td('placeHere'),
@@ -293,31 +246,49 @@ export const actionsList: AgentCommand[] = [
         })
     },
     {
+        name: '!placeBlock',
+        description: td('placeBlock'),
+        params: {
+            'type': { type: 'BlockOrItemName', description: tp('placeBlock', 'type') },
+            'x': { type: 'float', description: tp('placeBlock', 'x') },
+            'y': { type: 'float', description: tp('placeBlock', 'y') },
+            'z': { type: 'float', description: tp('placeBlock', 'z') }
+        },
+        perform: runAsAction(async (agent: any, type: string, x: number, y: number, z: number) => {
+            // **往指定坐标放方块**。placeHere 只能放"脚下当前位置"，搭下界门那种
+            // 4x5 门框根本摆不出来——模型真机报过这个硬缺口（凑够黑曜石也没用）。
+            const ok = await skills.placeBlock(agent.bot, type, x, y, z);
+            if (!ok) {
+                skills.log(agent.bot, `没能把 ${type} 放到 (${x},${y},${z})：那一格可能不是空气，或者够不着。`);
+            }
+        })
+    },
+    {
+        name: '!mineBlock',
+        description: td('mineBlock'),
+        params: {
+            'x': { type: 'float', description: tp('mineBlock', 'x') },
+            'y': { type: 'float', description: tp('mineBlock', 'y') },
+            'z': { type: 'float', description: tp('mineBlock', 'z') }
+        },
+        perform: runAsAction(async (agent: any, x: number, y: number, z: number) => {
+            // **挖指定的那一格**。collectBlocks 是自己找最近的、digDown 只会往下；
+            // 模型真机报过硬缺口："我在 100 格深的洞里没有挖掉头顶方块的工具，
+            // 所以搭不了落脚点"。和 placeBlock 对称的原语。
+            await skills.mineBlockAt(agent.bot, x, y, z);
+        })
+    },
+    {
         name: '!attack',
         description: td('attack'),
-        params: {'type': { type: 'string', description: tp('attack', 'type')}},
-        perform: runAsAction(async (agent: any, type: string) => {
-            await skills.attackNearest(agent.bot, type, true);
-        })
-    },
-    {
-        name: '!attackPlayer',
-        description: td('attackPlayer'),
-        params: {'player_name': { type: 'string', description: tp('attackPlayer', 'player_name')}},
-        perform: runAsAction(async (agent: any, player_name: string) => {
-            const player = agent.bot.players[player_name]?.entity;
-            if (!player) {
-                skills.log(agent.bot, `Could not find player ${player_name}.`);
-                return false;
-            }
-            await skills.attackEntity(agent.bot, player, true);
-        })
-    },
-    {
-        name: '!goToBed',
-        description: td('goToBed'),
-        perform: runAsAction(async (agent: any) => {
-            await skills.goToBed(agent.bot);
+        // target 是什么意思由 type 决定，**type 必填**：靠字符串形状隐式猜
+        // 等于把"玩家优先"这个人为约定藏起来，而模型既不知道它存在也无法覆盖。
+        params: {
+            'target': { type: 'string', description: tp('attack', 'target') },
+            'type': { type: 'string', description: tp('attack', 'type') }
+        },
+        perform: runAsAction(async (agent: any, target: string, type: string) => {
+            await skills.attackTarget(agent.bot, target, type, true);
         })
     },
     {
@@ -327,48 +298,6 @@ export const actionsList: AgentCommand[] = [
         perform: runAsAction(async (agent: any, seconds: number) => {
             await skills.stay(agent.bot, seconds);
         })
-    },
-    {
-        name: '!showVillagerTrades',
-        description: td('showVillagerTrades'),
-        params: {'id': { type: 'int', description: tp('showVillagerTrades', 'id') }},
-        perform: runAsAction(async (agent: any, id: number) => {
-            await skills.showVillagerTrades(agent.bot, id);
-        })
-    },
-    {
-        name: '!tradeWithVillager',
-        description: td('tradeWithVillager'),
-        params: {
-            'id': { type: 'int', description: tp('tradeWithVillager', 'id') },
-            'index': { type: 'int', description: tp('tradeWithVillager', 'index'), domain: [1, Number.MAX_SAFE_INTEGER] },
-            'count': { type: 'int', description: tp('tradeWithVillager', 'count'), domain: [1, Number.MAX_SAFE_INTEGER] },
-        },
-        perform: runAsAction(async (agent: any, id: number, index: number, count: number) => {
-            await skills.tradeWithVillager(agent.bot, id, index, count);
-        })
-    },
-    {
-        name: '!lookAtPlayer',
-        description: td('lookAtPlayer'),
-        params: {
-            'player_name': { type: 'string', description: tp('lookAtPlayer', 'player_name') },
-            'direction': {
-                type: 'string',
-                description: tp('lookAtPlayer', 'direction'),
-            }
-        },
-        perform: async function(agent: any, player_name: string, direction: string): Promise<string> {
-            if (direction !== 'at' && direction !== 'with') {
-                return "Invalid direction. Use 'at' or 'with'.";
-            }
-            let result = "";
-            const actionFn = async (): Promise<void> => {
-                result = await agent.vision_interpreter.lookAtPlayer(player_name, direction);
-            };
-            await agent.actions.runAction('action:lookAtPlayer', actionFn);
-            return result;
-        }
     },
     {
         name: '!lookAtPosition',
@@ -413,5 +342,93 @@ export const actionsList: AgentCommand[] = [
         perform: runAsAction(async (agent: any, tool_name: string, target: string) => {
             await skills.useToolOn(agent.bot, tool_name, target);
         })
+    },
+    // 交互类：useBlock / useEntity / craft。它们取代了一批把固定流程写死的中层
+    // 工具（craftRecipe / smeltItem / putInChest / takeFromChest / viewChest /
+    // tradeWithVillager / showVillagerTrades / goToBed / clearFurnace / givePlayer）。
+    ...interactList,
+    // 危险操作许可。**开关合一**：`revoke=true` 即收回授权。
+    // 原来"授予 / 收回"是两个工具，模型要收回得先想起那个名字——而
+    // restoreAllSafety 的注释里写的就是这个真实坑：漏掉一个等于没恢复干净。
+    // 合并后"收回"就在"授予"的同一个 schema 里，不存在想不起来这回事。
+    // minutes / calls 二选一：按时间，或按**工具调用次数**（失败也算，见 invokeTool 的 finally）。
+    {
+        name: '!allowDangerousOps',
+        description: td('allowDangerousOps'),
+        params: {
+            'minutes': { type: 'int', description: tp('allowDangerousOps', 'minutes'), domain: [1, 120] },
+            'calls': { type: 'int', description: tp('allowDangerousOps', 'calls'), domain: [1, 20] },
+            'reason': { type: 'string', description: tp('allowDangerousOps', 'reason') },
+            'ops': { type: 'string', description: tp('allowDangerousOps', 'ops') },
+            'revoke': { type: 'boolean', description: tp('allowDangerousOps', 'revoke') }
+        },
+        perform: function (agent: any, minutes: number, calls: number, reason: string, ops: string, revoke?: boolean): string {
+            void agent;
+            if (revoke === true) {
+                permits.revoke();
+                return pad(`已收回危险操作授权。${permits.describe(Date.now())}`);
+            }
+            const wanted: string[] = String(ops ?? '').split(',').map((t) => t.trim()).filter((t) => t !== '');
+            const unknown: string[] = wanted.filter((id) => !isAuthorizable(id));
+            if (unknown.length > 0) {
+                return pad(
+                    `没有这些危险操作：${unknown.join('、')}。可用的有：${DANGEROUS_OPS.map((o) => o.id).join('、')}。`,
+                );
+            }
+            const byCalls = typeof calls === 'number' && Number.isFinite(calls) && calls > 0;
+            if (byCalls) {
+                permits.grantCalls(wanted.length > 0 ? wanted : null, calls, reason, Date.now());
+                return pad(`已授权接下来 ${calls} 次工具调用。${permits.describe(Date.now())}`);
+            }
+            const mins = typeof minutes === 'number' && Number.isFinite(minutes) && minutes > 0 ? minutes : 1;
+            permits.grant(wanted.length > 0 ? wanted : null, mins, reason, Date.now());
+            // describe() 里已经带了"原因"，这里不再重复一遍（真机反馈：原因重复两遍）。
+            return pad(`已授权 ${mins} 分钟。${permits.describe(Date.now())}`);
+        }
+    },
+    // 保命程序开关：和上面的危险操作许可**是两件事** —— 那管"拦不拦动作"，
+    // 这里管"救不救命"。默认都开着，模型只有在清楚后果时才关。
+    // 同样**开关合一**：`restore=true` 即重新打开保命程序。
+    {
+        name: '!disableSafeguards',
+        description: td('disableSafeguards'),
+        params: {
+            'minutes': { type: 'int', description: tp('disableSafeguards', 'minutes'), domain: [1, 120] },
+            'calls': { type: 'int', description: tp('disableSafeguards', 'calls'), domain: [1, 20] },
+            'reason': { type: 'string', description: tp('disableSafeguards', 'reason') },
+            'restore': { type: 'boolean', description: tp('disableSafeguards', 'restore') }
+        },
+        perform: function (agent: any, minutes: number, calls: number, reason: string, restore?: boolean): string {
+            void agent;
+            if (restore === true) {
+                safeguards.release();
+                return pad(`保命程序已重新打开。${safeguards.describe(Date.now())}`);
+            }
+            const byCalls = typeof calls === 'number' && Number.isFinite(calls) && calls > 0;
+            if (byCalls) {
+                safeguards.suppressCalls(calls, reason, Date.now());
+                return pad(`保命程序已关闭，接下来 ${calls} 次工具调用内不介入。${safeguards.describe(Date.now())}`);
+            }
+            const mins = typeof minutes === 'number' && Number.isFinite(minutes) && minutes > 0 ? minutes : 1;
+            safeguards.suppressFor(mins, reason, Date.now());
+            return pad(`保命程序已关闭 ${mins} 分钟。${safeguards.describe(Date.now())}`);
+        }
+    },
+    // 一键恢复**两层**保护：闸门许可 + 保命程序。
+    // 分成两个工具有个真实的坑：模型可能只记得住其中一个（比如只记得
+    // 单独收回某一层），于是"我刚才乱来了，收干净"这件事做不干净——
+    // 授权还挂着，下一轮又被自己放行。紧急情况下要一个不用回忆的刹车。
+    {
+        name: '!restoreAllSafety',
+        description: td('restoreAllSafety'),
+        params: {},
+        perform: function (): string {
+            permits.revokeAll();
+            safeguards.release();
+            const now = Date.now();
+            return pad(
+                `已恢复全部保护。危险操作许可：${permits.describe(now)}。保命程序：${safeguards.describe(now)}。`,
+            );
+        }
     },
 ];

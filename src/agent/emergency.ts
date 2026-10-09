@@ -158,6 +158,22 @@ export interface EmergencyBot {
   stopAll(): void;
   fleeTo(x: number, z: number): void;
   eat(food: string): Promise<void>;
+  /**
+   * 头是不是泡在水里（真正淹没）。**可选**：不实现就当没溺水这回事。
+   *
+   * 为什么要单独一条：模型真机被淹死 5 次，每次都收到 L5 溺水事件，但
+   * runEmergency 只处理"威胁"和"吃"——**根本没有溺水分支**，事件响了没人管。
+   */
+  submerged?(): boolean;
+  /** 往上浮（在水里连跳 + 抬头）。可选，配合 submerged 用。 */
+  swimUp?(): void;
+  /**
+   * 保命是不是被模型关掉了（`!disableSafeguards`）。**可选**：不实现 = 没关。
+   *
+   * 关掉之后连溺水都不再上浮 —— 用户要的就是这个字面意思："角色会一直在水里
+   * 泡着"。模型自己签了生死状，我们不替它反悔。
+   */
+  safeguardsOff?(): boolean;
 }
 
 export interface EmergencyResult {
@@ -196,6 +212,29 @@ export async function runEmergency(
     if (health <= 0) return { escaped: false, reason: 'died' };
     if (lastHealth != null && health < lastHealth) lastHurtAt = now();
     lastHealth = health;
+
+    // **溺水：先把头露出水面，别的统统排后面。**
+    //
+    // 这一支以前完全没有——`EmergencyBot` 里声明了 `submerged()` / `swimUp()`
+    // 却从来没被调用过，于是真机被淹死 5 次：L5 事件响了，循环只问"有没有怪"
+    // 和"饿不饿"，人在水里照样往下掉血。
+    //
+    // 为什么要把后面的逃跑和吃东西一并跳过（`continue`）：水平逃跑在溺水面前
+    // 没有意义，人还在水里，氧气照样掉；吃东西同理。浮起来这几秒里做任何别的
+    // 事，都是在给自己增加氧气的债。
+    //
+    // 顺带这也保证了不会误判成"安全"——跳过 `escaped` 那道判断，必须真的把头
+    // 露出来才会回到正常流程。
+    if (bot.submerged?.() === true) {
+      // **保命被关掉就不碰身体** —— 模型明确表示这几步自己负责，别抢方向盘。
+      // 放在这里而不是外面，是为了保住"关了保命也照样跑别的保命（ fleeTo / 吃）"
+      // 这种语义：关掉的只是**这条**上浮反射，不是整个 emergency。
+      if (bot.safeguardsOff?.() !== true) {
+        bot.swimUp?.();
+        await sleep(tickMs);
+        continue;
+      }
+    }
 
     const feet = bot.feet();
     const threat = feet != null ? nearestThreat(bot.threats(), feet) : null;

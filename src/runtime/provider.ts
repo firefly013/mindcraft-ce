@@ -1,0 +1,237 @@
+/**
+ * P1：profile → pi-ai `Models`/`Model` 的解析层。
+ *
+ * 这一层替换手写的 `src/models/gpt.ts`。它只负责"去哪儿、用什么模型、带什么
+ * 头和 key"，不碰 deliberative 层；`prompter`/`agent` 暂时仍走旧路径（双路径
+ * 迁移，旧代码在等价性验证通过前不删）。
+ *
+ * 关键点：OpenCode Go / Zen 是 pi-ai 的内置 provider，目录里带着正确的
+ * `contextWindow`、`compat`（`thinkingFormat: "deepseek"`、
+ * `requiresReasoningContentOnAssistantMessages`）以及
+ * `withOpenCodeSessionHeader()` 自动注入的 `x-opencode-session`。
+ */
+import {
+  createModels,
+  createProvider,
+  envApiKeyAuth,
+  type Api,
+  type Credential,
+  type CredentialInfo,
+  type CredentialStore,
+  type Model,
+  type Models,
+} from '@earendil-works/pi-ai';
+import { openAICompletionsApi } from '@earendil-works/pi-ai/api/openai-completions.lazy';
+import { opencodeGoProvider } from '@earendil-works/pi-ai/providers/opencode-go';
+import { opencodeProvider } from '@earendil-works/pi-ai/providers/opencode';
+import { openaiProvider } from '@earendil-works/pi-ai/providers/openai';
+import { getKey, hasKey } from '../utils/keys.js';
+import { resolveHeaders } from './headers.js';
+
+/** OpenCode Go 的端点片段（注意必须比 Zen 先匹配，Go 的路径是 Zen 的子路径）。 */
+const GO_HOST = 'opencode.ai/zen/go';
+/** OpenCode Zen 的端点片段。 */
+const ZEN_HOST = 'opencode.ai/zen';
+
+/** 自定义端点未声明窗口时的回退值（与 `src/agent/compaction.ts` 的既有回退一致）。 */
+const FALLBACK_CONTEXT_WINDOW = 128_000;
+
+/** profile.model 的两种写法（裸字符串 / 对象）归一后的结果。 */
+export interface ProfileModel {
+  modelId: string;
+  url?: string;
+  params: Record<string, unknown>;
+  /** profile 声明的上下文窗口（顶层 / `model` 内层 / `params` 三处都认）。 */
+  contextWindow?: number;
+}
+
+/** 一个 profile 解析出的 pi-ai 侧全部所需。 */
+export interface ResolvedProvider {
+  models: Models;
+  model: Model<Api>;
+  providerId: string;
+  /**
+   * 请求级 apiKey。pi-ai 自己有 auth 机制，但仓库既有语义是
+   * keys.json → 环境变量 → 本地端点占位 `'not-needed'`，这里保留原样，
+   * 经 `ProviderRequestOptions.apiKey` 逐请求传入。
+   */
+  apiKey: string | undefined;
+  /** profile 显式配置的额外头（`${VAR}` 已展开）。 */
+  headers: Record<string, string> | null;
+  /** 真实上下文窗口。内置目录直接给出（OpenCode Go 的 deepseek-v4.1-flash = 1_000_000）。 */
+  contextWindow: number;
+}
+
+/** 只剥**开头**的 `openai/`，与 `_model_map.selectAPI` 的既有规则一致。 */
+function stripApiPrefix(raw: string): string {
+  return raw.startsWith('openai/') ? raw.slice('openai/'.length) : raw;
+}
+
+function asRecord(value: unknown): Record<string, unknown> {
+  return value != null && typeof value === 'object' && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : {};
+}
+
+/**
+ * 归一 profile 的模型声明。支持三种历史写法：
+ *   - 裸字符串：`"deepseek-v4.1-flash"`
+ *   - `model` 为对象：`{ model: { model, url, params } }`（生产 profile 的写法）
+ *   - 平铺：`{ model: "x", url, params }`
+ *
+ * `context_window` 三个位置都认：**profile 顶层**（主线的写法）、`model` 内层、
+ * 以及 `model.params` 里。只读 `params` 会让自定义端点拿错窗口。
+ */
+export function readProfileModel(profile: unknown): ProfileModel {
+  if (typeof profile === 'string' || profile instanceof String) {
+    return { modelId: stripApiPrefix(String(profile)), params: {} };
+  }
+  const top = asRecord(profile);
+  const raw = top['model'];
+  const declaredWindow = (source: Record<string, unknown>, params: Record<string, unknown>): number | undefined => {
+    for (const candidate of [source['context_window'], params['context_window']]) {
+      if (typeof candidate === 'number' && Number.isFinite(candidate) && candidate > 0) return candidate;
+    }
+    return undefined;
+  };
+  if (raw != null && typeof raw === 'object' && !Array.isArray(raw)) {
+    const nested = asRecord(raw);
+    const params = asRecord(nested['params']);
+    return {
+      modelId: stripApiPrefix(typeof nested['model'] === 'string' ? (nested['model'] as string) : ''),
+      url: typeof nested['url'] === 'string' ? (nested['url'] as string) : undefined,
+      params,
+      contextWindow: declaredWindow(top, params) ?? declaredWindow(nested, params),
+    };
+  }
+  const params = asRecord(top['params']);
+  return {
+    modelId: stripApiPrefix(typeof raw === 'string' ? raw : ''),
+    url: typeof top['url'] === 'string' ? (top['url'] as string) : undefined,
+    params,
+    contextWindow: declaredWindow(top, params),
+  };
+}
+
+/** 自定义 OpenAI 兼容端点用的合成模型条目。 */
+function customModel(
+  modelId: string,
+  url: string,
+  declaredWindow?: number,
+): Model<'openai-completions'> {
+  const contextWindow =
+    declaredWindow != null && Number.isFinite(declaredWindow) && declaredWindow > 0
+      ? declaredWindow
+      : FALLBACK_CONTEXT_WINDOW;
+  return {
+    id: modelId,
+    name: modelId,
+    api: 'openai-completions',
+    provider: 'custom',
+    baseUrl: url,
+    input: ['text', 'image'],
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    reasoning: false,
+    contextWindow,
+    maxTokens: 4096,
+  };
+}
+
+/**
+ * 把 profile 解析成可用的 pi-ai `Models` 集合与具体 `Model`。
+ *
+ * 端点分派：
+ *   - `opencode.ai/zen/go*` → 内置 `opencodeGoProvider()`
+ *   - `opencode.ai/zen*`    → 内置 `opencodeProvider()`
+ *   - 无 `url`              → 官方 `openaiProvider()`
+ *   - 其它 `url`            → `createProvider()` 现造一个 OpenAI 兼容 provider
+ */
+/**
+ * 只读凭据库：把 `keys.json` / 环境变量里取到的 key 交给 pi-ai 的鉴权解析。
+ *
+ * **为什么必须这么做**：内置 provider 的 auth 是
+ * `envApiKeyAuth(name, [ENV])`，它只认**已存凭据**或**环境变量**。而本项目的
+ * key 在 `keys.json` 里（`getKey`），既不进环境、也不进 pi-ai 的凭据库——于是
+ * **每个请求都失败**：`Provider is not configured: opencode-go`，assistant 条目
+ * 是 `stopReason: "error"`、usage 全 0，模型一个字都答不出来。
+ *
+ * 这条**只有真机跑得出来**：单测全都手动 `setProvider(faux)`，不需要鉴权。
+ *
+ * 只读：登录/刷新交给 pi-ai 的交互式流程，本项目不写凭据（也不用 OAuth）。
+ */
+export function staticCredentialStore(
+  providerId: string,
+  apiKey: string | undefined,
+): CredentialStore {
+  const credential: Credential | undefined =
+    apiKey == null || apiKey === '' ? undefined : { type: 'api_key', key: apiKey };
+  return {
+    read: (id) => Promise.resolve(id === providerId ? credential : undefined),
+    list: () =>
+      Promise.resolve(
+        credential == null
+          ? []
+          : ([{ providerId, type: credential.type }] as readonly CredentialInfo[]),
+      ),
+    // 写路径：本项目不持久化凭据。仍如实把 `fn` 的结果回给 pi-ai（它用这个结果
+    // 继续本次请求），但不落盘——我们只用 API key，没有刷新语义。
+    modify: (_id, fn) => fn(credential),
+    delete: () => Promise.resolve(),
+  };
+}
+
+export function resolveProvider(profile: unknown): ResolvedProvider {
+  const { modelId, url, params, contextWindow } = readProfileModel(profile);
+  const apiKeyEnv =
+    typeof params['api_key_env'] === 'string' ? (params['api_key_env'] as string) : 'OPENAI_API_KEY';
+  const headers = resolveHeaders(params['headers']);
+
+  // key 语义与旧适配器逐字一致：keys.json → 环境变量；本地/自建端点缺 key
+  // 时用占位（LM Studio、vLLM、Ollama 兼容口通常不校验）；官方端点缺 key
+  // 是明确的配置错误，交给 getKey 抛出。
+  const found = hasKey(apiKeyEnv);
+  let apiKey: string | undefined;
+  if (found != null && found !== '') {
+    apiKey = found;
+  } else if (url != null) {
+    apiKey = 'not-needed';
+  } else {
+    apiKey = getKey(apiKeyEnv);
+  }
+
+  // 端点分派要在建 `Models` 之前定，因为凭据库是按 provider id 挂的。
+  let providerId: string;
+  if (url != null && url.includes(GO_HOST)) providerId = 'opencode-go';
+  else if (url != null && url.includes(ZEN_HOST)) providerId = 'opencode';
+  else if (url == null) providerId = 'openai';
+  else providerId = 'custom';
+
+  const models = createModels({ credentials: staticCredentialStore(providerId, apiKey) });
+  if (providerId === 'opencode-go') {
+    models.setProvider(opencodeGoProvider());
+  } else if (providerId === 'opencode') {
+    models.setProvider(opencodeProvider());
+  } else if (providerId === 'openai') {
+    models.setProvider(openaiProvider());
+  } else {
+    models.setProvider(
+      createProvider({
+        id: providerId,
+        name: 'OpenAI-compatible endpoint',
+        baseUrl: url as string,
+        auth: { apiKey: envApiKeyAuth(apiKeyEnv, [apiKeyEnv]) },
+        models: [customModel(modelId, url as string, contextWindow)],
+        api: { 'openai-completions': openAICompletionsApi() },
+      }),
+    );
+  }
+
+  // 目录里没有该 id 时退到该 provider 的第一个模型（旧适配器对未知模型名
+  // 是直接透传给网关，让网关去报错；这里保持"不因本地目录缺失就崩"）。
+  const model = models.getModel(providerId, modelId) ?? models.getModels(providerId)[0];
+  if (model == null) {
+    throw new Error(`Model "${modelId}" not found in provider "${providerId}".`);
+  }
+
+  return { models, model, providerId, apiKey, headers, contextWindow: model.contextWindow };
+}

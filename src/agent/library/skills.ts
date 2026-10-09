@@ -3,9 +3,162 @@ import * as world from "./world.js";
 import pf from 'mineflayer-pathfinder';
 import Vec3 from 'vec3';
 import settings from "../../../settings.js";
+import { permits, opContextFor } from "../permits.js";
+import { refuseText } from "../dangerous_ops.js";
+import {
+    blockAtFrom,
+    waterUnderFeet,
+    headInWater,
+    dangerousWaterRefusal,
+    type WaterClass,
+} from "../water_safety.js";
+import { teleportRefusal } from "../dangerous_blocks.js";
+import { movementsFor } from "../movements.js";
+import { deepWaterAllowed } from "../permits.js";
+import { safeguards } from "../safeguards.js";
 
 export function log(bot: any, ...messages: any[]): void {
     bot.output += messages.join(' ') + '\n';
+}
+
+/**
+ * 危险操作闸门。
+ *
+ * 默认禁止倒水/倒岩浆/点火/在下界或末地睡觉/进深水；只有三种例外：身上着火
+ * （实时判定）、模型用 allowDangerousOps 授权、我们写死的保命代码。判据和记录
+ * 全在 dangerous_ops/permits 里，这里只负责"问一句、不让就写回执"。
+ *
+ * 回执**必须带上怎么授权** —— 这一夜反复证明：把下一步写出来，模型才能自己走得通。
+ */
+function allowDangerousOp(bot: any, opId: string): boolean {
+    const verdict = permits.isAllowed(opId, opContextFor(bot), Date.now());
+    if (verdict.allowed) return true;
+    log(bot, verdict.op != null ? refuseText(verdict.op) : `默认不允许这个操作（${opId}）。`);
+    return false;
+}
+
+/** 脚下这滩水的判定（给强制出水和回执用）。 */
+export function waterUnderFoot(bot: any): WaterClass {
+    return waterUnderFeet(bot);
+}
+
+/**
+ * 强制出水。
+ *
+ * 用户的要求是"其他情况，我们得想办法强制出水"——授权只管"模型想不想下去"，
+ * 管不了"它已经站在水里了"。所以这里是**我们写死的反射**：发现脚下是危险的水，
+ * 自己找岸、自己走上去。
+ *
+ * 为什么必须走 `bypassFor`：强制出水本身就要**穿过水**才能上岸，而寻路默认不
+ * 下水。不给一张短票，这道闸会把自己的保命代码也拦在门外——这正是
+ * `bypassFor` 存在的唯一理由，它是这里第一个真实调用者。
+ *
+ * 票是 30 秒：够走几格上岸，不够的话下一轮又会重新发（幂等，不会累积）。
+ */
+export async function forceExitWater(bot: any): Promise<boolean> {
+    // **保命被模型关掉了 → 一下都别碰身体。**
+    // 这一条要排在最前面，且比"有进水许可"更优先：许可只说明"模型想下水"，
+    // 关保命是"模型签了生死状"。用户要的字面效果就是"一直在水里泡着"。
+    if (safeguards.isSuppressed(Date.now())) return true;
+
+    const info = waterUnderFeet(bot);
+    if (!info.isWater) return true;                    // 压根没在水里
+    if (!info.dangerous) return true;                  // 1 格深的静水，踩着无所谓
+    if (deepWaterAllowed(bot)) return true;            // 着火 / 已授权，别跟保命抢方向盘
+
+    // **头也进水了 → 立刻上浮，别再费劲找岸了。**
+    //
+    // 这里**不能**让位给 L5：`runEmergency` 根本不会上浮——`EmergencyBot` 接口里
+    // 声明了 `submerged?()` / `swimUp?()`，`agent.ts` 也实现了传进去，但循环里
+    // 从来没调用过，只处理"有怪就跑"和"吃一口"（`emergency.ts` 的注释自己承认
+    // "根本没有溺水分支，事件响了没人管"）。也就是说**上浮这件事目前只有这里在做**，
+    // 头进水时让位等于没人管，直接淹死。
+    //
+    // 找岸要寻路、要走，来不及；头都进水了，先把头露出水面是唯一要紧的事。
+    if (headInWater(bot)) return await swimToSurface(bot);
+
+    const pos: any = bot?.entity?.position;
+    if (pos == null) return false;
+    const at = blockAtFrom(bot);
+
+    // 找最近的落脚点：脚下不是水也不是岩浆，而且它上面两格是空的（站得进去）。
+    let land: { x: number; y: number; z: number } | null = null;
+    for (let r = 1; r <= 12 && land == null; r++) {
+        for (let dx = -r; dx <= r && land == null; dx++) {
+            for (let dz = -r; dz <= r && land == null; dz++) {
+                if (Math.max(Math.abs(dx), Math.abs(dz)) !== r) continue;
+                for (let dy = -2; dy <= 3 && land == null; dy++) {
+                    const x = Math.floor(pos.x) + dx;
+                    const y = Math.floor(pos.y) + dy;
+                    const z = Math.floor(pos.z) + dz;
+                    const ground = at(x, y, z);
+                    if (ground == null) continue;
+                    const name = ground.name;
+                    if (name === 'water' || name === 'lava' || name === 'air' || name == null) continue;
+                    const above = at(x, y + 1, z);
+                    const above2 = at(x, y + 2, z);
+                    if (above?.name !== 'air' || above2?.name !== 'air') continue;
+                    land = { x, y: y + 1, z };
+                }
+            }
+        }
+    }
+
+    if (land == null) {
+        // **纯水大陆（一眼望不到岸）** —— 这时候正确的目标不是"上岸"，而是
+        // **"把头露出水面"**：淹死的条件是头进水，不是身体进水。找不到岸时后者
+        // 仍然救得了命。
+        //
+        // 原来这里做的是"跳 1.5 秒然后松手"，配上外层 2 秒一轮的重试，效果是
+        // 机器人**一直在原地上下浮动**，既上不了浮也沉不下去，直到耗死。而且每
+        // 一轮都往 `bot.output` 里塞一条，后台调用产生的这些回执模型还不一定看得到。
+        log(bot, `脚下是危险的水（${info.reason}），附近 12 格内找不到能上岸的地方——先浮起来把头露出水面。`);
+        return await swimToSurface(bot);
+    }
+
+    permits.bypassFor('enter_deep_water', 30_000, 'forceExitWater: 强制出水', Date.now());
+    log(bot, `脚下是危险的水（${info.reason}），自动上岸：${land.x},${land.y},${land.z}。`);
+    try {
+        bot.pathfinder?.stop?.();
+    } catch {
+        // 没在寻路就无所谓。
+    }
+    return await goToGoal(bot, new (pf as any).goals.GoalNear(land.x, land.y, land.z, 1));
+}
+
+/**
+ * 浮到**头露出水面**为止。
+ *
+ * 找不到岸时的活命办法：淹死的条件是头进水，不是身体进水。所以目标从上岸降级
+ * 成浮头——做不到前者时后者仍然救得了命。
+ *
+ * 两处刻意的设计：
+ * - **按结果停，不按时间停**：原来固定跳 1.5 秒就松手，配上外层 2 秒一轮的重试，
+ *   机器人只会一直原地上下浮动。这里一直浮到 `headInWater` 变 false 为止。
+ * - **结束时头还在水里就不松手**：那说明 L5 保命已经接管了（`runEmergency` 的
+ *   `swimUp` 也按着 jump），这时候松手等于拆保命的台。
+ */
+async function swimToSurface(bot: any): Promise<boolean> {
+    const DEADLINE_MS = 8000;
+    const STEP_MS = 250;
+    const started = Date.now();
+    try {
+        bot.setControlState?.('jump', true);
+        while (Date.now() - started < DEADLINE_MS) {
+            await new Promise((r) => setTimeout(r, STEP_MS));
+            if (!headInWater(bot)) return true;
+        }
+        return false; // 浮不出去（比如头顶是实心方块）
+    } catch {
+        return false;
+    } finally {
+        try {
+            if (!headInWater(bot)) bot.setControlState?.('jump', false);
+            // 头还在水里 → **保持按住继续浮**。松手就沉，而没人会接手这件事。
+        } catch {
+            // 拿不到 controlState 就算了。
+        }
+    }
 }
 
 async function autoLight(bot: any): Promise<boolean> {
@@ -174,7 +327,7 @@ export async function smeltItem(bot: any, itemName: string, num: number = 1): Pr
     if (bot.entity.position.distanceTo(furnaceBlock.position) > 4) {
         await goToNearestBlock(bot, 'furnace', 4, furnaceRange);
     }
-    await bot.lookAt(furnaceBlock.position);
+    await bot.lookAt(furnaceBlock.position.offset(0.5, 0.5, 0.5), true);
 
     console.log('smelting...');
     const furnace: any = await bot.openFurnace(furnaceBlock);
@@ -306,23 +459,145 @@ export async function clearNearestFurnace(bot: any): Promise<boolean> {
 }
 
 
-export async function attackNearest(bot: any, mobType: string, kill: boolean = true): Promise<boolean> {
-    /**
-     * Attack mob of the given type.
-     * @param {MinecraftBot} bot, reference to the minecraft bot.
-     * @param {string} mobType, the type of mob to attack.
-     * @param {boolean} kill, whether or not to continue attacking until the mob is dead. Defaults to true.
-     * @returns {Promise<boolean>} true if the mob was attacked, false if the mob type was not found.
-     * @example
-     * await skills.attackNearest(bot, "zombie", true);
-     **/
-    const mob: any = world.getNearbyEntities(bot, 24).find((entity: any) => entity.name === mobType);
-    if (mob) {
-        const res: boolean | undefined = await attackEntity(bot, mob, kill);
-        return res === true;
+/** `target` 的解析结果：命中实体，或一条说清为什么没命中的原因。 */
+export interface AttackTargetResult {
+  entity: any | null;
+  /** 人类可读的命中/失败说明，成功时用来告诉模型"打的是哪一只"。 */
+  message: string;
+}
+
+/**
+ * `target` 的语义类别——**必填，不给默认值**。
+ *
+ * - `id`：实体 ID，取 Live State 实体表里的 #编号。
+ * - `player`：玩家名（`username`）。
+ * - `mob`：实体类型名（`name`），取最近的。
+ *
+ * **为什么没有 `auto`**：靠字符串形状隐式猜（纯数字当 ID、其余先玩家名后类型名）
+ * 等于把"玩家优先"这个人为约定藏起来——模型既不知道它存在，也无法覆盖它。
+ * 曾经有个玩家就叫 `zombie`，而 `zombie` 也是最常见的怪物名。
+ * 三个取值语义完全平级，谁也不压谁，所以让模型自己声明。
+ */
+export type AttackTargetType = 'id' | 'player' | 'mob';
+
+const ATTACK_TARGET_TYPES: readonly AttackTargetType[] = ['id', 'player', 'mob'];
+
+/**
+ * 把模型给的 `target` 按 `targetType` 声明的语义解析成一个具体实体。
+ *
+ * - `id`：纯数字，直接取 `bot.entities[id]`。**不受 `maxDistance` 限制**——
+ *   模型给的编号往往来自上一轮快照，现在可能已走出感知半径，但仍是能走过去的
+ *   合法目标。
+ * - `player`：按 `username` 匹配。玩家必须走这条——mineflayer 的玩家实体 `name`
+ *   恒为 `'player'`（`entities.js:192`），按 `name` 找玩家永远落空。
+ * - `mob`：按实体类型名（`name`）匹配，取最近的。
+ */
+export function resolveAttackTarget(
+  bot: any,
+  target: string,
+  targetType: string,
+  maxDistance: number = 64,
+): AttackTargetResult {
+  const raw = String(target ?? '').trim();
+  const kind = String(targetType ?? '').trim().toLowerCase();
+
+  if (!ATTACK_TARGET_TYPES.includes(kind as AttackTargetType)) {
+    return {
+      entity: null,
+      message: `type 必填，且只认${ATTACK_TARGET_TYPES.join(' / ')}（收到 "${targetType ?? ''}"）。`,
+    };
+  }
+  if (raw === '') {
+    return {
+      entity: null,
+      message:
+        kind === 'id' ? 'type=id 要的是实体编号（Live State 实体表里的 #数字）。'
+        : kind === 'player' ? 'type=player 要的是玩家名。'
+        : 'type=mob 要的是实体类型名（如 zombie）。',
+    };
+  }
+
+  // ① 实体 ID。用 bot.entities 而不是"附近列表"——模型给的编号可能来自
+  // 上一轮的快照，现在已经走出感知半径了，但仍是可以走过去的合法目标。
+  if (kind === 'id') {
+    if (!/^\d+$/.test(raw)) {
+      return { entity: null, message: `type=id 要求 target 是纯数字的实体编号（收到 "${raw}"）。` };
     }
-    log(bot, 'Could not find any '+mobType+' to attack.');
-    return false;
+    const id = Number(raw);
+    const direct = bot.entities?.[id];
+    if (direct == null) {
+      return { entity: null, message: `找不到实体 #${id}（可能已经死了或消失了）。看一眼 Live State 的实体表。` };
+    }
+    const distance = Math.round(bot.entity.position.distanceTo(direct.position) * 10) / 10;
+    return {
+      entity: direct,
+      message: `锁定 #${id}（${describeEntity(direct)}，${distance}m），开打。`,
+    };
+  }
+
+  const lower = raw.toLowerCase();
+  const nearby: any[] = world.getNearbyEntities(bot, maxDistance);
+  const describeWhat = kind === 'player' ? `叫 ${raw} 的玩家` : `${raw} 型实体`;
+
+  // ② 玩家名（username）——只有 type=player 才走这条。
+  if (kind === 'player') {
+    const player: any = nearby.find((e: any) => typeof e.username === 'string' && e.username.toLowerCase() === lower);
+    if (player) {
+      return { entity: player, message: `锁定玩家 ${player.username}（#${player.id}），开打。` };
+    }
+  } else {
+    // ③ 实体类型名。
+    const mob: any = nearby.find((e: any) => typeof e.name === 'string' && e.name.toLowerCase() === lower);
+    if (mob) {
+      return {
+        entity: mob,
+        message: `锁定最近的 ${mob.name}#${mob.id}（${describeEntity(mob)}），开打。`,
+      };
+    }
+  }
+
+  // 没命中：把附近实际有什么列出来——模型真机报过"attack 报找不到 pig，
+  // 而快照里 16 格内就有一只"，它无从自查。现在它能自己改目标。
+  const seen = [
+    ...new Set(
+      nearby
+        .map((e: any) => (typeof e.username === 'string' ? `${e.username}(player)` : e.name))
+        .filter((n: unknown) => typeof n === 'string'),
+    ),
+  ];
+  return {
+    entity: null,
+    message:
+      `${maxDistance} 格内找不到可打的${describeWhat}。` +
+      (seen.length > 0 ? `附近有：${seen.join('、')}。` : '附近什么都没有。'),
+  };
+}
+
+/** 实体的一行式身份描述，给日志/回执用。 */
+function describeEntity(entity: any): string {
+  const name = typeof entity.username === 'string' ? entity.username : entity.name;
+  return typeof name === 'string' ? name : 'unknown';
+}
+
+/**
+ * 攻击 `target` 指向的实体，直到它死或跑掉。
+ *
+ * `targetType`（`id` / `player` / `mob`）**必填**，它决定 `target` 怎么解释。
+ * 规则见 {@link resolveAttackTarget}。
+ *
+ * @returns true = 打到了并打死了；false = 没找到目标或被中断。
+ */
+export async function attackTarget(
+  bot: any,
+  target: string,
+  targetType: string,
+  kill: boolean = true,
+): Promise<boolean> {
+  const { entity, message } = resolveAttackTarget(bot, target, targetType);
+  log(bot, message);
+  if (entity == null) return false;
+  const res: boolean | undefined = await attackEntity(bot, entity, kill);
+  return res === true;
 }
 
 export function stopPvp(bot: any): void {
@@ -386,13 +661,13 @@ export async function defendSelf(bot: any, range: number = 9): Promise<boolean> 
         await equipHighestAttack(bot);
         if (bot.entity.position.distanceTo(enemy.position) >= 4 && enemy.name !== 'creeper' && enemy.name !== 'phantom') {
             try {
-                bot.pathfinder.setMovements(new (pf as any).Movements(bot));
+                bot.pathfinder.setMovements(movementsFor(bot));
                 await bot.pathfinder.goto(new (pf as any).goals.GoalFollow(enemy, 3.5), true);
             } catch (err: unknown) {/* might error if entity dies, ignore */}
         }
         if (bot.entity.position.distanceTo(enemy.position) <= 2) {
             try {
-                bot.pathfinder.setMovements(new (pf as any).Movements(bot));
+                bot.pathfinder.setMovements(movementsFor(bot));
                 const inverted_goal: any = new (pf as any).goals.GoalInvert(new (pf as any).goals.GoalFollow(enemy, 2));
                 await bot.pathfinder.goto(inverted_goal, true);
             } catch (err: unknown) {/* might error if entity dies, ignore */}
@@ -447,7 +722,7 @@ export async function collectBlock(bot: any, blockType: string, num: number = 1,
 
     let collected = 0;
 
-    const movements: any = new (pf as any).Movements(bot);
+    const movements: any = movementsFor(bot);
     movements.dontMineUnderFallingBlock = false;
     movements.dontCreateFlow = true;
 
@@ -503,9 +778,13 @@ export async function collectBlock(bot: any, blockType: string, num: number = 1,
             }
             else if ((mc as any).mustCollectManually(blockType)) {
                 await goToPosition(bot, block.position.x, block.position.y, block.position.z, 2);
-                await bot.dig(block);
-                await pickupNearbyItems(bot);
-                success = true;
+                // 统一走 digWithTimeout：裸 bot.dig 会在方块中途变化时永不 resolve。
+                if (!(await digWithTimeout(bot, block, `@(${block.position.x},${block.position.y},${block.position.z})`))) {
+                    log(bot, `挖 ${blockType} 超时，跳过这一格。`);
+                } else {
+                    await pickupNearbyItems(bot);
+                    success = true;
+                }
             }
             else {
                 await bot.collectBlock.collect(block);
@@ -518,8 +797,29 @@ export async function collectBlock(bot: any, blockType: string, num: number = 1,
         catch (err: unknown) {
             const e = err as { name?: string } | null | undefined;
             if (e?.name === 'NoChests') {
-                log(bot, `Failed to collect ${blockType}: Inventory full, no place to deposit.`);
-                break;
+                // **背包满不等于挖不了**。mineflayer 的 collectBlock 插件满包时会抛 NoChests，
+                // 但挖方块本身跟背包没关系，掉落物还能并进已有的半栈——模型真机报过
+                // "free 0 死锁：collectBlocks 只认空格子"，就是这里直接放弃造成的。
+                // 同一个函数上面已经有能用的手动路径，回退过去就是了。
+                try {
+                    await goToPosition(bot, block.position.x, block.position.y, block.position.z, 2);
+                    // 统一走 digWithTimeout：裸 bot.dig 会在方块中途变化时永不 resolve。
+                    if (!(await digWithTimeout(bot, block, `@(${block.position.x},${block.position.y},${block.position.z})`))) {
+                        log(bot, `挖 ${blockType} 超时，跳过这一格。`);
+                        continue;
+                    }
+                    await pickupNearbyItems(bot);
+                    collected++;
+                    log(bot, `背包满了，改用"自己挖 + 捡"的方式收了 ${blockType}（掉落物能并进已有的半栈）。`);
+                    continue;
+                } catch (fallbackErr: unknown) {
+                    const fmsg: string = fallbackErr instanceof Error ? fallbackErr.message : String(fallbackErr);
+                    log(
+                        bot,
+                        `Failed to collect ${blockType}: 背包满了，而且手动挖也失败（${fmsg}）。先 discard 一批，或者找个箱子存起来。`,
+                    );
+                    break;
+                }
             }
             else {
                 const msg: string = err instanceof Error ? err.message : String(err);
@@ -548,7 +848,7 @@ export async function pickupNearbyItems(bot: any): Promise<boolean> {
     let nearestItem: any = getNearestItem(bot);
     let pickedUp = 0;
     while (nearestItem) {
-        const movements: any = new (pf as any).Movements(bot);
+        const movements: any = movementsFor(bot);
         movements.canDig = false;
         bot.pathfinder.setMovements(movements);
         await goToGoal(bot, new (pf as any).goals.GoalFollow(nearestItem, 1));
@@ -564,6 +864,44 @@ export async function pickupNearbyItems(bot: any): Promise<boolean> {
     return true;
 }
 
+
+/**
+ * 挖一个方块，**带按硬度分档的超时**。
+ *
+ * 为什么必须分档：mineflayer 的 `bot.dig` promise 在方块中途被改、被打断、
+ * 或者 bot 被 Stop 过之后会**永不 resolve**。固定 8 秒一刀切会两头不讨好——
+ * 挖土嫌久，挖黑曜石（硬度 50，钻石镐也要 ~9.4 秒）又根本不够。
+ *
+ * 模型真机给的证据非常干净：同一格 `mineBlock(36,9,10)` 调了 3 次，
+ * **空回执 ×2 + 卡死 280 秒 ×1**，而**同一片区域的另外 17 格全部正常**——
+ * 唯一的差别就是"那一格是最难挖的黑曜石"。
+ * （当时 8 秒超时只加在 `breakBlockAt` 上，`mineBlock` 走的是另一个入口，
+ * 压根没有超时。）
+ *
+ * 分档：`5000 + 硬度 × 800`，下限 8 秒、上限 30 秒。
+ * 黑曜石(50)→30 秒，远古残骸(30)→29 秒，石头(1.5)→8 秒，泥土(0.5)→8 秒。
+ */
+async function digWithTimeout(bot: any, block: any, where: string): Promise<boolean> {
+    const hardness: number =
+        typeof block?.hardness === 'number' ? block.hardness : typeof block?.blockEnum?.hardness === 'number' ? block.blockEnum.hardness : 0;
+    const timeoutMs = Math.min(30_000, Math.max(8_000, 5_000 + hardness * 800));
+    const timer = new Promise<'timeout'>((resolve) => setTimeout(() => resolve('timeout'), timeoutMs));
+    const dug = await Promise.race([bot.dig(block, true).then(() => 'ok' as const), timer]);
+    if (dug === 'timeout') {
+        try {
+            bot.stopDigging();
+        } catch {
+            // 停不下来就算了，下面照样如实报。
+        }
+        log(
+            bot,
+            `挖 ${block?.name ?? '?'} ${where} **超时 ${Math.round(timeoutMs / 1000)} 秒没挖完**` +
+                `（这方块硬度 ${hardness}，是慢方块；多半是中途被打断、方块变了、或者上一个动作被 Stop 过）。已停下，不再干等。`,
+        );
+        return false;
+    }
+    return true;
+}
 
 export async function breakBlockAt(bot: any, x: number, y: number, z: number): Promise<boolean> {
     /**
@@ -589,7 +927,7 @@ export async function breakBlockAt(bot: any, x: number, y: number, z: number): P
 
         if (bot.entity.position.distanceTo(block.position) > 4.5) {
             const pos: any = block.position;
-            const movements: any = new (pf as any).Movements(bot);
+            const movements: any = movementsFor(bot);
             movements.canPlaceOn = false;
             movements.allow1by1towers = false;
             bot.pathfinder.setMovements(movements);
@@ -603,7 +941,12 @@ export async function breakBlockAt(bot: any, x: number, y: number, z: number): P
                 return false;
             }
         }
-        await bot.dig(block, true);
+        // **给 dig 加超时**。mineflayer 的 `bot.dig` promise 在方块中途被改、
+        // 被打断、或者 bot 被 Stop 过之后会**永不 resolve**——模型真机三次数据点：
+        // digDown 静默卡死 115 / 140 / 152 秒（`task.stuck {action:"digDown",
+        // stuckForSeconds:152}`，speed 0 一格没动），她的 workaround 是"Stop() 一下就继续"。
+        // 有超时就不需要人肉 Stop 了。
+        if (!(await digWithTimeout(bot, block, `@(${x.toFixed(1)},${y.toFixed(1)},${z.toFixed(1)})`))) return false;
         log(bot, `Broke ${block.name} at x:${x.toFixed(1)}, y:${y.toFixed(1)}, z:${z.toFixed(1)}.`);
     }
     else {
@@ -613,6 +956,37 @@ export async function breakBlockAt(bot: any, x: number, y: number, z: number): P
     return true;
 }
 
+
+/**
+ * 等服务器把方块状态同步过来（`until` 为真即返回）。
+ *
+ * mineflayer 的 `placeBlock` / `breakBlockAt` **返回时什么都没发生**：只是把
+ * 一个动作发给了服务端，客户端 `blockAt` 要等服务器处理完（1 tick = 50ms）
+ * 再经网络广播才读得到。原来的写法是死等 200ms——那个数是猜的，网络好时
+ * 纯浪费；而蓝图施工是 8000 块起步，200ms × 8000 就是 27 分钟纯等待。
+ *
+ * 改成轮询：确认到了**立刻**走人，慢的时候仍有上限兜底。
+ * @param until 收到目标格的实际方块名，返回 true 表示成了
+ */
+async function waitForBlockAt(
+    bot: any,
+    pos: any,
+    until: (name: string) => boolean,
+    timeoutMs: number = 1000,
+): Promise<boolean> {
+    const deadline = Date.now() + timeoutMs;
+    for (;;) {
+        let name: string | null = null;
+        try {
+            name = bot.blockAt(pos)?.name ?? null;
+        } catch {
+            // 方块还没进视野/未加载：当作还没到，继续等。
+        }
+        if (name != null && until(name)) return true;
+        if (Date.now() >= deadline) return false;
+        await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+}
 
 export async function placeBlock(bot: any, blockType: string, x: number, y: number, z: number, placeOn: string = 'bottom', dontCheat: boolean = false): Promise<boolean> {
     /**
@@ -691,6 +1065,10 @@ export async function placeBlock(bot: any, blockType: string, x: number, y: numb
     else if (item_name === 'lava') {
         item_name = 'lava_bucket';
     }
+    // 用桶"放水/放岩浆"是同一个危险操作，只是走 placeBlock 这条路。
+    if (item_name === 'water_bucket' || item_name === 'lava_bucket') {
+        if (!allowDangerousOp(bot, item_name === 'water_bucket' ? 'pour_water' : 'pour_lava')) return false;
+    }
     let block_item: any = bot.inventory.findInventoryItem(item_name);
     if (!block_item && bot.game.gameMode === 'creative' && !bot.restrict_to_inventory) {
         await bot.creative.setInventorySlot(36, (mc as any).makeItem(item_name, 1)); // 36 is first hotbar slot
@@ -714,7 +1092,9 @@ export async function placeBlock(bot: any, blockType: string, x: number, y: numb
             log(bot, `Cannot place ${blockType} at ${targetBlock.position}: block in the way.`);
             return false;
         }
-        await new Promise(resolve => setTimeout(resolve, 200)); // wait for block to break
+        // 拆完要确认那一格真的空了：紧接着就要往那儿放方块，
+        // 服务端还没把破坏落地时 placeBlock 会撞上"格子里还有东西"。
+        await waitForBlockAt(bot, target_dest, (name) => empty_blocks.includes(name));
     }
     // get the buildoffblock and facevec based on whichever adjacent block is not empty
     let buildOffBlock: any = null;
@@ -761,13 +1141,13 @@ export async function placeBlock(bot: any, blockType: string, x: number, y: numb
         // too close
         const goal: any = new (pf as any).goals.GoalNear(targetBlock.position.x, targetBlock.position.y, targetBlock.position.z, 2);
         const inverted_goal: any = new (pf as any).goals.GoalInvert(goal);
-        bot.pathfinder.setMovements(new (pf as any).Movements(bot));
+        bot.pathfinder.setMovements(movementsFor(bot));
         await bot.pathfinder.goto(inverted_goal);
     }
     if (bot.entity.position.distanceTo(targetBlock.position) > 4.5) {
         // too far
         const tpos: any = targetBlock.position;
-        const movements: any = new (pf as any).Movements(bot);
+        const movements: any = movementsFor(bot);
         bot.pathfinder.setMovements(movements);
         await goToGoal(bot, new (pf as any).goals.GoalNear(tpos.x, tpos.y, tpos.z, 4));
     }
@@ -779,10 +1159,18 @@ export async function placeBlock(bot: any, blockType: string, x: number, y: numb
         }
         else {
             await bot.equip(block_item, 'hand');
-            await bot.lookAt(buildOffBlock.position.offset(0.5, 0.5, 0.5));
+            await bot.lookAt(buildOffBlock.position.offset(0.5, 0.5, 0.5), true);
             await bot.placeBlock(buildOffBlock, faceVec);
             log(bot, `Placed ${blockType} at ${target_dest}.`);
-            await new Promise(resolve => setTimeout(resolve, 200));
+            // **确认方块真的落地了再 return true**：这个 true 是对调用方的
+            // 承诺（蓝图施工会立刻在下一格继续、验证器会立刻读 blockAt）。
+            // 原先死等 200ms，现在轮询到就立刻走人。超时仍按成功返回——
+            // 契约与旧实现一致，只是把"确定失败"和"服务端慢"区分开。
+            // 方块名要去掉 `[facing=…]` 之类后缀：blockType 在上面被改写过
+            // （torch → wall_torch、stairs → stairs[facing=north]），而
+            // blockAt 报的是裸名。
+            const bareName = blockType.split('[')[0] ?? blockType;
+            await waitForBlockAt(bot, target_dest, (name) => name === bareName);
             return true;
         }
     } catch (err: unknown) {
@@ -1047,7 +1435,7 @@ export async function giveToPlayer(bot: any, itemType: string, username: string,
         }
     }
 
-    await bot.lookAt(player.position);
+    await bot.lookAt(player.position, true);
     if (await discard(bot, itemType, num)) {
         let given = false;
         bot.once('playerCollect', (collector: any, collected: any) => {
@@ -1081,7 +1469,26 @@ export async function goToGoal(bot: any, goal: any, _persist?: boolean): Promise
      * passes a third argument.)
      **/
 
-    const nonDestructiveMovements: any = new (pf as any).Movements(bot);
+    // **深水闸门（第一道）：目标点本身是不是危险的水。**
+    // 原来 `enter_deep_water` 只是登记表里的一行——着火豁免、拒绝文案都写着它，
+    // 但**没有任何代码真的拿它去问许可**，等于这条规则从来没生效过。用户的原话
+    // 是"禁止接触到深度超过一格的水"，所以先拦目标：那片水深 / 在流动 / 连着
+    // 流动水，就别过去。
+    // 只有给了明确坐标的 goal（GoalNear / GoalBlock / GoalXZ 那一类）才查得动；
+    // GoalFollow 之类追实体的没有坐标，交给下面第二道闸（allowWater）。
+    const g = goal as { x?: unknown; y?: unknown; z?: unknown } | null | undefined;
+    const gx = g != null ? Number(g.x) : NaN;
+    const gy = g != null ? Number(g.y) : NaN;
+    const gz = g != null ? Number(g.z) : NaN;
+    if (Number.isFinite(gx) && Number.isFinite(gy) && Number.isFinite(gz)) {
+        const refusal = dangerousWaterRefusal(bot, gx, gy, gz, '走到');
+        if (refusal != null) {
+            log(bot, refusal);
+            return false;
+        }
+    }
+
+    const nonDestructiveMovements: any = movementsFor(bot);
     const dontBreakBlocks: string[] = ['glass', 'glass_pane'];
     for (const block of dontBreakBlocks) {
         nonDestructiveMovements.blocksCantBreak.add((mc as any).getBlockId(block));
@@ -1089,7 +1496,26 @@ export async function goToGoal(bot: any, goal: any, _persist?: boolean): Promise
     nonDestructiveMovements.placeCost = 2;
     nonDestructiveMovements.digCost = 10;
 
-    const destructiveMovements: any = new (pf as any).Movements(bot);
+    const destructiveMovements: any = movementsFor(bot);
+
+    // **安全基线（落差 / 冲刺 / 跑酷 / 深水）不在这里设**——两套 Movements 都来自
+    // `movementsFor()`，它在出厂时就套好了，见 `movements.ts`。
+    //
+    // 这里**故意**不再重复一遍：原先这段是唯一一处安全配置，其余 16 处 `new
+    // Movements(bot)` 全是裸的——追怪、逃跑、保命 fleeTo 都从水里直穿过去。
+    // 安全配置跟着"创建实例的地方"走，才谈得上"任何情况下都有效"。
+    // 真机证据（为什么要这些值）也一并搬去 `movements.ts` 了，不复制第二份。
+    // **算路超时也要放宽**：默认 thinkTimeout 只有 5 秒，长路径（从 100 格深的竖井
+    // 爬出来、绕过大片水域）根本算不完，就直接报 'Took to long to decide path to goal!'
+    // ——模型真机报的"goToCoordinates 完全不动"就是这个。物理诊断加上之后一眼就看到了。
+    try {
+        bot.pathfinder.thinkTimeout = 20_000;
+        bot.pathfinder.tickTimeout = 80;
+    } catch {
+        // 老版本没有这两个字段就算了。
+    }
+    // 破坏性寻路也别太随便挖：让"挖"比"绕"贵，只有真绕不过去才动镐。
+    destructiveMovements.digCost = 5;
 
     let final_movements: any = destructiveMovements;
 
@@ -1185,6 +1611,33 @@ function startDoorInterval(bot: any): ReturnType<typeof setInterval> {
     return doorCheckInterval;
 }
 
+/**
+ * 寻路走不动时，把**物理现场**摊开。
+ *
+ * 模型真机报过"goToCoordinates 完全不动且被 task.stuck，原因不明"，还自己给了
+ * 堆栈定位（pathfinder monitorMovement→resetPath，疑似客户端物理被禁）。与其猜，
+ * 不如把"卡在哪、脚/头是什么方块、物理开没开"直接写出来——模型能据此改策略
+ * （挖出来 / 搭脚点 / 换目标），排查的人也能一眼看出原因。
+ */
+function describeStuck(bot: any): string {
+    try {
+        const p = bot.entity.position;
+        const at = (dy: number): string => {
+            const b = bot.blockAt?.(p.offset(0, dy, 0));
+            return typeof b?.name === 'string' ? b.name : '?';
+        };
+        const physics = bot.physicsEnabled === false ? '**物理已关闭**' : '物理正常';
+        const inBlock = at(0) !== 'air' && at(0) !== 'cave_air' && at(0) !== 'water';
+        return (
+            `你在 (${p.x.toFixed(1)},${p.y.toFixed(1)},${p.z.toFixed(1)})，` +
+            `脚 ${at(0)} / 头 ${at(1)}，${physics}` +
+            (inBlock ? '——**脚下方块是实心的，你可能卡在方块里**：用 mineBlock 挖开再走。' : '。')
+        );
+    } catch {
+        return '（读不到物理状态）';
+    }
+}
+
 export async function goToPosition(bot: any, x: number | null, y: number | null, z: number | null, min_distance: number = 2): Promise<boolean> {
     /**
      * Navigate to the given position.
@@ -1203,6 +1656,18 @@ export async function goToPosition(bot: any, x: number | null, y: number | null,
         return false;
     }
     if (settings.cheat) {
+        // **传送也要过深水闸门** —— `/tp` 是唯一一条完全绕开寻路的移动路径：
+        // 第 1 层（`blocksToAvoid`）管的是"怎么走过去"，第 2 层（`goToGoal` 的
+        // 目标点判定）在这条分支上**根本不会被调用**。闸门管路径，管不了落点，
+        // 所以落点得在这里单独判一次。
+        //
+        // 这条不难想到，难在意识到它存在：正常分支有闸，所以"模型把自己送进水里"
+        // 看起来不可能——直到 cheat 开着。
+    const tpRefusal = teleportRefusal(bot, x, y, z);
+    if (tpRefusal != null) {
+        log(bot, tpRefusal);
+        return false;
+    }
         bot.chat('/tp @s ' + x + ' ' + y + ' ' + z);
         log(bot, `Teleported to ${x}, ${y}, ${z}.`);
         return true;
@@ -1231,12 +1696,12 @@ export async function goToPosition(bot: any, x: number | null, y: number | null,
             return true;
         }
         else {
-            log(bot, `Unable to reach ${x}, ${y}, ${z}, you are ${Math.round(distance)} blocks away.`);
+            log(bot, `Unable to reach ${x}, ${y}, ${z}, you are ${Math.round(distance)} blocks away. ${describeStuck(bot)}`);
             return false;
         }
     } catch (err: unknown) {
         const msg: string = err instanceof Error ? err.message : String(err);
-        log(bot, `Pathfinding stopped: ${msg}.`);
+        log(bot, `Pathfinding stopped: ${msg}. ${describeStuck(bot)}`);
         clearInterval(progressInterval);
         return false;
     }
@@ -1275,8 +1740,11 @@ export async function goToNearestBlock(bot: any, blockType: string, min_distance
         return false;
     }
     log(bot, `Found ${blockType} at ${block.position}. Navigating...`);
-    await goToPosition(bot, block.position.x, block.position.y, block.position.z, min_distance);
-    return true;
+    const arrived = await goToPosition(bot, block.position.x, block.position.y, block.position.z, min_distance);
+    // **把结果如实返回**：原来无条件 return true;，路径不可达时工具照样报成功——
+    // 模型反馈过"找不到目标时静默"，其实不是找不到，是找到了但走不过去，结果被吞了。
+    if (!arrived) log(bot, `Found ${block.name} at ${block.position} but could not reach it (path blocked or too far).`);
+    return arrived;
 }
 
 export async function goToNearestEntity(bot: any, entityType: string, min_distance: number = 2, range: number = 64): Promise<boolean> {
@@ -1295,8 +1763,11 @@ export async function goToNearestEntity(bot: any, entityType: string, min_distan
     }
     const distance: number = bot.entity.position.distanceTo(entity.position);
     log(bot, `Found ${entityType} ${distance} blocks away.`);
-    await goToPosition(bot, entity.position.x, entity.position.y, entity.position.z, min_distance);
-    return true;
+    const arrived = await goToPosition(bot, entity.position.x, entity.position.y, entity.position.z, min_distance);
+    // **把结果如实返回**：原来无条件 return true;，路径不可达时工具照样报成功——
+    // 模型反馈过"找不到目标时静默"，其实不是找不到，是找到了但走不过去，结果被吞了。
+    if (!arrived) log(bot, `Found ${entity.name} at ${entity.position} but could not reach it (path blocked or too far).`);
+    return arrived;
 }
 
 export async function goToPlayer(bot: any, username: string, distance: number = 3): Promise<boolean | undefined> {
@@ -1347,7 +1818,7 @@ export async function followPlayer(bot: any, username: string, distance: number 
     if (!player)
         return false;
 
-    const move: any = new (pf as any).Movements(bot);
+    const move: any = movementsFor(bot);
     move.digCost = 10;
     bot.pathfinder.setMovements(move);
     let doorCheckInterval: ReturnType<typeof setInterval> | null = startDoorInterval(bot);
@@ -1396,10 +1867,10 @@ export async function moveAway(bot: any, distance: number): Promise<boolean> {
     const pos: any = bot.entity.position;
     const goal: any = new (pf as any).goals.GoalNear(pos.x, pos.y, pos.z, distance);
     const inverted_goal: any = new (pf as any).goals.GoalInvert(goal);
-    bot.pathfinder.setMovements(new (pf as any).Movements(bot));
+    bot.pathfinder.setMovements(movementsFor(bot));
 
     if (settings.cheat) {
-        const move: any = new (pf as any).Movements(bot);
+        const move: any = movementsFor(bot);
         const path: any = await bot.pathfinder.getPathTo(move, inverted_goal, 10000);
         const last_move: any = path.path[path.path.length-1];
         if (last_move) {
@@ -1427,7 +1898,7 @@ export async function moveAwayFromEntity(bot: any, entity: any, distance: number
      **/
     const goal: any = new (pf as any).goals.GoalFollow(entity, distance);
     const inverted_goal: any = new (pf as any).goals.GoalInvert(goal);
-    bot.pathfinder.setMovements(new (pf as any).Movements(bot));
+    bot.pathfinder.setMovements(movementsFor(bot));
     await bot.pathfinder.goto(inverted_goal);
     return true;
 }
@@ -1445,7 +1916,7 @@ export async function avoidEnemies(bot: any, distance: number = 16): Promise<boo
     while (enemy) {
         const follow: any = new (pf as any).goals.GoalFollow(enemy, distance+1); // move a little further away
         const inverted_goal: any = new (pf as any).goals.GoalInvert(follow);
-        bot.pathfinder.setMovements(new (pf as any).Movements(bot));
+        bot.pathfinder.setMovements(movementsFor(bot));
         bot.pathfinder.setGoal(inverted_goal, true);
         await new Promise(resolve => setTimeout(resolve, 500));
         enemy = world.getNearestEntityWhere(bot, (entity: any) => (mc as any).isHostile(entity), distance);
@@ -1511,7 +1982,7 @@ export async function useDoor(bot: any, door_pos: any = null): Promise<boolean> 
     }
 
     const door_block: any = bot.blockAt(door_pos);
-    await bot.lookAt(door_pos);
+    await bot.lookAt(door_pos, true);
     if (!door_block._properties.open)
         await bot.activateBlock(door_block);
 
@@ -1532,6 +2003,10 @@ export async function goToBed(bot: any): Promise<boolean> {
      * @example
      * await skills.goToBed(bot);
      **/
+    // 床在**下界和末地都会炸**（末地那个能一下把人秒了）。主世界睡觉不拦
+    // —— op 的 when() 只在会炸的维度才判危险。
+    if (!allowDangerousOp(bot, 'sleep_in_bed')) return false;
+
     const beds: any[] = bot.findBlocks({
         matching: (block: any) => {
             return block.name.includes('bed');
@@ -1604,7 +2079,7 @@ export async function tillAndSow(bot: any, x: number, y: number, z: number, seed
     // if distance is too far, move to the block
     if (bot.entity.position.distanceTo(block.position) > 4.5) {
         const bpos: any = block.position;
-        bot.pathfinder.setMovements(new (pf as any).Movements(bot));
+        bot.pathfinder.setMovements(movementsFor(bot));
         await goToGoal(bot, new (pf as any).goals.GoalNear(bpos.x, bpos.y, bpos.z, 4));
     }
     if (block.name !== 'farmland') {
@@ -1649,7 +2124,7 @@ export async function activateNearestBlock(bot: any, type: string): Promise<bool
     }
     if (bot.entity.position.distanceTo(block.position) > 4.5) {
         const pos: any = block.position;
-        bot.pathfinder.setMovements(new (pf as any).Movements(bot));
+        bot.pathfinder.setMovements(movementsFor(bot));
         await goToGoal(bot, new (pf as any).goals.GoalNear(pos.x, pos.y, pos.z, 4));
     }
     await bot.activateBlock(block);
@@ -1887,6 +2362,45 @@ function stringifyItem(bot: any, item: any): string {
     return text;
 }
 
+export async function mineBlockAt(bot: any, x: number, y: number, z: number): Promise<boolean> {
+    /**
+     * 挖掉**指定坐标**的那一格。
+     *
+     * 为什么需要：`collectBlock` 是"自己找最近的并挖"（中层），`digDown` 只会往下。
+     * 模型真机报过这个硬缺口："我在 100 格深的洞里**没有挖掉头顶方块的工具**，
+     * 所以搭不了落脚点"——它要的是"挖我指定的那一格"这个原语。
+     * @param {MinecraftBot} bot, reference to the minecraft bot.
+     * @param {number} x, y, z, 目标方块坐标。
+     * @returns {Promise<boolean>} 挖掉了返回 true。
+     **/
+    const target: any = bot.blockAt(new Vec3(x, y, z));
+    if (!target) {
+        log(bot, `(${x},${y},${z}) 读不到方块。`);
+        return false;
+    }
+    if (target.name === 'air' || target.name === 'cave_air' || target.name === 'void_air') {
+        log(bot, `(${x},${y},${z}) 是空气，不用挖。`);
+        return false;
+    }
+    const dist: number = bot.entity.position.distanceTo(target.position);
+    if (dist > 4.5) {
+        log(bot, `${target.name} @(${x},${y},${z}) 离你 ${dist.toFixed(1)} 格，够不着（最多 4.5）。先走过去，或者用 placeBlock 搭个脚点。`);
+        return false;
+    }
+    try {
+        // 尽力换上合适的工具；换不上也让 dig 自己试（原版手也能挖土/木）。
+        try { await bot.tool?.equipForBlock?.(target); } catch { /* best-effort */ }
+        // **同一个入口**：mineBlock 以前是裸的 await bot.dig()，8 秒超时没覆盖到它
+        // （模型真机报"mineBlock 挖黑曜石空回执×2 + 卡死 280 秒"，而其他 17 格全正常）。
+        if (!(await digWithTimeout(bot, target, `@(${x},${y},${z})`))) return false;
+        log(bot, `挖掉了 ${target.name} @(${x},${y},${z})。`);
+        return true;
+    } catch (err: unknown) {
+        log(bot, `挖 ${target.name} @(${x},${y},${z}) 失败：${err instanceof Error ? err.message : String(err)}`);
+        return false;
+    }
+}
+
 export async function digDown(bot: any, distance: number = 10): Promise<boolean> {
     /**
      * Digs down a specified distance. Will stop if it reaches lava, water, or a fall of >=4 blocks below the bot.
@@ -1897,10 +2411,22 @@ export async function digDown(bot: any, distance: number = 10): Promise<boolean>
      * await skills.digDown(bot, 10);
      **/
 
-    const start_block_pos: any = bot.blockAt(bot.entity.position).position;
+    // **每一轮都从机器人"现在"的位置重新取列**。
+    //
+    // 原来只在开头取一次 `start_block_pos`，之后一律用 `start - i`。可是机器人挖下去会
+    // **横向漂移**：模型真机那次 digDown 从 x=35.6 出发，最后人在 x=33.5（漂了 1.5 格），
+    // 于是它检查的竖列**已经不是机器人所在的竖列**了——**脚下的岩浆从来没被检查过**，
+    // 这就是"遇到岩浆不停止"。真机日志里 digDown 停过 14 次"drop below"、10 次"water"，
+    // **从没报过 lava**，也印证了这一点。
     for (let i = 1; i <= distance; i++) {
-        const targetBlock: any = bot.blockAt(start_block_pos.offset(0, -i, 0));
-        let belowBlock: any = bot.blockAt(start_block_pos.offset(0, -i-1, 0));
+        const here: any = bot.blockAt(bot.entity.position);
+        if (here == null) {
+            log(bot, `Dug down ${i - 1} blocks, but lost track of where I am (chunk unloaded?).`);
+            return false;
+        }
+        // 从当前脚下方块往下数第 i 格（i=1 就是正下方那一格）
+        const targetBlock: any = bot.blockAt(here.position.offset(0, -i, 0));
+        let belowBlock: any = bot.blockAt(here.position.offset(0, -i - 1, 0));
 
         if (!targetBlock || !belowBlock) {
             log(bot, `Dug down ${i-1} blocks, but reached the end of the world.`);
@@ -1910,7 +2436,8 @@ export async function digDown(bot: any, distance: number = 10): Promise<boolean>
         // Check for lava, water
         if (targetBlock.name === 'lava' || targetBlock.name === 'water' ||
             belowBlock.name === 'lava' || belowBlock.name === 'water') {
-            log(bot, `Dug down ${i-1} blocks, but reached ${belowBlock ? belowBlock.name : '(lava/water)'}`);
+            const hazard: string = targetBlock.name === 'lava' || targetBlock.name === 'water' ? targetBlock.name : belowBlock.name;
+            log(bot, `Dug down ${i-1} blocks, but reached ${hazard} (stopping before digging into it).`);
             return false;
         }
 
@@ -1956,8 +2483,18 @@ export async function goToSurface(bot: any): Promise<boolean> {
         if (!block || block.name === 'air' || block.name === 'cave_air') {
             continue;
         }
-        await goToPosition(bot, block.position.x, block.position.y + 1, block.position.z, 0); // this will probably work most of the time but a custom mining and towering up implementation could be added if needed
-        log(bot, `Going to the surface at y=${y+1}.`);
+        // **把结果如实返回**。原来这里无条件 log 'Going to the surface' + return true——
+        // 模型真机报过 'goToSurface 静默结束：无结果事件、人没动'：它以为上去了，其实
+        // 一步没动，后面的判断全建立在错误前提上。
+        const arrived = await goToPosition(bot, block.position.x, block.position.y + 1, block.position.z, 0);
+        if (!arrived) {
+            log(
+                bot,
+                `Surface is at y=${y + 1} (${block.name}) but I could not get up there from here. 竖井/洞穴里常这样——用 mineBlock 挖头顶开路，或者 placeBlock 搭落脚点一段段往上。`,
+            );
+            return false;
+        }
+        log(bot, `Reached the surface at y=${y + 1}.`);
         return true;
     }
     return false;
@@ -1980,6 +2517,16 @@ export async function useToolOn(bot: any, toolName: string, targetName: string):
     }
 
     targetName = targetName.toLowerCase();
+
+    // **危险操作闸门必须放在最前**，覆盖全部三个分支。
+    // 教训来自真机：模型用 useOn(flint_and_steel, "nothing") 点火，那条走的是
+    // `targetName === 'nothing'` 分支，**根本不经过 useToolOnBlock** —— 闸门加在下层
+    // 就等于没加，回执直接是 "Equipped flint_and_steel. / Used flint_and_steel."，零拦截。
+    if (toolName === 'water_bucket' || toolName === 'lava_bucket') {
+        if (!allowDangerousOp(bot, toolName === 'water_bucket' ? 'pour_water' : 'pour_lava')) return false;
+    }
+    if (toolName === 'flint_and_steel' && !allowDangerousOp(bot, 'ignite')) return false;
+
     if (targetName === 'nothing') {
         const equipped: boolean = await equip(bot, toolName);
         if (!equipped) {
@@ -2006,14 +2553,30 @@ export async function useToolOn(bot: any, toolName: string, targetName: string):
     } else {
         let block: any;
         if (targetName === 'water' || targetName === 'lava') {
-            // we want to get liquid source blocks, not flowing blocks
-            // so search for blocks with metadata 0 (not flowing)
-            const blocks: any[] = world.getNearestBlocksWhere(bot, (block: any) => block.name === targetName && block.metadata === 0, 64, 1);
-            if (blocks.length === 0) {
-                log(bot, `Could not find any source ${targetName}.`);
+            // **要水源方块**（流动水装不进桶），但**不能因为"够近的那格不是水源"就跑去远处**。
+            //
+            // 模型真机实测（成功率 1/4）：站在 (43.4,63,1.6)、**脚下 1.6 格就是水**，
+            // useOn(bucket,"water") 却跑去 **16 格外的 (27,62,7)** 并失败。原因是这里只认
+            // `metadata === 0` 的方块，近处那格没被匹配上，就一路找到远处去了。
+            //
+            // 改成：**近处的任何水/岩浆优先**（桶能不能装由服务端说了算，失败了下面会
+            // 如实报），只有近处完全没有时才去找水源方块。
+            const anyLiquid: any[] = world.getNearestBlocksWhere(bot, (b: any) => b.name === targetName, 64, 8);
+            const source: any = anyLiquid.find((b: any) => b.metadata === 0) ?? null;
+            const nearest: any = anyLiquid[0] ?? null;
+            if (nearest == null && source == null) {
+                log(bot, `Could not find any ${targetName} within 64 blocks.`);
                 return false;
             }
-            block = blocks[0];
+            // 近处那格在 3 格内就直接用它；否则用最近的水源。
+            const nearEnough: any = nearest != null && bot.entity.position.distanceTo(nearest.position) <= 3 ? nearest : null;
+            block = nearEnough ?? source ?? nearest;
+            const chosenDist: number = bot.entity.position.distanceTo(block.position);
+            log(
+                bot,
+                `Using ${block.name} at ${block.position} (${chosenDist.toFixed(1)} blocks away` +
+                    `${block.metadata === 0 ? ', source block' : ', NOT a source block — bucket may not fill'}).`,
+            );
         }
         else {
             block = world.getNearestBlock(bot, targetName, 64);
@@ -2038,8 +2601,16 @@ export async function useToolOn(bot: any, toolName: string, targetName: string):
      */
 
     const distance: number = toolName === 'water_bucket' && block.name !== 'lava' ? 1.5 : 2;
-    await goToPosition(bot, block.position.x, block.position.y, block.position.z, distance);
-    await bot.lookAt(block.position.offset(0.5, 0.5, 0.5));
+    // **够得着就别走**。原来无条件先 goToPosition 走过去，而模型真机踩过这个坑：
+    // "灌水失败时它为了够到水面重新寻路，结果把人带偏 20 多格"——本来站在水边
+    // 1.5 格内，一走路反而走丢了。她的 workaround 就是"原地重试"，那本该是默认行为。
+    const reach: number = bot.entity.position.distanceTo(block.position);
+    if (reach > 4) {
+        await goToPosition(bot, block.position.x, block.position.y, block.position.z, distance);
+    } else {
+        log(bot, `Already within ${reach.toFixed(1)} blocks of ${block.name}, using it from here.`);
+    }
+    await bot.lookAt(block.position.offset(0.5, 0.5, 0.5), true);
 
     // if block in view is closer than the target block, it is in our way. try to move closer
     const viewBlocked = (): boolean => {
@@ -2051,14 +2622,38 @@ export async function useToolOn(bot: any, toolName: string, targetName: string):
     };
     const blockInView: any = bot.blockAtCursor(5);
     if (viewBlocked()) {
-        log(bot, `Block ${blockInView.name} is in the way, moving closer...`);
-        // choose random block next to target block, go to it
-        const nearbyPos: any = block.position.offset(Math.random() * 2 - 1, 0, Math.random() * 2 - 1);
-        await goToPosition(bot, nearbyPos.x, nearbyPos.y, nearbyPos.z, 1);
-        await bot.lookAt(block.position.offset(0.5, 0.5, 0.5));
+        // **多试几个站位，别只随机试一个就放弃**。模型真机被这条卡过两次：
+        // 'Block stone is in the way, not using water_bucket'——它在岩浆层上方倒水，
+        // 准星被脚下的石头挡住，只试一个随机位置就返回失败，于是整条下界门链停住。
+        // 围着目标绕一圈试 4 个方向，最后再退一步正对着看。
+        log(bot, `Block ${blockInView.name} is in the way, trying other spots...`);
+        const bx: number = block.position.x;
+        const by: number = block.position.y;
+        const bz: number = block.position.z;
+        const spots: Array<[number, number, number]> = [
+            [bx + 1, by, bz],
+            [bx - 1, by, bz],
+            [bx, by, bz + 1],
+            [bx, by, bz - 1],
+            [bx + 1, by, bz + 1],
+            [bx - 1, by, bz - 1],
+        ];
+        for (const [sx, sy, sz] of spots) {
+            try {
+                await goToPosition(bot, sx, sy, sz, 1);
+                await bot.lookAt(block.position.offset(0.5, 0.5, 0.5), true);
+            } catch {
+                continue;
+            }
+            if (!viewBlocked()) break;
+        }
         if (viewBlocked()) {
             const blocked: any = bot.blockAtCursor(5);
-            log(bot, `Block ${blocked.name} is in the way, not using ${toolName}.`);
+            log(
+                bot,
+                `Block ${blocked?.name ?? '?'} is in the way, not using ${toolName}. ` +
+                    '试了目标四周 6 个站位都被挡——先 mineBlock 挖掉挡路的那一格，或者换一个能正对着的目标再来。',
+            );
             return false;
         }
     }
@@ -2069,8 +2664,30 @@ export async function useToolOn(bot: any, toolName: string, targetName: string):
         log(bot, `Could not equip ${toolName}.`);
         return false;
     }
+    // **倒水 / 倒岩浆 / 点火默认禁止**。注意区分：
+    //   - 倒水/倒岩浆：传的是 water_bucket / lava_bucket
+    //   - 打水（把空桶灌满）：传的是 bucket —— 这个闸门**不拦**，主线照常
+    if (toolName === 'water_bucket' || toolName === 'lava_bucket') {
+        if (!allowDangerousOp(bot, toolName === 'water_bucket' ? 'pour_water' : 'pour_lava')) return false;
+    }
+    if (toolName === 'flint_and_steel' && !allowDangerousOp(bot, 'ignite')) return false;
+
     if (toolName.includes('bucket')) {
+        // **必须验证**：`activateItem` 只是发一个"用物品"包，服务端采不采纳要看
+        // 十字准星是否真的对着目标。模型真机报过"连续两次 useOn(水桶, water)，
+        // 回执都是 Used bucket on water，但背包里还是空桶"——原来这里无条件
+        // log 成功 + return true，等于假成功，把整个下界门计划卡死了。
+        const before: number = (world.getInventoryCounts(bot) as Record<string, number>)[toolName] ?? 0;
         await bot.activateItem();
+        await new Promise((resolve) => setTimeout(resolve, 350));
+        const after: number = (world.getInventoryCounts(bot) as Record<string, number>)[toolName] ?? 0;
+        if (after >= before) {
+            log(
+                bot,
+                `对 ${block.name} 用了 ${toolName}，但物品没变化——准星多半没真的对着它（或者够不着/被方块挡住）。往目标挪近、正对着再来一次。`,
+            );
+            return false;
+        }
     }
     else {
         await bot.activateBlock(block);

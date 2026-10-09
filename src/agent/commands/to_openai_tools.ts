@@ -375,22 +375,3 @@ export function formatSay(text: unknown): { ok: boolean; line?: string; full?: s
     return { ok: true, line, full: text };
 }
 
-/** 给 help 工具用的人类可读工具清单（替代旧文本命令文档） */
-export function getToolDocs(agent: any): string {
-    const blocked = (agent?.blocked_actions || []) as string[];
-    let docs = 'Native tools. Call them via function calling with a JSON arguments object.\n';
-    for (const command of commandList) {
-        if (blocked.includes(command.name)) continue;
-        docs += `${stripBang(command.name)}: ${command.description || ''}\n`;
-        if (command.params) {
-            for (const param in command.params) {
-                docs += `  ${param}: ${command.params[param]?.description || ''}\n`;
-            }
-        }
-    }
-    // 控制类工具不在 commandList 里，单独列出（与 getOpenAITools 追加的一致）。
-    for (const name of ['Finish', 'Stop', 'Say', 'UpdatePlan', 'Feedback']) {
-        docs += `${name}: ${td(name)}\n`;
-    }
-    return docs;
-}

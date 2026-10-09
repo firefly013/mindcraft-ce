@@ -102,22 +102,65 @@ describe('sampleLiveState', () => {
     );
   });
 
-  it('passes a Vec3 to bot.blockAt, never a plain object', () => {
-    // 同 edge_poll：prismarine-world 的 getBlock 会调 pos.floored()。
-    const seen: unknown[] = [];
-    sampleLiveState({
-      bot: stubBot({
-        blockAt: (p: unknown) => {
-          seen.push(p);
-          return { name: 'air', light: 0, skyLight: 15, biome: { name: 'plains' } };
-        },
-      }),
-    });
-    expect(seen.length).toBeGreaterThan(0);
-    for (const p of seen) {
-      expect(typeof (p as { floored?: unknown }).floored).toBe('function');
-    }
+  it('entities carry a tag telling players from mobs', () => {
+    // 玩家的 `name` 是类型名 'player'、身份在 `username`，所以采样时把
+    // name 换成 username 填进 `name` 字段——渲染出来 `- Notch#12 8m (...)`
+    // 和 `- zombie#7 3m (...)` 结构上完全一样。不标 (player) 的话模型
+    // 分不出那是人还是怪物，也就无从判断"打不打得起"。
+    const entities: Record<string, unknown> = {
+      7: { id: 7, name: 'zombie', position: { x: 13.5, y: 64, z: -3.2 } },
+      12: { id: 12, name: 'player', username: 'Notch', position: { x: 18.5, y: 64, z: -3.2 } },
+    };
+    const s = sampleLiveState({ bot: stubBot({ entities }) });
+    const zombie = s.entities.find((e) => e.id === 7);
+    const player = s.entities.find((e) => e.id === 12);
+    expect(zombie?.tag).toBeUndefined();
+    expect(player?.tag).toBe('player');
+    // 名字取的是 username，不是 'player'——否则模型只知道有个玩家，不知道是谁。
+    expect(player?.name).toBe('Notch');
+    const text = renderLiveState(s);
+    expect(text).toContain('Notch#12');
+    expect(text).toContain('(player)');
   });
+
+  it('villager tags carry profession or baby, never both', () => {
+    const villager = (id: number, metadata: unknown[]) => ({
+      id,
+      name: 'villager',
+      position: { x: 12.5, y: 64, z: -3.2 },
+      metadata,
+    });
+    // metadata[16] === 1 是婴儿。婴儿不能交易，必须优先标出来。
+    const baby = sampleLiveState({
+      bot: stubBot({ entities: { 20: villager(20, [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]) } }),
+    }).entities.find((e) => e.id === 20);
+    expect(baby?.tag).toBe('baby');
+  });
+
+  it(
+    'passes a Vec3 to bot.blockAt, never a plain object',
+    () => {
+      // 同 edge_poll：prismarine-world 的 getBlock 会调 pos.floored()。
+      const seen: unknown[] = [];
+      sampleLiveState({
+        bot: stubBot({
+          blockAt: (p: unknown) => {
+            seen.push(p);
+            return { name: 'air', light: 0, skyLight: 15, biome: { name: 'plains' } };
+          },
+        }),
+      });
+      expect(seen.length).toBeGreaterThan(0);
+      for (const p of seen) {
+        expect(typeof (p as { floored?: unknown }).floored).toBe('function');
+      }
+    },
+    // 这条要背 live_state.ts 的首次模块加载，本身就要 1.5 秒上下（实测 1530ms）。
+    // 默认 5 秒超时在并行跑、机器负载高的时候会被挤爆 —— 已经用 git stash 对照
+    // 确认过 baseline（不含任何新代码）同样会挂，所以是**环境**问题不是逻辑问题。
+    // 给它放宽，别让它把真实的失败淹掉。
+    20_000,
+  );
 
   it('screenshot slot references the latest capture, or states why not', () => {
     const taken = sampleLiveState({
@@ -164,9 +207,15 @@ describe('renderLiveState', () => {
     );
     for (const head of [
       'Body:',
+
+      // 危险操作许可必须出现在快照里：模型得能看见"我现在能不能倒水/点火"，
+
+      // 而不是靠"试一下被拒"来发现——那是最贵的一种发现方式。
+
+      'DangerousOps:',
       'Held:',
       'Backpack',
-      'Position:',
+      'Position (此刻):',
       'Environment:',
       'Nearby entities',
       'Nearby key blocks',
@@ -310,6 +359,35 @@ describe('perception fields', () => {
       }),
     });
     expect(orphan.body.effects).toEqual(['effect#99 I 1s']);
+  });
+
+  it('clamps durability instead of reporting negative percentages', () => {
+    // 模型反馈过 `Held: stone_pickaxe (durability -300%)`：mineflayer 的
+    // durabilityUsed 可以大于 mcData 的 maxDurability。不钳的话负数会让
+    // tool.durability_low 永远处于触发态，也会把模型带进沟里。
+    expect(durabilityFraction(3000, 1000)).toBe(0);
+    expect(durabilityFraction(1300, 1000)).toBe(0);
+    expect(durabilityFraction(999, 1000)).toBeCloseTo(0.001);
+    expect(durabilityFraction(0, 1000)).toBe(1);
+    // 读不到 / 上限不合法 -> 没有结论，而不是编一个数。
+    expect(durabilityFraction(undefined, 1000)).toBeNull();
+    expect(durabilityFraction(1, undefined)).toBeNull();
+    expect(durabilityFraction(1, 0)).toBeNull();
+
+    const s = sampleLiveState({
+      bot: stubBot({
+        entity: {
+          id: 1,
+          position: { x: 0, y: 64, z: 0 },
+          yaw: 0,
+          pitch: 0,
+          metadata: [],
+          onGround: true,
+        },
+        heldItem: { name: 'stone_pickaxe', count: 1, durabilityUsed: 4000, maxDurability: 1000 },
+      }),
+    });
+    expect(s.held.mainHandDurability).toBe(0);
   });
 
   it('reads pose from entity metadata[6] (mineflayer has no entity.pose)', () => {

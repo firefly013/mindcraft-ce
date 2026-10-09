@@ -71,6 +71,22 @@ class MindServerProxy {
             }
         });
 
+        // **外部 CLI 的入口**：跑一条命令，并把上次调用以来的事件一并带回。
+        // 走 ack 回调（和 `get-full-state` 一样），mindserver 负责转发和超时。
+        this.socket.on('cli-command', (data: any, callback: (res: unknown) => void) => {
+            void (async () => {
+                try {
+                    if (this.agent == null) {
+                        callback({ ok: false, error: '机器人还没准备好' });
+                        return;
+                    }
+                    callback(await this.handleCliCommand(data));
+                } catch (error: unknown) {
+                    callback({ ok: false, error: error instanceof Error ? error.message : String(error) });
+                }
+            })();
+        });
+
         // Request settings and wait for response
         await new Promise<void>((resolve, reject) => {
             const timeout = setTimeout(() => {
@@ -87,6 +103,43 @@ class MindServerProxy {
                 resolve();
             });
         });
+    }
+
+    /**
+     * 分发外部 CLI 的请求。**一个事件、多种 op**，省得为每个操作再开一个 socket 事件。
+     *
+     * 事件（`since` 以后的）在**每个 op 上都带** —— 不管你是提交任务还是查状态，
+     * 都该顺带看到"这段时间发生了什么"。
+     */
+    private async handleCliCommand(data: any): Promise<unknown> {
+        const agent = this.agent;
+        const op: string = String(data?.op ?? '');
+        const args: Record<string, unknown> = data?.args ?? {};
+        const since = typeof data?.since === 'number' ? data.since : 0;
+        const events = (): unknown[] => (agent.cliEvents ?? []).filter((e: any) => e.at > since);
+
+        switch (op) {
+            case 'start': {
+                const { id } = await agent.startCliJob(String(data?.name ?? ''), args, data?.force === true);
+                return { ok: true, jobId: id, events: events() };
+            }
+            case 'wait': {
+                const res = await agent.cliWaitJob(String(data?.id ?? ''), Number(data?.waitMs ?? 0));
+                return { ok: true, job: res, events: events() };
+            }
+            case 'status': {
+                return { ok: true, job: agent.cliJobStatus(String(data?.id ?? '')), events: events() };
+            }
+            case 'list': {
+                return { ok: true, jobs: agent.cliJobList(), events: events() };
+            }
+            case 'cancel': {
+                const cancelled = await agent.cliCancelJob(String(data?.id ?? ''));
+                return { ok: true, cancelled, events: events() };
+            }
+            default:
+                return { ok: false, error: `不认识的 op：${op}` };
+        }
     }
 
     setAgent(agent: any): void {

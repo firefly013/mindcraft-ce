@@ -1,4 +1,5 @@
 import minecraftData from 'minecraft-data';
+import { expandTagRecipes } from './recipe_tags.js';
 import settings from '../agent/settings.js';
 import { createBot } from 'mineflayer';
 import prismarine_items from 'prismarine-item';
@@ -189,6 +190,11 @@ export function initBot(username: string): any {
     bot.once('login', () => {
         mc_version = bot.version;
         mcdata = minecraftData(mc_version);
+        // **这份 mcdata 也要打 tag 配方补丁**：craftRecipe 的"它还缺什么"提示和
+        // getItemCraftingRecipes 读的是**这份**，而 mineflayer 的 recipesFor 读的是
+        // bot.registry——两个是不同的对象。只补一处的话，就会出现"明明用桦木板做出来了，
+        // 提示却说 requires oak_planks"（模型真机报过 shield 那条）。
+        expandTagRecipes(mcdata);
         Item = prismarine_items(mc_version);
     });
 

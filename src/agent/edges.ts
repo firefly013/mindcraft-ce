@@ -41,12 +41,13 @@ export interface HeldSlot {
   slot: number | string;
   /** 剩余耐久比例 0~1。 */
   fraction?: number | null;
+  /** 手上这件东西的名字（`durability_low` 要告诉模型是哪件快坏了）。 */
+  item?: string;
 }
 
 export interface EdgeSnapshot {
   health?: number | null;
   food?: number | null;
-  oxygen?: number | null;
   light?: number | null;
   freeSlots?: number | null;
   foodCount?: number | null;
@@ -61,6 +62,10 @@ export interface EdgeSnapshot {
   inLava?: boolean | null;
   belowVoid?: boolean | null;
   inWater?: boolean | null;
+  /** **头那一格是水**（可靠事实，与坏掉的 oxygenLevel 无关）。 */
+  headInWater?: boolean | null;
+  /** 头也在水里（真正淹没）——不依赖坏掉的 oxygenLevel。 */
+  submerged?: boolean | null;
   onFire?: boolean | null;
   fallLethal?: boolean | null;
   trapped?: boolean | null;
@@ -85,7 +90,7 @@ export interface EdgeEvent {
   } | null;
 }
 
-type DetectorKind = 'flag' | 'all' | 'keyed' | 'change';
+type DetectorKind = 'flag' | 'all' | 'keyed' | 'change' | 'repeat';
 
 export interface Detector {
   type: string;
@@ -97,6 +102,8 @@ export interface Detector {
   keyOf?: (s: EdgeSnapshot) => Array<string | number>;
   value?: (s: EdgeSnapshot) => unknown;
   fireOn?: (prev: unknown, next: unknown) => boolean;
+  /** 仅 kind:'repeat' 用：条件成立时，最多每这么多毫秒报一次。 */
+  intervalMs?: number;
 }
 
 /** 边沿等级换算成调度等级。 */
@@ -240,6 +247,15 @@ function metadataValue(entity: unknown, index: number): number | null {
 export const DETECTORS: readonly Detector[] = Object.freeze([
   // L5 保命（host 侧读布尔旗，边沿+分级在这里）。
   { type: 'world.lava.contact', level: 5, kind: 'flag', flag: 'inLava' },
+  // **入水也有事件**（用户问的缺口）：原来只有"头+脚都泡在水里"才有 L5 紧急，
+  // 脚刚碰到水什么都不发生——预警比危险晚了一档（模型真机就是"氧气掉到 0 才
+  // 知道自己在水里"）。inWater 是可靠信号（脚下方块是水），白白不用是浪费。
+  // kind:flag 是**上升沿触发一次**，所以踩进水里叫一次、上岸复位，不会刷屏。
+  // **沾到水就一直报，1 秒一次**（用户的要求）。
+  // 目的：机器人在水里时**一直有事件把它拉起来**，防止站在水里空闲到自己淹死。
+  // 不是每 tick 报一个（那会打爆上下文），而是按 intervalMs 节流；上岸就停。
+  { type: 'world.water.contact', level: 3, kind: 'repeat', intervalMs: 1000,
+    fire: (s) => s.inWater === true },
   {
     type: 'world.lava.about_to_enter', level: 5, kind: 'all',
     fire: (s) => s.nextIsLava === true && s.moving === true,
@@ -247,8 +263,10 @@ export const DETECTORS: readonly Detector[] = Object.freeze([
   },
   { type: 'world.void.falling', level: 5, kind: 'flag', flag: 'belowVoid' },
   { type: 'world.water.drowning', level: 5, kind: 'all',
-    fire: (s) => lte(s.oxygen, 5) && s.inWater === true,
-    clear: (s) => gte(s.oxygen, 15) },
+    // **不看 oxygen**：那个字段在 1.20.6 上恒为 20（mineflayer 取不到 air_supply），
+    // 用它做条件等于永不触发。改用"头+脚都在水里"这个可靠信号。
+    fire: (s) => s.submerged === true,
+    clear: (s) => s.submerged !== true },
   { type: 'world.fire.burning_low_hp', level: 5, kind: 'all',
     fire: (s) => s.onFire === true && lt(s.health, 6),
     clear: (s) => s.onFire !== true },
@@ -278,14 +296,20 @@ export const DETECTORS: readonly Detector[] = Object.freeze([
   { type: 'bot.hunger_low', level: 3, kind: 'all',
     fire: (s) => lte(s.food, 6),
     clear: (s) => gte(s.food, 12) },
-  { type: 'bot.oxygen_low', level: 3, kind: 'all',
-    fire: (s) => lte(s.oxygen, 5),
-    clear: (s) => gte(s.oxygen, 15) },
+  // **删掉 bot.oxygen_low**：mineflayer 的 oxygenLevel 在 1.20.6 上取不到
+  // air_supply，读数是垃圾——模型真机报过"干燥草地报 oxygen=1"、"-1"、"干燥洞窟里 0"，
+  // 全是假警报，白白唤醒请求。水下安全已经由 world.water.drowning（submerged：
+  // 头+脚都是水）覆盖，不需要这个坏字段再报一遍。
+  // （原来这里是：{ type: 'bot.oxygen_low', ... fire: lte(s.oxygen, 5) ... }）
   {
+    // 「身边有敌对生物」是**一类事实**，不是"第 14500 号僵尸"。
+    // 和 `hostile_far` 同样的毛病：按实体 id 做边缘，一晚上能报十几条，
+    // 每只走到 32 格内的怪各报一次（真机日志里就是这样刷屏的）。
+    // 按**类型**做边缘：这种怪进了 32 格报一次，全部离开 40 格才解除。
     type: 'entity.hostile_nearby', level: 3, kind: 'keyed',
-    keyOf: (s) => (s.entities ?? []).filter((e) => isHostileEntity(e) && !isPlayerEntity(e)).map((e) => e.id),
-    fire: (s, id) => within(s, id, 32),
-    clear: (s, id) => !within(s, id, 40),
+    keyOf: (s) => hostileTypeKeys(s),
+    fire: (s, name) => hostilesIn(s, name).some((d) => d <= 32),
+    clear: (s, name) => !hostilesIn(s, name).some((d) => d <= 40),
   },
   {
     // 「远处有敌对生物」是**一类事实**，不是"第 1401 号僵尸"。
@@ -315,8 +339,10 @@ export const DETECTORS: readonly Detector[] = Object.freeze([
   { type: 'world.rain_start', level: 2, kind: 'all',
     fire: (s) => s.isRain === true, clear: (s) => s.isRain !== true },
   { type: 'world.light_low', level: 3, kind: 'all',
-    fire: (s) => lte(s.light, 4),
-    clear: (s) => gte(s.light, 8) },
+    // 迟滞带放宽：原来是 4/8，在洞里走动时光照在 4~8 之间来回跳，边缘反复
+    // re-arm——真机日志里每 2 秒报一次。放宽到 3/12 让"进洞"只报一次。
+    fire: (s) => lte(s.light, 3),
+    clear: (s) => gte(s.light, 12) },
   { type: 'world.dimension_change', level: 3, kind: 'change',
     value: (s) => s.dimension ?? null, fireOn: (prev, next) => prev != null && next != null && prev !== next },
   { type: 'world.biome_change', level: 2, kind: 'change',
@@ -324,7 +350,11 @@ export const DETECTORS: readonly Detector[] = Object.freeze([
   { type: 'inventory.full', level: 3, kind: 'all',
     fire: (s) => num(s.freeSlots) === 0,
     clear: (s) => gt(s.freeSlots, 0) },
-  { type: 'inventory.food_low', level: 3, kind: 'all',
+  // 「背包里没吃的了」——**不是**饥饿值低。模型反馈过这条：事件名
+  // `inventory.food_low` 配 `{foodCount: 0}` 读起来像"快饿死了"，而同一轮
+  // 快照显示 `food 20`（饥饿值是满的），于是它误判。
+  // 改名说清数的是**物品数量**，并把饥饿值一并带上，两者不会再混。
+  { type: 'inventory.food_items_low', level: 3, kind: 'all',
     fire: (s) => lte(s.foodCount, 8),
     clear: (s) => gte(s.foodCount, 12) },
   {
@@ -367,10 +397,19 @@ export function resolvePriority(descriptor: PriorityDescriptor, snapshot: EdgeSn
   const { type } = descriptor;
   const hp = num(snapshot.health);
   if (type === 'entity.hostile_nearby') {
-    const target = (snapshot.entities ?? []).find((e) => e.id === descriptor.key);
-    const dist = num(target?.distance);
+    // key 是**类型**（和边缘一致），所以按类型找最近的那只——不能再拿它当实体 id 用。
+    const name = String(descriptor.key ?? '');
+    const dists = hostilesIn(snapshot, name);
+    const dist = dists.length === 0 ? null : Math.min(...dists);
     if (dist != null && dist <= 3 && hp != null && hp <= 4) return 5;
-    if (target?.lockedOn === true && hp != null && hp <= 6) return 4;
+    const lockedOn = (snapshot.entities ?? []).some(
+      (e) =>
+        isHostileEntity(e) &&
+        !isPlayerEntity(e) &&
+        String(e.name ?? 'unknown') === name &&
+        e.lockedOn === true,
+    );
+    if (lockedOn && hp != null && hp <= 6) return 4;
     return descriptor.level;
   }
   if (type === 'player.chat.mention' || type === 'player.chat.private') {
@@ -418,6 +457,8 @@ export function createEdgeWatcher({ detectors = DETECTORS }: { detectors?: reado
   armed: Map<string, boolean>;
 } {
   const armed = new Map<string, boolean>();
+  /** kind:'repeat' 上次报出的时刻（按检测器 type 记）。 */
+  const lastRepeat = new Map<string, number>();
   const last = new Map<string, unknown>();
   const seenDiscrete = new Set<string>();
 
@@ -447,6 +488,23 @@ export function createEdgeWatcher({ detectors = DETECTORS }: { detectors?: reado
           out.push(describe(detector, null, snapshot));
         } else if (was && !on) {
           armed.set(detector.type, false);
+        }
+      } else if (detector.kind === 'repeat') {
+        // **条件成立期间反复报**，但按 intervalMs 节流。
+        //
+        // 用户要的场景：机器人在水里时，**一直有事件把它拉起来**，防止它站在水里
+        // 空闲到把自己淹死。不是每 tick 报一个（那会打爆上下文），而是 1 秒一次。
+        const on = detector.fire?.(snapshot) === true;
+        if (!on) {
+          lastRepeat.delete(detector.type);
+        } else {
+          const now = Date.now();
+          const prev = lastRepeat.get(detector.type);
+          const every = detector.intervalMs ?? 1000;
+          if (prev == null || now - prev >= every) {
+            lastRepeat.set(detector.type, now);
+            out.push(describe(detector, null, snapshot));
+          }
         }
       } else if (detector.kind === 'change') {
         const value = detector.value?.(snapshot);
@@ -522,15 +580,24 @@ function deltaFor(detector: Detector, key: string | number | null, snapshot: Edg
   if (key != null) delta['key'] = key;
   if (detector.type.startsWith('bot.health')) delta['health'] = snapshot.health;
   if (detector.type.startsWith('bot.hunger')) delta['food'] = snapshot.food;
-  if (detector.type.startsWith('bot.oxygen')) delta['oxygen'] = snapshot.oxygen;
   if (detector.type === 'world.light_low') delta['light'] = snapshot.light;
   if (detector.type === 'inventory.full') delta['freeSlots'] = snapshot.freeSlots;
-  if (detector.type === 'inventory.food_low') {
-    delta['foodCount'] = snapshot.foodCount;
-    // 光报"没食物了"没有用（模型反馈过："系统只发了事件但**没有可执行的建议**，
-    // 现在全靠我自己想"）。把下一步直接写进事件里。
+  // 手上那件工具快坏了——**说清是哪件、还剩多少**。模型反馈过这条事件不说是
+  // 哪个物品，它只能猜是哪把镐（key 固定是 'hand'，换手也不会变）。
+  if (detector.type === 'tool.durability_low') {
+    const held = (snapshot.heldSlots ?? []).find((h) => h.slot === 'hand');
+    delta['item'] = held?.item ?? null;
+    delta['remaining'] = held?.fraction ?? null;
+  }
+  // 背包食物数 + 当前饥饿值一起给：前者是"还有没有存货"，后者是"现在饿不饿"。
+  // 只给前者会让模型以为 `food_low` 是在说饥饿值（它反馈过这件事）。
+  if (detector.type === 'inventory.food_items_low') {
+    delta['foodItems'] = snapshot.foodCount;
+    delta['food'] = snapshot.food;
+    // 光报"没食物了"没有用——模型反馈过："系统只发了事件但**没有可执行的建议**，
+    // 现在全靠我自己想"。把下一步直接写进事件里。
     delta['hint'] =
-      '没有食物了：searchForEntity 找 pig/cow/chicken/sheep → attack 杀掉 → smeltItem 把生肉烤熟 → consume 吃掉；' +
+      '没有食物了：searchForEntity 找 pig/cow/chicken/sheep → attack 杀掉 → useBlock(type=furnace, input=生肉, output=熟肉) 烤熟 → consume 吃掉；' +
       '旁边有小麦/胡萝卜/土豆就直接 collectBlocks 收。饿到 6 以下会掉血。';
   }
   return delta;
@@ -557,8 +624,6 @@ export function snapshotFromBot(bot: unknown, extra: SnapshotExtra = {}): EdgeSn
   try {
     snap.health = num(b['health']);
     snap.food = num(b['food']);
-    snap.oxygen = num((b as { oxygenLevel?: unknown }).oxygenLevel);
-
     const entity = (b['entity'] ?? {}) as Record<string, unknown>;
     const pos = (entity['position'] ?? {}) as { x?: unknown; y?: unknown; z?: unknown };
     const feet = { x: num(pos.x) ?? 0, y: num(pos.y) ?? 0, z: num(pos.z) ?? 0 };
@@ -594,12 +659,20 @@ export function snapshotFromBot(bot: unknown, extra: SnapshotExtra = {}): EdgeSn
       // 背包读不到就不报食物数。
     }
 
-    const held = (b['heldItem'] ?? null) as { durabilityUsed?: unknown; maxDurability?: unknown } | null;
+    const held = (b['heldItem'] ?? null) as {
+      name?: unknown;
+      durabilityUsed?: unknown;
+      maxDurability?: unknown;
+    } | null;
     // 与 Live State 共用同一个钳制过的算法：负的 fraction 会让
     // `tool.durability_low` 永远处于触发态（模型反馈过 -300%/-900%）。
     const fraction = durabilityFraction(held?.durabilityUsed, held?.maxDurability);
     if (fraction != null) {
-      snap.heldSlots = [{ slot: 'hand', fraction }];
+      // **带上物品名**：模型反馈过"durability_low 不说是哪个物品"，它只能猜是哪把
+      // 镐快坏了。手上一换东西 key 仍是 'hand'，所以名字必须在 delta 里。
+      snap.heldSlots = [
+        { slot: 'hand', fraction, ...(typeof held?.name === 'string' ? { item: held.name } : {}) },
+      ];
     }
 
     const time = num((b['time'] as { timeOfDay?: unknown } | undefined)?.timeOfDay);
@@ -642,6 +715,37 @@ export function snapshotFromBot(bot: unknown, extra: SnapshotExtra = {}): EdgeSn
         const feetName = feetBlock['name'];
         snap.inLava = feetName === 'lava' ? true : undefined;
         snap.inWater = feetName === 'water' ? true : undefined;
+
+        // **真正淹没**：头也在水里。这是**可靠**信号——mineflayer 的
+
+        // `oxygenLevel = Math.round(metas.air_supply / 15)` 在 1.20.6 上取不到 air_supply，
+
+        // 会一直停在默认值 20。模型真机上就是这么溺死的：氧气显示 20，world.water.drowning
+
+        // （L5 紧急）永远不触发。
+
+        // 头那一格：mock 出来的 bot 可能没有 blockAt / entity.position.offset，
+
+        // 所以先看有没有，别让快照整个炸掉（测试就是这么抓到第一版的）。
+
+        const anyBot = bot as {
+
+          blockAt?: (pos: unknown) => { name?: unknown } | null;
+
+          entity?: { position?: { offset?: (x: number, y: number, z: number) => unknown } };
+
+        };
+
+        const headPos = anyBot.entity?.position?.offset?.(0, 1.6, 0);
+
+        const headBlock = headPos == null ? null : anyBot.blockAt?.(headPos);
+
+        // 头那一格是不是水（可靠事实）。**不用 oxygenLevel**：那个字段在 1.20.6 上
+        // 取不到 air_supply，恒为 20、还会冒出 -1，拿它当依据只会发假警报。
+        snap.headInWater = headBlock?.['name'] === 'water' ? true : undefined;
+        snap.submerged =
+
+          feetName === 'water' && headBlock?.['name'] === 'water' ? true : undefined;
         const biome = feetBlock['biome'] as { name?: unknown } | string | null | undefined;
         snap.biome = typeof biome === 'string' ? biome : strOf(biome?.name);
 
@@ -815,6 +919,26 @@ export function isStuck(
   if (!actionRunning) return false;
   if (lastPos == null || pos == null || lastPos !== pos) return false;
   return now - since >= thresholdMs;
+}
+
+/**
+ * 这些动作**本来就该站着不动**，位置不变不能当"卡住"的证据。
+ *
+ * 模型真机报过"误报 task.stuck"：它开着箱子、合成、查背包的时候位置当然不变，
+ * 却被判成卡住并收到一次 PREEMPT 唤醒——白花一次请求，还让它以为出事了。
+ */
+const STATIONARY_ACTIONS: readonly string[] = [
+  // 旧名单里的 inventory / nearbyBlocks / entities / craftable / savedPlaces 已删：
+  // 它们的查询全部并进 stats(type=…)，站着的也只有 stats 一个入口。
+  'useBlock', 'useEntity', 'craft', 'stats', 'getCraftingPlan', 'searchWiki',
+  'rememberHere', 'Say', 'Feedback', 'Stop',
+];
+
+/** 这个动作是不是"站着干活"那类（位置不变是正常的）。 */
+export function isStationaryAction(action: string | null | undefined): boolean {
+  if (action == null) return false;
+  const name = action.replace(/^action:/, '').replace(/^!/, '');
+  return STATIONARY_ACTIONS.includes(name);
 }
 
 /** 心跳：空闲超过间隔就醒一次做反思，防睡死。 */

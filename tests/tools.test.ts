@@ -3,7 +3,7 @@
  * Stop/Finish 是控制信号，不占通道。
  */
 import { describe, expect, it, vi } from 'vitest';
-import { checkDomain, commandToTool, executeToolCall, isActionTool, stripBang, toolExists, validateToolCall, validateUpdatePlan, formatSay, getOpenAITools, getToolDocs } from '../src/agent/commands/to_openai_tools.js';
+import { checkDomain, commandToTool, executeToolCall, isActionTool, stripBang, toolExists, validateToolCall, validateUpdatePlan, formatSay, getOpenAITools } from '../src/agent/commands/to_openai_tools.js';
 import { queryList } from '../src/agent/commands/queries.js';
 import type { AgentCommand } from '../src/agent/commands/actions.js';
 
@@ -16,8 +16,8 @@ describe('isActionTool', () => {
 
   it('query tools do not claim the channel', () => {
     expect(isActionTool('stats')).toBe(false);
-    expect(isActionTool('inventory')).toBe(false);
-    expect(isActionTool('entities')).toBe(false);
+    expect(isActionTool('getCraftingPlan')).toBe(false);
+    expect(isActionTool('searchWiki')).toBe(false);
   });
 
   it('control tools do not claim the channel', () => {
@@ -44,6 +44,16 @@ describe('validateToolCall', () => {
     const r = validateToolCall('Fly', {});
     expect(r.ok).toBe(false);
     expect(r.code).toBe('UNKNOWN_TOOL');
+  });
+
+  it('attack 的 type 是必填，不给就拒', () => {
+    // target 的含义全靠 type 声明（id/player/mob），没有默认值——
+    // 靠字符串形状隐式猜等于把"玩家优先"这个人为约定藏起来。
+    // 少一层 optional，schema 的 required 与运行时校验就都能拦住漏填。
+    expect(validateToolCall('attack', { target: '9' }).ok).toBe(false);
+    expect(validateToolCall('attack', { target: '9' }).errors?.join(';')).toContain('type');
+    expect(validateToolCall('attack', { target: '9', type: 'id' })).toEqual({ ok: true });
+    expect(validateToolCall('attack', { target: 'Notch', type: 'player' })).toEqual({ ok: true });
   });
 
   it('rejects non-object args', () => {
@@ -134,10 +144,6 @@ describe('Say isolation', () => {
     expect(validateUpdatePlan({ nope: 1 }).ok).toBe(false);
     const tools = getOpenAITools({ blocked_actions: [] });
     expect(tools.map((t) => t.function.name)).toContain('UpdatePlan');
-    const docs = getToolDocs({ blocked_actions: [] });
-    for (const name of ['Finish', 'Stop', 'Say', 'UpdatePlan', 'Feedback']) {
-      expect(docs).toContain(`${name}:`);
-    }
   });
 });
 

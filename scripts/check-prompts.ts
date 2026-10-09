@@ -7,9 +7,15 @@ type ToolText = Record<string, { params?: Record<string, unknown> }>;
 const TOOL_TEXT = P.TOOL_TEXT as ToolText;
 const MESSAGES = P.MESSAGES as Record<string, unknown>;
 
+const COMMAND_FILES = [
+  './src/agent/commands/actions.ts',
+  './src/agent/commands/queries.ts',
+  './src/agent/commands/interact.ts',
+];
+
 // 1. 命令文件引用完整性
 const used = new Map<string, Set<string>>();
-for (const fp of ['./src/agent/commands/actions.ts', './src/agent/commands/queries.ts']) {
+for (const fp of COMMAND_FILES) {
   const src = readFileSync(fp, 'utf8');
   for (const m of src.matchAll(/td\('([^']+)'\)/g)) if (!used.has(m[1] as string)) used.set(m[1] as string, new Set<string>());
   for (const m of src.matchAll(/tp\('([^']+)',\s*'([^']+)'\)/g)) {
@@ -27,7 +33,7 @@ for (const [key, params] of used) {
   }
 }
 const defined = new Set<string>();
-for (const fp of ['./src/agent/commands/actions.ts', './src/agent/commands/queries.ts']) {
+for (const fp of COMMAND_FILES) {
   const src = readFileSync(fp, 'utf8');
   for (const m of src.matchAll(/name:\s*['"]!([^'"]+)['"]/g)) defined.add(m[1] as string);
 }
