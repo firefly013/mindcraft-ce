@@ -80,17 +80,32 @@ export function createSayTool(onSay: (text: string) => void = () => {}): ToolReg
  * 标题由拼装方负责，这里不加壳——否则 "## 记忆摘要" 会挂到
  * "## 当前世界快照" 标题底下。
  */
-export function liveTailHook(liveTail: () => string | Promise<string>): HookRegistration {
+export function liveTailHook(
+  liveTail: () => string | Promise<string>,
+  /** 每轮现拍一张（base64 jpeg）；拍不到返回 null 就只给文本。**可选**。 */
+  liveImage?: () => Promise<string | null>,
+): HookRegistration {
   const append = (
     request: { readonly messages: readonly Message[] },
     raw: string,
+    image: string | null,
   ): { readonly messages: readonly Message[] } | undefined => {
     const tail = raw.trim();
-    if (tail === '') return undefined;
+    if (tail === '' && image == null) return undefined;
+    // 有图时 content 必须是数组（pi-ai 的 user content 支持
+    // `string | (TextContent | ImageContent)[]`）。只有文字就退化为纯字符串，
+    // 与不带图时发出的形状逐字一致。
+    const content =
+      image != null
+        ? [
+            ...(tail === '' ? [] : [{ type: 'text' as const, text: tail }]),
+            { type: 'image' as const, data: image, mimeType: 'image/jpeg' },
+          ]
+        : tail;
     return {
       messages: [
         ...request.messages,
-        { role: 'user' as const, content: tail, timestamp: Date.now() },
+        { role: 'user' as const, content, timestamp: Date.now() },
       ],
     };
   };
@@ -98,11 +113,26 @@ export function liveTailHook(liveTail: () => string | Promise<string>): HookRegi
   return hook(GenerationTask, {
     beforeRequest: (request) => {
       const tail = liveTail();
-      return typeof tail === 'string'
-        ? append(request, tail)
-        : tail.then((value) => append(request, value));
+      // 图和文一起取：每轮都要拍，所以只在真给了 liveImage 时才 await。
+      if (liveImage == null) {
+        return typeof tail === 'string'
+          ? append(request, tail, null)
+          : tail.then((value) => append(request, value, null));
+      }
+      return Promise.all([Promise.resolve(tail), safeImage(liveImage)]).then(([value, image]) =>
+        append(request, value, image),
+      );
     },
   });
+}
+
+/** 拍照失败一律当没拍——视觉是锦上添花，不能让它毁掉整轮请求。 */
+async function safeImage(liveImage: () => Promise<string | null>): Promise<string | null> {
+  try {
+    return await liveImage();
+  } catch {
+    return null;
+  }
 }
 
 /** 静态系统提示词走 section：`tag: false` 表示原样渲染，不加 `<key>` 包裹。 */

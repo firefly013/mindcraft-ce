@@ -869,7 +869,7 @@ export const interactList: AgentCommand[] = [
       return renderReport(
         [step(`做不出 ${want.name}×${want.count}`)],
         `检查材料（现在给的是 ${itemText(parsedIn.items) || '空'}）够不够；` +
-          `先 craftable 看一眼这个物品的配方和所需材料；只有 3×3 的配方才需要工作台（那时用 useBlock(type=crafting_table, …)）。` +
+          `想知道这个物品怎么做、缺哪些材料，用 getCraftingPlan(targetItem="…")；只有 3×3 的配方才需要工作台（那时用 useBlock(type=crafting_table, …)）。` +
           (have != null ? `背包里现有 ${want.name}×${have}。` : ''),
       );
     },

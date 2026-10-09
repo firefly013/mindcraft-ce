@@ -623,7 +623,7 @@ export function snapshotFromBot(bot: unknown, extra: SnapshotExtra = {}): EdgeSn
   const b = bot as Record<string, unknown>;
   try {
     snap.health = num(b['health']);
-    snap.food = num(b['food']);
+    snap.food = num(b['food']);
     const entity = (b['entity'] ?? {}) as Record<string, unknown>;
     const pos = (entity['position'] ?? {}) as { x?: unknown; y?: unknown; z?: unknown };
     const feet = { x: num(pos.x) ?? 0, y: num(pos.y) ?? 0, z: num(pos.z) ?? 0 };
@@ -928,8 +928,9 @@ export function isStuck(
  * 却被判成卡住并收到一次 PREEMPT 唤醒——白花一次请求，还让它以为出事了。
  */
 const STATIONARY_ACTIONS: readonly string[] = [
-  'useBlock', 'useEntity', 'craft', 'inventory', 'stats', 'craftable',
-  'nearbyBlocks', 'entities', 'savedPlaces', 'getCraftingPlan', 'searchWiki',
+  // 旧名单里的 inventory / nearbyBlocks / entities / craftable / savedPlaces 已删：
+  // 它们的查询全部并进 stats(type=…)，站着的也只有 stats 一个入口。
+  'useBlock', 'useEntity', 'craft', 'stats', 'getCraftingPlan', 'searchWiki',
   'rememberHere', 'Say', 'Feedback', 'Stop',
 ];
 

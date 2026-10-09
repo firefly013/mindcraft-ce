@@ -76,6 +76,8 @@ export type CommandInvoke = (
 export function commandToRegistration(
   command: AgentCommand,
   invoke: CommandInvoke,
+  /** 现拍一张截图，返回 base64；相机没开/拍失败返回 null。只有命令声明要图时才调。 */
+  captureImage?: () => Promise<string | null>,
 ): ToolRegistration {
   return defineTool({
     name: stripBang(command.name),
@@ -88,7 +90,23 @@ export function commandToRegistration(
       const source = (args ?? {}) as Record<string, unknown>;
       const ordered = paramNames(command).map((name) => source[name] ?? undefined);
       const raw = await invoke(command, ordered);
-      return { content: [{ type: 'text' as const, text: outcomeText(raw) }] };
+
+      // **回执可以带图**（pi-ai 的 toolResult.content 是
+      // (TextContent | ImageContent)[]）。文本照旧逐字不变——措辞是模型学过的契约，
+      // 图片只是**追加**在后面，不修改任何既有回执。
+      const parts: Array<{ type: 'text'; text: string } | { type: 'image'; data: string; mimeType: string }> = [
+        { type: 'text' as const, text: outcomeText(raw) },
+      ];
+      if (command.withScreenshot === true && captureImage != null) {
+        let image: string | null;
+        try {
+          image = await captureImage();
+        } catch {
+          image = null; // 拍不到就只给文本，绝不因为视觉失败毁掉整条回执。
+        }
+        if (image != null) parts.push({ type: 'image', data: image, mimeType: 'image/jpeg' });
+      }
+      return { content: parts };
     },
   });
 }
@@ -96,7 +114,7 @@ export function commandToRegistration(
 /**
  * `blocked_actions` 的**真正**强制点。
  *
- * 旧实现只在 `getOpenAITools` / `getToolDocs` 里过滤**广告**：被隐藏的工具
+ * 旧实现只在 `getOpenAITools` 里过滤**广告**：被隐藏的工具
  * 只要模型按名字直接调用就**照样执行**（`validateToolCall` 与
  * `executeToolCall` 都不查黑名单）。迁到 pi-durable 后，`beforeTool` 才是
  * 拦得住的地方——这是这次迁移顺带修掉的一个安全问题。

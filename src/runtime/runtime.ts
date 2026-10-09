@@ -53,6 +53,11 @@ export interface BotRuntimeOptions {
    * `beforeRequest` 允许返回 Promise。
    */
   liveTail: () => string | Promise<string>;
+  /**
+   * 每轮现拍一张画面（base64 jpeg），跟尾巴一起注入。**可选**：不给就纯文本。
+   * 拍不到返回 null 即可，hook 会安静降级。
+   */
+  liveImage?: () => Promise<string | null>;
   /** 游戏工具。原样安装，不做任何包装。 */
   tools?: readonly ToolRegistration[];
   /** Say 通道回调（写游戏内聊天 / 推前端）。 */
@@ -86,7 +91,7 @@ export async function openBotRuntime(options: BotRuntimeOptions): Promise<BotRun
     // 静态提示词走 section：只发增量，保 prompt cache。
     sections: [systemSection(options.systemPrompt)],
     // 动态尾巴走 beforeRequest：只影响本次请求，不落 transcript。
-    hooks: [liveTailHook(options.liveTail)],
+    hooks: [liveTailHook(options.liveTail, options.liveImage)],
     // 自然的 ReAct 工具循环：不挂 control.terminate，也没有 Finish 工具。
     // run 的结束就是"模型不再调工具"。见 loop.ts 顶部的说明。
     tools: [createSayTool(options.onSay), ...(options.tools ?? [])],

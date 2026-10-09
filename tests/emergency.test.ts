@@ -139,6 +139,140 @@ describe('runEmergency', () => {
     expect(res.health).toBe(5);
   });
 
+  it('溺水时上浮：swimUp 被调用（这一支以前压根不存在）', async () => {
+    let t = 0;
+    let submerged = true;
+    const swamUp: number[] = [];
+    const bot = stubBot({
+      threats: () => [],
+      submerged: () => submerged,
+      swimUp: () => {
+        swamUp.push(t);
+        submerged = false; // 一浮就露出水面
+      },
+    });
+    const res = await runEmergency(bot, {
+      tickMs: 100,
+      now: () => t,
+      sleep: (ms: number) => {
+        t += ms;
+        return Promise.resolve();
+      },
+    });
+    expect(swamUp.length).toBeGreaterThan(0);
+    expect(res.escaped).toBe(true);
+  });
+
+  it('溺水优先于逃跑：还在水里就一本正经地跑，等于白跑', async () => {
+    let t = 0;
+    let health = 5;
+    // 头顶被封死，浮不出去 → 一路掉血到 0。
+    const bot = stubBot({
+      threats: () => [{ id: 1, name: 'zombie', position: { x: 5, y: 64, z: 0 } }],
+      submerged: () => true,
+      swimUp: () => {},
+    });
+    // 每 tick 掉一点血，几轮就到底。
+    Object.defineProperty(bot, 'health', { get: () => health });
+    const res = await runEmergency(bot, {
+      tickMs: 100,
+      now: () => t,
+      sleep: (ms: number) => {
+        t += ms;
+        health = Math.max(0, health - 1);
+        return Promise.resolve();
+      },
+    });
+    expect(res.reason).toBe('died');
+    // 整个溺水期间一次都没逃跑、也没吃东西——这两件在溺水面前都是纯浪费。
+    expect(bot.fled).toEqual([]);
+    expect(bot.eaten).toEqual([]);
+  });
+
+  it('浮出水面后恢复正常流程（威胁还在就接着逃）', async () => {
+    let t = 0;
+    let submerged = true;
+    const bot = stubBot({
+      threats: () => (t < 1000 ? [{ id: 1, name: 'zombie', position: { x: 5, y: 64, z: 0 } }] : []),
+      submerged: () => submerged,
+      swimUp: () => {
+        submerged = false;
+      },
+    });
+    const res = await runEmergency(bot, {
+      tickMs: 100,
+      now: () => t,
+      sleep: (ms: number) => {
+        t += ms;
+        return Promise.resolve();
+      },
+    });
+    // 头一露出水面，下一轮就该回头处理威胁了。
+    expect(bot.fled.length).toBeGreaterThan(0);
+    expect(res.escaped).toBe(true);
+  });
+
+  it('保命被关掉后：溺水也不上浮（模型签了生死状，字面意思）', async () => {
+    let t = 0;
+    let health = 5;
+    const swamUp: number[] = [];
+    const bot = stubBot({
+      threats: () => [],
+      submerged: () => true,
+      safeguardsOff: () => true,
+      swimUp: () => {
+        swamUp.push(t);
+      },
+    });
+    Object.defineProperty(bot, 'health', { get: () => health });
+    await runEmergency(bot, {
+      tickMs: 100,
+      now: () => t,
+      sleep: (ms: number) => {
+        t += ms;
+        health = Math.max(0, health - 1);
+        return Promise.resolve();
+      },
+    });
+    // 一次都没上浮 —— 关掉的就是这条反射。
+    expect(swamUp).toEqual([]);
+  });
+
+  it('关掉保命只关上浮，fleeTo / 吃东西照旧（关的是反射，不是整个 emergency）', async () => {
+    let t = 0;
+    let submerged = true;
+    const bot = stubBot({
+      threats: () => (t < 1000 ? [{ id: 1, name: 'zombie', position: { x: 5, y: 64, z: 0 } }] : []),
+      submerged: () => submerged,
+      safeguardsOff: () => true,
+      swimUp: () => {},
+    });
+    await runEmergency(bot, {
+      tickMs: 100,
+      now: () => t,
+      sleep: (ms: number) => {
+        t += ms;
+        submerged = false; // 下一轮就浮出去了，这里只验证"关保命时别上浮"
+        return Promise.resolve();
+      },
+    });
+    expect(bot.fled.length).toBeGreaterThan(0);
+  });
+
+  it('bot 没实现 submerged / swimUp 时当没溺水，不炸', async () => {
+    let t = 0;
+    const bot = stubBot({ threats: () => (t < 1000 ? [{ id: 1, name: 'zombie', position: { x: 5, y: 64, z: 0 } }] : []) });
+    const res = await runEmergency(bot, {
+      tickMs: 1000,
+      now: () => t,
+      sleep: (ms: number) => {
+        t += ms;
+        return Promise.resolve();
+      },
+    });
+    expect(res.escaped).toBe(true);
+  });
+
   it('reports died when health hits zero mid-flight', async () => {
     const bot = stubBot({ health: 0 });
     const res = await runEmergency(bot, { tickMs: 1, sleep: () => Promise.resolve() });

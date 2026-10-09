@@ -4,7 +4,10 @@ import { initBot } from '../utils/mcdata.js';
 import { expandTagRecipes } from '../utils/recipe_tags.js';
 import { executeToolCall } from './commands/to_openai_tools.js';
 import { ActionRunner } from './action_runner.js';
-import { stopPvp, consume, goToPosition } from './library/skills.js';
+import { stopPvp, consume, goToPosition, forceExitWater } from './library/skills.js';
+import { movementsFor } from './movements.js';
+import { permits } from './permits.js';
+import { safeguards } from './safeguards.js';
 import pf from 'mineflayer-pathfinder';
 import { isHostile } from '../utils/mcdata.js';
 import { Scheduler, KIND, LEVEL } from './scheduler.js';
@@ -23,7 +26,12 @@ import { defineExtension } from '@earendil-works/pi-durable';
 import { openBotWiring, type BotWiring } from '../runtime/bot.js';
 import { createFeedbackTool, createStopTool, createUpdatePlanTool } from '../runtime/control_tools.js';
 import { EventIntake } from '../runtime/events.js';
-import { actionChannelInvoker, buildGameTools } from '../runtime/game_tools.js';
+import { actionChannelInvoker, buildGameTools, GAME_COMMANDS } from '../runtime/game_tools.js';
+import { stripBang } from './commands/to_openai_tools.js';
+import { CliJobTracker } from './cli_jobs.js';
+import { mkdirSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import {
     AUTO_PICKUP_ID,
     PICKUP_INTERVAL_MS,
@@ -51,6 +59,30 @@ import { Task } from './tasks/tasks.js';
 import type { TaskData } from './tasks/tasks.js';
 import { log, validateNameFormat, handleDisconnection } from './connection_handler.js';
 import type { ToolResponse } from '../types/common.js';
+
+/** CLI 事件缓冲上限。一次调试会话够用就行，别让数组无限长。 */
+const CLI_EVENT_LOG_LIMIT = 200;
+
+/** CLI 拿走的一条事件。 */
+export interface CliEvent {
+    at: number;
+    level: number;
+    action: string;
+    text: string;
+}
+
+
+/**
+ * 控制类工具：它们**自己不发额度，也不消耗额度**。
+ *
+ * 模型申请"接下来 3 次动作别拦我"，如果申请这一步就吃掉一次，那它到手只剩 2 次，
+ * 语义变成"申请 N 次实际能用 N-1 次" —— 模型很难算清，于是干脆不敢用这个功能。
+ */
+const CONTROL_TOOLS = new Set([
+    '!allowDangerousOps',
+    '!disableSafeguards',
+    '!restoreAllSafety',
+]);
 
 export class Agent {
     count_id: number = 0;
@@ -81,6 +113,16 @@ export class Agent {
     private pickupStarved: boolean = false;
     /** 开发者通道的读取位置（见 pollInbox）。 */
     private inboxOffset: number = 0;
+    /**
+     * 强制出水：是否正在执行 / 上次检查时刻。
+     *
+     * **必须节流**：判定要做一次连通搜索（最多 256 格），而 `update()` 是每
+     * 个物理 tick 都跑的（约 50ms 一次）——不节流等于把主线程泡在水里。
+     */
+    private exitingWater: boolean = false;
+    private lastWaterCheckAt: number = 0;
+    /** 连续几次没找到岸。纯水大陆上岸不会靠重试变可能，所以要退避。 */
+    private waterExitFailures: number = 0;
     /**
      * 队友 bot 的名字（从 settings.profiles 那些 profile 文件里读）。
      *
@@ -443,10 +485,19 @@ export class Agent {
                 baseDir,
                 systemPrompt: () => systemPromptFromProfile(profile, this.name),
                 sample: () => this.sampleContext(),
+                // 每轮现拍一张画面，跟世界快照一起进请求。
+                // 这就是 `settings.allow_vision` 那句注释一直承诺、却从没接线
+                // 的东西：`captureBase64()` 有，`liveImage` 参数也有，中间缺的
+                // 就是这一行。拍不到（相机没开 / worldView 没就绪）返回 null，
+                // 请求退化成纯文本，不报错。
+                liveImage: () => this.captureScreenshot(),
                 tools: [
                     ...buildGameTools({
                         execute: (name: string, args: Record<string, unknown>) =>
                             this.invokeTool(name, args),
+                        // 只有声明了 withScreenshot 的命令会真的调它（目前只有 !stats）。
+                        // 相机没开/没就绪时返回 null，回执退化成纯文本，不报错。
+                        captureImage: () => this.captureScreenshot(),
                     }),
                     createStopTool(() => this.fullStop()),
                     createUpdatePlanTool((goal, todos) => this.plan.update(goal, todos)),
@@ -486,6 +537,13 @@ export class Agent {
                         action,
                         text: event.text,
                     });
+                    // **CLI 的事件缓冲**：外部命令行没有"被唤醒"这回事——它只在
+                    // 被调用的那一刻才看得到东西。所以事件不能只在投递时打日志，
+                    // 得留一份给下一次 CLI 调用带走。上限 200 条，够一次调试会话。
+                    this.cliEvents.push({ at: Date.now(), level: event.level, action, text: event.text });
+                    if (this.cliEvents.length > CLI_EVENT_LOG_LIMIT) {
+                        this.cliEvents.splice(0, this.cliEvents.length - CLI_EVENT_LOG_LIMIT);
+                    }
                 },
             });
             this.wiring = wiring;
@@ -525,9 +583,209 @@ export class Agent {
             log.warn({ name, args, note: '工具通道尚未就绪' });
             return '工具通道尚未就绪，稍后再试。';
         }
-        const text = await actionChannelInvoker(runner)(name, args);
+        let text: string;
+        try {
+            text = await actionChannelInvoker(runner)(name, args);
+        } finally {
+            // **失败也要消耗** —— 这是"按次数授权"全部意义所在：模型申请 3 次，
+            // 第 2 次寻路失败，额度当场用完，闸门立刻回到默认禁止、保命重新接管。
+            // 放 finally 里就是为了让异常路径也扣：不然模型可以无限重试同一件事。
+            if (!CONTROL_TOOLS.has(name)) {
+                const now = Date.now();
+                const permitSpent = permits.consumeCall(now);
+                const guardSpent = safeguards.consumeCall(now);
+                if (permitSpent || guardSpent) {
+                    log.info({ name, note: '次数额度用尽，闸门/保命恢复默认' });
+                }
+            }
+        }
         log.info({ name, args, ms: Date.now() - started, result: text });
         return text;
+    }
+
+    /** CLI 事件缓冲（见 `runCliCommand`）。外部命令行靠它补看"不在场时"发生的事。 */
+    private cliEvents: CliEvent[] = [];
+
+    /** CLI 任务表（见 `startCliJob`）。状态机在 `cli_jobs.ts`，那边可单测。 */
+    private cliJobs = new CliJobTracker({ stop: async () => { await this.actions.stop(); } });
+
+    /** 提交一个任务，**立即返回 id**，命令在后台跑（详见 `CliJobTracker`）。 */
+    startCliJob(name: string, args: Record<string, unknown>, force: boolean): { id: string } {
+        return this.cliJobs.start(name, () => this.runOneCommand(name, args, force));
+    }
+
+    /** 单个任务状态；没有就是 `unknown`（可能已被挤出表）。 */
+    cliJobStatus(id: string): ReturnType<CliJobTracker['status']> {
+        return this.cliJobs.status(id);
+    }
+
+    /** 全部任务。 */
+    cliJobList(): ReturnType<CliJobTracker['list']> {
+        return this.cliJobs.list();
+    }
+
+    /** 取消：置标记 + 真的去停动作。 */
+    async cliCancelJob(id: string): Promise<boolean> {
+        return await this.cliJobs.cancel(id);
+    }
+
+    /**
+     * 等一个任务。超时**不是失败**——返回 `state: 'running'` 表示它还在跑。
+     * 这一点和"超时即报错"不一样：那时超时了动作却没停，人看着终端以为失败，
+     * 其实机器人还在走路。
+     */
+    async cliWaitJob(id: string, timeoutMs: number): Promise<ReturnType<CliJobTracker['status']>> {
+        return await this.cliJobs.wait(id, timeoutMs);
+    }
+
+    /** `jobs`：列出任务表。 */
+    private cliListJobs(): string {
+        const jobs = this.cliJobList();
+        if (jobs.length === 0) return '(还没有任务)';
+        return jobs.map((j) => `  #${j.id}  ${j.state.padEnd(9)} ${j.name}  (${Math.round(j.ms / 1000)}s)`).join('\n');
+    }
+
+    /** `tools`：列出所有能跑的命令（游戏工具 + 内置命令）。 */
+    private cliListTools(): string {
+        const game = GAME_COMMANDS.map((c) => stripBang(c.name)).sort();
+        const builtin = ['tools', 'jobs', 'history', 'events'].sort();
+        return [`游戏工具（${game.length}）：`, ...game, '', `内置命令（${builtin.length}）：`, ...builtin].join('\n');
+    }
+
+    /** `events`：只看最近事件（不跑任何命令）。 */
+    private cliRecentEvents(limit: number): string {
+        const recent = this.cliEvents.slice(-limit);
+        if (recent.length === 0) return '(这段时间没有事件)';
+        return recent.map((e) => `[L${e.level}/${e.action}] ${e.text}`).join('\n');
+    }
+
+    /**
+     * `history`：整份对话历史。
+     *
+     * 走 `harness.context()` 拿原始 transcript（entry + 它对应的模型消息），不自己
+     * 另存一份——另存就会和真实上下文漂移，看历史看到的是假的。
+     */
+    private async cliHistory(limit: number): Promise<string> {
+        const wiring = this.wiring as
+            | { runtime?: { session?: { harness?: any }; conversation?: { id?: any } } }
+            | null
+            | undefined;
+        const harness = wiring?.runtime?.session?.harness;
+        const convId = wiring?.runtime?.conversation?.id;
+        if (harness == null || convId == null) return '(会话还没起来，暂无历史)';
+        try {
+            const view = await harness.context(convId, BACKGROUND_CONTEXT);
+            const entries: readonly any[] = view?.entries ?? [];
+            const contributions: readonly (readonly any[])[] = view?.contributions ?? [];
+            const lines: string[] = [];
+            const start = Math.max(0, entries.length - limit);
+            for (let i = start; i < entries.length; i++) {
+                const entry = entries[i];
+                const kind = entry?.kind ?? '?';
+                const msgs = contributions[i] ?? [];
+                for (const m of msgs) {
+                    const role = m?.role ?? '?';
+                    const text = typeof m?.content === 'string' ? m.content : JSON.stringify(m?.content ?? '');
+                    lines.push(`#${i} ${kind} [${role}] ${text}`);
+                }
+            }
+            if (lines.length === 0) return '(历史是空的)';
+            return lines.join('\n');
+        } catch (err: unknown) {
+            return `读历史失败：${err instanceof Error ? err.message : String(err)}`;
+        }
+    }
+
+    /**
+     * 给外部 CLI 用的一次调用：跑一条命令，并把**上次调用以来积攒的事件**一起带走。
+     *
+     * 为什么要带事件：CLI 是被动的——它没法像游戏内玩家那样"被唤醒"。用户敲一次
+     * 命令才看一次输出，中间那几十秒里机器人挨了打、进了水、做完了一个动作，全
+     * 都不在回执里。所以每次调用把这段时间的事件一并打印，不管用户问没问。
+     *
+     * `since` 由 CLI 自己记（它知道上次看到哪），这样多个 CLI / 多次重开互不干扰。
+     */
+    async runCliCommand(
+        name: string,
+        args: Record<string, unknown> = {},
+        opts: { since?: number; force?: boolean } = {},
+    ): Promise<{ output: string; events: CliEvent[] }> {
+        const since = typeof opts.since === 'number' ? opts.since : 0;
+        const events = this.cliEvents.filter((e) => e.at > since);
+        return {
+            output: await this.runOneCommand(name, args, opts.force === true),
+            events,
+        };
+    }
+
+    /** 跑一条命令（工具或内置命令）。`force` = 先把身体抢过来再跑。 */
+    private async runOneCommand(name: string, args: Record<string, unknown>, force: boolean): Promise<string> {
+        // 内置命令（不是游戏工具）：这些得在 bot 进程里跑，因为要碰会话数据库。
+        if (name === 'tools') return this.cliListTools();
+        if (name === 'jobs') return this.cliListJobs();
+        if (name === 'history') return await this.cliHistory(Number(args.limit ?? 40) || 40);
+        if (name === 'events') return this.cliRecentEvents(Number(args.limit ?? 30) || 30);
+
+        if (force) {
+            try {
+                await this.actions.stop();
+            } catch {
+                // 停不掉就硬着头皮跑，回执里会体现冲突。
+            }
+        }
+        const found = GAME_COMMANDS.find((c) => c.name === `!${name}` || c.name === name);
+        if (found == null) return `没有这条命令：${name}。用 tools 看看有哪些。`;
+        try {
+            const ordered = Object.keys(found.params ?? {}).map((k) => args[k]);
+            const raw = await found.perform(this, ...ordered);
+            const text = raw == null ? '(no output)' : String(raw);
+            // **CLI 这条路不走 `commandToRegistration`**（那个是给模型用的，把图塞进
+            // 工具回执的多模态 content 里）。这里是终端，塞 base64 只会刷屏——
+            // 存成临时文件，回执给路径，人自己打开看。
+            return found.withScreenshot === true ? await this.attachScreenshotFile(text) : text;
+        } catch (err: unknown) {
+            return `命令 ${name} 出错：${err instanceof Error ? err.message : String(err)}`;
+        }
+    }
+
+    /**
+     * 把这一刻的画面存成临时文件，回执里给路径。
+     *
+     * 为什么不直接给 base64：终端显示不了图片，几千个字符只会把有用信息淹没。
+     * 存 Temp 是系统临时目录（`os.tmpdir()`），系统会自己清理，不用我们管生命周期。
+     */
+    private async attachScreenshotFile(text: string): Promise<string> {
+        const b64 = await this.captureScreenshot();
+        if (b64 == null) return `${text}\n\n（没拍到画面：相机没开，或者还没就绪）`;
+        try {
+            const dir = join(tmpdir(), 'mindcraft-cli');
+            mkdirSync(dir, { recursive: true });
+            const file = join(dir, `${this.name}-${Date.now()}.jpg`);
+            writeFileSync(file, Buffer.from(b64, 'base64'));
+            return `${text}\n\n画面：${file}`;
+        } catch (err: unknown) {
+            return `${text}\n\n（画面存不下来：${err instanceof Error ? err.message : String(err)}）`;
+        }
+    }
+
+    /**
+     * 现拍一张画面（base64 jpeg）给工具回执用；拍不到就 null。
+     *
+     * 单独包一层是为了让"拍不到"这件事**安静地失败**：视觉是锦上添花，
+     * 不能因为相机没就绪就把整条工具回执毁掉（工具回执是模型的行动依据）。
+     */
+    private async captureScreenshot(): Promise<string | null> {
+        try {
+            const vision = this.vision_interpreter as
+                | { captureBase64?: () => Promise<string | null> }
+                | null
+                | undefined;
+            if (vision == null || typeof vision.captureBase64 !== 'function') return null;
+            return await vision.captureBase64();
+        } catch (err: unknown) {
+            this.log.with('vision').warn({ phase: 'capture-failed', err: String(err) });
+            return null;
+        }
     }
 
     /** 全部停下：动作停、日志清、回到 idle。 */
@@ -626,7 +884,7 @@ export class Agent {
             },
             fleeTo: (x: number, z: number): void => {
                 try {
-                    bot.pathfinder.setMovements(new pf.Movements(bot));
+                    bot.pathfinder.setMovements(movementsFor(bot));
                     bot.pathfinder.setGoal(new pf.goals.GoalXZ(x, z));
                 } catch (err: unknown) {
                     console.warn('emergency flee failed:', err instanceof Error ? err.message : String(err));
@@ -650,6 +908,8 @@ export class Agent {
                     // 拿不到实体就没什么可做的。
                 }
             },
+            // 模型用 !disableSafeguards 签了生死状 → 连溺水都不再上浮。
+            safeguardsOff: (): boolean => safeguards.isSuppressed(Date.now()),
         });
     }
 
@@ -853,7 +1113,48 @@ export class Agent {
         this.maybeAutoPickup();
         // 兜底关窗：残留的开着的容器界面会废掉一整类世界交互（见 maybeCloseStaleScreen）。
         this.maybeCloseStaleScreen();
+        // 深水强制出水（见 maybeForceExitWater）。同样是后台行为，不能 await。
+        this.maybeForceExitWater();
         this.pollEdges();
+    }
+
+    /**
+     * 站在危险的水里就自己上岸。
+     *
+     * 授权管的是"模型想不想下水"，管不了"它已经站在水里了"。用户的原话是
+     * "其他情况，我们得想办法强制出水"，所以这条是我们写死的反射，不走模型。
+     *
+     * 三个不做：
+     * - **正在出水就不重复触发**（它是 repeat 式判据，不锁会自己叠自己）。
+     * - **模型正在干活就不抢方向盘**（它可能刚授权过、正打算水下作业）。
+     * - **不着火也不授权才动** —— 这两条由 `forceExitWater` 自己判，别在这里
+     *   复制一遍判据，复制就会漂移。
+     */
+    private maybeForceExitWater(): void {
+        if (this.exitingWater) return;
+        if (this.bot == null) return;
+        const now = Date.now();
+        // **失败就退避**：纯水大陆上"岸"这件事不会靠重试变可能，2 秒一轮只会
+        // 反复抢身体、反复往回执里塞同一句话。退到 30 秒，把身体还给模型
+        // （它也许想造船、或者游向某个方向）。
+        const gap = this.waterExitFailures > 0 ? 30_000 : 2000;
+        if (now - this.lastWaterCheckAt < gap) return;
+        this.lastWaterCheckAt = now;
+        if (this.scheduler?.currentAction() != null) return;
+
+        const bot = this.bot;
+        this.exitingWater = true;
+        void forceExitWater(bot)
+            .then((ok: boolean) => {
+                this.waterExitFailures = ok ? 0 : this.waterExitFailures + 1;
+            })
+            .catch((err: unknown) => {
+                this.waterExitFailures++;
+                this.log.with('water').warn({ phase: 'exit-failed', err: String(err) });
+            })
+            .finally(() => {
+                this.exitingWater = false;
+            });
     }
     /**
      * 兜底关窗。

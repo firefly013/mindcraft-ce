@@ -41,6 +41,7 @@
     "scripts": {
         "postinstall": "patch-package",
         "start": "tsx main.ts",
+    "cli": "tsx src/cli.ts",
         "start:build": "npm run build && node dist/main.js",
         "build": "tsc",
         "typecheck": "tsc --noEmit",

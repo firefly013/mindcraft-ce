@@ -159,6 +159,22 @@ describe('许可', () => {
     expect(text).toContain('点地狱门');
     expect(text).toContain('90 秒');
   });
+
+  it('describe 清掉过期的豁免票——不清的话模型会以为自己还豁免着', () => {
+    const p = createPermits();
+    p.bypassFor('enter_deep_water', 1000, '溺水自救', T0);
+    expect(p.describe(T0)).toContain('内部豁免 1 项');
+    const later = p.describe(T0 + 1000);
+    expect(later).not.toContain('内部豁免');
+    expect(later).toContain('没有任何授权');
+  });
+
+  it('describe 也清掉过期的授权（进 Live State 的必须是现在时）', () => {
+    const p = createPermits();
+    p.grant(null, 1, '浇黑曜石', T0);
+    expect(p.describe(T0)).toContain('已授权');
+    expect(p.describe(T0 + 60_000)).toContain('没有任何授权');
+  });
 });
 
 describe('opContextFor', () => {

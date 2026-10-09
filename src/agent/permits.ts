@@ -28,19 +28,49 @@ export interface Verdict {
 /** 着火**只**豁免这一项：跳进水里把自己浇灭。倒水/倒岩浆/点火/睡觉都不豁免。 */
 export const FIRE_EXEMPT_OPS: readonly string[] = ['enter_deep_water'];
 
+/**
+ * 授权记录。**两种模式，二选一**：
+ *
+ * - **时间制**（`minutes`）：`expiresAt` 有值、`callsLeft` 为 null。
+ * - **次数制**（`calls`）：`callsLeft` 有值、`expiresAt` 为 null。
+ *
+ * 次数制是为了水下作业这种场景：模型说"接下来 3 次动作别拦我"，于是它能连着
+ * 寻路 → 挖洞 → 封顶；中间哪一步失败了，这一次额度就没了，闸门立刻回到默认禁止，
+ * 保命程序重新接管。**按时间做不到这一点** —— 授权 5 分钟，模型在这 5 分钟里怎么
+ * 折腾都没人管，淹死了也白淹。
+ */
 interface Grant {
   /** null = 全部授权。 */
   ops: string[] | null;
-  expiresAt: number;
+  /** 时间制到期时刻；次数制为 null。 */
+  expiresAt: number | null;
+  /** 次数制剩余次数；时间制为 null。 */
+  callsLeft: number | null;
   reason: string;
   grantedAt: number;
 }
 
 export interface Permits {
   isAllowed(opId: string, ctx: OpContext, now: number): Verdict;
-  /** `opIds` 省略/null = 授权全部；给了列表 = 只授权这几个（未注册 id 抛错）。 */
+  /** `opIds` 省略/null = 授权全部；给了列表 = 只授权这几个（未注册 id 抛错）。**按时间**。 */
   grant(opIds: string[] | null, minutes: number, reason: string, now: number): Grant;
+  /** 同上，但**按次数**：每次工具调用消耗一次，**失败也算**（见 `consumeCall`）。 */
+  grantCalls(opIds: string[] | null, calls: number, reason: string, now: number): Grant;
   revoke(): void;
+  /**
+   * 彻底清干净：模型授权**和**内部豁免票一起清。
+   *
+   * `revoke()` 只清前者 —— 它回答的是"你不再被特别批准"。而"一键恢复保护"要的是
+   * 连我们写死的保命代码发出去的票也收回来，否则"立刻恢复"里有残留。
+   */
+  revokeAll(): void;
+  /**
+   * 消耗一次工具调用额度。只对次数制生效。
+   *
+   * **失败也要消耗** —— 这是次数制全部意义所在：模型申请了 3 次，第 2 次寻路失败，
+   * 它就该只剩 1 次，而不是可以无限重试。返回值 `true` 表示这一次正好把额度用尽。
+   */
+  consumeCall(now: number): boolean;
   /** 只给我们自己的保命代码用：给某一项发一张极短的豁免票。 */
   bypassFor(opId: string, ms: number, reason: string, now: number): void;
   describe(now: number): string;
@@ -51,6 +81,20 @@ export interface Permits {
 export function createPermits(): Permits {
   let grant: Grant | null = null;
   const bypasses = new Map<string, number>(); // opId -> expiresAt
+
+  /** 授权是否还有效（顺带清掉过期的）。两种模式统一在这里判。 */
+  function liveGrant(now: number): Grant | null {
+    if (grant == null) return null;
+    if (grant.expiresAt != null && now >= grant.expiresAt) {
+      grant = null;
+      return null;
+    }
+    if (grant.callsLeft != null && grant.callsLeft <= 0) {
+      grant = null;
+      return null;
+    }
+    return grant;
+  }
 
   function isAllowed(opId: string, ctx: OpContext, now: number): Verdict {
     const op = findOp(opId);
@@ -71,12 +115,9 @@ export function createPermits(): Permits {
     }
 
     // 2) 模型授权
-    if (grant != null) {
-      if (now >= grant.expiresAt) {
-        grant = null;
-      } else if (grant.ops == null || grant.ops.includes(opId)) {
-        return { allowed: true, why: 'granted', op };
-      }
+    const g = liveGrant(now);
+    if (g != null && (g.ops == null || g.ops.includes(opId))) {
+      return { allowed: true, why: 'granted', op };
     }
 
     return { allowed: false, why: 'none', op };
@@ -88,6 +129,17 @@ export function createPermits(): Permits {
       grant = {
         ops: opIds == null || opIds.length === 0 ? null : [...opIds],
         expiresAt: now + Math.max(1, minutes) * 60_000,
+        callsLeft: null,
+        reason,
+        grantedAt: now,
+      };
+      return grant;
+    },
+    grantCalls(opIds, calls, reason, now) {
+      grant = {
+        ops: opIds == null || opIds.length === 0 ? null : [...opIds],
+        expiresAt: null,
+        callsLeft: Math.max(1, Math.floor(calls)),
         reason,
         grantedAt: now,
       };
@@ -96,24 +148,46 @@ export function createPermits(): Permits {
     revoke() {
       grant = null;
     },
+    revokeAll() {
+      grant = null;
+      bypasses.clear();
+    },
+    consumeCall(now) {
+      const g = liveGrant(now);
+      if (g == null || g.callsLeft == null) return false; // 时间制不消耗
+      g.callsLeft -= 1;
+      if (g.callsLeft <= 0) {
+        grant = null;
+        return true;
+      }
+      return false;
+    },
     bypassFor(opId, ms, reason, now) {
       void reason;
       bypasses.set(opId, now + Math.max(1, ms));
     },
     current(now) {
-      if (grant == null) return null;
-      if (now >= grant.expiresAt) {
-        grant = null;
-        return null;
-      }
-      return grant;
+      return liveGrant(now);
     },
     describe(now) {
+      // 先清掉已经过期的票。**不清的话"内部豁免 N 项"会一直挂着失效的项**，
+      // 而 describe() 是要进 Live State 给模型看的——模型会以为自己还有豁免。
+      for (const [id, until] of bypasses) {
+        if (now >= until) bypasses.delete(id);
+      }
+      grant = liveGrant(now);
+
       const parts: string[] = [];
-      const g = grant != null && now < grant.expiresAt ? grant : null;
+      const g = grant;
       if (g != null) {
-        const left = Math.max(0, Math.round((g.expiresAt - now) / 1000));
-        parts.push(`${g.ops == null ? '全部危险操作' : g.ops.join('/')} 已授权，还剩 ${left} 秒（原因：${g.reason}）`);
+        const scope = g.ops == null ? '全部危险操作' : g.ops.join('/');
+        // 两种模式说两种话：时间制说剩多少秒，次数制说剩几次。模型得知道
+        // 自己还剩多少"动作额度"——它要靠这个决定还要不要再多申请几个。
+        const left =
+          g.callsLeft != null
+            ? `还剩 ${g.callsLeft} 次工具调用`
+            : `还剩 ${Math.max(0, Math.round(((g.expiresAt as number) - now) / 1000))} 秒`;
+        parts.push(`${scope} 已授权，${left}（原因：${g.reason}）`);
       } else {
         parts.push('没有任何授权，危险操作全部禁止');
       }
@@ -152,5 +226,19 @@ export function opContextFor(bot: unknown): OpContext {
  * 纯逻辑（`createPermits`）另外导出，测试用新实例，避免互相污染。
  */
 export const permits = createPermits();
+
+/**
+ * 进水许可：着火（实时判定）或者模型授权过 `enter_deep_water`。
+ *
+ * **判据必须只有这一个出处** —— 路径闸门（`movements.ts`）和目标点/传送落点闸门
+ * （`dangerousWaterRefusal`）都调它，否则"能走过去"和"肯走过去"会漂移成两套规则。
+ *
+ * 放在 `permits.ts` 而不是 `skills.ts`：后者是两千多行的工具实现，import 它会
+ * 连带拖进 mineflayer / pathfinder / canvas，任何想测這個判据的测试都得背上这份
+ * 重（真机教训：就是这么把一个单测文件拖垮的）。
+ */
+export function deepWaterAllowed(bot: unknown): boolean {
+  return permits.isAllowed('enter_deep_water', opContextFor(bot), Date.now()).allowed;
+}
 
 export default { createPermits, permits, opContextFor, FIRE_EXEMPT_OPS };

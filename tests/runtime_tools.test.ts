@@ -35,6 +35,58 @@ function normalizeRequired(schema: unknown): unknown {
   return out;
 }
 
+describe('回执带图（只有声明了 withScreenshot 的命令）', () => {
+  const demo: AgentCommand = {
+    name: '!demo',
+    description: 'demo',
+    params: { a: { type: 'string', description: 'a' } },
+    perform: () => 'text-out',
+  };
+
+  async function run(tool: ReturnType<typeof commandToRegistration>, args: unknown = {}): Promise<
+    Array<{ type: string; text?: string; data?: string }>
+  > {
+    const exec = (tool as unknown as { execute?: (a: unknown) => Promise<{ content: unknown[] }> }).execute;
+    if (exec == null) throw new Error('工具没有 execute');
+    const res = await exec(args);
+    return res.content as Array<{ type: string; text?: string; data?: string }>;
+  }
+
+  it('默认只有文本——图片是按 token 计费的重货，不能白送', async () => {
+    const parts = await run(commandToRegistration(demo, () => 'out', () => Promise.resolve('BASE64')));
+    expect(parts).toEqual([{ type: 'text', text: 'out' }]);
+  });
+
+  it('命令要图 + 拍到了 → 文本后面追加一张 jpeg', async () => {
+    const tool = commandToRegistration({ ...demo, withScreenshot: true }, () => 'out', () => Promise.resolve('BASE64'));
+    const parts = await run(tool);
+    expect(parts[0]).toEqual({ type: 'text', text: 'out' });
+    expect(parts).toHaveLength(2);
+    expect(parts[1]?.type).toBe('image');
+    expect(parts[1]?.data).toBe('BASE64');
+  });
+
+  it('拍不到（null）→ 退化成纯文本，不报错', async () => {
+    const tool = commandToRegistration({ ...demo, withScreenshot: true }, () => 'out', () => Promise.resolve(null));
+    expect(await run(tool)).toEqual([{ type: 'text', text: 'out' }]);
+  });
+
+  it('相机炸了 → 只给文本，绝不毁掉整条回执', async () => {
+    const tool = commandToRegistration({ ...demo, withScreenshot: true }, () => 'out', () => Promise.reject(new Error('camera boom')));
+    expect(await run(tool)).toEqual([{ type: 'text', text: 'out' }]);
+  });
+
+  it('命令要图但没注入 captureImage → 只有文本（别去瞎拍）', async () => {
+    const tool = commandToRegistration({ ...demo, withScreenshot: true }, () => 'out');
+    expect(await run(tool)).toEqual([{ type: 'text', text: 'out' }]);
+  });
+
+  it('全仓库只有 !stats 开了图（其余一律纯文本）', () => {
+    const withPic = ALL_COMMANDS.filter((c) => c.withScreenshot === true).map((c) => c.name);
+    expect(withPic).toEqual(['!stats']);
+  });
+});
+
 describe('schema 等价：全部命令工具', () => {
   it('命令集合与旧广告同源（不写死数字）', () => {
     // 别写死数量：工具集会随死子系统清理而变化（construction 下线时一次就

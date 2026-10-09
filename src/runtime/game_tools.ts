@@ -27,6 +27,11 @@ export interface GameToolDeps {
    * 直接就是 `executeToolCall(agent, name, args)` 的形状。
    */
   execute: (name: string, args: Record<string, unknown>) => unknown | Promise<unknown>;
+  /**
+   * 现拍一张画面（base64 jpeg），给声明了 `withScreenshot` 的命令用。
+   * 不传 = 所有命令的回执都是纯文本。
+   */
+  captureImage?: () => Promise<string | null>;
 }
 
 export function buildGameTools(deps: GameToolDeps): ToolRegistration[] {
@@ -43,7 +48,7 @@ export function buildGameTools(deps: GameToolDeps): ToolRegistration[] {
         if (value !== undefined) named[name] = value;
       });
       return deps.execute(stripBang(command.name), named);
-    }),
+    }, deps.captureImage),
   );
 }
 

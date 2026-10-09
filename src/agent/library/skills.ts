@@ -5,6 +5,17 @@ import Vec3 from 'vec3';
 import settings from "../../../settings.js";
 import { permits, opContextFor } from "../permits.js";
 import { refuseText } from "../dangerous_ops.js";
+import {
+    blockAtFrom,
+    waterUnderFeet,
+    headInWater,
+    dangerousWaterRefusal,
+    type WaterClass,
+} from "../water_safety.js";
+import { teleportRefusal } from "../dangerous_blocks.js";
+import { movementsFor } from "../movements.js";
+import { deepWaterAllowed } from "../permits.js";
+import { safeguards } from "../safeguards.js";
 
 export function log(bot: any, ...messages: any[]): void {
     bot.output += messages.join(' ') + '\n';
@@ -24,6 +35,130 @@ function allowDangerousOp(bot: any, opId: string): boolean {
     if (verdict.allowed) return true;
     log(bot, verdict.op != null ? refuseText(verdict.op) : `默认不允许这个操作（${opId}）。`);
     return false;
+}
+
+/** 脚下这滩水的判定（给强制出水和回执用）。 */
+export function waterUnderFoot(bot: any): WaterClass {
+    return waterUnderFeet(bot);
+}
+
+/**
+ * 强制出水。
+ *
+ * 用户的要求是"其他情况，我们得想办法强制出水"——授权只管"模型想不想下去"，
+ * 管不了"它已经站在水里了"。所以这里是**我们写死的反射**：发现脚下是危险的水，
+ * 自己找岸、自己走上去。
+ *
+ * 为什么必须走 `bypassFor`：强制出水本身就要**穿过水**才能上岸，而寻路默认不
+ * 下水。不给一张短票，这道闸会把自己的保命代码也拦在门外——这正是
+ * `bypassFor` 存在的唯一理由，它是这里第一个真实调用者。
+ *
+ * 票是 30 秒：够走几格上岸，不够的话下一轮又会重新发（幂等，不会累积）。
+ */
+export async function forceExitWater(bot: any): Promise<boolean> {
+    // **保命被模型关掉了 → 一下都别碰身体。**
+    // 这一条要排在最前面，且比"有进水许可"更优先：许可只说明"模型想下水"，
+    // 关保命是"模型签了生死状"。用户要的字面效果就是"一直在水里泡着"。
+    if (safeguards.isSuppressed(Date.now())) return true;
+
+    const info = waterUnderFeet(bot);
+    if (!info.isWater) return true;                    // 压根没在水里
+    if (!info.dangerous) return true;                  // 1 格深的静水，踩着无所谓
+    if (deepWaterAllowed(bot)) return true;            // 着火 / 已授权，别跟保命抢方向盘
+
+    // **头也进水了 → 立刻上浮，别再费劲找岸了。**
+    //
+    // 这里**不能**让位给 L5：`runEmergency` 根本不会上浮——`EmergencyBot` 接口里
+    // 声明了 `submerged?()` / `swimUp?()`，`agent.ts` 也实现了传进去，但循环里
+    // 从来没调用过，只处理"有怪就跑"和"吃一口"（`emergency.ts` 的注释自己承认
+    // "根本没有溺水分支，事件响了没人管"）。也就是说**上浮这件事目前只有这里在做**，
+    // 头进水时让位等于没人管，直接淹死。
+    //
+    // 找岸要寻路、要走，来不及；头都进水了，先把头露出水面是唯一要紧的事。
+    if (headInWater(bot)) return await swimToSurface(bot);
+
+    const pos: any = bot?.entity?.position;
+    if (pos == null) return false;
+    const at = blockAtFrom(bot);
+
+    // 找最近的落脚点：脚下不是水也不是岩浆，而且它上面两格是空的（站得进去）。
+    let land: { x: number; y: number; z: number } | null = null;
+    for (let r = 1; r <= 12 && land == null; r++) {
+        for (let dx = -r; dx <= r && land == null; dx++) {
+            for (let dz = -r; dz <= r && land == null; dz++) {
+                if (Math.max(Math.abs(dx), Math.abs(dz)) !== r) continue;
+                for (let dy = -2; dy <= 3 && land == null; dy++) {
+                    const x = Math.floor(pos.x) + dx;
+                    const y = Math.floor(pos.y) + dy;
+                    const z = Math.floor(pos.z) + dz;
+                    const ground = at(x, y, z);
+                    if (ground == null) continue;
+                    const name = ground.name;
+                    if (name === 'water' || name === 'lava' || name === 'air' || name == null) continue;
+                    const above = at(x, y + 1, z);
+                    const above2 = at(x, y + 2, z);
+                    if (above?.name !== 'air' || above2?.name !== 'air') continue;
+                    land = { x, y: y + 1, z };
+                }
+            }
+        }
+    }
+
+    if (land == null) {
+        // **纯水大陆（一眼望不到岸）** —— 这时候正确的目标不是"上岸"，而是
+        // **"把头露出水面"**：淹死的条件是头进水，不是身体进水。找不到岸时后者
+        // 仍然救得了命。
+        //
+        // 原来这里做的是"跳 1.5 秒然后松手"，配上外层 2 秒一轮的重试，效果是
+        // 机器人**一直在原地上下浮动**，既上不了浮也沉不下去，直到耗死。而且每
+        // 一轮都往 `bot.output` 里塞一条，后台调用产生的这些回执模型还不一定看得到。
+        log(bot, `脚下是危险的水（${info.reason}），附近 12 格内找不到能上岸的地方——先浮起来把头露出水面。`);
+        return await swimToSurface(bot);
+    }
+
+    permits.bypassFor('enter_deep_water', 30_000, 'forceExitWater: 强制出水', Date.now());
+    log(bot, `脚下是危险的水（${info.reason}），自动上岸：${land.x},${land.y},${land.z}。`);
+    try {
+        bot.pathfinder?.stop?.();
+    } catch {
+        // 没在寻路就无所谓。
+    }
+    return await goToGoal(bot, new (pf as any).goals.GoalNear(land.x, land.y, land.z, 1));
+}
+
+/**
+ * 浮到**头露出水面**为止。
+ *
+ * 找不到岸时的活命办法：淹死的条件是头进水，不是身体进水。所以目标从上岸降级
+ * 成浮头——做不到前者时后者仍然救得了命。
+ *
+ * 两处刻意的设计：
+ * - **按结果停，不按时间停**：原来固定跳 1.5 秒就松手，配上外层 2 秒一轮的重试，
+ *   机器人只会一直原地上下浮动。这里一直浮到 `headInWater` 变 false 为止。
+ * - **结束时头还在水里就不松手**：那说明 L5 保命已经接管了（`runEmergency` 的
+ *   `swimUp` 也按着 jump），这时候松手等于拆保命的台。
+ */
+async function swimToSurface(bot: any): Promise<boolean> {
+    const DEADLINE_MS = 8000;
+    const STEP_MS = 250;
+    const started = Date.now();
+    try {
+        bot.setControlState?.('jump', true);
+        while (Date.now() - started < DEADLINE_MS) {
+            await new Promise((r) => setTimeout(r, STEP_MS));
+            if (!headInWater(bot)) return true;
+        }
+        return false; // 浮不出去（比如头顶是实心方块）
+    } catch {
+        return false;
+    } finally {
+        try {
+            if (!headInWater(bot)) bot.setControlState?.('jump', false);
+            // 头还在水里 → **保持按住继续浮**。松手就沉，而没人会接手这件事。
+        } catch {
+            // 拿不到 controlState 就算了。
+        }
+    }
 }
 
 async function autoLight(bot: any): Promise<boolean> {
@@ -324,34 +459,146 @@ export async function clearNearestFurnace(bot: any): Promise<boolean> {
 }
 
 
-export async function attackNearest(bot: any, mobType: string, kill: boolean = true): Promise<boolean> {
-    /**
-     * Attack mob of the given type.
-     * @param {MinecraftBot} bot, reference to the minecraft bot.
-     * @param {string} mobType, the type of mob to attack.
-     * @param {boolean} kill, whether or not to continue attacking until the mob is dead. Defaults to true.
-     * @returns {Promise<boolean>} true if the mob was attacked, false if the mob type was not found.
-     * @example
-     * await skills.attackNearest(bot, "zombie", true);
-     **/
-    // 范围原来只有 24 格、失败只回一句"找不到"——模型真机报过
-    // "attack 报找不到 pig，而快照里 16 格内就有一只"，它无从自查。
-    // 现在放宽到 64 格，**失败时把附近实际有什么列出来**，让它能自己改目标。
-    const ATTACK_RANGE = 64;
-    const nearby: any[] = world.getNearbyEntities(bot, ATTACK_RANGE);
-    const mob: any = nearby.find((entity: any) => entity.name === mobType);
+/** `target` 的解析结果：命中实体，或一条说清为什么没命中的原因。 */
+export interface AttackTargetResult {
+  entity: any | null;
+  /** 人类可读的命中/失败说明，成功时用来告诉模型"打的是哪一只"。 */
+  message: string;
+}
+
+/**
+ * `target` 的语义类别——**必填，不给默认值**。
+ *
+ * - `id`：实体 ID，取 Live State 实体表里的 #编号。
+ * - `player`：玩家名（`username`）。
+ * - `mob`：实体类型名（`name`），取最近的。
+ *
+ * **为什么没有 `auto`**：靠字符串形状隐式猜（纯数字当 ID、其余先玩家名后类型名）
+ * 等于把"玩家优先"这个人为约定藏起来——模型既不知道它存在，也无法覆盖它。
+ * 曾经有个玩家就叫 `zombie`，而 `zombie` 也是最常见的怪物名。
+ * 三个取值语义完全平级，谁也不压谁，所以让模型自己声明。
+ */
+export type AttackTargetType = 'id' | 'player' | 'mob';
+
+const ATTACK_TARGET_TYPES: readonly AttackTargetType[] = ['id', 'player', 'mob'];
+
+/**
+ * 把模型给的 `target` 按 `targetType` 声明的语义解析成一个具体实体。
+ *
+ * - `id`：纯数字，直接取 `bot.entities[id]`。**不受 `maxDistance` 限制**——
+ *   模型给的编号往往来自上一轮快照，现在可能已走出感知半径，但仍是能走过去的
+ *   合法目标。
+ * - `player`：按 `username` 匹配。玩家必须走这条——mineflayer 的玩家实体 `name`
+ *   恒为 `'player'`（`entities.js:192`），按 `name` 找玩家永远落空。
+ * - `mob`：按实体类型名（`name`）匹配，取最近的。
+ */
+export function resolveAttackTarget(
+  bot: any,
+  target: string,
+  targetType: string,
+  maxDistance: number = 64,
+): AttackTargetResult {
+  const raw = String(target ?? '').trim();
+  const kind = String(targetType ?? '').trim().toLowerCase();
+
+  if (!ATTACK_TARGET_TYPES.includes(kind as AttackTargetType)) {
+    return {
+      entity: null,
+      message: `type 必填，且只认${ATTACK_TARGET_TYPES.join(' / ')}（收到 "${targetType ?? ''}"）。`,
+    };
+  }
+  if (raw === '') {
+    return {
+      entity: null,
+      message:
+        kind === 'id' ? 'type=id 要的是实体编号（Live State 实体表里的 #数字）。'
+        : kind === 'player' ? 'type=player 要的是玩家名。'
+        : 'type=mob 要的是实体类型名（如 zombie）。',
+    };
+  }
+
+  // ① 实体 ID。用 bot.entities 而不是"附近列表"——模型给的编号可能来自
+  // 上一轮的快照，现在已经走出感知半径了，但仍是可以走过去的合法目标。
+  if (kind === 'id') {
+    if (!/^\d+$/.test(raw)) {
+      return { entity: null, message: `type=id 要求 target 是纯数字的实体编号（收到 "${raw}"）。` };
+    }
+    const id = Number(raw);
+    const direct = bot.entities?.[id];
+    if (direct == null) {
+      return { entity: null, message: `找不到实体 #${id}（可能已经死了或消失了）。看一眼 Live State 的实体表。` };
+    }
+    const distance = Math.round(bot.entity.position.distanceTo(direct.position) * 10) / 10;
+    return {
+      entity: direct,
+      message: `锁定 #${id}（${describeEntity(direct)}，${distance}m），开打。`,
+    };
+  }
+
+  const lower = raw.toLowerCase();
+  const nearby: any[] = world.getNearbyEntities(bot, maxDistance);
+  const describeWhat = kind === 'player' ? `叫 ${raw} 的玩家` : `${raw} 型实体`;
+
+  // ② 玩家名（username）——只有 type=player 才走这条。
+  if (kind === 'player') {
+    const player: any = nearby.find((e: any) => typeof e.username === 'string' && e.username.toLowerCase() === lower);
+    if (player) {
+      return { entity: player, message: `锁定玩家 ${player.username}（#${player.id}），开打。` };
+    }
+  } else {
+    // ③ 实体类型名。
+    const mob: any = nearby.find((e: any) => typeof e.name === 'string' && e.name.toLowerCase() === lower);
     if (mob) {
-        const res: boolean | undefined = await attackEntity(bot, mob, kill);
-        return res === true;
+      return {
+        entity: mob,
+        message: `锁定最近的 ${mob.name}#${mob.id}（${describeEntity(mob)}），开打。`,
+      };
     }
-    const seen = [...new Set(nearby.map((e: any) => e.name).filter((n: unknown) => typeof n === 'string'))];
-    log(
-        bot,
-        `Could not find any ${mobType} to attack within ${ATTACK_RANGE} blocks.` +
-            (seen.length > 0 ? ` Nearby: ${seen.join(', ')}.` : ' Nothing nearby.'),
-    );
-    return false;
-    }
+  }
+
+  // 没命中：把附近实际有什么列出来——模型真机报过"attack 报找不到 pig，
+  // 而快照里 16 格内就有一只"，它无从自查。现在它能自己改目标。
+  const seen = [
+    ...new Set(
+      nearby
+        .map((e: any) => (typeof e.username === 'string' ? `${e.username}(player)` : e.name))
+        .filter((n: unknown) => typeof n === 'string'),
+    ),
+  ];
+  return {
+    entity: null,
+    message:
+      `${maxDistance} 格内找不到可打的${describeWhat}。` +
+      (seen.length > 0 ? `附近有：${seen.join('、')}。` : '附近什么都没有。'),
+  };
+}
+
+/** 实体的一行式身份描述，给日志/回执用。 */
+function describeEntity(entity: any): string {
+  const name = typeof entity.username === 'string' ? entity.username : entity.name;
+  return typeof name === 'string' ? name : 'unknown';
+}
+
+/**
+ * 攻击 `target` 指向的实体，直到它死或跑掉。
+ *
+ * `targetType`（`id` / `player` / `mob`）**必填**，它决定 `target` 怎么解释。
+ * 规则见 {@link resolveAttackTarget}。
+ *
+ * @returns true = 打到了并打死了；false = 没找到目标或被中断。
+ */
+export async function attackTarget(
+  bot: any,
+  target: string,
+  targetType: string,
+  kill: boolean = true,
+): Promise<boolean> {
+  const { entity, message } = resolveAttackTarget(bot, target, targetType);
+  log(bot, message);
+  if (entity == null) return false;
+  const res: boolean | undefined = await attackEntity(bot, entity, kill);
+  return res === true;
+}
 
 export function stopPvp(bot: any): void {
     // @nxg-org/mineflayer-custom-pvp：近战 swordpvp + 远程 bowpvp 都要停
@@ -414,13 +661,13 @@ export async function defendSelf(bot: any, range: number = 9): Promise<boolean> 
         await equipHighestAttack(bot);
         if (bot.entity.position.distanceTo(enemy.position) >= 4 && enemy.name !== 'creeper' && enemy.name !== 'phantom') {
             try {
-                bot.pathfinder.setMovements(new (pf as any).Movements(bot));
+                bot.pathfinder.setMovements(movementsFor(bot));
                 await bot.pathfinder.goto(new (pf as any).goals.GoalFollow(enemy, 3.5), true);
             } catch (err: unknown) {/* might error if entity dies, ignore */}
         }
         if (bot.entity.position.distanceTo(enemy.position) <= 2) {
             try {
-                bot.pathfinder.setMovements(new (pf as any).Movements(bot));
+                bot.pathfinder.setMovements(movementsFor(bot));
                 const inverted_goal: any = new (pf as any).goals.GoalInvert(new (pf as any).goals.GoalFollow(enemy, 2));
                 await bot.pathfinder.goto(inverted_goal, true);
             } catch (err: unknown) {/* might error if entity dies, ignore */}
@@ -475,7 +722,7 @@ export async function collectBlock(bot: any, blockType: string, num: number = 1,
 
     let collected = 0;
 
-    const movements: any = new (pf as any).Movements(bot);
+    const movements: any = movementsFor(bot);
     movements.dontMineUnderFallingBlock = false;
     movements.dontCreateFlow = true;
 
@@ -601,7 +848,7 @@ export async function pickupNearbyItems(bot: any): Promise<boolean> {
     let nearestItem: any = getNearestItem(bot);
     let pickedUp = 0;
     while (nearestItem) {
-        const movements: any = new (pf as any).Movements(bot);
+        const movements: any = movementsFor(bot);
         movements.canDig = false;
         bot.pathfinder.setMovements(movements);
         await goToGoal(bot, new (pf as any).goals.GoalFollow(nearestItem, 1));
@@ -680,7 +927,7 @@ export async function breakBlockAt(bot: any, x: number, y: number, z: number): P
 
         if (bot.entity.position.distanceTo(block.position) > 4.5) {
             const pos: any = block.position;
-            const movements: any = new (pf as any).Movements(bot);
+            const movements: any = movementsFor(bot);
             movements.canPlaceOn = false;
             movements.allow1by1towers = false;
             bot.pathfinder.setMovements(movements);
@@ -709,6 +956,37 @@ export async function breakBlockAt(bot: any, x: number, y: number, z: number): P
     return true;
 }
 
+
+/**
+ * 等服务器把方块状态同步过来（`until` 为真即返回）。
+ *
+ * mineflayer 的 `placeBlock` / `breakBlockAt` **返回时什么都没发生**：只是把
+ * 一个动作发给了服务端，客户端 `blockAt` 要等服务器处理完（1 tick = 50ms）
+ * 再经网络广播才读得到。原来的写法是死等 200ms——那个数是猜的，网络好时
+ * 纯浪费；而蓝图施工是 8000 块起步，200ms × 8000 就是 27 分钟纯等待。
+ *
+ * 改成轮询：确认到了**立刻**走人，慢的时候仍有上限兜底。
+ * @param until 收到目标格的实际方块名，返回 true 表示成了
+ */
+async function waitForBlockAt(
+    bot: any,
+    pos: any,
+    until: (name: string) => boolean,
+    timeoutMs: number = 1000,
+): Promise<boolean> {
+    const deadline = Date.now() + timeoutMs;
+    for (;;) {
+        let name: string | null = null;
+        try {
+            name = bot.blockAt(pos)?.name ?? null;
+        } catch {
+            // 方块还没进视野/未加载：当作还没到，继续等。
+        }
+        if (name != null && until(name)) return true;
+        if (Date.now() >= deadline) return false;
+        await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+}
 
 export async function placeBlock(bot: any, blockType: string, x: number, y: number, z: number, placeOn: string = 'bottom', dontCheat: boolean = false): Promise<boolean> {
     /**
@@ -814,7 +1092,9 @@ export async function placeBlock(bot: any, blockType: string, x: number, y: numb
             log(bot, `Cannot place ${blockType} at ${targetBlock.position}: block in the way.`);
             return false;
         }
-        await new Promise(resolve => setTimeout(resolve, 200)); // wait for block to break
+        // 拆完要确认那一格真的空了：紧接着就要往那儿放方块，
+        // 服务端还没把破坏落地时 placeBlock 会撞上"格子里还有东西"。
+        await waitForBlockAt(bot, target_dest, (name) => empty_blocks.includes(name));
     }
     // get the buildoffblock and facevec based on whichever adjacent block is not empty
     let buildOffBlock: any = null;
@@ -861,13 +1141,13 @@ export async function placeBlock(bot: any, blockType: string, x: number, y: numb
         // too close
         const goal: any = new (pf as any).goals.GoalNear(targetBlock.position.x, targetBlock.position.y, targetBlock.position.z, 2);
         const inverted_goal: any = new (pf as any).goals.GoalInvert(goal);
-        bot.pathfinder.setMovements(new (pf as any).Movements(bot));
+        bot.pathfinder.setMovements(movementsFor(bot));
         await bot.pathfinder.goto(inverted_goal);
     }
     if (bot.entity.position.distanceTo(targetBlock.position) > 4.5) {
         // too far
         const tpos: any = targetBlock.position;
-        const movements: any = new (pf as any).Movements(bot);
+        const movements: any = movementsFor(bot);
         bot.pathfinder.setMovements(movements);
         await goToGoal(bot, new (pf as any).goals.GoalNear(tpos.x, tpos.y, tpos.z, 4));
     }
@@ -882,7 +1162,15 @@ export async function placeBlock(bot: any, blockType: string, x: number, y: numb
             await bot.lookAt(buildOffBlock.position.offset(0.5, 0.5, 0.5), true);
             await bot.placeBlock(buildOffBlock, faceVec);
             log(bot, `Placed ${blockType} at ${target_dest}.`);
-            await new Promise(resolve => setTimeout(resolve, 200));
+            // **确认方块真的落地了再 return true**：这个 true 是对调用方的
+            // 承诺（蓝图施工会立刻在下一格继续、验证器会立刻读 blockAt）。
+            // 原先死等 200ms，现在轮询到就立刻走人。超时仍按成功返回——
+            // 契约与旧实现一致，只是把"确定失败"和"服务端慢"区分开。
+            // 方块名要去掉 `[facing=…]` 之类后缀：blockType 在上面被改写过
+            // （torch → wall_torch、stairs → stairs[facing=north]），而
+            // blockAt 报的是裸名。
+            const bareName = blockType.split('[')[0] ?? blockType;
+            await waitForBlockAt(bot, target_dest, (name) => name === bareName);
             return true;
         }
     } catch (err: unknown) {
@@ -1181,7 +1469,26 @@ export async function goToGoal(bot: any, goal: any, _persist?: boolean): Promise
      * passes a third argument.)
      **/
 
-    const nonDestructiveMovements: any = new (pf as any).Movements(bot);
+    // **深水闸门（第一道）：目标点本身是不是危险的水。**
+    // 原来 `enter_deep_water` 只是登记表里的一行——着火豁免、拒绝文案都写着它，
+    // 但**没有任何代码真的拿它去问许可**，等于这条规则从来没生效过。用户的原话
+    // 是"禁止接触到深度超过一格的水"，所以先拦目标：那片水深 / 在流动 / 连着
+    // 流动水，就别过去。
+    // 只有给了明确坐标的 goal（GoalNear / GoalBlock / GoalXZ 那一类）才查得动；
+    // GoalFollow 之类追实体的没有坐标，交给下面第二道闸（allowWater）。
+    const g = goal as { x?: unknown; y?: unknown; z?: unknown } | null | undefined;
+    const gx = g != null ? Number(g.x) : NaN;
+    const gy = g != null ? Number(g.y) : NaN;
+    const gz = g != null ? Number(g.z) : NaN;
+    if (Number.isFinite(gx) && Number.isFinite(gy) && Number.isFinite(gz)) {
+        const refusal = dangerousWaterRefusal(bot, gx, gy, gz, '走到');
+        if (refusal != null) {
+            log(bot, refusal);
+            return false;
+        }
+    }
+
+    const nonDestructiveMovements: any = movementsFor(bot);
     const dontBreakBlocks: string[] = ['glass', 'glass_pane'];
     for (const block of dontBreakBlocks) {
         nonDestructiveMovements.blocksCantBreak.add((mc as any).getBlockId(block));
@@ -1189,23 +1496,15 @@ export async function goToGoal(bot: any, goal: any, _persist?: boolean): Promise
     nonDestructiveMovements.placeCost = 2;
     nonDestructiveMovements.digCost = 10;
 
-    const destructiveMovements: any = new (pf as any).Movements(bot);
+    const destructiveMovements: any = movementsFor(bot);
 
-    // **落差上限压到 2 格**。这两套 Movements 原来都没设 maxDropDown（默认 4），
-    // 而 destructiveMovements 更是纯默认值——模型真机上反复被它带进大落差：
-    // pib "从 y=29 掉回来 12 格"、pia "searchForBlock 带我从竖井直落 13 格"（摔死）。
-    // 多绕几步也比摔死强，何况它手上有 mineBlock/placeBlock 可以自己开路。
-    for (const movements of [nonDestructiveMovements, destructiveMovements]) {
-        movements.maxDropDown = 2;
-        // **关掉冲刺和跑酷**。冲刺不只是快：movements.js:664 有一行
-        //   const maxD = this.allowSprinting ? 4 : 2
-        // ——开着冲刺时，寻路会认为"跳/落 4 格"是可达的，于是敢往边缘冲。
-        // 模型真机证据（pib）：38.5,9.92,10.84 → **被 sprint 往北拖 20+ 格** → 34.99,0.64
-        // （直接坠落，血只剩 6）。跑酷同理，会主动往缺口跳。
-        // 安全比快重要：多绕几步，也比摔死强。
-        movements.allowSprinting = false;
-        movements.allowParkour = false;
-    }
+    // **安全基线（落差 / 冲刺 / 跑酷 / 深水）不在这里设**——两套 Movements 都来自
+    // `movementsFor()`，它在出厂时就套好了，见 `movements.ts`。
+    //
+    // 这里**故意**不再重复一遍：原先这段是唯一一处安全配置，其余 16 处 `new
+    // Movements(bot)` 全是裸的——追怪、逃跑、保命 fleeTo 都从水里直穿过去。
+    // 安全配置跟着"创建实例的地方"走，才谈得上"任何情况下都有效"。
+    // 真机证据（为什么要这些值）也一并搬去 `movements.ts` 了，不复制第二份。
     // **算路超时也要放宽**：默认 thinkTimeout 只有 5 秒，长路径（从 100 格深的竖井
     // 爬出来、绕过大片水域）根本算不完，就直接报 'Took to long to decide path to goal!'
     // ——模型真机报的"goToCoordinates 完全不动"就是这个。物理诊断加上之后一眼就看到了。
@@ -1357,6 +1656,18 @@ export async function goToPosition(bot: any, x: number | null, y: number | null,
         return false;
     }
     if (settings.cheat) {
+        // **传送也要过深水闸门** —— `/tp` 是唯一一条完全绕开寻路的移动路径：
+        // 第 1 层（`blocksToAvoid`）管的是"怎么走过去"，第 2 层（`goToGoal` 的
+        // 目标点判定）在这条分支上**根本不会被调用**。闸门管路径，管不了落点，
+        // 所以落点得在这里单独判一次。
+        //
+        // 这条不难想到，难在意识到它存在：正常分支有闸，所以"模型把自己送进水里"
+        // 看起来不可能——直到 cheat 开着。
+    const tpRefusal = teleportRefusal(bot, x, y, z);
+    if (tpRefusal != null) {
+        log(bot, tpRefusal);
+        return false;
+    }
         bot.chat('/tp @s ' + x + ' ' + y + ' ' + z);
         log(bot, `Teleported to ${x}, ${y}, ${z}.`);
         return true;
@@ -1507,7 +1818,7 @@ export async function followPlayer(bot: any, username: string, distance: number 
     if (!player)
         return false;
 
-    const move: any = new (pf as any).Movements(bot);
+    const move: any = movementsFor(bot);
     move.digCost = 10;
     bot.pathfinder.setMovements(move);
     let doorCheckInterval: ReturnType<typeof setInterval> | null = startDoorInterval(bot);
@@ -1556,10 +1867,10 @@ export async function moveAway(bot: any, distance: number): Promise<boolean> {
     const pos: any = bot.entity.position;
     const goal: any = new (pf as any).goals.GoalNear(pos.x, pos.y, pos.z, distance);
     const inverted_goal: any = new (pf as any).goals.GoalInvert(goal);
-    bot.pathfinder.setMovements(new (pf as any).Movements(bot));
+    bot.pathfinder.setMovements(movementsFor(bot));
 
     if (settings.cheat) {
-        const move: any = new (pf as any).Movements(bot);
+        const move: any = movementsFor(bot);
         const path: any = await bot.pathfinder.getPathTo(move, inverted_goal, 10000);
         const last_move: any = path.path[path.path.length-1];
         if (last_move) {
@@ -1587,7 +1898,7 @@ export async function moveAwayFromEntity(bot: any, entity: any, distance: number
      **/
     const goal: any = new (pf as any).goals.GoalFollow(entity, distance);
     const inverted_goal: any = new (pf as any).goals.GoalInvert(goal);
-    bot.pathfinder.setMovements(new (pf as any).Movements(bot));
+    bot.pathfinder.setMovements(movementsFor(bot));
     await bot.pathfinder.goto(inverted_goal);
     return true;
 }
@@ -1605,7 +1916,7 @@ export async function avoidEnemies(bot: any, distance: number = 16): Promise<boo
     while (enemy) {
         const follow: any = new (pf as any).goals.GoalFollow(enemy, distance+1); // move a little further away
         const inverted_goal: any = new (pf as any).goals.GoalInvert(follow);
-        bot.pathfinder.setMovements(new (pf as any).Movements(bot));
+        bot.pathfinder.setMovements(movementsFor(bot));
         bot.pathfinder.setGoal(inverted_goal, true);
         await new Promise(resolve => setTimeout(resolve, 500));
         enemy = world.getNearestEntityWhere(bot, (entity: any) => (mc as any).isHostile(entity), distance);
@@ -1768,7 +2079,7 @@ export async function tillAndSow(bot: any, x: number, y: number, z: number, seed
     // if distance is too far, move to the block
     if (bot.entity.position.distanceTo(block.position) > 4.5) {
         const bpos: any = block.position;
-        bot.pathfinder.setMovements(new (pf as any).Movements(bot));
+        bot.pathfinder.setMovements(movementsFor(bot));
         await goToGoal(bot, new (pf as any).goals.GoalNear(bpos.x, bpos.y, bpos.z, 4));
     }
     if (block.name !== 'farmland') {
@@ -1813,7 +2124,7 @@ export async function activateNearestBlock(bot: any, type: string): Promise<bool
     }
     if (bot.entity.position.distanceTo(block.position) > 4.5) {
         const pos: any = block.position;
-        bot.pathfinder.setMovements(new (pf as any).Movements(bot));
+        bot.pathfinder.setMovements(movementsFor(bot));
         await goToGoal(bot, new (pf as any).goals.GoalNear(pos.x, pos.y, pos.z, 4));
     }
     await bot.activateBlock(block);

@@ -1,5 +1,6 @@
 import pf from 'mineflayer-pathfinder';
 import * as mc from '../../utils/mcdata.js';
+import { movementsFor } from '../movements.js';
 
 // Vec3 coordinates are structural: mineflayer ships no types (see src/types/mineflayer.d.ts),
 // so bot/entity/block handles stay `any` while pure coordinate shapes use Vec3Like.
@@ -303,33 +304,6 @@ export function getInventoryCounts(bot: any): Record<string, number> {
 }
 
 
-export function getCraftableItems(bot: any): string[] {
-    /**
-     * Get a list of all items that can be crafted with the bot's current inventory.
-     * @param {Bot} bot - The bot to get the craftable items for.
-     * @returns {string[]} - A list of all items that can be crafted.
-     * @example
-     * let craftableItems = world.getCraftableItems(bot);
-     **/
-    let table: any = getNearestBlock(bot, 'crafting_table');
-    if (!table) {
-        for (const item of bot.inventory.items() as any[]) {
-            if (item != null && item.name === 'crafting_table') {
-                table = item;
-                break;
-            }
-        }
-    }
-    const res: string[] = [];
-    for (const item of (mc as any).getAllItems() as any[]) {
-        const recipes: any[] = bot.recipesFor(item.id, null, 1, table);
-        if (recipes.length > 0)
-            res.push(item.name);
-    }
-    return res;
-}
-
-
 export function getPosition(bot: any): any {
     /**
      * Get your position in the world (Note that y is vertical).
@@ -416,7 +390,7 @@ export async function isClearPath(bot: any, target: any): Promise<boolean> {
      * @param {Entity} target - The target to path to.
      * @returns {boolean} - True if there is a clear path, false otherwise.
      */
-    const movements: any = new (pf as any).Movements(bot);
+    const movements: any = movementsFor(bot);
     movements.canDig = false;
     movements.canPlaceOn = false;
     movements.canOpenDoors = false;

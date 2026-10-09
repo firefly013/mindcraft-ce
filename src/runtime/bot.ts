@@ -58,6 +58,11 @@ export interface BotWiringOptions {
   baseDir?: string;
   /** 实例区分后缀，避免同名多开撞同一个库。 */
   instanceId?: string;
+  /**
+   * 每轮现拍一张画面（base64 jpeg），跟世界快照一起进请求。**可选**：
+   * 不给就纯文本。拍不到返回 null 即可，hook 会安静降级。
+   */
+  liveImage?: () => Promise<string | null>;
 }
 
 export interface BotWiring {
@@ -68,6 +73,8 @@ export interface BotWiring {
   state: BotStateAccess;
   /** 每轮尾巴（只有世界快照）。 */
   liveTail: () => Promise<string>;
+  /** 每轮现拍画面（同 `liveImage` 选项）。 */
+  liveImage?: () => Promise<string | null>;
   close: () => Promise<void>;
 }
 
@@ -103,6 +110,7 @@ export async function openBotWiring(options: BotWiringOptions): Promise<BotWirin
     ...(options.instanceId != null ? { instanceId: options.instanceId } : {}),
     systemPrompt: options.systemPrompt,
     liveTail: () => composeLiveTail(options.sample()),
+    ...(options.liveImage != null ? { liveImage: options.liveImage } : {}),
     tools: options.tools ?? [],
     extensions: [
       ...(options.extensions ?? []),
@@ -130,6 +138,7 @@ export async function openBotWiring(options: BotWiringOptions): Promise<BotWirin
     intake,
     state,
     liveTail: () => Promise.resolve(composeLiveTail(options.sample())),
+    liveImage: options.liveImage,
     close: () => runtime.close(),
   };
 }

@@ -311,6 +311,55 @@ export function createMindServer(
             io.emit('bot-output', agentName, message);
         });
 
+        // **外部 CLI**：把命令转给对应机器人，等它回 ack，再原样回给 CLI。
+        //
+        // 为什么要超时：命令可能是"走过去"这种要几十秒的动作，而 CLI 那头的人在
+        // 等提示符。一直挂着不返回，比返回一个"超时了"更难用——后者至少说明
+        // 机器人还活着、只是没干完。默认 120 秒，CLI 可以传 `timeoutMs` 改。
+        socket.on('cli-command', (agentName: string, data: unknown, callback?: (res: unknown) => void) => {
+            const reply = (res: unknown): void => {
+                try {
+                    callback?.(res);
+                } catch (error: unknown) {
+                    console.error('Error replying cli-command: ', error);
+                }
+            };
+            const agent = agent_connections[agentName];
+            if (agent?.socket == null) {
+                reply({ ok: false, error: `机器人 ${agentName} 不在线（或还没连上 MindServer）` });
+                return;
+            }
+            const timeoutMs =
+                typeof (data as { timeoutMs?: unknown })?.timeoutMs === 'number'
+                    ? (data as { timeoutMs: number }).timeoutMs
+                    : 120_000;
+            let settled = false;
+            const timer = setTimeout(() => {
+                if (settled) return;
+                settled = true;
+                // `timeout: true` 让 CLI 能区分"真出错"和"还在跑"。后者对
+                // `wait` 来说根本不是失败 —— 任务继续跑着，只是这次不等了。
+                reply({
+                    ok: false,
+                    timeout: true,
+                    error: `超过 ${Math.round(timeoutMs / 1000)} 秒还没返回（任务仍在继续）`,
+                });
+            }, Math.max(1000, timeoutMs));
+            try {
+                agent.socket?.emit('cli-command', data, (res: unknown) => {
+                    if (settled) return;
+                    settled = true;
+                    clearTimeout(timer);
+                    reply(res);
+                });
+            } catch (error: unknown) {
+                if (settled) return;
+                settled = true;
+                clearTimeout(timer);
+                reply({ ok: false, error: error instanceof Error ? error.message : String(error) });
+            }
+        });
+
         socket.on('listen-to-agents', () => {
             addListener(socket);
         });

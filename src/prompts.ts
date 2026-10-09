@@ -63,10 +63,6 @@ export const TOOL_TEXT: Record<string, { description: string; params: Record<str
     description: '重启机器人进程。',
     params: {},
   },
-  clearChat: {
-    description: '清空聊天历史。',
-    params: {},
-  },
   goToPlayer: {
     description: '走到指定玩家身边。',
     params: { player_name: '要找的玩家名字。', closeness: '靠到多近。' },
@@ -124,17 +120,38 @@ export const TOOL_TEXT: Record<string, { description: string; params: Record<str
     params: { type: '要放的方块类型。', x: '目标 x 坐标。', y: '目标 y 坐标。', z: '目标 z 坐标。' },
   },
   allowDangerousOps: {
-    description: '授权自己做一段时间危险操作（默认禁止的）：pour_water（用桶倒水）、' +
+    description: '授权自己做危险操作（默认禁止的）：pour_water（用桶倒水）、' +
       'pour_lava（倒岩浆）、ignite（主动点火）、sleep_in_bed（在下界/末地睡觉——那两处的床会炸）、' +
-      'enter_deep_water（进深水/向深水寻路）。只在真需要时用，比如浇黑曜石前开 pour_water、点地狱门前开 ignite。',
+      'enter_deep_water（进深水/向深水寻路）。只在真需要时用，比如浇黑曜石前开 pour_water、点地狱门前开 ignite。' +
+      'minutes 和 calls 二选一：填 minutes 按时间授权；填 calls 按**工具调用次数**授权——' +
+      '申请"接下来 3 次动作别拦我"，每调一次工具消耗一次（失败也算），用完立刻恢复默认禁止。' +
+      '水下作业那种要连着做好几个动作的，用 calls 比 minutes 安全：中途失手了保命程序马上接管。' +
+      '**填 revoke=true 就是收回授权**（不必等它过期/用完），其余参数都不用填。',
     params: {
-      minutes: '授权多少分钟（1~120）。到点自动收回。',
+      minutes: '按时间授权多少分钟（1~120）。到点自动收回。留空则改看 calls。',
+      calls: '按次数授权——接下来几次工具调用不拦你（1~20）。失败也算一次。留空则改看 minutes。',
       reason: '为什么需要（写清在做什么，方便复盘）。',
       ops: '要授权哪几项，逗号分隔；留空 = 全部授权。',
+      revoke: '填 true = 提前收回当前授权。',
     },
   },
-  denyDangerousOps: {
-    description: '提前收回危险操作授权（不用等它过期）。',
+  disableSafeguards: {
+    description: '**关掉保命程序**，一段时间内或若干次工具调用内：进深水不会自动上岸、溺水不会自动上浮。' +
+      '只有在你清楚后果、并且需要连续做完一串动作（水下挖洞、封顶留空气）时才用——' +
+      '这几步做完之前保命不会来救你，出事就是真出事。用 calls 比 minutes 安全：' +
+      '中途失手了额度一用完，保命立刻接管。' +
+      '**填 restore=true 就是提前把保命程序重新打开**（不必等它过期/用完额度），其余参数都不用填。',
+    params: {
+      minutes: '按时间关闭保命多少分钟（1~120）。留空则改看 calls。',
+      calls: '按次数关闭——接下来几次工具调用内保命不介入（1~20）。失败也算一次。留空则改看 minutes。',
+      reason: '为什么要关（写清在做什么，方便复盘，也方便出事后看账）。',
+      restore: '填 true = 提前重新打开保命程序。',
+    },
+  },
+  restoreAllSafety: {
+    description: '**一键恢复两层保护**：收回所有危险操作授权（连内部豁免票一起）+ 重新打开保命程序。' +
+      '当你觉得刚才的授权给错了、或者玩脱了，立刻调这个——不必分别去调 allowDangerousOps(revoke=true) 和 ' +
+      'disableSafeguards(restore=true)，漏掉一个就等于没恢复干净。',
     params: {},
   },
   mineBlock: {
@@ -142,20 +159,20 @@ export const TOOL_TEXT: Record<string, { description: string; params: Record<str
     params: { x: '目标 x 坐标。', y: '目标 y 坐标。', z: '目标 z 坐标。' },
   },
   attack: {
-    description: '攻击并杀死最近的某种实体。',
-    params: { type: '要攻击的实体类型。' },
-  },
-  attackPlayer: {
-    description: '攻击指定玩家直到他死或跑掉。记住这只是游戏，不会造成现实伤害。',
-    params: { player_name: '要攻击的玩家名字。' },
+    description: '攻击并杀死一个目标，一直打到它死或跑掉。**type 必填，target 的含义全看它**：' +
+      'type=id → target 给 Live State 实体表里的 #编号（如"9"），同一类型有多只时只有它能指准；' +
+      'type=player → target 给玩家名（如"Notch"）；' +
+      'type=mob → target 给实体类型（如"zombie"），取最近的。' +
+      '**没有默认值，也不要靠 target 长什么样猜**——玩家名和怪物类型会同名。' +
+      '实体表里玩家标着 (player)、怪物没有，可以据此判断。记住这只是游戏，不会造成现实伤害。',
+    params: {
+      target: '要打的东西：type=id 时给 #编号，type=player 时给玩家名，type=mob 时给实体类型。',
+      type: '必填。id（按实体编号）/ player（按玩家名）/ mob（按实体类型）。三选一，无默认值。',
+    },
   },
   stay: {
     description: '待在原地不动，不管发生什么。',
     params: { type: '要待的秒数，-1 表示永远。' },
-  },
-  lookAtPlayer: {
-    description: '看向某个玩家，或朝他看的方向看。',
-    params: { player_name: '目标玩家名字', direction: '怎么看（"at" 看向他，"with" 朝他看的方向看）' },
   },
   lookAtPosition: {
     description: '看向指定坐标。',
@@ -174,28 +191,10 @@ export const TOOL_TEXT: Record<string, { description: string; params: Record<str
     params: { tool_name: '要用的工具名，不用工具就写 "hand"。', target: '目标：实体类型、方块类型，或 "nothing" 表示无目标。' },
   },
   stats: {
-    description: '拍一张当前状态快照（和每轮自动给你的世界快照同源，但这一张会留在上下文里，可以用来和上一次对比：身上多了什么、走到哪了）。**只在确实需要前后对比时用**——每轮末尾本来就已经有一份最新的世界快照，别把它当例行公事。',
-    params: {},
-  },
-  inventory: {
-    description: '看机器人的背包。',
-    params: {},
-  },
-  nearbyBlocks: {
-    description: '看机器人附近的方块。',
-    params: {},
-  },
-  craftable: {
-    description: '看当前背包能合成什么。',
-    params: {},
-  },
-  entities: {
-    description: '看附近的玩家和实体。',
-    params: {},
-  },
-  savedPlaces: {
-    description: '列出所有记住的位置。',
-    params: {},
+    description: '拍一张当前状态快照（和每轮自动给你的世界快照同源，但这一张会留在上下文里，可以用来和上一次对比：身上多了什么、走到哪了）。' +
+      '**回执会附一张当前画面**——"洞口在哪一侧""前面地形长什么样"这类光看方块列表说不清的事，调这个就能直接看见。' +
+      '**只在确实需要前后对比、想看画面、或只想看某一个方面时用**——每轮末尾本来就已经有一份最新的世界快照，别把 stats 当例行公事。用 type 挑方面：body 身体/状态/位置/环境、inventory 背包与穿戴（含"我总共有几个"的汇总）、entities 周围的人和怪物（村民带职业，婴儿标注 baby 不能交易）、blocks 周围方块、places 记住过的地名。不给 type 就是整份。想知道某个东西怎么做、缺哪些材料，用 getCraftingPlan，别问这里。',
+    params: { type: '要看哪一方面：body / inventory / entities / blocks / places。不给就是整份（等同 all）。' },
   },
   getCraftingPlan: {
     description: '给指定物品出一份完整合成计划：要哪些材料、各要多少、对照当前背包还缺什么、多什么。',
@@ -204,10 +203,6 @@ export const TOOL_TEXT: Record<string, { description: string; params: Record<str
   searchWiki: {
     description: '去 Minecraft Wiki 查指定问题。',
     params: { query: '要查的内容。' },
-  },
-  help: {
-    description: '列出所有可用工具和说明。',
-    params: {},
   },
   Finish: {
     description: '当前工作完成时调用，结束本轮推理循环。正在执行的动作不受影响。',

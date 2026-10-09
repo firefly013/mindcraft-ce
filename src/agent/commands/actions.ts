@@ -1,6 +1,7 @@
 import * as skills from '../library/skills.js';
 import { markDiscarded } from '../auto_pickup.js';
 import { permits } from '../permits.js';
+import { safeguards } from '../safeguards.js';
 import { DANGEROUS_OPS, isAuthorizable } from '../dangerous_ops.js';
 import { td, tp, MESSAGES } from '../../prompts.js';
 import { interactList } from './interact.js';
@@ -23,13 +24,35 @@ export interface AgentCommand {
     name: string;
     description: string;
     params?: Record<string, CommandParamDef>;
-    perform: (agent: any, ...args: any[]) => unknown;
+    perform: CommandPerform;
+    /**
+     * 这条命令的回执要**附一张现拍的截图**。默认不给。
+     *
+     * 只有真正需要"看画面"的命令才开（目前只有 `!stats`）：图片是按 token 计费
+     * 的重货，白送一张进上下文，等于每调用一次就烧一笔钱。所以默认纯文本，
+     * 让模型**按需**要图 —— 这也正好是 `!stats` 的语义（"我现在要看一眼"）。
+     */
+    withScreenshot?: boolean;
 }
 
 export type AgentActionFn = (agent: any, ...args: any[]) => Promise<unknown>;
 
+/**
+ * 命令的执行体。用带调用签名的接口而不是裸函数类型，是为了能挂 `longRunning`
+ * 这个**运行时**标记 —— 它比手工维护一份"哪些命令耗时长"的清单可靠：
+ * 清单会漏、会过期，而这个标记是 `runAsAction` 自己打上去的，走身体通道就一定有。
+ */
+export interface CommandPerform {
+    (agent: any, ...args: any[]): unknown;
+    /**
+     * 走身体通道（`actions.runAction`）= **长时间命令**（能跑几分钟）。
+     * 由 `runAsAction` 自动打上，别手工设。CLI 据此强制异步。
+     */
+    longRunning?: boolean;
+}
 
-function runAsAction (actionFn: AgentActionFn, timeout = -1): AgentCommand['perform'] {
+
+function runAsAction (actionFn: AgentActionFn, timeout = -1): CommandPerform {
     let actionLabel: string | null = null;  // Will be set on first use
 
     const wrappedAction = async function (agent: any, ...args: any[]): Promise<string | null | undefined> {
@@ -48,7 +71,10 @@ function runAsAction (actionFn: AgentActionFn, timeout = -1): AgentCommand['perf
         return code_return.message;
     };
 
-    return wrappedAction;
+    // **它跑在身体通道里，而且 `timeout` 默认 -1（没有上限）** —— 寻路几分钟是常态。
+    // 打上这个标记，外部 CLI 就不用猜哪些命令要异步：谁走身体通道谁就是长命令。
+    (wrappedAction as CommandPerform).longRunning = true;
+    return wrappedAction as CommandPerform;
 }
 
 export const actionsList: AgentCommand[] = [
@@ -62,15 +88,6 @@ export const actionsList: AgentCommand[] = [
         // eslint-disable-next-line require-await -- command interface requires a promise result
         perform: async function (agent: any): Promise<void> {
             agent.cleanKill();
-        }
-    },
-    {
-        name: '!clearChat',
-        description: td('clearChat'),
-        // eslint-disable-next-line require-await -- command interface requires a promise result
-        perform: async function (agent: any): Promise<string> {
-            agent.history.clear();
-            return agent.name + "'s chat history was cleared, starting new conversation from scratch.";
         }
     },
     {
@@ -264,22 +281,14 @@ export const actionsList: AgentCommand[] = [
     {
         name: '!attack',
         description: td('attack'),
-        params: {'type': { type: 'string', description: tp('attack', 'type')}},
-        perform: runAsAction(async (agent: any, type: string) => {
-            await skills.attackNearest(agent.bot, type, true);
-        })
-    },
-    {
-        name: '!attackPlayer',
-        description: td('attackPlayer'),
-        params: {'player_name': { type: 'string', description: tp('attackPlayer', 'player_name')}},
-        perform: runAsAction(async (agent: any, player_name: string) => {
-            const player = agent.bot.players[player_name]?.entity;
-            if (!player) {
-                skills.log(agent.bot, `Could not find player ${player_name}.`);
-                return false;
-            }
-            await skills.attackEntity(agent.bot, player, true);
+        // target 是什么意思由 type 决定，**type 必填**：靠字符串形状隐式猜
+        // 等于把"玩家优先"这个人为约定藏起来，而模型既不知道它存在也无法覆盖。
+        params: {
+            'target': { type: 'string', description: tp('attack', 'target') },
+            'type': { type: 'string', description: tp('attack', 'type') }
+        },
+        perform: runAsAction(async (agent: any, target: string, type: string) => {
+            await skills.attackTarget(agent.bot, target, type, true);
         })
     },
     {
@@ -289,28 +298,6 @@ export const actionsList: AgentCommand[] = [
         perform: runAsAction(async (agent: any, seconds: number) => {
             await skills.stay(agent.bot, seconds);
         })
-    },
-    {
-        name: '!lookAtPlayer',
-        description: td('lookAtPlayer'),
-        params: {
-            'player_name': { type: 'string', description: tp('lookAtPlayer', 'player_name') },
-            'direction': {
-                type: 'string',
-                description: tp('lookAtPlayer', 'direction'),
-            }
-        },
-        perform: async function(agent: any, player_name: string, direction: string): Promise<string> {
-            if (direction !== 'at' && direction !== 'with') {
-                return "Invalid direction. Use 'at' or 'with'.";
-            }
-            let result = "";
-            const actionFn = async (): Promise<void> => {
-                result = await agent.vision_interpreter.lookAtPlayer(player_name, direction);
-            };
-            await agent.actions.runAction('action:lookAtPlayer', actionFn);
-            return result;
-        }
     },
     {
         name: '!lookAtPosition',
@@ -360,18 +347,27 @@ export const actionsList: AgentCommand[] = [
     // 工具（craftRecipe / smeltItem / putInChest / takeFromChest / viewChest /
     // tradeWithVillager / showVillagerTrades / goToBed / clearFurnace / givePlayer）。
     ...interactList,
-    // 危险操作许可：默认禁止倒水/倒岩浆/点火/在下界末地睡觉/进深水，
-    // 要用得先用这两个工具明确授权一段时间（注册表见 dangerous_ops.ts）。
+    // 危险操作许可。**开关合一**：`revoke=true` 即收回授权。
+    // 原来"授予 / 收回"是两个工具，模型要收回得先想起那个名字——而
+    // restoreAllSafety 的注释里写的就是这个真实坑：漏掉一个等于没恢复干净。
+    // 合并后"收回"就在"授予"的同一个 schema 里，不存在想不起来这回事。
+    // minutes / calls 二选一：按时间，或按**工具调用次数**（失败也算，见 invokeTool 的 finally）。
     {
         name: '!allowDangerousOps',
         description: td('allowDangerousOps'),
         params: {
             'minutes': { type: 'int', description: tp('allowDangerousOps', 'minutes'), domain: [1, 120] },
+            'calls': { type: 'int', description: tp('allowDangerousOps', 'calls'), domain: [1, 20] },
             'reason': { type: 'string', description: tp('allowDangerousOps', 'reason') },
-            'ops': { type: 'string', description: tp('allowDangerousOps', 'ops') }
+            'ops': { type: 'string', description: tp('allowDangerousOps', 'ops') },
+            'revoke': { type: 'boolean', description: tp('allowDangerousOps', 'revoke') }
         },
-        perform: function (agent: any, minutes: number, reason: string, ops: string): string {
+        perform: function (agent: any, minutes: number, calls: number, reason: string, ops: string, revoke?: boolean): string {
             void agent;
+            if (revoke === true) {
+                permits.revoke();
+                return pad(`已收回危险操作授权。${permits.describe(Date.now())}`);
+            }
             const wanted: string[] = String(ops ?? '').split(',').map((t) => t.trim()).filter((t) => t !== '');
             const unknown: string[] = wanted.filter((id) => !isAuthorizable(id));
             if (unknown.length > 0) {
@@ -379,18 +375,60 @@ export const actionsList: AgentCommand[] = [
                     `没有这些危险操作：${unknown.join('、')}。可用的有：${DANGEROUS_OPS.map((o) => o.id).join('、')}。`,
                 );
             }
-            permits.grant(wanted.length > 0 ? wanted : null, minutes, reason, Date.now());
+            const byCalls = typeof calls === 'number' && Number.isFinite(calls) && calls > 0;
+            if (byCalls) {
+                permits.grantCalls(wanted.length > 0 ? wanted : null, calls, reason, Date.now());
+                return pad(`已授权接下来 ${calls} 次工具调用。${permits.describe(Date.now())}`);
+            }
+            const mins = typeof minutes === 'number' && Number.isFinite(minutes) && minutes > 0 ? minutes : 1;
+            permits.grant(wanted.length > 0 ? wanted : null, mins, reason, Date.now());
             // describe() 里已经带了"原因"，这里不再重复一遍（真机反馈：原因重复两遍）。
-            return pad(`已授权 ${minutes} 分钟。${permits.describe(Date.now())}`);
+            return pad(`已授权 ${mins} 分钟。${permits.describe(Date.now())}`);
         }
     },
+    // 保命程序开关：和上面的危险操作许可**是两件事** —— 那管"拦不拦动作"，
+    // 这里管"救不救命"。默认都开着，模型只有在清楚后果时才关。
+    // 同样**开关合一**：`restore=true` 即重新打开保命程序。
     {
-        name: '!denyDangerousOps',
-        description: td('denyDangerousOps'),
+        name: '!disableSafeguards',
+        description: td('disableSafeguards'),
+        params: {
+            'minutes': { type: 'int', description: tp('disableSafeguards', 'minutes'), domain: [1, 120] },
+            'calls': { type: 'int', description: tp('disableSafeguards', 'calls'), domain: [1, 20] },
+            'reason': { type: 'string', description: tp('disableSafeguards', 'reason') },
+            'restore': { type: 'boolean', description: tp('disableSafeguards', 'restore') }
+        },
+        perform: function (agent: any, minutes: number, calls: number, reason: string, restore?: boolean): string {
+            void agent;
+            if (restore === true) {
+                safeguards.release();
+                return pad(`保命程序已重新打开。${safeguards.describe(Date.now())}`);
+            }
+            const byCalls = typeof calls === 'number' && Number.isFinite(calls) && calls > 0;
+            if (byCalls) {
+                safeguards.suppressCalls(calls, reason, Date.now());
+                return pad(`保命程序已关闭，接下来 ${calls} 次工具调用内不介入。${safeguards.describe(Date.now())}`);
+            }
+            const mins = typeof minutes === 'number' && Number.isFinite(minutes) && minutes > 0 ? minutes : 1;
+            safeguards.suppressFor(mins, reason, Date.now());
+            return pad(`保命程序已关闭 ${mins} 分钟。${safeguards.describe(Date.now())}`);
+        }
+    },
+    // 一键恢复**两层**保护：闸门许可 + 保命程序。
+    // 分成两个工具有个真实的坑：模型可能只记得住其中一个（比如只记得
+    // 单独收回某一层），于是"我刚才乱来了，收干净"这件事做不干净——
+    // 授权还挂着，下一轮又被自己放行。紧急情况下要一个不用回忆的刹车。
+    {
+        name: '!restoreAllSafety',
+        description: td('restoreAllSafety'),
         params: {},
         perform: function (): string {
-            permits.revoke();
-            return pad(`已收回危险操作授权。${permits.describe(Date.now())}`);
+            permits.revokeAll();
+            safeguards.release();
+            const now = Date.now();
+            return pad(
+                `已恢复全部保护。危险操作许可：${permits.describe(now)}。保命程序：${safeguards.describe(now)}。`,
+            );
         }
     },
 ];
