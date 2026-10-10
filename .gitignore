@@ -1,5 +1,6 @@
 .vscode/
 .idea/
+.workbuddy/
 node_modules/
 dist/
 coverage/
@@ -32,3 +33,9 @@ src/mindcraft-py/__pycache__/
 __pycache__/
 _site/
 site/
+
+# 文档站与文档正文：本机留档，不进仓库（.github/workflows/deploy.yml 也一并停掉）
+docs/
+mkdocs.yml
+hooks.py
+.github/workflows/deploy.yml
