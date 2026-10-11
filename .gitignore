@@ -1,0 +1,26 @@
+.vscode/
+.idea/
+.workbuddy/
+.git-old/
+node_modules/
+dist/
+coverage/
+code_records/
+scratch.js
+bots/
+bots/**/action-code/**
+keys.json
+tmp/
+server_data/*
+server_data*
+results/*
+**/.DS_Store
+__pycache__/
+_site/
+site/
+
+# 文档站与文档正文：本机留档，不进仓库
+docs/
+mkdocs.yml
+hooks.py
+.github/workflows/deploy.yml

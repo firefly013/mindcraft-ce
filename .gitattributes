@@ -1,0 +1,4 @@
+# patch-package 的补丁必须保持 LF：源码（npm/GitHub 包）是 LF，
+# 若检出时被 autocrlf 转成 CRLF，patch-package/git apply 会全部匹配失败
+# （2026-10 踩过一次：补丁静默失效，pathfinder 自定义改动全丢）。
+patches/*.patch text eol=lf
