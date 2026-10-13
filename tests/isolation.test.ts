@@ -112,6 +112,14 @@ describe('隔离守卫：身体与大脑不互相 import', () => {
     }
     expect(offenders, 'src/shared 是两侧共用的契约，只能往下依赖，不许往上').toEqual([]);
   });
+
+  it('src/shared/** 里没有 Minecraft 客户端库的影子（连 ambient 声明也不行）', () => {
+    // 声明住哪，边界就画在哪：`declare module 'mineflayer'` 这种 ambient 声明
+    // 放共享层，等于往后谁都能在大脑侧顺手 import 一个客户端库。
+    const clientLibs = /(from|declare module)\s*\(?\s*['"](mineflayer|@nxg-org\/mineflayer|prismarine-|minecraft-data|node-canvas-webgl|vec3)/;
+    const offenders = tsFiles(abs('src/shared')).filter((file) => clientLibs.test(readFileSync(abs(file), 'utf8')));
+    expect(offenders, 'Minecraft 客户端库的声明与用法都该留在 src/body/ 或 src/brain/').toEqual([]);
+  });
 });
 
 describe('隔离守卫：进程入口的传递闭包', () => {
