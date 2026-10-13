@@ -5,7 +5,7 @@
  * 和 `MineflayerBody`（跑在身体进程里）；将来 `JavaClientBody` 实现了同一份接口，
  * 大脑一行不用改。
  *
- * 接口的字段是**从现状反推**的，不是设计出来的：`src/agent/` 里 506 处 `bot.*`
+ * 接口的字段是**从现状反推**的，不是设计出来的：`src/body/` 里 506 处 `bot.*`
  * 收敛下来就是下面这些——读状态（sample / image）、发动作（act / say / stop）、
  * 保命（rescue）、事件订阅、连接关闭。
  */

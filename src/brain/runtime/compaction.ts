@@ -1,7 +1,7 @@
 /**
  * 压缩接线：profile 参数 → pi-durable 的 `CompactionPolicy`。
  *
- * 主线正在改的 `src/agent/compaction.ts` 注释里明确写着照 Pi 实现
+ * 主线（重构前的 `agent/compaction.ts`）注释里明确写着照 Pi 实现
  * （`github.com/earendil-works/pi`），而 pi-durable 的 `CompactionTask` **就是**
  * Pi 的压仓。所以这一层是**接线**，不是重实现：
  *

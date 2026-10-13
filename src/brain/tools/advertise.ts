@@ -84,7 +84,10 @@ export function commandToTool(declaration: ToolDeclaration): OpenAITool {
  * 按 `blocked_actions` 过滤后，返回 OpenAI tools 数组。
  *
  * 过滤是**广告层**的：被隐藏的工具只要模型按名字直接调用就照样执行。
- * 真正的强制点在身体通道入口（见 `brain/tools/tools.ts::blockedActionsHook`）。
+ * 真正的强制点是身体通道入口的 `beforeTool`（见 `brain/tools/tools.ts::blockedActionsHook`）
+ * ——**注意那个 hook 目前还没挂到装配处**（README“已知差异”第 2 条），
+ * 所以现阶段 `blocked_actions` 既不拦广告、也不拦执行；本文件与生产路径无关，
+ * 只是给测试/`check:prompts` 用的参照实现。
  *
  * 末尾追加 5 个控制工具（Finish/Stop/Say/UpdatePlan/Feedback）——它们
  * **不住在身体里**，所以不在声明表里。与旧 `getOpenAITools` 逐字一致。

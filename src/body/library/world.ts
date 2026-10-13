@@ -2,7 +2,7 @@ import pf from 'mineflayer-pathfinder';
 import * as mc from '../data/mcdata.js';
 import { movementsFor } from '../safety/movements.js';
 
-// Vec3 coordinates are structural: mineflayer ships no types (see src/types/mineflayer.d.ts),
+// Vec3 coordinates are structural: mineflayer ships no types (see src/body/types/untyped-minecraft.d.ts),
 // so bot/entity/block handles stay `any` while pure coordinate shapes use Vec3Like.
 /** Minimal structural position shared by world helpers. */
 export interface Vec3Like {

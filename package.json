@@ -44,7 +44,7 @@
         "start": "tsx main.ts",
     "cli": "tsx src/cli.ts",
         "start:build": "npm run build && node dist/main.js",
-        "build": "tsc",
+        "build": "tsc && node scripts/copy-static.mjs",
         "typecheck": "tsc --noEmit",
         "lint": "eslint .",
         "check:prompts": "tsx scripts/check-prompts.ts",

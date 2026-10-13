@@ -2,7 +2,8 @@
  * P2：跨会话状态的文档定义。
  *
  * 这些字段原先散落在 `bots/<name>/memory.json` 的 `HistorySaveData` 里
- * （见 `src/agent/history.ts`）。迁到 pi-durable 后它们是**文档**：
+ * （重构前的主线路径是 `agent/history.ts`，本仓库这一版已由 pi-durable 接管）。
+ * 迁到 pi-durable 后它们是**文档**：
  * 与 entry 同一事务提交、原子落盘、带 fork 语义、可按地址观察。
  *
  * 只迁"跨会话真正有价值"的三项——memory / places / plan。

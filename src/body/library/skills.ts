@@ -2,7 +2,16 @@ import * as mc from "../data/mcdata.js";
 import * as world from "./world.js";
 import pf from 'mineflayer-pathfinder';
 import Vec3 from 'vec3';
-import settings from "../../../settings.js";
+/**
+ * ⚠️ **必须读共享单例，不许读根目录那份 `settings.ts`。**
+ *
+ * 根 `settings.ts` 是**主进程**（MindServer 宿主）的配置字面量；身体进程拿到的是
+ * 大脑转交过来的那一份，写在 `shared/settings.ts` 的单例里（`body/index.ts`
+ * 的 `setSettings`）。以前这里 import 的是根那份，于是身体里的 `settings.cheat`
+ * **永远是 false**——`/setblock`、瞬间放置这些 OP 快捷路径全是死代码，
+ * 配了 `"cheat": true` 也不生效，而且没有任何报错。
+ */
+import settings from "../../shared/settings.js";
 import { permits, opContextFor } from "../safety/permits.js";
 import { refuseText } from "../safety/dangerous_ops.js";
 import {

@@ -113,7 +113,7 @@ export class Agent {
      */
     body: Body | null = null;
 
-    /** 身体协议端口。由进程入口（`init_brain.ts`）在 `start()` 前设好。 */
+    /** 身体协议端口。由进程入口（`src/brain/index.ts`）在 `start()` 前设好。 */
     private bodyPort: number | null = null;
 
     /** 背包槽位缓存（每 300ms 刷一次）。只给 `Task` 数物品用，见 `inventorySlots()`。 */

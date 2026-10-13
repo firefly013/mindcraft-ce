@@ -33,7 +33,7 @@ const GO_HOST = 'opencode.ai/zen/go';
 /** OpenCode Zen 的端点片段。 */
 const ZEN_HOST = 'opencode.ai/zen';
 
-/** 自定义端点未声明窗口时的回退值（与 `src/agent/compaction.ts` 的既有回退一致）。 */
+/** 自定义端点未声明窗口时的回退值（与旧 `agent/compaction.ts` 的既有回退一致）。 */
 const FALLBACK_CONTEXT_WINDOW = 128_000;
 
 /** profile.model 的两种写法（裸字符串 / 对象）归一后的结果。 */

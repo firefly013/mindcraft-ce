@@ -14,7 +14,7 @@ import yargs from 'yargs';
 
 const args = process.argv.slice(2);
 if (args.length < 1) {
-    console.log('Usage: node init_brain.js -n <agent_name> -p <mindserver_port> -b <body_port> -l <load_memory> -m <init_message> -c <count_id>');
+    console.log('Usage: node src/brain/index.js -n <agent_name> -p <mindserver_port> -b <body_port> -l <load_memory> -m <init_message> -c <count_id>');
     process.exit(1);
 }
 
@@ -31,7 +31,7 @@ await (async () => {
     try {
         const agentName = argv.name;
         const mindserverPort = argv.port;
-        // 同 init_body：`--body-port` 会被 yargs 规范化成 `bodyPort`，两个都认。
+        // 同身体入口（`src/body/index.ts`）：`--body-port` 会被 yargs 规范化成 `bodyPort`，两个都认。
         const bodyPort = argv.body_port ?? (argv as unknown as { bodyPort?: number }).bodyPort;
         if (!agentName || mindserverPort === undefined || bodyPort === undefined) {
             console.error('Missing required arguments: -n <agent_name> -p <mindserver_port> -b <body_port>');

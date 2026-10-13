@@ -2,7 +2,7 @@
  * P2：每个 bot 进程一个 SQLite 的 pi-durable 会话。
  *
  * pi-durable 明确"一个进程同时只能独占一个 storage，且无跨进程锁"，这与仓库
- * 现有的"1 bot = 1 子进程"拓扑天然吻合（`src/process/agent_process.ts`）。
+ * 现有的"1 bot = 1 子进程"拓扑天然吻合（`src/brain/process/agent_process.ts`）。
  * 目录规则沿用既有的 `bots/<profile.name>/`，所以落盘位置对运维是连续的。
  *
  * 注意：`openNodeSqliteStorage` 走 **Node 内置 `node:sqlite`**，没有第三方

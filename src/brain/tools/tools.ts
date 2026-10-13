@@ -118,6 +118,11 @@ export function commandToRegistration(
  * `executeToolCall` 都不查黑名单）。迁到 pi-durable 后，`beforeTool` 才是
  * 拦得住的地方——这是这次迁移顺带修掉的一个安全问题。
  *
+ * ⚠️ **但它现在还没挂上去**（README“已知差异”第 2 条）：装配处的扩展列表里
+ * 只有请求日志与 agent 日志，`agent.ts` 存下的 `blocked_actions` 没人读。
+ * 所以这个名字叫"强制点"是**目标形态**，不是现状——挂着它之前，
+ * `blocked_actions` 不拦任何东西。别被这个函数的存在骗了。
+ *
  * 名单里存的是带 `!` 的命令名（如 `!checkBlueprint`），而工具名已 strip 过，
  * 所以两种写法都要比对。
  */
