@@ -1,6 +1,6 @@
-import * as Mindcraft from './src/mindcraft/mindcraft.js';
+import * as Mindcraft from './src/brain/mindserver/mindcraft.js';
 import settings from './settings.js';
-import type { Settings } from './src/types/common.js';
+import type { Settings } from './src/shared/types/common.js';
 import yargs from 'yargs';
 import { hideBin } from 'yargs/helpers';
 import { readFileSync } from 'fs';

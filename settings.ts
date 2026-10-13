@@ -1,4 +1,4 @@
-import type { Settings } from './src/types/common.js';
+import type { Settings } from './src/shared/types/common.js';
 
 const settings: Settings = {
     "minecraft_version": "auto", // or specific version like "1.21.11"
