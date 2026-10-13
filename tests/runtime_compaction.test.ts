@@ -18,10 +18,10 @@ import {
   DEFAULT_RESERVE_TOKENS,
   compactionPolicyFromProfile,
   compactionTriggerTokens,
-} from '../src/runtime/compaction.js';
-import { readProfileModel, resolveProvider } from '../src/runtime/provider.js';
-import type { ResolvedProvider } from '../src/runtime/provider.js';
-import { openBotRuntime } from '../src/runtime/runtime.js';
+} from '../src/brain/runtime/compaction.js';
+import { readProfileModel, resolveProvider } from '../src/brain/runtime/provider.js';
+import type { ResolvedProvider } from '../src/brain/runtime/provider.js';
+import { openBotRuntime } from '../src/brain/runtime/runtime.js';
 
 const ctx = BACKGROUND_CONTEXT;
 const tempDirs: string[] = [];

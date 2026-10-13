@@ -6,12 +6,12 @@
  * 只要有一个参数的类型/范围/必填性漂了，这条就会红。
  */
 import { describe, expect, it } from 'vitest';
-import type { AgentCommand } from '../src/agent/commands/actions.js';
-import { actionsList } from '../src/agent/commands/actions.js';
-import { queryList } from '../src/agent/commands/queries.js';
-import { commandToTool, getOpenAITools } from '../src/agent/commands/to_openai_tools.js';
-import { commandParameters } from '../src/runtime/tool_schema.js';
-import { blockedActionsHook, commandToRegistration, outcomeText } from '../src/runtime/tools.js';
+import type { AgentCommand } from '../src/body/commands/actions.js';
+import { actionsList } from '../src/body/commands/actions.js';
+import { queryList } from '../src/body/commands/queries.js';
+import { commandToTool, getOpenAITools } from '../src/body/commands/to_openai_tools.js';
+import { commandParameters } from '../src/brain/tools/tool_schema.js';
+import { blockedActionsHook, commandToRegistration, outcomeText } from '../src/brain/tools/tools.js';
 
 /** 与 `to_openai_tools.ts` 内部用的同一个列表。 */
 const ALL_COMMANDS: AgentCommand[] = queryList.concat(actionsList);

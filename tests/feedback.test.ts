@@ -10,8 +10,8 @@ import {
   appendFeedback,
   buildFeedbackEntry,
   validateFeedback,
-} from '../src/agent/feedback.js';
-import { getOpenAITools, isActionTool, toolExists, validateToolCall } from '../src/agent/commands/to_openai_tools.js';
+} from '../src/brain/feedback.js';
+import { getOpenAITools, isActionTool, toolExists, validateToolCall } from '../src/body/commands/to_openai_tools.js';
 
 describe('validateFeedback', () => {
   it('accepts a full valid call', () => {

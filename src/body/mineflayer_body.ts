@@ -32,30 +32,30 @@ import type {
     BrainRequest,
     BodyResponse,
     ChatPush,
-} from '../protocol/types.js';
-import { ERR } from '../protocol/types.js';
-import { initBot, isHostile } from '../utils/mcdata.js';
-import { expandTagRecipes } from '../utils/recipe_tags.js';
-import { executeToolCall, stripBang } from '../agent/commands/to_openai_tools.js';
-import { actionsList } from '../agent/commands/actions.js';
-import { queryList } from '../agent/commands/queries.js';
-import { ActionManager } from '../agent/action_manager.js';
-import { MemoryBank } from '../agent/memory_bank.js';
-import { LEVEL } from '../agent/scheduler.js';
-import type { Kind, Level } from '../agent/scheduler.js';
-import { KIND } from '../agent/scheduler.js';
-import { sampleLiveState, renderLiveState } from '../agent/live_state.js';
-import type { SampleContext } from '../agent/live_state.js';
-import { nearestThreat, runEmergency, FOOD_VALUE, shouldTriggerEmergency } from '../agent/emergency.js';
-import type { ThreatEntity } from '../agent/emergency.js';
+} from '../shared/protocol/types.js';
+import { ERR } from '../shared/protocol/types.js';
+import { initBot, isHostile } from './data/mcdata.js';
+import { expandTagRecipes } from './data/recipe_tags.js';
+import { executeToolCall, stripBang } from './commands/to_openai_tools.js';
+import { actionsList } from './commands/actions.js';
+import { queryList } from './commands/queries.js';
+import { ActionManager } from './action_manager.js';
+import { MemoryBank } from './memory_bank.js';
+import { LEVEL } from '../brain/scheduler.js';
+import type { Kind, Level } from '../brain/scheduler.js';
+import { KIND } from '../brain/scheduler.js';
+import { sampleLiveState, renderLiveState } from './live_state.js';
+import type { SampleContext } from './live_state.js';
+import { nearestThreat, runEmergency, FOOD_VALUE, shouldTriggerEmergency } from './safety/emergency.js';
+import type { ThreatEntity } from './safety/emergency.js';
 import {
     consume,
     forceExitWater,
     goToPosition,
     stopPvp,
-} from '../agent/library/skills.js';
-import { headInWater } from '../agent/water_safety.js';
-import { movementsFor } from '../agent/movements.js';
+} from './library/skills.js';
+import { headInWater } from './safety/water_safety.js';
+import { movementsFor } from './safety/movements.js';
 import {
     createEdgeWatcher,
     isHeartbeatDue,
@@ -65,17 +65,17 @@ import {
     schedulerLevelFor,
     shouldEmitHurt,
     snapshotFromBot,
-} from '../agent/edges.js';
-import { renderEventText } from '../agent/event_stream.js';
-import { AUTO_PICKUP_ID, nearestDropWithin } from '../agent/auto_pickup.js';
-import { getFullState } from '../agent/library/full_state.js';
+} from './edges.js';
+import { renderEventText } from '../shared/event_stream.js';
+import { AUTO_PICKUP_ID, nearestDropWithin } from './auto_pickup.js';
+import { getFullState } from './library/full_state.js';
 import { decodeCursor, EMPTY_CURSOR, encodeCursor, readInbox, type InboxCursor } from './inbox.js';
-import { safeguards } from '../agent/safeguards.js';
-import { permits } from '../agent/permits.js';
-import { log, validateNameFormat, handleDisconnection } from '../agent/connection_handler.js';
-import { createLogger, type Logger } from '../runtime/logger.js';
-import { MESSAGES } from '../prompts.js';
-import settings from '../agent/settings.js';
+import { safeguards } from './safety/safeguards.js';
+import { permits } from './safety/permits.js';
+import { log, validateNameFormat, handleDisconnection } from '../brain/connection_handler.js';
+import { createLogger, type Logger } from '../shared/logger.js';
+import { MESSAGES } from '../shared/prompts.js';
+import settings from '../shared/settings.js';
 import pf from 'mineflayer-pathfinder';
 
 type EdgeWatcher = ReturnType<typeof createEdgeWatcher>;
@@ -397,7 +397,7 @@ export class MineflayerBody {
             return;
         }
         try {
-            const mod = await import('../agent/vision/vision_interpreter.js');
+            const mod = await import('./vision/vision_interpreter.js');
             this.vision_interpreter = new mod.VisionInterpreter(this, settings.allow_vision) as BodyVision;
             console.log('vision interpreter ready');
         } catch (err: unknown) {

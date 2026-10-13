@@ -22,9 +22,9 @@
  */
 import { describe, expect, it } from 'vitest';
 import type { Submission } from '@earendil-works/pi-durable';
-import { ActionRunner } from '../src/agent/action_runner.js';
-import { LEVEL, Scheduler } from '../src/agent/scheduler.js';
-import { EventIntake } from '../src/runtime/events.js';
+import { ActionRunner } from '../src/brain/action_runner.js';
+import { LEVEL, Scheduler } from '../src/brain/scheduler.js';
+import { EventIntake } from '../src/brain/runtime/events.js';
 
 function deferred() {
   let resolve!: () => void;

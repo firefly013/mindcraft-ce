@@ -3,7 +3,7 @@
  *
  * 全部用 faux provider，不联网、不花钱、确定性。
  */
-import { SAY_LINE_LIMIT } from '../src/prompts.js';
+import { SAY_LINE_LIMIT } from '../src/shared/prompts.js';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -12,10 +12,10 @@ import { BACKGROUND_CONTEXT } from '@earendil-works/chord/context';
 import { Type, createModels } from '@earendil-works/pi-ai';
 import { fauxAssistantMessage, fauxProvider, fauxToolCall } from '@earendil-works/pi-ai/providers/faux';
 import { defineTool, type ToolRegistration } from '@earendil-works/pi-durable';
-import { SayEntry } from '../src/runtime/entries.js';
-import { liveTailHook } from '../src/runtime/loop.js';
-import type { ResolvedProvider } from '../src/runtime/provider.js';
-import { openBotRuntime, type BotRuntime } from '../src/runtime/runtime.js';
+import { SayEntry } from '../src/brain/runtime/entries.js';
+import { liveTailHook } from '../src/brain/runtime/loop.js';
+import type { ResolvedProvider } from '../src/brain/runtime/provider.js';
+import { openBotRuntime, type BotRuntime } from '../src/brain/runtime/runtime.js';
 
 const ctx = BACKGROUND_CONTEXT;
 const tempDirs: string[] = [];

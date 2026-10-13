@@ -35,8 +35,8 @@
 import { io } from 'socket.io-client';
 import { readFileSync, writeFileSync } from 'node:fs';
 import { parseCliArgs } from './cli/args.js';
-import { GAME_COMMANDS } from './runtime/game_tools.js';
-import { stripBang } from './agent/commands/to_openai_tools.js';
+import { GAME_COMMANDS } from './brain/tools/game_tools.js';
+import { stripBang } from './body/commands/to_openai_tools.js';
 
 /**
  * 这条命令是不是"长时间"的。

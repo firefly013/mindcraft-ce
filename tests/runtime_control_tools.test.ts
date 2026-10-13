@@ -12,17 +12,17 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { BACKGROUND_CONTEXT } from '@earendil-works/chord/context';
 import { createModels } from '@earendil-works/pi-ai';
 import { fauxAssistantMessage, fauxProvider, fauxToolCall } from '@earendil-works/pi-ai/providers/faux';
-import type { PlanSnapshot, PlanTodoInput } from '../src/agent/plan.js';
-import { getOpenAITools } from '../src/agent/commands/to_openai_tools.js';
+import type { PlanSnapshot, PlanTodoInput } from '../src/brain/plan.js';
+import { getOpenAITools } from '../src/body/commands/to_openai_tools.js';
 import {
   createFeedbackTool,
   createStopTool,
   createUpdatePlanTool,
   normalizeUpdatePlanArguments,
-} from '../src/runtime/control_tools.js';
-import { createSayTool } from '../src/runtime/loop.js';
-import type { ResolvedProvider } from '../src/runtime/provider.js';
-import { openBotRuntime } from '../src/runtime/runtime.js';
+} from '../src/brain/tools/control_tools.js';
+import { createSayTool } from '../src/brain/runtime/loop.js';
+import type { ResolvedProvider } from '../src/brain/runtime/provider.js';
+import { openBotRuntime } from '../src/brain/runtime/runtime.js';
 
 const ctx = BACKGROUND_CONTEXT;
 const tempDirs: string[] = [];

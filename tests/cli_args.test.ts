@@ -7,8 +7,8 @@
  */
 import { describe, expect, it } from 'vitest';
 import { parseCliArgs } from '../src/cli/args.js';
-import { GAME_COMMANDS } from '../src/runtime/game_tools.js';
-import { stripBang } from '../src/agent/commands/to_openai_tools.js';
+import { GAME_COMMANDS } from '../src/brain/tools/game_tools.js';
+import { stripBang } from '../src/body/commands/to_openai_tools.js';
 
 /**
  * "哪些命令是长时间命令"**不靠手工清单** —— 清单会漏、会过期。

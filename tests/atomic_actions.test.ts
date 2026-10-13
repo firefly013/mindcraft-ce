@@ -13,7 +13,7 @@ import {
   moveBy,
   setPosture,
   turnView,
-} from '../src/agent/library/skills.js';
+} from '../src/body/library/skills.js';
 
 /** 一个只记录键位、永远不动的假身体（好让 moveBy 走"卡住"那条结束路径）。 */
 function fakeBot(options: { yaw?: number; pitch?: number; onGround?: boolean } = {}) {

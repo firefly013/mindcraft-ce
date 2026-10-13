@@ -6,8 +6,8 @@
  * JSON 化发出去，模型看到的就不是它熟悉的东西了。
  */
 import { describe, expect, it } from 'vitest';
-import { MESSAGES } from '../src/prompts.js';
-import { loopResultText, outcomeText } from '../src/runtime/tools.js';
+import { MESSAGES } from '../src/shared/prompts.js';
+import { loopResultText, outcomeText } from '../src/brain/tools/tools.js';
 
 describe('loopResultText', () => {
   it('completed：正文是 data 的 outcomeText', () => {

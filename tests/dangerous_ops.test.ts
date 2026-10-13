@@ -12,8 +12,8 @@ import {
   isDangerousHere,
   normalizeDimension,
   refuseText,
-} from '../src/agent/dangerous_ops.js';
-import { FIRE_EXEMPT_OPS, createPermits, opContextFor } from '../src/agent/permits.js';
+} from '../src/body/safety/dangerous_ops.js';
+import { FIRE_EXEMPT_OPS, createPermits, opContextFor } from '../src/body/safety/permits.js';
 
 /** 取一条注册表记录；没注册就直接炸测试（比非空断言清楚）。 */
 function op(id: string): (typeof DANGEROUS_OPS)[number] {

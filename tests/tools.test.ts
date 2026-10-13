@@ -2,11 +2,11 @@
  * 工具通道归属：动作类占身体通道（忙时拒绝），查询类只读不占，
  * Stop/Finish 是控制信号，不占通道。
  */
-import { SAY_LINE_LIMIT } from '../src/prompts.js';
+import { SAY_LINE_LIMIT } from '../src/shared/prompts.js';
 import { describe, expect, it, vi } from 'vitest';
-import { checkDomain, commandToTool, executeToolCall, isActionTool, stripBang, toolExists, validateToolCall, validateUpdatePlan, formatSay, getOpenAITools } from '../src/agent/commands/to_openai_tools.js';
-import { queryList } from '../src/agent/commands/queries.js';
-import type { AgentCommand } from '../src/agent/commands/actions.js';
+import { checkDomain, commandToTool, executeToolCall, isActionTool, stripBang, toolExists, validateToolCall, validateUpdatePlan, formatSay, getOpenAITools } from '../src/body/commands/to_openai_tools.js';
+import { queryList } from '../src/body/commands/queries.js';
+import type { AgentCommand } from '../src/body/commands/actions.js';
 
 describe('isActionTool', () => {
   it('action tools claim the body channel', () => {

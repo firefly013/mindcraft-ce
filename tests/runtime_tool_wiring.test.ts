@@ -7,11 +7,11 @@
  * （`actionChannelInvoker`），所以直连 `executeToolCall` 的回归会在这里红。
  */
 import { describe, expect, it } from 'vitest';
-import { ActionRunner } from '../src/agent/action_runner.js';
-import { Scheduler } from '../src/agent/scheduler.js';
-import { renderLiveState, sampleLiveState } from '../src/agent/live_state.js';
-import { actionChannelInvoker, buildGameTools } from '../src/runtime/game_tools.js';
-import { composeLiveTail } from '../src/runtime/perception.js';
+import { ActionRunner } from '../src/brain/action_runner.js';
+import { Scheduler } from '../src/brain/scheduler.js';
+import { renderLiveState, sampleLiveState } from '../src/body/live_state.js';
+import { actionChannelInvoker, buildGameTools } from '../src/brain/tools/game_tools.js';
+import { composeLiveTail } from '../src/brain/runtime/perception.js';
 
 function deferred() {
   let resolve!: () => void;

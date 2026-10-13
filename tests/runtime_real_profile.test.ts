@@ -12,17 +12,17 @@
  *   - 一轮真的跑得起来，且尾巴带世界快照、不落 transcript
  */
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
-import { composeLiveTail } from '../src/runtime/perception.js';
+import { composeLiveTail } from '../src/brain/runtime/perception.js';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { BACKGROUND_CONTEXT } from '@earendil-works/chord/context';
 import { createModels } from '@earendil-works/pi-ai';
 import { fauxAssistantMessage, fauxProvider } from '@earendil-works/pi-ai/providers/faux';
-import { openBotWiring } from '../src/runtime/bot.js';
-import { compactionPolicyFromProfile } from '../src/runtime/compaction.js';
-import { buildGameTools } from '../src/runtime/game_tools.js';
-import type { ResolvedProvider } from '../src/runtime/provider.js';
+import { openBotWiring } from '../src/brain/runtime/bot.js';
+import { compactionPolicyFromProfile } from '../src/brain/runtime/compaction.js';
+import { buildGameTools } from '../src/brain/tools/game_tools.js';
+import type { ResolvedProvider } from '../src/brain/runtime/provider.js';
 
 const ctx = BACKGROUND_CONTEXT;
 const tempDirs: string[] = [];

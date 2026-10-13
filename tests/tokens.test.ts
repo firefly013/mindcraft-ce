@@ -5,7 +5,7 @@
  * 报的 `usage`——这个估算只在没有 usage 锚点时兜底，以及感知层给内容定级。
  */
 import { describe, expect, it } from 'vitest';
-import { estimateTokens } from '../src/utils/tokens.js';
+import { estimateTokens } from '../src/shared/utils/tokens.js';
 
 describe('estimateTokens', () => {
   it('空串是 0', () => {

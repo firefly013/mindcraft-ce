@@ -7,7 +7,7 @@
  * - `String(window.title)` 把对象变成 `[object Object]`，模型读到的就是这串。
  */
 import { describe, expect, it, vi } from 'vitest';
-import { craftsForRecipe, openBlockUi } from '../src/agent/library/skills.js';
+import { craftsForRecipe, openBlockUi } from '../src/body/library/skills.js';
 import { readableWindowTitle } from '../src/body/mineflayer_body.js';
 
 function fakeBot() {

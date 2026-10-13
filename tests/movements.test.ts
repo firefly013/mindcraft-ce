@@ -13,7 +13,7 @@ import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { join, relative } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import minecraftData from 'minecraft-data';
-import { MAX_DROP_DOWN, applyWaterPolicy, deepWaterAllowed, movementsFor, waterBlockId } from '../src/agent/movements.js';
+import { MAX_DROP_DOWN, applyWaterPolicy, deepWaterAllowed, movementsFor, waterBlockId } from '../src/body/safety/movements.js';
 
 const SRC = join(process.cwd(), 'src');
 const MC_VERSION = '1.20.4';
@@ -37,7 +37,7 @@ const BARE_MOVEMENTS = /new\s+(?:\([^)]*as\s+any\)\s*\.\s*|[A-Za-z_$][\w$]*\s*\.
 describe('架构守卫：Movements 只有一个来源', () => {
   it('除了 movements.ts，任何地方都不许直接 new Movements', () => {
     const offenders = tsFiles(SRC)
-      .filter((f) => !f.endsWith(join('agent', 'movements.ts')))
+      .filter((f) => !f.endsWith(join('body', 'safety', 'movements.ts')))
       .filter((f) => BARE_MOVEMENTS.test(readFileSync(f, 'utf8')))
       .map((f) => relative(process.cwd(), f).replace(/\\/g, '/'));
     // 报错信息要能直接照着改：指出该用什么替代。
@@ -48,7 +48,7 @@ describe('架构守卫：Movements 只有一个来源', () => {
   });
 
   it('movements.ts 自己确实还留着那一处构造（守卫没写成空判据）', () => {
-    const self = join(SRC, 'agent', 'movements.ts');
+    const self = join(SRC, 'body', 'safety', 'movements.ts');
     expect(BARE_MOVEMENTS.test(readFileSync(self, 'utf8'))).toBe(true);
   });
 });

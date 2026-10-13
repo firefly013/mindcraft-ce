@@ -3,9 +3,9 @@
  * 过期 generation 的完成回调就地丢弃。
  */
 import { describe, expect, it } from 'vitest';
-import { ActionRunner } from '../src/agent/action_runner.js';
-import type { ToolOutcome } from '../src/runtime/tools.js';
-import { Scheduler } from '../src/agent/scheduler.js';
+import { ActionRunner } from '../src/brain/action_runner.js';
+import type { ToolOutcome } from '../src/brain/tools/tools.js';
+import { Scheduler } from '../src/brain/scheduler.js';
 
 interface Harness {
   runner: ActionRunner;

@@ -7,8 +7,8 @@
  */
 import { describe, expect, it } from 'vitest';
 import type { Submission } from '@earendil-works/pi-durable';
-import { LEVEL } from '../src/agent/scheduler.js';
-import { EventIntake, type GameEvent } from '../src/runtime/events.js';
+import { LEVEL } from '../src/brain/scheduler.js';
+import { EventIntake, type GameEvent } from '../src/brain/runtime/events.js';
 
 interface Submitted {
   text: string;

@@ -5,8 +5,8 @@
  * 拒什么动作、哪个回调过期。不测实现细节。
  */
 import { describe, expect, it } from 'vitest';
-import { KIND, LEVEL, Scheduler } from '../src/agent/scheduler.js';
-import type { Kind, Level } from '../src/agent/scheduler.js';
+import { KIND, LEVEL, Scheduler } from '../src/brain/scheduler.js';
+import type { Kind, Level } from '../src/brain/scheduler.js';
 
 const ev = (level: Level, kind: Kind = KIND.WORLD, payload: unknown = {}) => ({ kind, level, payload });
 

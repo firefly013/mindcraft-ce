@@ -10,13 +10,13 @@ import { createModels } from '@earendil-works/pi-ai';
 import type { Message } from '@earendil-works/pi-ai';
 import { fauxAssistantMessage, fauxProvider } from '@earendil-works/pi-ai/providers/faux';
 import { defineExtension } from '@earendil-works/pi-durable';
-import type { ResolvedProvider } from '../src/runtime/provider.js';
+import type { ResolvedProvider } from '../src/brain/runtime/provider.js';
 import {
   compactionPageHook,
   createRequestLogSink,
   requestLogHook,
-} from '../src/runtime/request_log.js';
-import { openBotRuntime } from '../src/runtime/runtime.js';
+} from '../src/brain/runtime/request_log.js';
+import { openBotRuntime } from '../src/brain/runtime/runtime.js';
 
 const ctx = BACKGROUND_CONTEXT;
 const tempDirs: string[] = [];

@@ -8,8 +8,8 @@
  * 次数制是这一轮的重点：失败也要扣额度，这样模型中途失手时保命会立刻回来。
  */
 import { describe, expect, it } from 'vitest';
-import { createPermits } from '../src/agent/permits.js';
-import { createSafeguards } from '../src/agent/safeguards.js';
+import { createPermits } from '../src/body/safety/permits.js';
+import { createSafeguards } from '../src/body/safety/safeguards.js';
 
 const T0 = 1_700_000_000_000;
 const dry = { dimension: 'overworld', onFire: false };

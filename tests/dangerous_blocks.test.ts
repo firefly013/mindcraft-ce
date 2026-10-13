@@ -12,7 +12,7 @@ import {
   HURTING_BLOCKS,
   landingVerdictFor,
   teleportRefusal,
-} from '../src/agent/dangerous_blocks.js';
+} from '../src/body/safety/dangerous_blocks.js';
 
 const MC_VERSION = '1.20.4';
 const registry: any = minecraftData(MC_VERSION);

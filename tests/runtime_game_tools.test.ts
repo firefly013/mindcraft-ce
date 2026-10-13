@@ -4,8 +4,8 @@
  * 等价性用**旧实现自己**当预言机（`getOpenAITools`），不拿新代码跟自己对。
  */
 import { describe, expect, it } from 'vitest';
-import { getOpenAITools } from '../src/agent/commands/to_openai_tools.js';
-import { GAME_COMMANDS, buildGameTools, commandsForBody } from '../src/runtime/game_tools.js';
+import { getOpenAITools } from '../src/body/commands/to_openai_tools.js';
+import { GAME_COMMANDS, buildGameTools, commandsForBody } from '../src/brain/tools/game_tools.js';
 
 /** 旧广告里的控制工具（新路径下各自成型，不在这里）。 */
 const CONTROL = ['Finish', 'Stop', 'Say', 'UpdatePlan', 'Feedback'];

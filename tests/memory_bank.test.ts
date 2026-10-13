@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { MemoryBank } from '../src/agent/memory_bank.js';
+import { MemoryBank } from '../src/body/memory_bank.js';
 
 describe('MemoryBank', () => {
   it('remembers and recalls places', () => {

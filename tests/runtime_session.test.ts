@@ -12,9 +12,9 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { BACKGROUND_CONTEXT } from '@earendil-works/chord/context';
 import { createModels } from '@earendil-works/pi-ai';
 import { createRegistry } from '@earendil-works/pi-durable';
-import { migrateLegacyState, readLegacySave } from '../src/runtime/legacy.js';
-import { botDbPath, openBotSession } from '../src/runtime/session.js';
-import { MemoryDoc, PlacesDoc, PlanDoc } from '../src/runtime/state.js';
+import { migrateLegacyState, readLegacySave } from '../src/brain/runtime/legacy.js';
+import { botDbPath, openBotSession } from '../src/brain/runtime/session.js';
+import { MemoryDoc, PlacesDoc, PlanDoc } from '../src/brain/runtime/state.js';
 
 const ctx = BACKGROUND_CONTEXT;
 const tempDirs: string[] = [];

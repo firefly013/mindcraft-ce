@@ -10,9 +10,9 @@
  * 旧适配器走注入的 stub client。
  */
 import { beforeAll, describe, expect, it } from 'vitest';
-import { PiModel } from '../src/runtime/model.js';
-import { resolveProvider } from '../src/runtime/provider.js';
-import type { ChatMessage, OpenAITool } from '../src/types/common.js';
+import { PiModel } from '../src/brain/runtime/model.js';
+import { resolveProvider } from '../src/brain/runtime/provider.js';
+import type { ChatMessage, OpenAITool } from '../src/shared/types/common.js';
 
 const OFFLINE_URL = 'http://127.0.0.1:1/v1';
 const MISSING_KEY = 'DEFINITELY_MISSING_KEY_FOR_TEST';

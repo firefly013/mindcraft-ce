@@ -13,7 +13,7 @@ import {
   renderEventText,
   renderEvents,
   ENTRY_LIMIT,
-} from '../src/agent/event_stream.js';
+} from '../src/shared/event_stream.js';
 
 describe('formatEventEntry', () => {
   it('renders #seq kind/Llevel with the payload as JSON', () => {

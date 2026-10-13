@@ -11,7 +11,7 @@ import {
   DISCARD_IGNORE_MS,
   PICKUP_INTERVAL_MS,
   PICKUP_RADIUS,
-} from '../src/agent/auto_pickup.js';
+} from '../src/body/auto_pickup.js';
 
 function botWith(entities: Array<Record<string, unknown>>, self = { x: 0, y: 64, z: 0 }): unknown {
   const map: Record<string, unknown> = { self: { id: 99, name: 'player', position: self } };

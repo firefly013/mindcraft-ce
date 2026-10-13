@@ -6,8 +6,8 @@ import promptDefault, {
   resolvePromptSet,
   td,
   tp,
-} from '../src/prompts.js';
-import type { AgentProfile } from '../src/types/common.js';
+} from '../src/shared/prompts.js';
+import type { AgentProfile } from '../src/shared/types/common.js';
 
 const profile = (over: Record<string, unknown> = {}): AgentProfile =>
   ({ name: 'test', ...over }) as AgentProfile;

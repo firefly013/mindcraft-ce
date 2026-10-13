@@ -10,8 +10,8 @@ import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { createModels } from '@earendil-works/pi-ai';
 import { createRegistry } from '@earendil-works/pi-durable';
-import { openBotSession } from '../src/runtime/session.js';
-import { createStateAccess } from '../src/runtime/state_access.js';
+import { openBotSession } from '../src/brain/runtime/session.js';
+import { createStateAccess } from '../src/brain/runtime/state_access.js';
 
 const tempDirs: string[] = [];
 

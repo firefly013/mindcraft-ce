@@ -10,14 +10,14 @@
  * （DECISIONS D-55）。
  */
 import { afterEach, describe, expect, it } from 'vitest';
-import { RemoteBody } from '../src/body/remote_body.js';
-import { BodyServer } from '../src/protocol/transport.js';
+import { RemoteBody } from '../src/brain/remote_body.js';
+import { BodyServer } from '../src/shared/protocol/transport.js';
 import {
     ERR,
     type BodyCapabilities,
     type BodyResponse,
     type BrainRequest,
-} from '../src/protocol/types.js';
+} from '../src/shared/protocol/types.js';
 
 const CAPS: BodyCapabilities = {
     bodyKind: 'mineflayer',

@@ -1,7 +1,7 @@
 import { rmSync } from 'node:fs';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { MESSAGES } from '../src/prompts.js';
-import { Task, type TaskData } from '../src/agent/tasks/tasks.js';
+import { MESSAGES } from '../src/shared/prompts.js';
+import { Task, type TaskData } from '../src/brain/tasks/tasks.js';
 
 const PROGRESS = './hells_kitchen_progress.json';
 afterEach(() => rmSync(PROGRESS, { force: true }));

@@ -16,7 +16,7 @@ import {
   renderLiveState,
   sampleLiveState,
   summarizeOmitted,
-} from '../src/agent/live_state.js';
+} from '../src/body/live_state.js';
 
 function stubBot(overrides: Record<string, unknown> = {}): Record<string, unknown> {
   return {

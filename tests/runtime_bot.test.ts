@@ -7,7 +7,7 @@
  * 用 faux provider，不联网。
  */
 import { mkdtempSync, rmSync } from 'node:fs';
-import { composeLiveTail } from '../src/runtime/perception.js';
+import { composeLiveTail } from '../src/brain/runtime/perception.js';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -15,10 +15,10 @@ import { BACKGROUND_CONTEXT } from '@earendil-works/chord/context';
 import { Type, createModels } from '@earendil-works/pi-ai';
 import { fauxAssistantMessage, fauxProvider, fauxToolCall } from '@earendil-works/pi-ai/providers/faux';
 import { defineTool } from '@earendil-works/pi-durable';
-import { openBotWiring, type BotWiring } from '../src/runtime/bot.js';
-import { SayEntry } from '../src/runtime/entries.js';
-import { EventIntake } from '../src/runtime/events.js';
-import type { ResolvedProvider } from '../src/runtime/provider.js';
+import { openBotWiring, type BotWiring } from '../src/brain/runtime/bot.js';
+import { SayEntry } from '../src/brain/runtime/entries.js';
+import { EventIntake } from '../src/brain/runtime/events.js';
+import type { ResolvedProvider } from '../src/brain/runtime/provider.js';
 
 const ctx = BACKGROUND_CONTEXT;
 const tempDirs: string[] = [];

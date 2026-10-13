@@ -6,7 +6,7 @@
  * 只是行为静静变错——点了取消跟没点一样，或者"超时"让人以为机器人停了。
  */
 import { describe, expect, it } from 'vitest';
-import { CliJobTracker } from '../src/agent/cli_jobs.js';
+import { CliJobTracker } from '../src/brain/cli_jobs.js';
 
 function tracker(stop: () => Promise<void> = async () => {}): CliJobTracker {
   return new CliJobTracker({ stop });

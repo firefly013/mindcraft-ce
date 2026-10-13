@@ -7,7 +7,7 @@
  * 这里同时保护**有意设计**：Say + 自动散文双通道不能被当成冗余删掉。
  */
 import { describe, expect, it } from 'vitest';
-import { PROMPT_SETS, MESSAGES } from '../src/prompts.js';
+import { PROMPT_SETS, MESSAGES } from '../src/shared/prompts.js';
 
 const conversing = PROMPT_SETS['default']?.['conversing'] ?? '';
 

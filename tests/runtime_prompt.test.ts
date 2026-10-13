@@ -3,8 +3,8 @@
  * 并且明确保证"动态内容一个都不进来"（system 是 section，值一变缓存全废）。
  */
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { PROMPT_SETS, resolvePromptSet } from '../src/prompts.js';
-import { staticSystemPrompt, systemPromptFromProfile } from '../src/runtime/prompt.js';
+import { PROMPT_SETS, resolvePromptSet } from '../src/shared/prompts.js';
+import { staticSystemPrompt, systemPromptFromProfile } from '../src/brain/runtime/prompt.js';
 
 afterEach(() => {
   vi.restoreAllMocks();

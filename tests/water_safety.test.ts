@@ -22,8 +22,8 @@ import {
   waterLevel,
   waterUnderFeet,
   headInWater,
-} from '../src/agent/water_safety.js';
-import { dangerousWaterRefusal } from '../src/agent/water_safety.js';
+} from '../src/body/safety/water_safety.js';
+import { dangerousWaterRefusal } from '../src/body/safety/water_safety.js';
 
 /**
  * 假世界。格子用 `[x, y, z, name, level?]` 描述，没写的格子是空气。

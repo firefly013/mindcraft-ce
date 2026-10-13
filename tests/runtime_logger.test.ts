@@ -9,7 +9,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'no
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { FIELD_LIMIT, createLogger, describeError, nullLogger } from '../src/runtime/logger.js';
+import { FIELD_LIMIT, createLogger, describeError, nullLogger } from '../src/shared/logger.js';
 
 const tempDirs: string[] = [];
 

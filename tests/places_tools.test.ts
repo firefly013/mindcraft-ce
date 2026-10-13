@@ -15,8 +15,8 @@ import {
   createGoToRememberedPlaceTool,
   createRememberHereTool,
   type PlacesDeps,
-} from '../src/runtime/control_tools.js';
-import { formatSay, SAY_LINE_LIMIT } from '../src/agent/commands/to_openai_tools.js';
+} from '../src/brain/tools/control_tools.js';
+import { formatSay, SAY_LINE_LIMIT } from '../src/body/commands/to_openai_tools.js';
 
 /** 假依赖：内存里存一份，可故意让 write 失败。 */
 function fakeDeps(opts: { failWrite?: boolean; here?: { x: number; y: number; z: number } | null } = {}) {

@@ -1,16 +1,16 @@
 import { readFileSync, readdirSync, statSync } from 'fs';
 import { join } from 'path';
-import * as P from '../src/prompts.js';
-import { CONTROL_TOOLS, getOpenAITools } from '../src/agent/commands/to_openai_tools.js';
+import * as P from '../src/shared/prompts.js';
+import { CONTROL_TOOLS, getOpenAITools } from '../src/body/commands/to_openai_tools.js';
 
 type ToolText = Record<string, { params?: Record<string, unknown> }>;
 const TOOL_TEXT = P.TOOL_TEXT as ToolText;
 const MESSAGES = P.MESSAGES as Record<string, unknown>;
 
 const COMMAND_FILES = [
-  './src/agent/commands/actions.ts',
-  './src/agent/commands/queries.ts',
-  './src/agent/commands/interact.ts',
+  './src/body/commands/actions.ts',
+  './src/body/commands/queries.ts',
+  './src/body/commands/interact.ts',
 ];
 
 // 1. 命令文件引用完整性
@@ -27,14 +27,14 @@ for (const fp of COMMAND_FILES) {
 for (const name of CONTROL_TOOLS) used.set(name, new Set<string>());
 /**
  * **大脑侧工具**：它们不是"命令"，而是 pi-durable 的 `defineTool`（住在
- * `runtime/control_tools.ts`），所以命令文件里扫不到。地点三件套就是这类——
+ * `brain/tools/control_tools.ts`），所以命令文件里扫不到。地点三件套就是这类——
  * 真源在会话文档里，不该由身体回答（见 control_tools 里 PlacesDeps 的说明）。
  */
 const BRAIN_SIDE_TOOLS = ['getPlaces', 'rememberHere', 'goToRememberedPlace'];
-for (const m of readFileSync('./src/runtime/control_tools.ts', 'utf8').matchAll(/td\('([^']+)'\)/g)) {
+for (const m of readFileSync('./src/brain/tools/control_tools.ts', 'utf8').matchAll(/td\('([^']+)'\)/g)) {
   used.set(m[1] as string, new Set<string>());
 }
-for (const m of readFileSync('./src/runtime/control_tools.ts', 'utf8').matchAll(/tp\('([^']+)',\s*'([^']+)'\)/g)) {
+for (const m of readFileSync('./src/brain/tools/control_tools.ts', 'utf8').matchAll(/tp\('([^']+)',\s*'([^']+)'\)/g)) {
   if (!used.has(m[1] as string)) used.set(m[1] as string, new Set<string>());
   used.get(m[1] as string)?.add(m[2] as string);
 }

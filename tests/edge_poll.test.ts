@@ -5,7 +5,7 @@ import { mkdirSync, mkdtempSync, readFileSync, readdirSync, writeFileSync } from
 import { tmpdir } from 'os';
 import { join } from 'path';
 import { describe, expect, it } from 'vitest';
-import { snapshotFromBot, createEdgeWatcher } from '../src/agent/edges.js';
+import { snapshotFromBot, createEdgeWatcher } from '../src/body/edges.js';
 
 function stubBot(overrides: Record<string, unknown> = {}): Record<string, unknown> {
   return {

@@ -14,7 +14,7 @@
  */
 import { describe, expect, it } from 'vitest';
 import { Vec3 } from 'vec3';
-import { resolveAttackTarget } from '../src/agent/library/skills.js';
+import { resolveAttackTarget } from '../src/body/library/skills.js';
 
 function stubBot(): Record<string, unknown> {
   const mob = (id: number, name: string, x: number, y: number, z: number) => ({

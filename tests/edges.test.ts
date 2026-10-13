@@ -21,10 +21,10 @@ import {
   HEARTBEAT_MS,
   HURT_DEBOUNCE_MS,
   STUCK_MS,
-} from '../src/agent/edges.js';
-import { HOSTILE_NEARBY_METERS, type EdgeSnapshot } from '../src/agent/edges.js';
-import { PERCEPTION_RADIUS } from '../src/agent/live_state.js';
-import { LEVEL } from '../src/agent/scheduler.js';
+} from '../src/body/edges.js';
+import { HOSTILE_NEARBY_METERS, type EdgeSnapshot } from '../src/body/edges.js';
+import { PERCEPTION_RADIUS } from '../src/body/live_state.js';
+import { LEVEL } from '../src/brain/scheduler.js';
 
 const ent = (id: number, distance: number, extra: Record<string, unknown> = {}) => ({
   id,

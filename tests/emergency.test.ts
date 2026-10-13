@@ -11,8 +11,8 @@ import {
   SAFE_SECONDS,
   shouldTriggerEmergency,
   THREAT_RADIUS,
-} from '../src/agent/emergency.js';
-import type { EmergencyBot } from '../src/agent/emergency.js';
+} from '../src/body/safety/emergency.js';
+import type { EmergencyBot } from '../src/body/safety/emergency.js';
 
 describe('shouldTriggerEmergency', () => {
   it('fires strictly below max*0.3, never for the dead or the unreadable', () => {

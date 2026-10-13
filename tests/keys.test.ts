@@ -1,6 +1,6 @@
 import { existsSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { getKey, hasKey } from '../src/utils/keys.js';
+import { getKey, hasKey } from '../src/shared/utils/keys.js';
 
 const MARKER = 'MIGRATION_TEST_KEY_XYZ';
 const FILE_KEY = 'MIGRATION_FILE_KEY_XYZ';
@@ -42,7 +42,7 @@ describe('keys (keys.json present)', () => {
     writeFileSync('./keys.json', JSON.stringify({ [FILE_KEY]: 'from-file' }), 'utf8');
     process.env[FILE_KEY] = 'from-env';
     vi.resetModules();
-    const fresh = await import('../src/utils/keys.js');
+    const fresh = await import('../src/shared/utils/keys.js');
     expect(fresh.hasKey(FILE_KEY)).toBe('from-file');
     expect(fresh.getKey(FILE_KEY)).toBe('from-file');
   });
@@ -51,7 +51,7 @@ describe('keys (keys.json present)', () => {
     writeFileSync('./keys.json', '{not-json', 'utf8');
     process.env[MARKER] = 'secret';
     vi.resetModules();
-    const fresh = await import('../src/utils/keys.js');
+    const fresh = await import('../src/shared/utils/keys.js');
     expect(fresh.getKey(MARKER)).toBe('secret');
   });
 });

@@ -3,7 +3,7 @@
  * todos 是 {text,done}——模型要能标进度，纯字符串只作为旧格式兼容。
  */
 import { describe, expect, it } from 'vitest';
-import { PlanStore } from '../src/agent/plan.js';
+import { PlanStore } from '../src/brain/plan.js';
 
 describe('PlanStore', () => {
   it('starts empty', () => {

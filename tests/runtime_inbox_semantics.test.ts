@@ -17,8 +17,8 @@ import { BACKGROUND_CONTEXT } from '@earendil-works/chord/context';
 import { Type, createModels } from '@earendil-works/pi-ai';
 import { fauxAssistantMessage, fauxProvider, fauxToolCall } from '@earendil-works/pi-ai/providers/faux';
 import { defineTool } from '@earendil-works/pi-durable';
-import type { ResolvedProvider } from '../src/runtime/provider.js';
-import { openBotRuntime, type BotRuntime } from '../src/runtime/runtime.js';
+import type { ResolvedProvider } from '../src/brain/runtime/provider.js';
+import { openBotRuntime, type BotRuntime } from '../src/brain/runtime/runtime.js';
 
 const ctx = BACKGROUND_CONTEXT;
 const tempDirs: string[] = [];
