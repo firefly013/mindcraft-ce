@@ -16,8 +16,9 @@
 
 import { Scheduler } from './scheduler.js';
 import { MESSAGES } from '../shared/prompts.js';
-import { isActionTool, validateToolCall } from '../body/commands/to_openai_tools.js';
-import { AUTO_PICKUP_ID } from '../body/auto_pickup.js';
+import { AUTO_PICKUP_ID } from '../shared/auto_pickup.js';
+import type { ToolCatalog } from './tools/catalog.js';
+import { isActionTool, validateToolCall } from './tools/validate.js';
 import type { ToolOutcome } from './tools/tools.js';
 
 /**
@@ -36,6 +37,11 @@ export type ActionTrace =
 
 export interface ActionRunnerDeps {
   scheduler: Scheduler;
+  /**
+   * 工具目录：**只读身体握手里报上来的声明**。参数校验与"这条工具占不占身体
+   * 通道"都从它查——大脑手里没有命令表，也不该有。
+   */
+  catalog: ToolCatalog;
   /** 聊天历史写入（证据回填）。 */
   record: (outcome: string, name: string, args: unknown) => Promise<void>;
   /** 说话/广播。 */
@@ -50,6 +56,7 @@ export interface ActionRunnerDeps {
 
 export class ActionRunner {
   private scheduler: Scheduler;
+  private catalog: ToolCatalog;
   private record: (outcome: string, name: string, args: unknown) => Promise<void>;
   private speak: (text: string) => void;
   private execute: (name: string, args: Record<string, unknown>) => Promise<string>;
@@ -58,6 +65,7 @@ export class ActionRunner {
 
   constructor(deps: ActionRunnerDeps) {
     this.scheduler = deps.scheduler;
+    this.catalog = deps.catalog;
     this.record = deps.record;
     this.speak = deps.speak;
     this.execute = deps.execute;
@@ -67,14 +75,14 @@ export class ActionRunner {
 
   /** 跑一个工具调用：动作类即时回 accepted，查询类阻塞回内容。 */
   async run(name: string, args: unknown): Promise<ToolOutcome> {
-    const checked = validateToolCall(name, args);
+    const checked = validateToolCall(this.catalog, name, args);
     if (!checked.ok) {
       const reason = checked.errors?.join('; ') ?? 'Bad arguments.';
       this.trace({ kind: 'query', name });
       await this.record(`rejected: ${reason}`, name, args);
       return { status: 'rejected', code: checked.code ?? 'BAD_ARGS', reason };
     }
-    if (!isActionTool(name)) {
+    if (!isActionTool(this.catalog, name)) {
       this.trace({ kind: 'query', name });
       this.speak(MESSAGES.usedMarker(name));
       const data = await this.execute(name, args as Record<string, unknown>);

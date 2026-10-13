@@ -24,7 +24,12 @@ import { describe, expect, it } from 'vitest';
 import type { Submission } from '@earendil-works/pi-durable';
 import { ActionRunner } from '../src/brain/action_runner.js';
 import { LEVEL, Scheduler } from '../src/brain/scheduler.js';
+import { createToolCatalog } from '../src/brain/tools/catalog.js';
 import { EventIntake } from '../src/brain/runtime/events.js';
+import { toolDeclarations } from '../src/body/commands/registry.js';
+
+/** 与生产一致：工具目录来自身体握手报上来的声明。 */
+const CATALOG = createToolCatalog(toolDeclarations());
 
 function deferred() {
   let resolve!: () => void;
@@ -61,6 +66,7 @@ function makeBoundary(): Boundary {
 
   const runner = new ActionRunner({
     scheduler,
+    catalog: CATALOG,
     record: (outcome, name) => {
       records.push(`${name}: ${outcome}`);
       return Promise.resolve();

@@ -11,7 +11,13 @@ import {
   buildFeedbackEntry,
   validateFeedback,
 } from '../src/brain/feedback.js';
-import { getOpenAITools, isActionTool, toolExists, validateToolCall } from '../src/body/commands/to_openai_tools.js';
+import { getOpenAITools } from '../src/brain/tools/advertise.js';
+import { createToolCatalog } from '../src/brain/tools/catalog.js';
+import { isActionTool, toolExists, validateToolCall } from '../src/brain/tools/validate.js';
+import { toolDeclarations } from '../src/body/commands/registry.js';
+
+/** 与生产一致：工具目录来自身体握手报上来的声明。 */
+const CATALOG = createToolCatalog(toolDeclarations());
 
 describe('validateFeedback', () => {
   it('accepts a full valid call', () => {
@@ -85,11 +91,11 @@ describe('appendFeedback', () => {
 
 describe('Feedback on the tool surface', () => {
   it('is a known, channel-free control tool with a strict schema', () => {
-    expect(toolExists('Feedback')).toBe(true);
-    expect(isActionTool('Feedback')).toBe(false);
-    expect(validateToolCall('Feedback', { title: 't', body: 'b' }).ok).toBe(true);
-    expect(validateToolCall('Feedback', { title: 't' }).ok).toBe(false);
-    const tools = getOpenAITools({ blocked_actions: [] });
+    expect(toolExists(CATALOG, 'Feedback')).toBe(true);
+    expect(isActionTool(CATALOG, 'Feedback')).toBe(false);
+    expect(validateToolCall(CATALOG, 'Feedback', { title: 't', body: 'b' }).ok).toBe(true);
+    expect(validateToolCall(CATALOG, 'Feedback', { title: 't' }).ok).toBe(false);
+    const tools = getOpenAITools(toolDeclarations());
     const feedback = tools.find((t) => t.function.name === 'Feedback');
     expect(feedback).toBeDefined();
     expect(feedback?.function.parameters).toMatchObject({

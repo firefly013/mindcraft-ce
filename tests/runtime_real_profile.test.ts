@@ -12,7 +12,7 @@
  *   - 一轮真的跑得起来，且尾巴带世界快照、不落 transcript
  */
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
-import { composeLiveTail } from '../src/brain/runtime/perception.js';
+import { composeLiveTail } from '../src/body/live_state.js';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -22,6 +22,7 @@ import { fauxAssistantMessage, fauxProvider } from '@earendil-works/pi-ai/provid
 import { openBotWiring } from '../src/brain/runtime/bot.js';
 import { compactionPolicyFromProfile } from '../src/brain/runtime/compaction.js';
 import { buildGameTools } from '../src/brain/tools/game_tools.js';
+import { toolDeclarations } from '../src/body/commands/registry.js';
 import type { ResolvedProvider } from '../src/brain/runtime/provider.js';
 
 const ctx = BACKGROUND_CONTEXT;
@@ -111,7 +112,7 @@ describe('真实 profile 装配', () => {
           food: 18,
         },
       }),
-      tools: buildGameTools({ execute: () => 'ok' }),
+      tools: buildGameTools({ declarations: toolDeclarations(), execute: () => 'ok' }),
       rescue: () => Promise.resolve(),
     });
 
@@ -127,7 +128,7 @@ describe('真实 profile 装配', () => {
   });
 
   it('工具表 = 真实命令表 + 控制工具（Say 由运行时装）', () => {
-    const names = buildGameTools({ execute: () => 'ok' }).map((tool) => tool.name);
+    const names = buildGameTools({ declarations: toolDeclarations(), execute: () => 'ok' }).map((tool) => tool.name);
     // 生产 profile 对应的模型走的是同一张命令表
     expect(names.length).toBeGreaterThan(30);
     for (const control of ['Finish', 'Stop', 'Say', 'UpdatePlan', 'Feedback']) {

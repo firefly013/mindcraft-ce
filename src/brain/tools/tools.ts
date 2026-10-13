@@ -1,9 +1,9 @@
 /**
- * P4：命令 → pi-durable 工具注册项，以及 `blocked_actions` 的真正强制点。
+ * 工具**声明** → pi-durable 工具注册项，以及 `blocked_actions` 的真正强制点。
  *
- * 这里**不重写** 47 个 `perform` 实现——那会引入行为漂移。只把声明搬过来：
- * schema 由 TypeBox 生成（`tool_schema.ts`），调用约定（位置参数、null 归一、
- * 回执文本）逐字保留。
+ * 这里**不重写**任何 `perform` 实现——那些都在身体进程里，一次协议调用之外
+ * 与大脑无关。大脑只拿到声明（名字/描述/参数），据此生成 schema 并把调用
+ * 转给身体通道（`execute` 由装配方注入）。
  */
 import {
   ToolTask,
@@ -12,9 +12,8 @@ import {
   type HookRegistration,
   type ToolRegistration,
 } from '@earendil-works/pi-durable';
-import type { AgentCommand } from '../../body/commands/actions.js';
-import { stripBang } from '../../body/commands/to_openai_tools.js';
 import { MESSAGES } from '../../shared/prompts.js';
+import type { ToolDeclaration } from '../../shared/tools.js';
 import { commandParameters, paramNames } from './tool_schema.js';
 
 /**
@@ -63,25 +62,25 @@ export function outcomeText(data: unknown): string {
 
 /** 执行一个命令；`orderedArgs` 已按 `params` 的 key 顺序排好。 */
 export type CommandInvoke = (
-  command: AgentCommand,
+  command: ToolDeclaration,
   orderedArgs: unknown[],
 ) => unknown | Promise<unknown>;
 
 /**
- * 命令 → 工具注册项。
+ * 工具声明 → 工具注册项。
  *
- * `invoke` 是注入的：P4 阶段 `agent.ts` 还没接过来，注入让转换器本身可单测；
- * 后续阶段传入"闭包住 agent 实例"的实现即可，转换逻辑不用改。
+ * `invoke` 是注入的：转换器本身可单测，装配方传入"闭包住 Agent / 身体通道"的
+ * 实现即可，转换逻辑不用改。
  */
 export function commandToRegistration(
-  command: AgentCommand,
+  command: ToolDeclaration,
   invoke: CommandInvoke,
   /** 现拍一张截图，返回 base64；相机没开/拍失败返回 null。只有命令声明要图时才调。 */
   captureImage?: () => Promise<string | null>,
 ): ToolRegistration {
   return defineTool({
-    name: stripBang(command.name),
-    description: command.description || stripBang(command.name),
+    name: command.name,
+    description: command.description || command.name,
     parameters: commandParameters(command),
     execute: async (args) => {
       // 位置参数按 params 的 key 顺序取；`null` 归一为 `undefined`，这样 JS

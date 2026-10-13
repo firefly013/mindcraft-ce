@@ -1,5 +1,4 @@
 import { readFileSync, writeFileSync, existsSync } from 'node:fs';
-import { getPosition } from '../../body/library/world.js';
 import { MESSAGES } from '../../shared/prompts.js';
 
 const PROGRESS_FILE = './hells_kitchen_progress.json';

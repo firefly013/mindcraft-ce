@@ -7,7 +7,7 @@
  * 用 faux provider，不联网。
  */
 import { mkdtempSync, rmSync } from 'node:fs';
-import { composeLiveTail } from '../src/brain/runtime/perception.js';
+import { composeLiveTail } from '../src/body/live_state.js';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';

@@ -14,9 +14,9 @@ import {
   PERCEPTION_LIMIT,
   PERCEPTION_RADIUS,
   renderLiveState,
-  sampleLiveState,
   summarizeOmitted,
-} from '../src/body/live_state.js';
+} from '../src/shared/live_state.js';
+import { sampleLiveState } from '../src/body/live_state.js';
 
 function stubBot(overrides: Record<string, unknown> = {}): Record<string, unknown> {
   return {

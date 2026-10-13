@@ -12,7 +12,7 @@ import {
   validateFeedback,
 } from '../feedback.js';
 import type { PlanSnapshot, PlanTodoInput } from '../plan.js';
-import { validateUpdatePlan } from '../../body/commands/to_openai_tools.js';
+import { validateUpdatePlan } from './validate.js';
 import { td, tp } from '../../shared/prompts.js';
 import { outcomeText } from './tools.js';
 

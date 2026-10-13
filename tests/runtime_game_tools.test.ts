@@ -1,77 +1,77 @@
 /**
  * 游戏工具的装配：集合、顺序、参数形状都必须与旧实现等价。
  *
- * 等价性用**旧实现自己**当预言机（`getOpenAITools`），不拿新代码跟自己对。
+ * 等价性用**旧实现自己**当预言机（`brain/tools/advertise.ts` 的 `getOpenAITools`），
+ * 不拿新代码跟自己对。
+ *
+ * 工具声明来自**身体**（`body/commands/registry.ts`）——这正是本文件要钉住的分界：
+ * 大脑只吃声明，声明里有多少工具就装多少。
  */
 import { describe, expect, it } from 'vitest';
-import { getOpenAITools } from '../src/body/commands/to_openai_tools.js';
-import { GAME_COMMANDS, buildGameTools, commandsForBody } from '../src/brain/tools/game_tools.js';
+import { getOpenAITools } from '../src/brain/tools/advertise.js';
+import { buildGameTools } from '../src/brain/tools/game_tools.js';
+import { GAME_COMMANDS, toolDeclarations } from '../src/body/commands/registry.js';
 
 /** 旧广告里的控制工具（新路径下各自成型，不在这里）。 */
 const CONTROL = ['Finish', 'Stop', 'Say', 'UpdatePlan', 'Feedback'];
 
+/** 身体握手会报上来的那份声明。 */
+const DECLARATIONS = toolDeclarations();
+
 describe('工具集合与顺序', () => {
   it('与旧 getOpenAITools 的广告逐项一致（除控制工具外）', () => {
-    const oldNames = getOpenAITools({}).map((tool) => tool.function.name);
+    const oldNames = getOpenAITools(DECLARATIONS).map((tool) => tool.function.name);
     const expected = oldNames.filter((name) => !CONTROL.includes(name));
-    const actual = buildGameTools({ execute: () => '' }).map((tool) => tool.name);
+    const actual = buildGameTools({ declarations: DECLARATIONS, execute: () => '' }).map((tool) => tool.name);
     expect(actual).toEqual(expected);
   });
 
   it('顺序与 queryList.concat(actionsList) 相同', () => {
     const names = GAME_COMMANDS.map((command) => command.name.replace(/^!/, ''));
-    expect(buildGameTools({ execute: () => '' }).map((t) => t.name)).toEqual(names);
+    expect(DECLARATIONS.map((d) => d.name)).toEqual(names);
+    expect(buildGameTools({ declarations: DECLARATIONS, execute: () => '' }).map((t) => t.name)).toEqual(names);
   });
 
   it('不含控制工具（它们在别处成型）', () => {
-    const names = buildGameTools({ execute: () => '' }).map((t) => t.name);
+    const names = buildGameTools({ declarations: DECLARATIONS, execute: () => '' }).map((t) => t.name);
     for (const control of CONTROL) expect(names).not.toContain(control);
   });
 
   it('没有重名', () => {
-    const names = buildGameTools({ execute: () => '' }).map((t) => t.name);
+    const names = buildGameTools({ declarations: DECLARATIONS, execute: () => '' }).map((t) => t.name);
     expect(new Set(names).size).toBe(names.length);
   });
 });
 
 /**
- * 能力协商：**工具的 schema 是身体能力的函数**。
+ * 能力协商：**工具的 schema 是身体声明的函数**。
  *
  * 这条机制存在的唯一理由是"将来的 Java 身体支持得少"。如果它退化成一个永远返回
  * 全表的装饰，症状是：模型调一个必然失败的工具，而没有任何地方报错。所以这里
- * 测的不是"函数能过滤"，是"少声明的能力真的不出现在 schema 里"。
+ * 测的不是"函数能过滤"，是"声明里没有的工具真的不出现在 schema 里"。
  */
-describe('能力协商过滤', () => {
-  const allNames = GAME_COMMANDS.map((command) => command.name.replace(/^!/, ''));
-
-  it('不传 = 全表（测试与"还没有身体"的场景的默认值）', () => {
-    expect(commandsForBody()).toEqual(GAME_COMMANDS);
-    expect(buildGameTools({ execute: () => '' }).length).toBe(GAME_COMMANDS.length);
+describe('能力协商：装多少看身体声明', () => {
+  it('全表声明 = 装全表', () => {
+    expect(buildGameTools({ declarations: DECLARATIONS, execute: () => '' }).length).toBe(GAME_COMMANDS.length);
   });
 
-  it('空表 = 一个工具都没有（身体什么都不会，就别给工具）', () => {
-    expect(commandsForBody([])).toEqual([]);
-    expect(buildGameTools({ execute: () => '', commands: [] })).toEqual([]);
+  it('空声明 = 一个工具都没有（身体什么都不会，就别给工具）', () => {
+    expect(buildGameTools({ declarations: [], execute: () => '' })).toEqual([]);
   });
 
-  it('子集只保留交集，且顺序跟着全表走（不是跟着声明表走）', () => {
-    // 故意**逆着全表顺序**声明，这样"跟着谁走"才有区分度。
-    const picked = [allNames[0], allNames[2], allNames[1]];
-    const filtered = commandsForBody(picked).map((c) => c.name.replace(/^!/, ''));
-    expect(filtered).toEqual([allNames[0], allNames[1], allNames[2]]);
-    expect(new Set(filtered).size).toBe(3);
-    // 工具顺序是提示词契约的一部分，不能随身体声明的顺序漂。
-    expect(filtered).not.toEqual(picked);
+  it('只装声明里有的工具，顺序跟着声明走', () => {
+    // 故意**逆着全表顺序**声明，这样"跟着声明走"才有区分度。
+    const picked = [DECLARATIONS[0], DECLARATIONS[2], DECLARATIONS[1]];
+    const names = buildGameTools({ declarations: picked, execute: () => '' }).map((tool) => tool.name);
+    expect(names).toEqual(picked.map((d) => d.name));
+    expect(new Set(names).size).toBe(3);
   });
 
-  it('身体声明了它没有的命令时，静默忽略而不是凭空多出一个工具', () => {
-    const filtered = commandsForBody(['stats', 'thisCommandDoesNotExist']);
-    expect(filtered.map((c) => c.name.replace(/^!/, ''))).toEqual(['stats']);
-  });
-
-  it('带 `!` 前缀的声明也认（协议上不带，但能力表是手写的）', () => {
-    // 多一个感叹号的代价原本是"这个身体静默失去全部工具"——不报错的那种失败。
-    expect(commandsForBody(['!stats']).map((c) => c.name.replace(/^!/, ''))).toEqual(['stats']);
+  it('身体没声明的命令不会凭空多出一个工具', () => {
+    const stats = DECLARATIONS.find((d) => d.name === 'stats');
+    expect(stats).toBeDefined();
+    const names = stats == null ? [] : buildGameTools({ declarations: [stats], execute: () => '' }).map((tool) => tool.name);
+    expect(names).toEqual(['stats']);
   });
 });
 
@@ -79,6 +79,7 @@ describe('参数形状：具名 → 位置 → 具名', () => {
   it('调用时拿回具名参数，形状与旧 executeToolCall 一致', async () => {
     const seen: Array<{ name: string; args: Record<string, unknown> }> = [];
     const tools = buildGameTools({
+      declarations: DECLARATIONS,
       execute: (name, args) => {
         seen.push({ name, args });
         return 'ok';
@@ -96,6 +97,7 @@ describe('参数形状：具名 → 位置 → 具名', () => {
   it('省略的可选参数不写入，让 JS 默认参数生效', async () => {
     const seen: Array<Record<string, unknown>> = [];
     const tools = buildGameTools({
+      declarations: DECLARATIONS,
       execute: (_name, args) => {
         seen.push(args);
         return 'ok';
@@ -112,6 +114,7 @@ describe('参数形状：具名 → 位置 → 具名', () => {
   it('未声明的参数被严格丢弃（schema 是 additionalProperties:false）', async () => {
     const seen: Array<Record<string, unknown>> = [];
     const tools = buildGameTools({
+      declarations: DECLARATIONS,
       execute: (_name, args) => {
         seen.push(args);
         return 'ok';
@@ -124,7 +127,7 @@ describe('参数形状：具名 → 位置 → 具名', () => {
   });
 
   it('工具返回的执行结果被渲染成文本回执', async () => {
-    const tools = buildGameTools({ execute: () => ({ hits: 2 }) });
+    const tools = buildGameTools({ declarations: DECLARATIONS, execute: () => ({ hits: 2 }) });
     const any = tools[0];
     expect(any).toBeDefined();
     const result = (await any?.execute({}, {} as never, {} as never)) as {

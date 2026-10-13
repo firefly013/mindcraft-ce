@@ -36,15 +36,15 @@ import type {
 import { ERR } from '../shared/protocol/types.js';
 import { initBot, isHostile } from './data/mcdata.js';
 import { expandTagRecipes } from './data/recipe_tags.js';
-import { executeToolCall, stripBang } from './commands/to_openai_tools.js';
-import { actionsList } from './commands/actions.js';
-import { queryList } from './commands/queries.js';
+import { executeToolCall } from './commands/execute.js';
+import { toolDeclarations } from './commands/registry.js';
 import { ActionManager } from './action_manager.js';
 import { MemoryBank } from './memory_bank.js';
-import { LEVEL } from '../brain/scheduler.js';
-import type { Kind, Level } from '../brain/scheduler.js';
-import { KIND } from '../brain/scheduler.js';
-import { sampleLiveState, renderLiveState } from './live_state.js';
+import { LEVEL } from '../shared/events.js';
+import type { Kind, Level } from '../shared/events.js';
+import { KIND } from '../shared/events.js';
+import { sampleLiveState } from './live_state.js';
+import { renderLiveState } from '../shared/live_state.js';
 import type { SampleContext } from './live_state.js';
 import { nearestThreat, runEmergency, FOOD_VALUE, shouldTriggerEmergency } from './safety/emergency.js';
 import type { ThreatEntity } from './safety/emergency.js';
@@ -72,7 +72,7 @@ import { getFullState } from './library/full_state.js';
 import { decodeCursor, EMPTY_CURSOR, encodeCursor, readInbox, type InboxCursor } from './inbox.js';
 import { safeguards } from './safety/safeguards.js';
 import { permits } from './safety/permits.js';
-import { log, validateNameFormat, handleDisconnection } from '../brain/connection_handler.js';
+import { log, validateNameFormat, handleDisconnection } from './connection_handler.js';
 import { createLogger, type Logger } from '../shared/logger.js';
 import { MESSAGES } from '../shared/prompts.js';
 import settings from '../shared/settings.js';
@@ -173,21 +173,7 @@ export function readableWindowTitle(raw: unknown): string {
 }
 
 
-/**
- * 这个身体能执行的命令名（已去掉前导 `!`）。
- *
- * 从**命令实现的来源**直接推出来，不另抄一份清单——手抄的清单会漏、会过期，
- * 而这里漏掉一条的后果是"模型永远看不到那个工具"（静默少一个能力）。
- *
- * 顺序无关（大脑按 `GAME_COMMANDS` 的顺序取交集），去重是为了防将来某个名字
- * 在两个列表里同时出现。
- */
-const BODY_COMMANDS: string[] = Array.from(
-    new Set([...actionsList, ...queryList].map((command) => stripBang(command.name))),
-);
-
-/**
- * 相机的最小接口。
+/** 相机的最小接口。
  *
  * **故意不 import `VisionInterpreter` 的具体类型**：那条导入链会把
  * `node-canvas-webgl`（原生模块）拉进来，而它在这台机器上**根本没有编译产物**
@@ -1156,14 +1142,17 @@ export class MineflayerBody {
         return {
             bodyKind: 'mineflayer',
             agentName: this.name,
-            // **全部命令都能执行**，因为命令实现就在身体里（`executeToolCall` →
-            // `skills.ts`）。声明它不是把大脑的清单抄一遍：身体本来就要跑这些实现，
-            // 这里只是把"我能做什么"说出来，让大脑据此生成工具 schema。
+            // **工具声明从这里报给大脑**：名字/描述/参数/要不要附图/是不是长动作。
+            // 实现（`perform`）不出去——大脑不需要，也不该拿到。
+            //
+            // 为什么声明由身体出而不是大脑自带一份清单：那样大脑里就得有整份
+            // mineflayer 代码（历史欠债），而"身体/大脑是两个进程"只剩拓扑意义。
+            // 声明不在握手里，就没法换一个身体（Java 真客户端）而大脑一行不改。
             //
             // 为什么不直接回 `[]`（那正是这一版之前的写法）：那等于把能力协商做成
             // 装饰——大脑没法区分"这个身体什么都能做"和"这个身体坏了"。现在
             // 空表会被大脑判成协议错误并拒绝启动（见 `Agent.bootstrap`）。
-            commands: BODY_COMMANDS,
+            tools: toolDeclarations(),
             // **截图是可选能力，所以它要如实申报**：相机起不来（`allow_vision=false`
             // 或原生模块坏了）就不报，大脑据此**不再每个回合白跑一次协议往返**。
             // 报一个自己给不了的能力，等于凭空多一次必然为 null 的调用。

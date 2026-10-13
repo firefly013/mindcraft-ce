@@ -140,6 +140,11 @@ class MindServerProxy {
                 const cancelled = await agent.cliCancelJob(String(data?.id ?? ''));
                 return { ok: true, cancelled, events: events() };
             }
+            // **工具声明**：CLI 的 `help` 与"这条命令要不要异步"都靠它。
+            // 真源在身体侧（握手报上来），所以只有在线的大脑答得出来。
+            case 'tools': {
+                return { ok: true, tools: agent.cliToolDeclarations(), events: events() };
+            }
             default:
                 return { ok: false, error: `不认识的 op：${op}` };
         }

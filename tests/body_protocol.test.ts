@@ -22,7 +22,10 @@ import {
 const CAPS: BodyCapabilities = {
     bodyKind: 'mineflayer',
     agentName: 'tester',
-    commands: ['stats', 'moveTo'],
+    tools: [
+        { name: 'stats', description: 'stats', kind: 'query' },
+        { name: 'moveTo', description: 'moveTo', kind: 'action' },
+    ],
     observations: ['live-state'],
 };
 
@@ -68,7 +71,7 @@ describe('握手', () => {
         const body = await RemoteBody.connect(standardBody());
         const caps = await body.hello();
         expect(caps.bodyKind).toBe('mineflayer');
-        expect(caps.commands).toEqual(['stats', 'moveTo']);
+        expect(caps.tools.map((tool) => tool.name)).toEqual(['stats', 'moveTo']);
         expect(caps.observations).toEqual(['live-state']);
         body.close();
     });

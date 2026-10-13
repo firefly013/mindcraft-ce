@@ -3,7 +3,8 @@ import * as world from '../library/world.js';
 import * as mc from '../data/mcdata.js';
 import { load } from 'cheerio';
 import { td, tp } from '../../shared/prompts.js';
-import { renderSections, sampleLiveState, type LiveSectionKey } from '../live_state.js';
+import { renderSections, type LiveSectionKey } from '../../shared/live_state.js';
+import { sampleLiveState } from '../live_state.js';
 import type { AgentCommand } from './actions.js';
 
 const pad = (str: string): string => {

@@ -13,7 +13,8 @@ import { BACKGROUND_CONTEXT } from '@earendil-works/chord/context';
 import { createModels } from '@earendil-works/pi-ai';
 import { fauxAssistantMessage, fauxProvider, fauxToolCall } from '@earendil-works/pi-ai/providers/faux';
 import type { PlanSnapshot, PlanTodoInput } from '../src/brain/plan.js';
-import { getOpenAITools } from '../src/body/commands/to_openai_tools.js';
+import { getOpenAITools } from '../src/brain/tools/advertise.js';
+import { toolDeclarations } from '../src/body/commands/registry.js';
 import {
   createFeedbackTool,
   createStopTool,
@@ -66,7 +67,7 @@ function buildControlTools() {
 }
 
 describe('控制工具与旧广告一致', () => {
-  const oldTools = new Map(getOpenAITools({}).map((tool) => [tool.function.name, tool.function]));
+  const oldTools = new Map(getOpenAITools(toolDeclarations()).map((tool) => [tool.function.name, tool.function]));
 
   it('旧广告里有 5 个控制工具，我们只实现 4 个（Finish 已移除）', () => {
     for (const name of ['Finish', 'Stop', 'Say', 'UpdatePlan', 'Feedback']) {

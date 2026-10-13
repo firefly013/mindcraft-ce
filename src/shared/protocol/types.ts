@@ -14,6 +14,8 @@
  *    状态，大脑不能假设同步返回。
  */
 
+import type { ToolDeclaration } from '../tools.js';
+
 /** 身体的种类。Java 真客户端接进来时这里是 `java-client`。 */
 export type BodyKind = 'mineflayer' | 'java-client' | 'mock';
 
@@ -23,12 +25,14 @@ export interface BodyCapabilities {
     /** 身体名（= profile.name）。 */
     agentName: string;
     /**
-     * 身体支持的命令名（已去掉前导 `!`）。
+     * 身体能提供的**工具声明**（名字不带前导 `!`）。
      *
-     * 大脑拿它跟 `GAME_COMMANDS` 求交——身体不支持的命令**不进工具 schema**，
-     * 否则模型会调一个必然失败的工具。
+     * 工具的**真源在身体**：实现（`perform`）在那边，声明也由那边产出。
+     * 大脑只认这份数据——它据此生成 schema、校验参数、判断哪些工具占身体通道。
+     * 因此大脑进程里不再需要 import 身体的命令表（那会把整份 mineflayer
+     * 代码拖进大脑进程）。身体不支持的命令自然不在这里，无需再求交。
      */
-    commands: string[];
+    tools: ToolDeclaration[];
     /** 身体能提供的观测。现在只有世界快照和画面两种。 */
     observations: string[];
 }

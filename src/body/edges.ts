@@ -16,11 +16,14 @@
  * 去重即可，不需要 armed。
  */
 
-import { LEVEL } from '../brain/scheduler.js';
-import type { Level } from '../brain/scheduler.js';
+import { LEVEL } from '../shared/events.js';
+import type { Level } from '../shared/events.js';
+import { STOP_WORDS } from '../shared/chat.js';
+import { durabilityFraction } from '../shared/live_state.js';
 import { ALWAYS_HOSTILE } from './safety/emergency.js';
-import { durabilityFraction } from './live_state.js';
 import { Vec3 } from 'vec3';
+
+export { STOP_WORDS };
 
 /** 检测器看到的拍平快照（由调用方从 LiveState 等拼出来）。 */
 export interface EdgeEntity {
@@ -415,9 +418,6 @@ export const DETECTORS: readonly Detector[] = Object.freeze([
   { type: 'agent.respawn', level: 3, kind: 'change',
     value: (s) => s.alive ?? null, fireOn: (prev, next) => prev === false && next === true },
 ]);
-
-/** 聊天里的急停词：提到它们视为 L4 抢占（与 resolvePriority 同表）。 */
-export const STOP_WORDS: readonly string[] = Object.freeze(['停', '别动', '危险', '救命', 'stop']);
 
 export interface PriorityDescriptor {
   type: string;

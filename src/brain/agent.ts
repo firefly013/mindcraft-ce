@@ -4,11 +4,10 @@
  * 它**不碰 Mineflayer**。所有"读世界"和"动身体"的事都过 `this.body`（`Body`
  * 契约），今天的实现在另一个进程里（`RemoteBody` → 协议 → `MineflayerBody`）。
  *
- * 分层之后，这个文件里**唯一**还留着的历史包袱是工具声明：
- * `GAME_COMMANDS` 一口气 import 了 `commands/*.ts`，而那些文件又 import
- * `skills.ts`（mineflayer）。所以大脑进程里仍然加载了 mineflayer 的模块——
- * 只是从不调用。这是**已知的、故意的欠债**：把"工具声明"和"工具实现"拆开
- * 是一件独立且不小的活，别顺手改。
+ * **工具的声明与实现也是分开的**：这里只有握手里报上来的声明
+ * （`BodyCapabilities.tools`），实现（`perform`）全在身体进程里。
+ * 所以大脑进程里不会加载 mineflayer 的任何模块——`src/brain/**` 不许 import
+ * `src/body/**`，这条由 `tests/isolation.test.ts` 机器守卫。
  *
  * 从旧版搬过来的方法**逐字保留**（含注释）：那边的注释记的都是真机踩出来的坑。
  */
@@ -24,16 +23,16 @@ import {
     PICKUP_TIMEOUT_MS,
     shouldAttemptPickup,
     type PickupTarget,
-} from '../body/auto_pickup.js';
-import { buildGameTools, actionChannelInvoker, commandsForBody, GAME_COMMANDS } from './tools/game_tools.js';
-import { stripBang } from '../body/commands/to_openai_tools.js';
-import { queryList } from '../body/commands/queries.js';
+} from '../shared/auto_pickup.js';
+import { buildGameTools, actionChannelInvoker } from './tools/game_tools.js';
+import { createToolCatalog, EMPTY_TOOL_CATALOG, type ToolCatalog } from './tools/catalog.js';
+import type { ToolDeclaration } from '../shared/tools.js';
 import { CliJobTracker } from './cli_jobs.js';
 import { log } from './connection_handler.js';
-import { STOP_WORDS } from '../body/edges.js';
+import { STOP_WORDS } from '../shared/chat.js';
 import { EVENT_LOG_LIMIT, eventTextFor, renderEventText } from '../shared/event_stream.js';
-import { renderLiveState } from '../body/live_state.js';
-import type { LiveState } from '../body/live_state.js';
+import { renderLiveState } from '../shared/live_state.js';
+import type { LiveState } from '../shared/live_state.js';
 import type { PlanTodoInput } from './plan.js';
 import { PlanStore } from './plan.js';
 import { KIND, LEVEL, Scheduler } from './scheduler.js';
@@ -92,13 +91,6 @@ const CONTROL_TOOLS = new Set([
     '!disableSafeguards',
     '!restoreAllSafety',
 ]);
-
-/**
- * 只读命令（不消耗次数制额度）。**从 `queryList` 派生，不手写第二份名单**——
- * 手写两份迟早对不上，而对不上的后果是"某个查询悄悄烧掉一次危险操作额度"。
- * 见下面扣额度处的说明。
- */
-const READ_ONLY_TOOLS = new Set<string>(queryList.map((c: { name: string }) => c.name));
 
 export class Agent {
     count_id: number = 0;
@@ -179,6 +171,15 @@ export class Agent {
     private caps: BodyCapabilities | null = null;
 
     /**
+     * 工具目录（握手声明派生）。**只读查询不消耗次数制额度**、动作类要占身体
+     * 通道——两条判据都从这里查，不手写第二份名单：手写两份迟早对不上，
+     * 而对不上的后果是"某个查询悄悄烧掉一次危险操作额度"。
+     *
+     * 握手之前是空目录：此刻一个工具都没有，这是事实，不是占位。
+     */
+    private catalog: ToolCatalog = EMPTY_TOOL_CATALOG;
+
+    /**
      * 正在主动关停。**用来区分"身体断了"的两种情况**：我们叫它死的（关停路径）
      * 和它自己死的（事故）。只有后者才该触发退出。
      */
@@ -221,10 +222,10 @@ export class Agent {
     /**
      * 启动顺序：**先连身体 → 再建运行时 → 最后讲开场白**。
      *
-     * 为什么身体必须排在运行时之前：**工具 schema 是身体能力的函数**。
-     * `buildGameTools` 要按 `caps.commands` 求交，而能力表只有握完手才有。
-     * 以前是反过来的（先建运行时、身体在旁边异步连），因为那时 schema 是写死的、
-     * 不用问身体——那正是"分层没做完"留下的形状。
+     * 为什么身体必须排在运行时之前：**工具 schema 是身体声明的函数**。
+     * `buildGameTools` 要按握手里报上来的 `caps.tools` 装配，而声明只有握完手
+     * 才有。以前是反过来的（先建运行时、身体在旁边异步连），因为那时 schema
+     * 是写死的、不用问身体——那正是"分层没做完"留下的形状。
      */
     private async bootstrap(save_data: unknown, init_message: string | null): Promise<void> {
         let caps: BodyCapabilities;
@@ -242,6 +243,7 @@ export class Agent {
             return;
         }
         this.caps = caps;
+        this.catalog = createToolCatalog(caps.tools);
         await this.buildRuntime(caps);
         try {
             await this._setupEventHandlers(save_data, init_message);
@@ -281,16 +283,16 @@ export class Agent {
         });
         this.body = body;
         const caps = await body.hello();
-        // 空能力表 = 这个身体一个命令都跑不了。**判成协议错误**，而不是"那就
+        // 空工具表 = 这个身体一个命令都跑不了。**判成协议错误**，而不是"那就
         // 不给工具"：后者会让大脑带着零个工具继续跑，模型只能干聊，
         // 而日志里一切正常——这是最坏的一种失败。
-        if (caps.commands.length === 0) {
-            throw new Error(`body ${caps.bodyKind} declared no executable commands`);
+        if (caps.tools.length === 0) {
+            throw new Error(`body ${caps.bodyKind} declared no executable tools`);
         }
         this.log.with('lifecycle').info({
             event: 'body-attached',
             kind: caps.bodyKind,
-            commands: caps.commands.length,
+            tools: caps.tools.length,
             observations: caps.observations,
         });
 
@@ -667,6 +669,8 @@ export class Agent {
         this.scheduler = new Scheduler();
         this.actionRunner = new ActionRunner({
             scheduler: this.scheduler,
+            // 参数校验的依据是身体握手里报上来的**声明**（大脑这边没有命令表）。
+            catalog: this.catalog,
             // pi-durable 自己会记工具结果；动作**完成**走 L3 消息（见 notify）。
             // 这里不再往上下文补一条回执——那会把同一件事喂两遍。
             record: () => Promise.resolve(),
@@ -715,9 +719,9 @@ export class Agent {
                     ...buildGameTools({
                         execute: (name: string, args: Record<string, unknown>) =>
                             this.invokeTool(name, args),
-                        // **能力协商落地处**：身体给不了的工具不进 schema，
-                        // 否则模型会调一个必然失败的工具。
-                        commands: caps.commands,
+                        // **工具来自身体握手**：身体报什么就装什么，大脑不再有
+                        // 第二份命令表——所以"身体不支持的命令"根本进不了 schema。
+                        declarations: caps.tools,
                         // 只有声明了 withScreenshot 的命令会真的调它（目前只有 !stats）。
                         captureImage: () => this.captureScreenshot(),
                     }),
@@ -812,12 +816,17 @@ export class Agent {
     /**
      * 工具名列表（请求日志头用）。
      *
-     * 走**和工具装配同一套过滤**（`caps.commands`）。两处各滤一遍迟早漂移，
+     * 走**和工具装配同一个来源**：身体握手报上来的声明。两处各取一份迟早漂移，
      * 而这一处漂移的后果尤其坏：日志会显示模型其实没有的工具。
      * `caps` 还没到手时给空表——那正是"模型此刻一个工具都没有"的事实。
      */
     private toolNames(): string[] {
-        return buildGameTools({ execute: () => '', commands: this.caps?.commands ?? [] }).map((tool) => tool.name);
+        return (this.caps?.tools ?? []).map((tool) => tool.name);
+    }
+
+    /** 外部 CLI 的 `help` / "哪些是长命令"要用同一份声明（命令定义在身体侧）。 */
+    cliToolDeclarations(): readonly ToolDeclaration[] {
+        return this.caps?.tools ?? [];
     }
 
     // ── 身体接口的小包装 ───────────────────────────────────────────────────
@@ -1007,7 +1016,7 @@ export class Agent {
             // 那一次花在哪（Feedback #4：'我这轮只调了 allowDangerousOps 这一个
             // 工具'，额度却从 2 变 1——它没意识到 stats 也算一次工具调用）。
             // 模型不敢查了，比多扣一次额度更糟。
-            if (!CONTROL_TOOLS.has(name) && !READ_ONLY_TOOLS.has(name)) {
+            if (!CONTROL_TOOLS.has(name) && !this.catalog.isReadOnly(name)) {
                 // **额度在身体侧扣**：`permits` / `safeguards` 是模块级单例，而授权
                 // 由身体里的命令实现发出、由身体里的 `skills.ts` 读取。大脑这边
                 // 也有一份自己的拷贝——在那边扣等于没扣，后果是**次数制授权与
@@ -1075,7 +1084,7 @@ export class Agent {
     /** `tools`：列出所有能跑的命令（游戏工具 + 内置命令）。 */
     private cliListTools(): string {
         // 同 `toolNames`：列的是**这个身体真能跑的**，不是全表。
-        const game = commandsForBody(this.caps?.commands ?? []).map((c) => stripBang(c.name)).sort();
+        const game = (this.caps?.tools ?? []).map((tool) => tool.name).sort();
         const builtin = ['tools', 'jobs', 'history', 'events'].sort();
         return [`游戏工具（${game.length}）：`, ...game, '', `内置命令（${builtin.length}）：`, ...builtin].join('\n');
     }
@@ -1161,7 +1170,7 @@ export class Agent {
                 // 停不掉就硬着头皮跑，回执里会体现冲突。
             }
         }
-        const found = GAME_COMMANDS.find((c) => c.name === `!${name}` || c.name === name);
+        const found = this.catalog.get(name);
         if (found == null) return `没有这条命令：${name}。用 tools 看看有哪些。`;
         // **不在大脑里执行 `perform`**：那些实现全是 mineflayer 调用。走协议到
         // 身体上去跑，由那边 `executeToolCall` 按同样的具名参数展开——语义一致。

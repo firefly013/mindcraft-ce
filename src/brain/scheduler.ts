@@ -6,12 +6,8 @@
  *   - 动作线：同一时刻最多一个占用的身体动作（ActionManager 串行执行）。
  * 本类是到达事件与这两条线之间的裁判。
  *
- * Levels:
- *   1  只记账，从不唤醒
- *   2  只记账，随下一次请求顺带发给模型
- *   3  推理线空闲就立刻开请求；忙就排队等本轮结束
- *   4  中断当前请求重开；动作不受影响继续跑
- *   5  中断请求并停掉动作，锁住动作通道直到 emergency 结束
+ * 事件分级词汇（L1–L5、KIND）住在 `shared/events.ts`——身体侧的边沿检测器
+ * 按同一份表给事件定级。这里只负责"到达的事件该怎么处理"。
  *
  * 事件被某个请求带上即视为 "seen"。被抢占的请求会 un-see
  * 它带走的东西，让重启的新请求重新带上而不是丢掉。跑完
@@ -20,32 +16,10 @@
  * 这里的 map 只是分发状态，不是日志）。
  */
 
-export const LEVEL = Object.freeze({
-  UNUSED: 1,
-  STATE: 2,
-  WAKE: 3,
-  PREEMPT: 4,
-  EMERGENCY: 5,
-} as const);
+import { KIND, KINDS, LEVEL, type EventPayload, type Kind, type Level } from '../shared/events.js';
 
-export type Level = (typeof LEVEL)[keyof typeof LEVEL];
-
-export const KIND = Object.freeze({
-  USER: 'User',
-  WORLD: 'World',
-  TOOL: 'Tool',
-  MODEL: 'Model',
-} as const);
-
-export type Kind = (typeof KIND)[keyof typeof KIND];
-
-const KINDS: ReadonlySet<string> = new Set(Object.values(KIND));
-
-export interface EventPayload {
-  kind: Kind;
-  level: Level;
-  payload: unknown;
-}
+export { KIND, LEVEL };
+export type { EventPayload, Kind, Level };
 
 interface StoredEvent extends EventPayload {
   seq: number;

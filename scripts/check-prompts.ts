@@ -1,7 +1,9 @@
 import { readFileSync, readdirSync, statSync } from 'fs';
 import { join } from 'path';
 import * as P from '../src/shared/prompts.js';
-import { CONTROL_TOOLS, getOpenAITools } from '../src/body/commands/to_openai_tools.js';
+import { getOpenAITools } from '../src/brain/tools/advertise.js';
+import { CONTROL_TOOLS } from '../src/brain/tools/validate.js';
+import { toolDeclarations } from '../src/body/commands/registry.js';
 
 type ToolText = Record<string, { params?: Record<string, unknown> }>;
 const TOOL_TEXT = P.TOOL_TEXT as ToolText;
@@ -63,7 +65,7 @@ for (const key of Object.keys(TOOL_TEXT)) {
 type BuiltTool = { function: { name: string; parameters: { properties?: Record<string, unknown> } } };
 let builtTools: BuiltTool[] = [];
 try {
-  builtTools = getOpenAITools({ blocked_actions: [] }) as unknown as BuiltTool[];
+  builtTools = getOpenAITools(toolDeclarations()) as unknown as BuiltTool[];
 } catch (err) {
   console.log('TOOL BUILD FAILED:', String(err));
   fail++;

@@ -9,9 +9,15 @@
 import { describe, expect, it } from 'vitest';
 import { ActionRunner } from '../src/brain/action_runner.js';
 import { Scheduler } from '../src/brain/scheduler.js';
-import { renderLiveState, sampleLiveState } from '../src/body/live_state.js';
+import { renderLiveState } from '../src/shared/live_state.js';
+import { composeLiveTail, sampleLiveState } from '../src/body/live_state.js';
+import { createToolCatalog } from '../src/brain/tools/catalog.js';
 import { actionChannelInvoker, buildGameTools } from '../src/brain/tools/game_tools.js';
-import { composeLiveTail } from '../src/brain/runtime/perception.js';
+import { toolDeclarations } from '../src/body/commands/registry.js';
+
+/** 与生产一致：工具目录来自身体握手报上来的声明。 */
+const DECLARATIONS = toolDeclarations();
+const CATALOG = createToolCatalog(DECLARATIONS);
 
 function deferred() {
   let resolve!: () => void;
@@ -32,6 +38,7 @@ function makeRig(): Rig {
   const gate = deferred();
   const runner = new ActionRunner({
     scheduler,
+    catalog: CATALOG,
     record: () => Promise.resolve(),
     speak: () => {},
     execute: (name) =>
@@ -41,7 +48,7 @@ function makeRig(): Rig {
     notify: () => {},
   });
   // 与 agent.ts::invokeTool 完全同一条路径
-  const tools = buildGameTools({ execute: actionChannelInvoker(runner) });
+  const tools = buildGameTools({ declarations: DECLARATIONS, execute: actionChannelInvoker(runner) });
   return { scheduler, tools, release: gate.resolve };
 }
 

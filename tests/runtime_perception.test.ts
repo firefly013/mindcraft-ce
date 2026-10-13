@@ -6,7 +6,8 @@
  * - `## 记忆摘要`：记忆就是压仓摘要，作为历史第一条随整份历史发出，再发一遍也是重复喂
  */
 import { describe, expect, it } from 'vitest';
-import { composeLiveTail, liveTailFromText } from '../src/brain/runtime/perception.js';
+import { composeLiveTail } from '../src/body/live_state.js';
+import { liveTailFromText } from '../src/brain/runtime/perception.js';
 
 describe('liveTailFromText（纯拼装）', () => {
   it('只有快照段，标题在', () => {

@@ -5,20 +5,15 @@ import { permits } from '../safety/permits.js';
 import { safeguards } from '../safety/safeguards.js';
 import { DANGEROUS_OPS, isAuthorizable } from '../safety/dangerous_ops.js';
 import { td, tp, MESSAGES } from '../../shared/prompts.js';
+import type { ToolParamDef } from '../../shared/tools.js';
 import { interactList } from './interact.js';
 
-// 命令参数定义（domain / optional / default 等保留原样透传）
+// 命令参数定义（domain / optional / default 等原样透传）。
+// 形状住在 `shared/tools.ts`：它就是握手时报给大脑的那份声明的一部分。
 /** 给工具回执加个空行，读起来不挤在一起（和 queries.ts 同款）。 */
 const pad = (str: string): string => '\n' + str + '\n';
 
-export interface CommandParamDef {
-    type: string;
-    description?: string;
-    domain?: unknown;
-    optional?: boolean;
-    default?: unknown;
-    [key: string]: unknown;
-}
+export type CommandParamDef = ToolParamDef;
 
 // 单个命令对象：perform 首参 agent 统一 any（避免循环依赖），其余位置参数逐个定类型
 export interface AgentCommand {

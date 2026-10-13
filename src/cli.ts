@@ -35,25 +35,27 @@
 import { io } from 'socket.io-client';
 import { readFileSync, writeFileSync } from 'node:fs';
 import { parseCliArgs } from './cli/args.js';
-import { GAME_COMMANDS } from './brain/tools/game_tools.js';
-import { stripBang } from './body/commands/to_openai_tools.js';
+import type { ToolDeclaration } from './shared/tools.js';
 
 /**
  * 这条命令是不是"长时间"的。
  *
- * 判据不是我列的清单，而是 `runAsAction` 打在 perform 上的 `longRunning`
+ * 判据不是我列的清单，而是 `runAsAction` 打在实现上的 `longRunning`
  * 标记——**走身体通道的就是长命令**。清单会漏、会过期，这个不会。
+ *
+ * 声明来自**在线的大脑**（工具的真源在身体侧，只有握完手的大脑手上有它）：
+ * `help` / `run` 都要先连上机器人才知道命令长什么样。
  */
-function isLongRunning(name: string): boolean {
-  const cmd = GAME_COMMANDS.find((c) => c.name === `!${name}` || c.name === name);
-  return cmd?.perform?.longRunning === true;
+function isLongRunning(name: string, catalogue: readonly ToolDeclaration[]): boolean {
+  const cmd = catalogue.find((c) => c.name === name || c.name === `!${name}`);
+  return cmd?.longRunning === true;
 }
 
 /** `help [命令]`：给命令的用途和参数。查不到就直说。 */
-function describeCommand(name: string): string {
-  const cmd = GAME_COMMANDS.find((c) => c.name === `!${name}` || c.name === name);
+function describeCommand(name: string, catalogue: readonly ToolDeclaration[]): string {
+  const cmd = catalogue.find((c) => c.name === name || c.name === `!${name}`);
   if (cmd == null) return `没有这条命令：${name}。用 tools 看看有哪些。`;
-  const lines: string[] = [stripBang(cmd.name), `  ${cmd.description ?? '(没写说明)'}`];
+  const lines: string[] = [cmd.name, `  ${cmd.description ?? '(没写说明)'}`];
   const params = Object.entries(cmd.params ?? {});
   if (params.length > 0) {
     lines.push('  参数：');
@@ -64,7 +66,7 @@ function describeCommand(name: string): string {
       lines.push(`    --${key}  ${def2.type ?? ''}  ${def2.description ?? ''}${tail}`);
     }
   }
-  if (isLongRunning(name)) lines.push('  （长时间命令：提交后异步跑，加 --wait 可顺带等）');
+  if (isLongRunning(name, catalogue)) lines.push('  （长时间命令：提交后异步跑，加 --wait 可顺带等）');
   return lines.join('\n');
 }
 
@@ -93,6 +95,8 @@ interface CliResult {
   jobs?: Array<{ id: string; name: string; state: string; ms: number }>;
   cancelled?: boolean;
   events?: CliEvent[];
+  /** `op: 'tools'` 的应答：身体握手报上来的工具声明。 */
+  tools?: ToolDeclaration[];
 }
 
 function cursorPath(agent: string): string {
@@ -140,32 +144,59 @@ function renderJob(job: JobView, id: string): string {
 async function main(): Promise<void> {
   const opts = parseCliArgs(process.argv.slice(2));
 
-  // `help` 完全在本地：命令定义本来就在同一个代码库里，犯不着为了查参数去打扰机器人。
-  if (opts.command === 'help' || opts.help) {
-    const target = typeof opts.args['0'] === 'string' ? String(opts.args['0']) : null;
-    process.stdout.write(`${target == null ? opts.usage : describeCommand(target)}\n`);
-    return;
-  }
-  if (opts.command == null) {
+  // 只打用法的那种 help 不需要连机器人。
+  const helpTarget = typeof opts.args['0'] === 'string' ? String(opts.args['0']) : null;
+  if (opts.command == null || ((opts.command === 'help' || opts.help) && helpTarget == null)) {
     process.stdout.write(`${opts.usage}\n`);
     return;
   }
 
   const socket = io(`http://localhost:${opts.port}`, { reconnection: false });
   await new Promise<void>((resolve, reject) => {
-    socket.on('connect', () => resolve());
-    socket.on('connect_error', (err: unknown) =>
-      reject(new Error(`连不上 MindServer（端口 ${opts.port}）：${String(err)}`)),
-    );
-    setTimeout(() => reject(new Error('连 MindServer 超时')), 5000);
+    // 同上：连上了就把这个兜底计时器清掉，否则进程会为了它多活 5 秒。
+    const timer = setTimeout(() => reject(new Error('连 MindServer 超时')), 5000);
+    socket.on('connect', () => {
+      clearTimeout(timer);
+      resolve();
+    });
+    socket.on('connect_error', (err: unknown) => {
+      clearTimeout(timer);
+      reject(new Error(`连不上 MindServer（端口 ${opts.port}）：${String(err)}`));
+    });
   });
 
   const send = (payload: Record<string, unknown>, timeoutMs: number): Promise<CliResult> =>
     new Promise<CliResult>((resolve) => {
-      socket.emit('cli-command', opts.agent, { ...payload, timeoutMs }, (res: CliResult) => resolve(res));
-      // 比服务端超时多留 5 秒，避免"服务端还没回、这边先放弃了"。
-      setTimeout(() => resolve({ ok: false, timeout: true, error: 'CLI 这边等超时了' }), timeoutMs + 5000);
+      // 应答到了就把兜底计时器清掉：**计时器不清 = 进程不退出**。它是
+      // "服务端没回时别永远等"的兜底，不是保活——不清的话每条命令
+      // 打完结果都要在终端上多挂 `timeoutMs + 5s`（最长两分多钟）。
+      const timer = setTimeout(
+        () => resolve({ ok: false, timeout: true, error: 'CLI 这边等超时了' }),
+        timeoutMs + 5000,
+      );
+      socket.emit('cli-command', opts.agent, { ...payload, timeoutMs }, (res: CliResult) => {
+        clearTimeout(timer);
+        resolve(res);
+      });
     });
+
+  /**
+   * 工具目录只有**在线的大脑**手上有（声明的真源在身体侧，靠握手带上来）。
+   * 只有 `help <命令>` 和"这条命令要不要异步"需要它——查询类 op 不为它多跑一趟。
+   */
+  const needsCatalogue = opts.command === 'help' || opts.help || opts.op === 'run';
+  const catalogue: readonly ToolDeclaration[] = needsCatalogue
+    ? await (async () => {
+        const res = await send({ op: 'tools' }, 15_000);
+        return res.ok && Array.isArray(res.tools) ? res.tools : [];
+      })()
+    : [];
+
+  if (opts.command === 'help' || opts.help) {
+    process.stdout.write(`${describeCommand(helpTarget ?? '', catalogue)}\n`);
+    socket.close();
+    return;
+  }
 
   let result: CliResult;
 
@@ -175,7 +206,7 @@ async function main(): Promise<void> {
   } else {
     // **分流**：长命令强制异步（--wait 才等），其余强制同步。
     // 不用人去记哪个该异步 —— 记不住，而且记错了就是"终端说失败、机器人还在走"。
-    const longRunning = isLongRunning(opts.command);
+    const longRunning = isLongRunning(opts.command, catalogue);
     const shouldWait = !longRunning || opts.wait;
 
     const started = await send(

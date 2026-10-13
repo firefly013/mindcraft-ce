@@ -26,7 +26,6 @@
  * 事件 / 记忆 / 世界快照走 `beforeRequest`，只影响本次请求、不落 transcript。
  * 否则 section 值一变就追加一条 `pi.system` entry，缓存全废。
  */
-import { formatSay } from '../../body/commands/to_openai_tools.js';
 import { Type } from '@earendil-works/pi-ai';
 import type { Message } from '@earendil-works/pi-ai';
 import {
@@ -38,11 +37,12 @@ import {
   type PromptSection,
   type ToolRegistration,
 } from '@earendil-works/pi-durable';
-import { td, tp } from '../../shared/prompts.js';
+import { SAY_LINE_LIMIT, td, tp } from '../../shared/prompts.js';
+import { formatSay } from '../tools/validate.js';
 import { SayEntry } from './entries.js';
 
-/** 单条 Say 的字符上限。**唯一的真源在 `to_openai_tools.ts`**，别在这里再定一份。 */
-export { SAY_LINE_LIMIT } from '../../body/commands/to_openai_tools.js';
+/** 单条 Say 的字符上限。**唯一的真源在 `shared/prompts.ts`**，别在这里再定一份。 */
+export { SAY_LINE_LIMIT };
 
 /** `Say` 工具：说话走独立 entry，不污染工具结果文本。 */
 export function createSayTool(onSay: (text: string) => void = () => {}): ToolRegistration {

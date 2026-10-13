@@ -8,20 +8,15 @@
  * 纯数据结构，无 I/O，随便单测。语义是整单替换（UpdatePlan
  * 一次把 goal/todos 写全），不做合并——合并是模型的活，
  * 存这里只会制造"到底以哪个为准"的糊涂账。
+ *
+ * 三个数据形状（`PlanTodo` / `PlanSnapshot` / `PlanTodoInput`）住在
+ * `shared/plan.ts`：身体的 Live State 采样也要读同一份 goal/todos，
+ * 形状不能各写一份。
  */
 
-export interface PlanTodo {
-  text: string;
-  done: boolean;
-}
+import type { PlanSnapshot, PlanTodo, PlanTodoInput } from '../shared/plan.js';
 
-export interface PlanSnapshot {
-  goal: string | null;
-  todos: PlanTodo[];
-}
-
-/** 兼容旧格式：纯字符串按"未完成"折算。 */
-export type PlanTodoInput = PlanTodo | string;
+export type { PlanSnapshot, PlanTodo, PlanTodoInput } from '../shared/plan.js';
 
 /**
  * 计划（goal / todos）的存储。

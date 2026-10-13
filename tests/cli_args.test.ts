@@ -7,16 +7,16 @@
  */
 import { describe, expect, it } from 'vitest';
 import { parseCliArgs } from '../src/cli/args.js';
-import { GAME_COMMANDS } from '../src/brain/tools/game_tools.js';
-import { stripBang } from '../src/body/commands/to_openai_tools.js';
+import { toolDeclarations } from '../src/body/commands/registry.js';
 
 /**
  * "哪些命令是长时间命令"**不靠手工清单** —— 清单会漏、会过期。
- * 判据是 `runAsAction` 打在 perform 上的 `longRunning` 标记（走身体通道就有）。
- * 这组测试钉的是：那个标记机制真的生效了，而不是字段加了却没人打。
+ * 判据是 `runAsAction` 打在实现上的 `longRunning` 标记（走身体通道就有），
+ * 由身体握手报给大脑（`toolDeclarations()`）。这组测试钉的是：
+ * 那个标记机制真的生效了，而不是字段加了却没人打。
  */
 describe('长时间命令的判定', () => {
-  const longNames = GAME_COMMANDS.filter((c) => c.perform?.longRunning === true).map((c) => stripBang(c.name));
+  const longNames = toolDeclarations().filter((d) => d.longRunning === true).map((d) => d.name);
 
   it('机制生效：确实有一批命令被标成了长时间', () => {
     expect(longNames.length).toBeGreaterThan(0);

@@ -4,8 +4,13 @@
  */
 import { describe, expect, it } from 'vitest';
 import { ActionRunner } from '../src/brain/action_runner.js';
+import { createToolCatalog } from '../src/brain/tools/catalog.js';
 import type { ToolOutcome } from '../src/brain/tools/tools.js';
 import { Scheduler } from '../src/brain/scheduler.js';
+import { toolDeclarations } from '../src/body/commands/registry.js';
+
+/** 与生产一致：工具目录来自身体握手报上来的声明。 */
+const CATALOG = createToolCatalog(toolDeclarations());
 
 interface Harness {
   runner: ActionRunner;
@@ -55,6 +60,7 @@ function makeHarness(): Harness {
   let gate = deferred<string>();
   harness.runner = new ActionRunner({
     scheduler,
+    catalog: CATALOG,
     record: (outcome: string) => {
       records.push(outcome);
       return Promise.resolve();

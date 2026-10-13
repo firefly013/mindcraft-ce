@@ -4,45 +4,54 @@
  */
 import { SAY_LINE_LIMIT } from '../src/shared/prompts.js';
 import { describe, expect, it, vi } from 'vitest';
-import { checkDomain, commandToTool, executeToolCall, isActionTool, stripBang, toolExists, validateToolCall, validateUpdatePlan, formatSay, getOpenAITools } from '../src/body/commands/to_openai_tools.js';
+import { commandToTool, getOpenAITools } from '../src/brain/tools/advertise.js';
+import { createToolCatalog } from '../src/brain/tools/catalog.js';
+import { checkDomain, formatSay, isActionTool, toolExists, validateToolCall, validateUpdatePlan } from '../src/brain/tools/validate.js';
+import { stripBang } from '../src/shared/tools.js';
+import { executeToolCall } from '../src/body/commands/execute.js';
+import { toolDeclarations } from '../src/body/commands/registry.js';
 import { queryList } from '../src/body/commands/queries.js';
 import type { AgentCommand } from '../src/body/commands/actions.js';
 
+/** 与生产一致：工具目录来自身体握手报上来的声明。 */
+const ALL_TOOLS = toolDeclarations();
+const CATALOG = createToolCatalog(ALL_TOOLS);
+
 describe('isActionTool', () => {
   it('action tools claim the body channel', () => {
-    expect(isActionTool('goToPlayer')).toBe(true);
-    expect(isActionTool('collectBlocks')).toBe(true);
-    expect(isActionTool('attack')).toBe(true);
+    expect(isActionTool(CATALOG, 'goToPlayer')).toBe(true);
+    expect(isActionTool(CATALOG, 'collectBlocks')).toBe(true);
+    expect(isActionTool(CATALOG, 'attack')).toBe(true);
   });
 
   it('query tools do not claim the channel', () => {
-    expect(isActionTool('stats')).toBe(false);
-    expect(isActionTool('getCraftingPlan')).toBe(false);
-    expect(isActionTool('searchWiki')).toBe(false);
+    expect(isActionTool(CATALOG, 'stats')).toBe(false);
+    expect(isActionTool(CATALOG, 'getCraftingPlan')).toBe(false);
+    expect(isActionTool(CATALOG, 'searchWiki')).toBe(false);
   });
 
   it('control tools do not claim the channel', () => {
-    expect(isActionTool('Finish')).toBe(false);
-    expect(isActionTool('Stop')).toBe(false);
+    expect(isActionTool(CATALOG, 'Finish')).toBe(false);
+    expect(isActionTool(CATALOG, 'Stop')).toBe(false);
   });
 
   it('bang prefix is accepted either way', () => {
-    expect(isActionTool('!goToPlayer')).toBe(true);
+    expect(isActionTool(CATALOG, '!goToPlayer')).toBe(true);
     expect(stripBang('!goToPlayer')).toBe('goToPlayer');
-    expect(toolExists('goToPlayer')).toBe(true);
-    expect(toolExists('NoSuchTool')).toBe(false);
+    expect(toolExists(CATALOG, 'goToPlayer')).toBe(true);
+    expect(toolExists(CATALOG, 'NoSuchTool')).toBe(false);
   });
 });
 
 describe('validateToolCall', () => {
   it('accepts a full valid call and control tools', () => {
-    expect(validateToolCall('goToPlayer', { player_name: 'steve', closeness: 3 })).toEqual({ ok: true });
-    expect(validateToolCall('Finish', {})).toEqual({ ok: true });
-    expect(validateToolCall('stats', {})).toEqual({ ok: true });
+    expect(validateToolCall(CATALOG, 'goToPlayer', { player_name: 'steve', closeness: 3 })).toEqual({ ok: true });
+    expect(validateToolCall(CATALOG, 'Finish', {})).toEqual({ ok: true });
+    expect(validateToolCall(CATALOG, 'stats', {})).toEqual({ ok: true });
   });
 
   it('rejects unknown tools without touching anything else', () => {
-    const r = validateToolCall('Fly', {});
+    const r = validateToolCall(CATALOG, 'Fly', {});
     expect(r.ok).toBe(false);
     expect(r.code).toBe('UNKNOWN_TOOL');
   });
@@ -51,45 +60,46 @@ describe('validateToolCall', () => {
     // target 的含义全靠 type 声明（id/player/mob），没有默认值——
     // 靠字符串形状隐式猜等于把"玩家优先"这个人为约定藏起来。
     // 少一层 optional，schema 的 required 与运行时校验就都能拦住漏填。
-    expect(validateToolCall('attack', { target: '9' }).ok).toBe(false);
-    expect(validateToolCall('attack', { target: '9' }).errors?.join(';')).toContain('type');
-    expect(validateToolCall('attack', { target: '9', type: 'id' })).toEqual({ ok: true });
-    expect(validateToolCall('attack', { target: 'Notch', type: 'player' })).toEqual({ ok: true });
+    expect(validateToolCall(CATALOG, 'attack', { target: '9' }).ok).toBe(false);
+    expect(validateToolCall(CATALOG, 'attack', { target: '9' }).errors?.join(';')).toContain('type');
+    expect(validateToolCall(CATALOG, 'attack', { target: '9', type: 'id' })).toEqual({ ok: true });
+    expect(validateToolCall(CATALOG, 'attack', { target: 'Notch', type: 'player' })).toEqual({ ok: true });
   });
 
   it('rejects non-object args', () => {
-    expect(validateToolCall('stats', null).code).toBe('BAD_ARGS');
-    expect(validateToolCall('stats', 'x').code).toBe('BAD_ARGS');
+    expect(validateToolCall(CATALOG, 'stats', null).code).toBe('BAD_ARGS');
+    expect(validateToolCall(CATALOG, 'stats', 'x').code).toBe('BAD_ARGS');
   });
 
   it('names missing, mistyped and unknown properties with paths', () => {
-    const missing = validateToolCall('goToPlayer', { player_name: 'steve' });
+    const missing = validateToolCall(CATALOG, 'goToPlayer', { player_name: 'steve' });
     expect(missing.ok).toBe(false);
     expect(missing.errors?.join(';')).toContain('closeness');
 
-    const mistyped = validateToolCall('goToPlayer', { player_name: 'steve', closeness: 'near' });
+    const mistyped = validateToolCall(CATALOG, 'goToPlayer', { player_name: 'steve', closeness: 'near' });
     expect(mistyped.ok).toBe(false);
     expect(mistyped.errors?.join(';')).toContain('$.closeness');
 
-    const extra = validateToolCall('stats', { foo: 1 });
+    const extra = validateToolCall(CATALOG, 'stats', { foo: 1 });
     expect(extra.ok).toBe(false);
     expect(extra.errors?.join(';')).toContain('foo');
 
-    const notInt = validateToolCall('stay', { type: 1.5 });
+    const notInt = validateToolCall(CATALOG, 'stay', { type: 1.5 });
     expect(notInt.ok).toBe(false);
   });
 
   it('null counts as not given: optional/default may omit, required may not', () => {
     // quantity 有 default，可缺。
-    expect(validateToolCall('getCraftingPlan', { targetItem: 'stick' }).ok).toBe(true);
-    expect(validateToolCall('getCraftingPlan', { targetItem: 'stick', quantity: null }).ok).toBe(true);
-    expect(validateToolCall('getCraftingPlan', { quantity: 2 }).ok).toBe(false);
+    expect(validateToolCall(CATALOG, 'getCraftingPlan', { targetItem: 'stick' }).ok).toBe(true);
+    expect(validateToolCall(CATALOG, 'getCraftingPlan', { targetItem: 'stick', quantity: null }).ok).toBe(true);
+    expect(validateToolCall(CATALOG, 'getCraftingPlan', { quantity: 2 }).ok).toBe(false);
   });
 
   it('keeps optional/default params out of the schema required list', () => {
     // schema 的 required 不能比校验器更严：quantity 声明了 optional/default，
     // 却被无条件塞进 required 的话，模型会被迫每次传一个本可省的字段。
-    const cmd = queryList.find((c) => c.name === '!getCraftingPlan') as AgentCommand;
+    const cmd = ALL_TOOLS.find((d) => d.name === 'getCraftingPlan');
+    if (cmd == null) throw new Error('missing declaration');
     const tool = commandToTool(cmd);
     const required = tool.function.parameters['required'] as string[];
     expect(required).toContain('targetItem');
@@ -126,10 +136,10 @@ describe('Say isolation', () => {
   });
 
   it('Say is a control tool: known, valid, channel-free', () => {
-    expect(toolExists('Say')).toBe(true);
-    expect(isActionTool('Say')).toBe(false);
-    expect(validateToolCall('Say', { text: 'hi' }).ok).toBe(true);
-    const tools = getOpenAITools({ blocked_actions: [] });
+    expect(toolExists(CATALOG, 'Say')).toBe(true);
+    expect(isActionTool(CATALOG, 'Say')).toBe(false);
+    expect(validateToolCall(CATALOG, 'Say', { text: 'hi' }).ok).toBe(true);
+    const tools = getOpenAITools(ALL_TOOLS, []);
     const names = tools.map((t) => t.function.name);
     expect(names).toContain('Say');
     expect(names).toContain('Finish');
@@ -138,15 +148,15 @@ describe('Say isolation', () => {
   });
 
   it('UpdatePlan is a control tool with whole-replace shape', () => {
-    expect(toolExists('UpdatePlan')).toBe(true);
-    expect(isActionTool('UpdatePlan')).toBe(false);
-    expect(validateToolCall('UpdatePlan', { goal: 'build', todos: ['wood'] }).ok).toBe(true);
-    expect(validateToolCall('UpdatePlan', {}).ok).toBe(true);
+    expect(toolExists(CATALOG, 'UpdatePlan')).toBe(true);
+    expect(isActionTool(CATALOG, 'UpdatePlan')).toBe(false);
+    expect(validateToolCall(CATALOG, 'UpdatePlan', { goal: 'build', todos: ['wood'] }).ok).toBe(true);
+    expect(validateToolCall(CATALOG, 'UpdatePlan', {}).ok).toBe(true);
     expect(validateUpdatePlan({ goal: 42 }).ok).toBe(false);
     expect(validateUpdatePlan({ todos: 'wood' }).ok).toBe(false);
     expect(validateUpdatePlan({ todos: ['wood', 7] }).ok).toBe(false);
     expect(validateUpdatePlan({ nope: 1 }).ok).toBe(false);
-    const tools = getOpenAITools({ blocked_actions: [] });
+    const tools = getOpenAITools(ALL_TOOLS, []);
     expect(tools.map((t) => t.function.name)).toContain('UpdatePlan');
   });
 });
@@ -175,24 +185,24 @@ describe('checkDomain', () => {
   });
 
   it('rejects an out-of-range value through validateToolCall', () => {
-    const bad = validateToolCall('goToCoordinates', { x: 0, y: 400, z: 0 });
+    const bad = validateToolCall(CATALOG, 'goToCoordinates', { x: 0, y: 400, z: 0 });
     expect(bad.ok).toBe(false);
     expect(bad.code).toBe('BAD_ARGS');
     expect(bad.errors?.join('; ')).toContain('<= 320');
-    expect(validateToolCall('goToCoordinates', { x: 0, y: 64, z: 0, closeness: 1 }).ok).toBe(true);
+    expect(validateToolCall(CATALOG, 'goToCoordinates', { x: 0, y: 64, z: 0, closeness: 1 }).ok).toBe(true);
   });
 
   it('exposes finite domain bounds to the model in the schema', () => {
-    const cmd = { name: '!goToCoordinates', description: 'go', params: { y: { type: 'float', domain: [-64, 320] } } };
-    const tool = commandToTool(cmd as unknown as AgentCommand);
+    const cmd = { name: 'goToCoordinates', description: 'go', kind: 'action' as const, params: { y: { type: 'float', domain: [-64, 320] } } };
+    const tool = commandToTool(cmd);
     expect(tool.function.parameters['properties']).toMatchObject({ y: { minimum: -64, maximum: 320 } });
   });
 
   it('advertises an exclusive bound as exclusive*, matching what the validator enforces', () => {    // minimum/maximum 是闭语义；开区间必须用 exclusive*，否则 schema 说的区间
     // 比 checkDomain 实际放行的更宽（模型给 0 合法、校验器却拒）。
     const param = { type: 'int', domain: [0, 10, '(]'] } as const;
-    const cmd = { name: '!x', description: 'x', params: { n: param } };
-    const tool = commandToTool(cmd as unknown as AgentCommand);
+    const cmd = { name: 'x', description: 'x', kind: 'action' as const, params: { n: param } };
+    const tool = commandToTool(cmd);
     const props = tool.function.parameters['properties'] as Record<string, Record<string, unknown>>;
     expect(props['n']?.['exclusiveMinimum']).toBe(0);
     expect(props['n']?.['maximum']).toBe(10);

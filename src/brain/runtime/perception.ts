@@ -13,22 +13,14 @@
  * （Pi 的投影：`system + 摘要 + 保留段`）。以前在这里又发一遍，等于把摘要
  * 喂两次。主线（`92309d1`）已经把这一段删掉，这里跟随。
  *
- * 所以尾巴只剩一件事：**把这一刻的世界注入在请求末尾，且不进上下文**。
- * 这正是本项目的核心诉求。
+ * ## 采样在身体侧
  *
- * ## 为什么走 beforeRequest 而不是 section
- *
- * 快照每轮都在变，进 section 就会每轮追加一条 `pi.system`，前缀缓存全废。
- * 这条尾巴只影响本次请求、**不落 transcript**。
+ * 快照由**身体进程**采样（它才看得见 mineflayer 的世界），渲染器是
+ * `shared/live_state.ts` 里那份纯函数——文本与身体侧的 `stats` 工具逐字一致。
+ * 这里只负责加标题：尾巴是"最后一条 user 消息"，不进 transcript。
  */
-import { renderLiveState, sampleLiveState, type SampleContext } from '../../body/live_state.js';
 
-/** 尾巴的唯一内容：`## 当前世界快照` + 现采文本。 */
+/** 尾巴的唯一内容：`## 当前世界快照` + 身体采回来的现采文本。 */
 export function liveTailFromText(liveText: string): string {
   return `## 当前世界快照\n${liveText}`;
-}
-
-/** 现采一次并拼成尾巴。 */
-export function composeLiveTail(sample: SampleContext): string {
-  return liveTailFromText(renderLiveState(sampleLiveState(sample)));
 }

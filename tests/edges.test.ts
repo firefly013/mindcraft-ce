@@ -23,8 +23,8 @@ import {
   STUCK_MS,
 } from '../src/body/edges.js';
 import { HOSTILE_NEARBY_METERS, type EdgeSnapshot } from '../src/body/edges.js';
-import { PERCEPTION_RADIUS } from '../src/body/live_state.js';
-import { LEVEL } from '../src/brain/scheduler.js';
+import { PERCEPTION_RADIUS } from '../src/shared/live_state.js';
+import { LEVEL } from '../src/shared/events.js';
 
 const ent = (id: number, distance: number, extra: Record<string, unknown> = {}) => ({
   id,

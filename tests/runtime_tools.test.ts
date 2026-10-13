@@ -1,20 +1,24 @@
 /**
- * P4：命令 → pi-durable 工具的等价性。
+ * P4：工具**声明** → pi-durable 工具的等价性。
  *
- * 最强的一条是 `schema 等价`：对 `queryList.concat(actionsList)` 里的**每一个**
- * 命令，把 TypeBox 生成的 schema 与旧 `commandToTool()` 的输出逐字段比对。
+ * 最强的一条是 `schema 等价`：对工具声明表里的**每一个**工具，
+ * 把 TypeBox 生成的 schema 与旧 `commandToTool()` 的输出逐字段比对。
  * 只要有一个参数的类型/范围/必填性漂了，这条就会红。
+ *
+ * 声明来自**身体**（`body/commands/registry.ts`）——大脑侧没有命令表，
+ * 这条测试顺带钉住了"握手报上来的声明覆盖全部工具"。
  */
 import { describe, expect, it } from 'vitest';
-import type { AgentCommand } from '../src/body/commands/actions.js';
-import { actionsList } from '../src/body/commands/actions.js';
-import { queryList } from '../src/body/commands/queries.js';
-import { commandToTool, getOpenAITools } from '../src/body/commands/to_openai_tools.js';
+import type { ToolDeclaration } from '../src/shared/tools.js';
+import { toolDeclarations } from '../src/body/commands/registry.js';
+import { commandToTool, getOpenAITools } from '../src/brain/tools/advertise.js';
+import { createToolCatalog } from '../src/brain/tools/catalog.js';
 import { commandParameters } from '../src/brain/tools/tool_schema.js';
+import { validateToolCall } from '../src/brain/tools/validate.js';
 import { blockedActionsHook, commandToRegistration, outcomeText } from '../src/brain/tools/tools.js';
 
-/** 与 `to_openai_tools.ts` 内部用的同一个列表。 */
-const ALL_COMMANDS: AgentCommand[] = queryList.concat(actionsList);
+/** 身体握手会报上来的那份声明（大脑侧唯一的工具来源）。 */
+const ALL_TOOLS: ToolDeclaration[] = toolDeclarations();
 
 /** TypeBox schema → 纯 JSON（丢掉 [Kind] 之类的 symbol，便于比对）。 */
 function toJson(schema: unknown): unknown {
@@ -36,11 +40,11 @@ function normalizeRequired(schema: unknown): unknown {
 }
 
 describe('回执带图（只有声明了 withScreenshot 的命令）', () => {
-  const demo: AgentCommand = {
-    name: '!demo',
+  const demo: ToolDeclaration = {
+    name: 'demo',
     description: 'demo',
     params: { a: { type: 'string', description: 'a' } },
-    perform: () => 'text-out',
+    kind: 'action',
   };
 
   async function run(tool: ReturnType<typeof commandToRegistration>, args: unknown = {}): Promise<
@@ -81,9 +85,9 @@ describe('回执带图（只有声明了 withScreenshot 的命令）', () => {
     expect(await run(tool)).toEqual([{ type: 'text', text: 'out' }]);
   });
 
-  it('全仓库只有 !stats 开了图（其余一律纯文本）', () => {
-    const withPic = ALL_COMMANDS.filter((c) => c.withScreenshot === true).map((c) => c.name);
-    expect(withPic).toEqual(['!stats']);
+  it('全仓库只有 stats 开了图（其余一律纯文本）', () => {
+    const withPic = ALL_TOOLS.filter((c) => c.withScreenshot === true).map((c) => c.name);
+    expect(withPic).toEqual(['stats']);
   });
 });
 
@@ -92,27 +96,27 @@ describe('schema 等价：全部命令工具', () => {
     // 别写死数量：工具集会随死子系统清理而变化（construction 下线时一次就
     // 少了 4 个 blueprint 工具）。断言"非空 + 与旧广告逐项同源"——写死的
     // 数字只会腐坏，测不出真问题。
-    expect(ALL_COMMANDS.length).toBeGreaterThan(0);
-    const advertised = getOpenAITools({}).map((tool) => tool.function.name);
+    expect(ALL_TOOLS.length).toBeGreaterThan(0);
+    const advertised = getOpenAITools(ALL_TOOLS).map((tool) => tool.function.name);
     const control = ['Finish', 'Stop', 'Say', 'UpdatePlan', 'Feedback'];
-    expect(ALL_COMMANDS.map((command) => command.name.replace(/^!/, ''))).toEqual(
+    expect(ALL_TOOLS.map((tool) => tool.name)).toEqual(
       advertised.filter((name) => !control.includes(name)),
     );
   });
 
-  it.each(ALL_COMMANDS.map((command) => [command.name, command] as const))(
+  it.each(ALL_TOOLS.map((tool) => [tool.name, tool] as const))(
     '%s 的 TypeBox schema 与旧 JSON Schema 语义一致',
-    (_name, command) => {
-      const oldParameters = commandToTool(command).function.parameters;
-      const nextParameters = toJson(commandParameters(command));
+    (_name, tool) => {
+      const oldParameters = commandToTool(tool).function.parameters;
+      const nextParameters = toJson(commandParameters(tool));
       expect(normalizeRequired(nextParameters)).toEqual(normalizeRequired(oldParameters));
     },
   );
 
   it('原始差异只允许"空 required 缺省"这一类，别的漂移一律不许有', () => {
-    for (const command of ALL_COMMANDS) {
-      const oldRaw = commandToTool(command).function.parameters as Record<string, unknown>;
-      const newRaw = toJson(commandParameters(command)) as Record<string, unknown>;
+    for (const tool of ALL_TOOLS) {
+      const oldRaw = commandToTool(tool).function.parameters as Record<string, unknown>;
+      const newRaw = toJson(commandParameters(tool)) as Record<string, unknown>;
       const oldKeys = Object.keys(oldRaw).sort();
       const newKeys = Object.keys(newRaw).sort();
       if (oldKeys.join('|') === newKeys.join('|')) continue;
@@ -123,33 +127,67 @@ describe('schema 等价：全部命令工具', () => {
   });
 
   it('每个命令的 required 判定与旧实现一致（optional / default 不进 required）', () => {
-    for (const command of ALL_COMMANDS) {
-      const oldRequired = commandToTool(command).function.parameters['required'];
-      const next = commandParameters(command) as unknown as { required?: string[] };
+    for (const tool of ALL_TOOLS) {
+      const oldRequired = commandToTool(tool).function.parameters['required'];
+      const next = commandParameters(tool) as unknown as { required?: string[] };
       expect(next.required ?? []).toEqual(oldRequired);
     }
   });
 });
 
+describe('握手往返：声明过了 WebSocket 之后 schema 不变', () => {
+  // 握手是 JSON over WebSocket：`domain` 里的 `Infinity` 会变成 `null`。
+  // 两侧的 schema 生成与范围校验本来就只认有限值，所以行为必须逐字不变——
+  // 这条测试就是那个"本来"的机器证明。
+  const WIRE = JSON.parse(JSON.stringify(ALL_TOOLS)) as ToolDeclaration[];
+
+  it('每个工具的参数 schema 与本地声明逐字一致', () => {
+    for (const tool of ALL_TOOLS) {
+      const sent = WIRE.find((wire) => wire.name === tool.name);
+      expect(sent, tool.name).toBeDefined();
+      if (sent == null) continue;
+      expect(toJson(commandParameters(sent)), tool.name).toEqual(toJson(commandParameters(tool)));
+    }
+  });
+
+  it('Infinity 边界过线后仍然不约束（与本地一致）', () => {
+    const local = ALL_TOOLS.find((tool) => tool.name === 'getCraftingPlan');
+    const sent = WIRE.find((tool) => tool.name === 'getCraftingPlan');
+    expect(local).toBeDefined();
+    expect(sent).toBeDefined();
+    if (local == null || sent == null) return;
+    expect(toJson(commandParameters(sent))).toEqual(toJson(commandParameters(local)));
+  });
+
+  it('校验器在往返后的声明上给出同样的判决', () => {
+    const sent = WIRE.find((tool) => tool.name === 'goToCoordinates');
+    expect(sent).toBeDefined();
+    if (sent == null) return;
+    const catalog = createToolCatalog(WIRE);
+    expect(validateToolCall(catalog, 'goToCoordinates', { x: 0, y: 64, z: 0, closeness: 1 }).ok).toBe(true);
+    expect(validateToolCall(catalog, 'goToCoordinates', { x: 0, y: 400, z: 0, closeness: 1 }).ok).toBe(false);
+  });
+});
+
 describe('工具注册项', () => {
-  const demo: AgentCommand = {
-    name: '!demo',
+  const demo: ToolDeclaration = {
+    name: 'demo',
     description: '演示命令',
     params: {
       a: { type: 'int', description: 'A', domain: [1, 10] },
       b: { type: 'float', description: 'B', optional: true },
       c: { type: 'string', description: 'C' },
     },
-    perform: () => 'never-called',
+    kind: 'action',
   };
 
-  it('工具名去掉 ! 前缀', () => {
+  it('工具名不带 ! 前缀', () => {
     const tool = commandToRegistration(demo, () => '');
     expect(tool.name).toBe('demo');
     expect(tool.description).toBe('演示命令');
   });
 
-  it('没有 description 的命令退回用名字当描述（去掉 ! 前缀）', () => {
+  it('没有 description 的命令退回用名字当描述', () => {
     const tool = commandToRegistration({ ...demo, description: '' }, () => '');
     expect(tool.description).toBe('demo');
   });
