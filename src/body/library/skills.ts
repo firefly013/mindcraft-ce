@@ -2830,6 +2830,240 @@ export function classifyDigDownStep(
     return { kind: 'dig', target: { x: fx, y: targetY, z: fz } };
 }
 
+/** 垂直上行单步判据。 */
+export type VerticalStepPlan =
+    | { kind: 'mine'; target: { x: number; y: number; z: number } }
+    | { kind: 'step_forward'; target: { x: number; y: number; z: number } }
+    | { kind: 'place_step'; target: { x: number; y: number; z: number } }
+    | { kind: 'jump_place' }
+    | { kind: 'blocked'; reason: string };
+
+const VERTICAL_PASSABLE = new Set(['air', 'cave_air', 'void_air']);
+const VERTICAL_HAZARD = new Set(['water', 'lava']);
+
+function verticalName(block: { name?: unknown } | null | undefined): string | null {
+    return typeof block?.name === 'string' ? block.name : null;
+}
+
+function isVerticalPassable(name: string | null): boolean {
+    return name != null && VERTICAL_PASSABLE.has(name);
+}
+
+function verticalHazard(name: string | null): boolean {
+    return name != null && VERTICAL_HAZARD.has(name);
+}
+
+/**
+ * 在背包里挑一个能垫脚的方块。
+ *
+ * 优先圆石/石头/泥土/木板/原木；排除火把、水桶、岩浆桶、食物/工具这类
+ * 放不下或放了没用的东西。
+ */
+export function choosePillarMaterial(items: Array<{ name?: unknown; count?: unknown }> | null | undefined): string | null {
+    const available = new Set<string>();
+    for (const item of items ?? []) {
+        const name = typeof item?.name === 'string' ? item.name : null;
+        const count = typeof item?.count === 'number' ? item.count : 1;
+        if (name != null && count > 0) available.add(name);
+    }
+    const preferred = [
+        'cobblestone', 'stone', 'dirt', 'coarse_dirt', 'oak_planks', 'spruce_planks',
+        'birch_planks', 'oak_log', 'spruce_log', 'birch_log', 'deepslate', 'andesite',
+        'granite', 'diorite', 'netherrack',
+    ];
+    for (const name of preferred) if (available.has(name)) return name;
+    const blockedWords = ['torch', 'water', 'lava', 'bucket', 'sapling', 'seed', 'potion', 'sword', 'pickaxe', 'axe', 'shovel', 'hoe', 'bread', 'apple', 'carrot', 'potato', 'beef', 'porkchop', 'chicken', 'mutton', 'cod', 'salmon', 'cookie', 'cake', 'stew'];
+    const blockedExact = new Set(['bread', 'apple', 'carrot', 'potato', 'beef', 'porkchop', 'chicken', 'mutton', 'cod', 'salmon', 'cookie', 'cake', 'stew']);
+    for (const name of available) {
+        if (!blockedExact.has(name) && !blockedWords.some((word) => name.includes(word))) return name;
+    }
+    return null;
+}
+
+/** 柱子上行一步：先保证头顶两格是空的；否则先挖；水/岩浆直接 blocked。 */
+export function planPillarStep(
+    blockAt: (x: number, y: number, z: number) => { name?: unknown } | null,
+    feet: { x: number; y: number; z: number },
+): VerticalStepPlan {
+    const fx = Math.floor(feet.x);
+    const fy = Math.floor(feet.y);
+    const fz = Math.floor(feet.z);
+    const head = blockAt(fx, fy + 1, fz);
+    const head2 = blockAt(fx, fy + 2, fz);
+    const headName = verticalName(head);
+    const head2Name = verticalName(head2);
+    if (verticalHazard(headName)) return { kind: 'blocked', reason: '头顶就是' + String(headName) };
+    if (verticalHazard(head2Name)) return { kind: 'blocked', reason: '头顶上方是' + String(head2Name) };
+    if (!isVerticalPassable(headName)) return { kind: 'mine', target: { x: fx, y: fy + 1, z: fz } };
+    if (!isVerticalPassable(head2Name)) return { kind: 'mine', target: { x: fx, y: fy + 2, z: fz } };
+    return { kind: 'jump_place' };
+}
+
+/** 台阶上行一步：优先挖开正前方/头顶，然后跳上前方实心格；空着就放一块垫脚。 */
+export function planStairStep(
+    blockAt: (x: number, y: number, z: number) => { name?: unknown } | null,
+    feet: { x: number; y: number; z: number },
+    dx: number,
+    dz: number,
+): VerticalStepPlan {
+    const fx = Math.floor(feet.x);
+    const fy = Math.floor(feet.y);
+    const fz = Math.floor(feet.z);
+    const stepX = fx + Math.sign(dx);
+    const stepZ = fz + Math.sign(dz);
+    const head = blockAt(fx, fy + 1, fz);
+    const head2 = blockAt(fx, fy + 2, fz);
+    const headName = verticalName(head);
+    const head2Name = verticalName(head2);
+    if (verticalHazard(headName)) return { kind: 'blocked', reason: '头顶就是' + String(headName) };
+    if (verticalHazard(head2Name)) return { kind: 'blocked', reason: '头顶上方是' + String(head2Name) };
+    if (!isVerticalPassable(headName)) return { kind: 'mine', target: { x: fx, y: fy + 1, z: fz } };
+
+    const frontHead = blockAt(stepX, fy + 1, stepZ);
+    const frontFeet = blockAt(stepX, fy, stepZ);
+    const frontHeadName = verticalName(frontHead);
+    const frontFeetName = verticalName(frontFeet);
+    if (verticalHazard(frontHeadName)) return { kind: 'blocked', reason: '前方头顶是' + String(frontHeadName) };
+    if (verticalHazard(frontFeetName)) return { kind: 'blocked', reason: '前方脚下是' + String(frontFeetName) };
+    if (!isVerticalPassable(frontHeadName)) return { kind: 'mine', target: { x: stepX, y: fy + 1, z: stepZ } };
+    if (frontFeetName == null) return { kind: 'blocked', reason: '前方区块读不到' };
+    if (!isVerticalPassable(frontFeetName)) return { kind: 'step_forward', target: { x: stepX, y: fy, z: stepZ } };
+    return { kind: 'place_step', target: { x: stepX, y: fy, z: stepZ } };
+}
+
+function forwardDelta(yaw: number): { dx: number; dz: number } {
+    // 与项目其它地方一致：yaw=0 面朝南(+Z)，90 面朝西(-X)。
+    const dx = -Math.round(Math.sin(yaw));
+    const dz = Math.round(Math.cos(yaw));
+    if (dx === 0 && dz === 0) return { dx: 0, dz: 1 };
+    return { dx, dz };
+}
+
+/** 柱子上行：跳起后在脚下放块，适合 digDown 挖出的 1x1 竖井。 */
+export async function pillarUp(bot: any, blocks: number = 1): Promise<boolean> {
+    const wanted = Math.max(1, Math.floor(blocks));
+    const material = choosePillarMaterial(bot?.inventory?.items?.() as Array<{ name?: unknown; count?: unknown }>);
+    if (material == null) {
+        log(bot, 'pillarUp 失败：背包里没有可垫脚的方块（圆石/石头/泥土/木板/原木都行）。');
+        return false;
+    }
+    log(bot, 'pillarUp 开始：目标 ' + wanted + ' 格，用 ' + material + '，当前 y=' + Number(bot?.entity?.position?.y ?? 0).toFixed(1) + '。');
+    if (bot?.interrupt_code) {
+        log(bot, 'pillarUp 中断：Stop/保命打断，一步没走。');
+        return false;
+    }
+    if (!(await equip(bot, material))) {
+        log(bot, 'pillarUp 失败：拿不到 ' + material + '。');
+        return false;
+    }
+    const deadline = Date.now() + Math.max(30_000, wanted * 8_000);
+    let done = 0;
+    while (done < wanted) {
+        if (bot.interrupt_code) {
+            log(bot, 'pillarUp 中断：Stop/保命打断，已完成 ' + done + '/' + wanted + ' 格。');
+            return false;
+        }
+        if (Date.now() > deadline) {
+            log(bot, 'pillarUp 超时：已完成 ' + done + '/' + wanted + ' 格，先停在这里。');
+            return false;
+        }
+        const feet = bot.entity.position;
+        const blockAt = (x: number, y: number, z: number): { name?: unknown } | null => bot.blockAt(new Vec3(x, y, z));
+        const plan = planPillarStep(blockAt, { x: feet.x, y: feet.y, z: feet.z });
+        if (plan.kind === 'blocked') {
+            log(bot, 'pillarUp 停止：' + plan.reason + '（已完成 ' + done + '/' + wanted + ' 格）。');
+            return false;
+        }
+        if (plan.kind === 'mine') {
+            const dug = await breakBlockAt(bot, plan.target.x, plan.target.y, plan.target.z);
+            if (!dug) {
+                log(bot, 'pillarUp 停止：挖头顶方块失败（已完成 ' + done + '/' + wanted + ' 格）。');
+                return false;
+            }
+            continue;
+        }
+        const startY = Number(feet.y);
+        const startX = Math.floor(feet.x);
+        const startZ = Math.floor(feet.z);
+        bot.setControlState('jump', true);
+        const rose = await waitFor(bot, () => Number(bot?.entity?.position?.y ?? 0) > startY + 0.4, 1200, 40);
+        let placed = false;
+        if (rose) {
+            placed = await placeBlock(bot, material, startX, Math.floor(startY), startZ, 'bottom', true);
+        }
+        bot.setControlState('jump', false);
+        if (!placed) {
+            log(bot, 'pillarUp 第 ' + (done + 1) + ' 格失败：没能把 ' + material + ' 垫到脚下。');
+            return false;
+        }
+        await waitFor(bot, () => bot?.entity?.onGround === true, 2500, 50);
+        done++;
+        log(bot, 'pillarUp 进度 ' + done + '/' + wanted + '：现在 y=' + Number(bot.entity.position.y).toFixed(1) + '。');
+    }
+    log(bot, 'pillarUp 完成：上升 ' + done + ' 格。');
+    return true;
+}
+
+/** 台阶上行：挖开前方/头顶，跳上高一层的实心格；空着就放一块垫脚。 */
+export async function stairUp(bot: any, blocks: number = 1): Promise<boolean> {
+    const wanted = Math.max(1, Math.floor(blocks));
+    const material = choosePillarMaterial(bot?.inventory?.items?.() as Array<{ name?: unknown; count?: unknown }>);
+    log(bot, 'stairUp 开始：目标 ' + wanted + ' 格，材质 ' + (material ?? '无（只能挖台阶）') + '，当前 y=' + Number(bot?.entity?.position?.y ?? 0).toFixed(1) + '。');
+    const deadline = Date.now() + Math.max(30_000, wanted * 8_000);
+    let done = 0;
+    while (done < wanted) {
+        if (bot.interrupt_code) {
+            log(bot, 'stairUp 中断：Stop/保命打断，已完成 ' + done + '/' + wanted + ' 格。');
+            return false;
+        }
+        if (Date.now() > deadline) {
+            log(bot, 'stairUp 超时：已完成 ' + done + '/' + wanted + ' 格，先停在这里。');
+            return false;
+        }
+        const feet = bot.entity.position;
+        const dir = forwardDelta(Number(bot?.entity?.yaw ?? 0));
+        const blockAt = (x: number, y: number, z: number): { name?: unknown } | null => bot.blockAt(new Vec3(x, y, z));
+        const plan = planStairStep(blockAt, { x: feet.x, y: feet.y, z: feet.z }, dir.dx, dir.dz);
+        if (plan.kind === 'blocked') {
+            log(bot, 'stairUp 停止：' + plan.reason + '（已完成 ' + done + '/' + wanted + ' 格）。');
+            return false;
+        }
+        if (plan.kind === 'mine') {
+            const dug = await breakBlockAt(bot, plan.target.x, plan.target.y, plan.target.z);
+            if (!dug) {
+                log(bot, 'stairUp 停止：挖 ' + plan.target.x + ',' + plan.target.y + ',' + plan.target.z + ' 失败（已完成 ' + done + '/' + wanted + ' 格）。');
+                return false;
+            }
+            continue;
+        }
+        if (plan.kind === 'place_step') {
+            if (material == null) {
+                log(bot, 'stairUp 停止：前方要垫脚但背包里没有方块。');
+                return false;
+            }
+            const placed = await placeBlock(bot, material, plan.target.x, plan.target.y, plan.target.z, 'bottom', true);
+            if (!placed) {
+                log(bot, 'stairUp 停止：前方垫脚失败。');
+                return false;
+            }
+        }
+        const beforeY = Number(feet.y);
+        bot.setControlState('forward', true);
+        bot.setControlState('jump', true);
+        await new Promise<void>((resolve) => setTimeout(resolve, 700));
+        bot.setControlState('jump', false);
+        bot.setControlState('forward', false);
+        if (Number(bot.entity.position.y) <= beforeY + 0.4) {
+            log(bot, 'stairUp 第 ' + (done + 1) + ' 格失败：跳不上去（前方可能被挡或高度太大）。');
+            return false;
+        }
+        done++;
+        log(bot, 'stairUp 进度 ' + done + '/' + wanted + '：现在 y=' + Number(bot.entity.position.y).toFixed(1) + '。');
+    }
+    log(bot, 'stairUp 完成：上升 ' + done + ' 格。');
+    return true;
+}
+
 export async function digDown(bot: any, distance: number = 10): Promise<boolean> {
     /**
      * Digs down a specified distance. Will stop if it reaches lava, water, or a fall of >=4 blocks below the bot.
@@ -2881,28 +3115,45 @@ export async function goToSurface(bot: any): Promise<boolean> {
      * @returns {Promise<boolean>} true if the surface was reached, false otherwise.
      **/
     const pos: any = bot.entity.position;
-    for (let y = 360; y > -64; y--) { // probably not the best way to find the surface but it works
+    for (let y = 360; y > -64; y--) {
         const block: any = bot.blockAt(new (Vec3 as any)(pos.x, y, pos.z));
         if (!block || block.name === 'air' || block.name === 'cave_air') {
             continue;
         }
-        // **把结果如实返回**。原来这里无条件 log 'Going to the surface' + return true——
-        // 模型真机报过 'goToSurface 静默结束：无结果事件、人没动'：它以为上去了，其实
-        // 一步没动，后面的判断全建立在错误前提上。
-        const arrived = await goToPosition(bot, block.position.x, block.position.y + 1, block.position.z, 0);
+        const targetY: number = block.position.y + 1;
+        const dy: number = targetY - pos.y;
+        log(bot, 'goToSurface：地表在 y=' + targetY + '（' + block.name + '），高差 ' + dy.toFixed(1) + ' 格。');
+        if (bot.interrupt_code) {
+            log(bot, 'goToSurface 中断：Stop/保命打断，一步没走。');
+            return false;
+        }
+        if (dy >= 4) {
+            const material = choosePillarMaterial(bot?.inventory?.items?.() as Array<{ name?: unknown; count?: unknown }>);
+            const need = Math.ceil(dy);
+            log(bot, 'goToSurface：高差 ' + dy.toFixed(1) + ' 格，先用 ' + (material != null ? 'pillarUp' : 'stairUp') + ' 垂直上行 ' + need + ' 格。');
+            const climbed = material != null ? await pillarUp(bot, need) : await stairUp(bot, need);
+            if (bot.interrupt_code) {
+                log(bot, 'goToSurface 中断：垂直上行被 Stop/保命打断。');
+                return false;
+            }
+            if (!climbed) {
+                log(bot, 'goToSurface：垂直上行没能完成，继续尝试普通寻路（失败会说明卡在哪）。');
+            }
+        }
+        const arrived = await goToPosition(bot, block.position.x, targetY, block.position.z, 0);
         if (!arrived) {
             log(
                 bot,
-                `Surface is at y=${y + 1} (${block.name}) but I could not get up there from here. 竖井/洞穴里常这样——用 mineBlock 挖头顶开路，或者 placeBlock 搭落脚点一段段往上。`,
+                'Surface is at y=' + targetY + ' (' + block.name + ') but I could not get up there from here. 竖井/洞穴里常这样——用 stairUp/pillarUp 垂直上行，或者 mineBlock 挖头顶开路。',
             );
             return false;
         }
-        log(bot, `Reached the surface at y=${y + 1}.`);
+        log(bot, 'Reached the surface at y=' + targetY + '.');
         return true;
     }
+    log(bot, 'goToSurface 失败：当前竖列读不到任何实心方块（区块可能没加载）。');
     return false;
 }
-
 export async function useToolOn(bot: any, toolName: string, targetName: string): Promise<boolean> {
     /**
      * Equip a tool and use it on the nearest target.

@@ -152,8 +152,27 @@ export const actionsList: AgentCommand[] = [
             'closeness': {type: 'float', description: tp('goToCoordinates', 'closeness'), domain: [0, Infinity]}
         },
         perform: runAsAction(async (agent: any, x: number, y: number, z: number, closeness: number) => {
-            await skills.goToPosition(agent.bot, x, y, z, closeness);
-        })
+            const bot = agent.bot;
+            const start = bot.entity.position;
+            const dy = y - start.y;
+            const horizontal = Math.hypot(x - start.x, z - start.z);
+            // 高差大且几乎在正上方：寻路器会一直卡壁，先垂直上行再走最后一段。
+            if (dy >= 4 && horizontal <= 8) {
+                skills.log(bot, 'goToCoordinates：高差 ' + dy.toFixed(1) + ' 格、水平 ' + horizontal.toFixed(1) + ' 格，先用 pillarUp/stairUp 垂直上行。');
+                const material = skills.choosePillarMaterial(bot?.inventory?.items?.() as Array<{ name?: unknown; count?: unknown }>);
+                const climbed = material != null
+                    ? await skills.pillarUp(bot, Math.ceil(dy))
+                    : await skills.stairUp(bot, Math.ceil(dy));
+                if (bot.interrupt_code) {
+                    skills.log(bot, 'goToCoordinates：垂直上行被 Stop/保命打断，本次停止。');
+                    return;
+                }
+                skills.log(bot, climbed
+                    ? 'goToCoordinates：垂直上行完成，继续寻路到精确坐标。'
+                    : 'goToCoordinates：垂直上行没能完成，继续尝试普通寻路（失败会给出卡住原因）。');
+            }
+            await skills.goToPosition(bot, x, y, z, closeness);
+        }, 5)
     },
     {
         name: '!searchForBlock',
@@ -342,6 +361,26 @@ export const actionsList: AgentCommand[] = [
         perform: runAsAction(async (agent: any, distance: number) => {
             await skills.digDown(agent.bot, distance);
         })
+    },
+    {
+        name: '!stairUp',
+        description: td('stairUp'),
+        params: {
+            'distance': { type: 'int', description: tp('stairUp', 'distance'), domain: [1, 64] }
+        },
+        perform: runAsAction(async (agent: any, distance: number) => {
+            await skills.stairUp(agent.bot, distance);
+        }, 4)
+    },
+    {
+        name: '!pillarUp',
+        description: td('pillarUp'),
+        params: {
+            'distance': { type: 'int', description: tp('pillarUp', 'distance'), domain: [1, 64] }
+        },
+        perform: runAsAction(async (agent: any, distance: number) => {
+            await skills.pillarUp(agent.bot, distance);
+        }, 4)
     },
     {
         name: '!goToSurface',

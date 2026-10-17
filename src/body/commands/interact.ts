@@ -1137,6 +1137,268 @@ function wrapInteractiveCommand(command: AgentCommand): AgentCommand {
   return { ...command, perform };
 }
 
+
+// ---------------------------------------------------------------
+// task-17：合成支持同类标签（任何木板 / 原木 / 煤炭 / 羊毛）。
+//
+// 背景：minecraft-data 把 `#planks` 这类 tag 解析成一个具体物品（oak_planks），
+// 于是 oak×2 + birch×2 做 crafting_table 会被判「缺 oak_planks」。原版允许同类混用。
+// 这里在交互层补：把配方里同 family 的格子按背包实际成员分配，再用 `bot.craft`
+// 执行（`bot.recipesAll` 拿到不看库存的配方，克隆后逐格换成实际物品 id）。
+// ---------------------------------------------------------------
+
+/** 同类可互换的 family（原版 tag 的最小实现，按注册名后缀识别）。 */
+const FAMILY_PATTERNS: ReadonlyArray<{ tag: string; test: (name: string) => boolean }> = [
+  { tag: 'planks', test: (n) => n.endsWith('_planks') },
+  { tag: 'logs', test: (n) => n.endsWith('_log') || n.endsWith('_wood') || n.endsWith('_stem') || n.endsWith('_hyphae') },
+  { tag: 'coals', test: (n) => n === 'coal' || n === 'charcoal' },
+  { tag: 'wool', test: (n) => n.endsWith('_wool') },
+];
+
+/** 这个物品属于哪个同类 family（不属于返回 null）。 */
+export function familyTagOf(itemName: string): string | null {
+  for (const family of FAMILY_PATTERNS) if (family.test(itemName)) return family.tag;
+  return null;
+}
+
+export function sameFamily(a: string, b: string): boolean {
+  const fa = familyTagOf(a);
+  return fa != null && fa === familyTagOf(b);
+}
+
+export interface TagGroupPlan {
+  tag: string;
+  required: number;
+  available: number;
+  members: Array<{ name: string; count: number }>;
+  missing: number;
+  /** 同一种凑不够、必须靠混用才能达到 required。 */
+  needsMixing: boolean;
+}
+
+export interface TagCraftPlan {
+  ok: boolean;
+  groups: TagGroupPlan[];
+  missingText: string;
+}
+
+/**
+ * 按「同类可混用」检查一次配方需求：required 里每个物品按 family 归组，
+ * 统计背包里同 family 的合计。纯函数，可单测。
+ */
+export function planTagCraft(
+  required: Record<string, number>,
+  inventory: Record<string, number>,
+): TagCraftPlan {
+  const groups = new Map<string, TagGroupPlan>();
+  for (const [name, need] of Object.entries(required)) {
+    if (!Number.isFinite(need) || need <= 0) continue;
+    const tag = familyTagOf(name) ?? name;
+    const group = groups.get(tag) ?? { tag, required: 0, available: 0, members: [], missing: 0, needsMixing: false };
+    group.required += need;
+    group.members = Object.entries(inventory)
+      .filter(([item, count]) => (familyTagOf(item) ?? item) === tag && Number.isFinite(count) && count > 0)
+      .map(([item, count]) => ({ name: item, count: Math.floor(count) }));
+    groups.set(tag, group);
+  }
+  const out: TagGroupPlan[] = [];
+  for (const group of groups.values()) {
+    group.available = group.members.reduce((sum, m) => sum + m.count, 0);
+    group.missing = Math.max(0, group.required - group.available);
+    const maxSingle = group.members.reduce((max, m) => Math.max(max, m.count), 0);
+    group.needsMixing = group.available >= group.required && maxSingle < group.required;
+    group.members.sort((a, b) => b.count - a.count || a.name.localeCompare(b.name));
+    out.push(group);
+  }
+  const ok = out.every((g) => g.available >= g.required);
+  const missingText = out
+    .filter((g) => g.missing > 0)
+    .map((g) => {
+      const have = g.members.length > 0 ? g.members.map((m) => `${m.name}×${m.count}`).join('、') : '无';
+      return `${g.tag} 还缺 ${g.missing}（需要 ${g.required}，现有 ${have}，合计 ${g.available}；同类可混用也还差 ${g.missing}）`;
+    })
+    .join('；');
+  return { ok, groups: out, missingText };
+}
+
+export interface RecipeAssignResult {
+  recipe: any;
+  used: Record<string, number>;
+  mixed: boolean;
+}
+
+function isFilledCell(cell: any): boolean {
+  return cell != null && typeof cell.id === 'number' && cell.id >= 0;
+}
+
+export function formatUsedItems(used: Record<string, number>): string {
+  const parts = Object.entries(used).map(([name, count]) => `${name}×${count}`);
+  return parts.length > 0 ? parts.join('、') : '（无）';
+}
+
+/**
+ * 把配方里属于 family 的格子替换成背包里实际有的成员 id：每个 family 的格子
+ * 按剩余数量从多到少取（优先配方原本的代表物）。取不满返回 null。
+ */
+export function assignRecipeToInventory(
+  recipe: any,
+  inventory: Record<string, number>,
+  idToName: (id: number) => string | null,
+  nameToId: (name: string) => number | null,
+): RecipeAssignResult | null {
+  if (recipe == null) return null;
+  let clone: any;
+  try {
+    clone = JSON.parse(JSON.stringify(recipe));
+  } catch {
+    return null;
+  }
+  const pool = new Map<string, number>();
+  for (const [name, count] of Object.entries(inventory)) {
+    if (Number.isFinite(count) && count > 0) pool.set(name, Math.floor(count));
+  }
+  const used = new Map<string, number>();
+  const take = (name: string, n = 1): boolean => {
+    const have = pool.get(name) ?? 0;
+    if (have < n) return false;
+    pool.set(name, have - n);
+    used.set(name, (used.get(name) ?? 0) + n);
+    return true;
+  };
+  const assignCell = (cell: any): boolean => {
+    if (!isFilledCell(cell)) return true;
+    const originalName = idToName(cell.id);
+    const tag = originalName == null ? null : familyTagOf(originalName);
+    const need = typeof cell.count === 'number' && cell.count > 0 ? cell.count : 1;
+    if (tag == null) return take(originalName ?? '', need);
+    const candidates = [...pool.entries()]
+      .filter(([name, count]) => count > 0 && sameFamily(name, originalName as string))
+      .sort((a, b) => (a[0] === originalName ? -1 : b[0] === originalName ? 1 : 0) || b[1] - a[1] || a[0].localeCompare(b[0]));
+    const pick = candidates[0];
+    if (pick == null || !take(pick[0], need)) return false;
+    const id = nameToId(pick[0]);
+    if (id == null) return false;
+    cell.id = id;
+    return true;
+  };
+  if (Array.isArray(clone.inShape)) {
+    for (const row of clone.inShape) {
+      if (!Array.isArray(row)) continue;
+      for (const cell of row) if (!assignCell(cell)) return null;
+    }
+  } else if (Array.isArray(clone.ingredients)) {
+    for (const cell of clone.ingredients) if (!assignCell(cell)) return null;
+  } else {
+    return null;
+  }
+  const familyUsed = new Map<string, Set<string>>();
+  for (const name of used.keys()) {
+    const tag = familyTagOf(name);
+    if (tag == null) continue;
+    if (!familyUsed.has(tag)) familyUsed.set(tag, new Set());
+    (familyUsed.get(tag) as Set<string>).add(name);
+  }
+  const mixed = [...familyUsed.values()].some((set) => set.size > 1);
+  return { recipe: clone, used: Object.fromEntries(used), mixed };
+}
+
+export interface TagCraftOutcome {
+  ok: boolean;
+  detail: string;
+  mixed: boolean;
+}
+
+/**
+ * 用同类混用真去合成：只处理 2×2（不需要工作台）的配方，交给 `bot.craft`。
+ * 返回回执；调用方负责把 detail 写进 bot.output。
+ */
+export async function craftRecipeWithTags(
+  bot: any,
+  itemName: string,
+  num = 1,
+): Promise<TagCraftOutcome> {
+  const itemId = mc.getItemId(itemName);
+  const recipeInfos = itemId == null ? null : mc.getItemCraftingRecipes(itemName);
+  if (itemId == null || recipeInfos == null || recipeInfos.length === 0) {
+    return { ok: false, detail: `没有 ${itemName} 的合成配方。`, mixed: false };
+  }
+  const required = (recipeInfos[0]?.[0] ?? {}) as Record<string, number>;
+  const counts: Record<string, number> = world.getInventoryCounts(bot) ?? {};
+  const plan = planTagCraft(required, counts);
+  const bases: any[] = typeof bot?.recipesAll === 'function' ? (bot.recipesAll(itemId, null, null) ?? []) : [];
+  if (bases.length === 0) {
+    const needText = Object.entries(required).map(([n, c]) => `${n}×${c}`).join('、');
+    return {
+      ok: false,
+      detail:
+        `做不出 ${itemName}：这个配方要 3×3 工作台（或需要先放工作台）。` +
+        (plan.ok ? `材料按同类合计是够的（${plan.groups.map((g) => `${g.tag} 合计 ${g.available}/${g.required}`).join('、')}）。` : `还缺：${plan.missingText}。`) +
+        '请用 useBlock(type=crafting_table, input=…, output=…) 或先 placeHere 放下工作台。',
+      mixed: false,
+    };
+  }
+  const idToName = (id: number): string | null => mc.getItemName(id);
+  const nameToId = (name: string): number | null => mc.getItemId(name);
+  for (const base of bases) {
+    const assigned = assignRecipeToInventory(base, counts, idToName, nameToId);
+    if (assigned == null) continue;
+    const perCraft = Math.max(1, Math.floor(Number(base?.result?.count ?? 1)) || 1);
+    const runs = Math.max(1, Math.ceil(num / perCraft));
+    try {
+      await bot.craft(assigned.recipe, runs, null);
+    } catch (error: unknown) {
+      return {
+        ok: false,
+        detail: `${assigned.mixed ? '混用同类材料' : '用同一种材料'}合成 ${itemName} 时失败：${error instanceof Error ? error.message : String(error)}。`,
+        mixed: assigned.mixed,
+      };
+    }
+    return {
+      ok: true,
+      detail:
+        `${assigned.mixed ? '混用同类材料' : '用同一种材料'}合成了 ${itemName}×${runs * perCraft}` +
+        `（${formatUsedItems(assigned.used)}${assigned.mixed ? '，原版允许同类混用' : ''}）。`,
+      mixed: assigned.mixed,
+    };
+  }
+  return {
+    ok: false,
+    detail:
+      `做不出 ${itemName}：同类混用也凑不齐。` +
+      (plan.missingText !== ''
+        ? `缺：${plan.missingText}。`
+        : `配方需要 ${Object.entries(required).map(([n, c]) => `${n}×${c}`).join('、')}，背包里对不上（可能名字不同或不是同类）。`),
+    mixed: false,
+  };
+}
+
+/**
+ * 合成入口：先用原来的 skills.craftRecipe（支持工作台/精确配方），失败再走
+ * 同类标签混用。两个回执都会写进 bot.output，最后一行是明确结论。
+ */
+export async function craftSmartDetailed(
+  bot: any,
+  itemName: string,
+  num = 1,
+): Promise<{ ok: boolean; detail: string }> {
+  try {
+    if (await skills.craftRecipe(bot, itemName, num)) {
+      return { ok: true, detail: `合成 ${itemName} 成功（原配方）。` };
+    }
+  } catch (error: unknown) {
+    skills.log(bot, `craftRecipe 抛错：${error instanceof Error ? error.message : String(error)}`);
+  }
+  const outcome = await craftRecipeWithTags(bot, itemName, num);
+  return { ok: outcome.ok, detail: outcome.detail };
+}
+
+/** 布尔版：给 useBlock/runSkill 用（detail 写进 bot.output，runSkill 会带回）。 */
+export async function craftSmart(bot: any, itemName: string, num = 1): Promise<boolean> {
+  const outcome = await craftSmartDetailed(bot, itemName, num);
+  skills.log(bot, outcome.detail);
+  return outcome.ok;
+}
+
 const interactCommands: AgentCommand[] = [
   {
     name: '!useBlock',
@@ -1395,7 +1657,7 @@ const interactCommands: AgentCommand[] = [
       let crafted = await runSkill(
         agent.bot,
         lines,
-        () => skills.craftRecipe(agent.bot, wanted.name, wanted.count),
+        () => craftSmart(agent.bot, wanted.name, wanted.count),
         // 先不写死产出 X×N——真正进包多少，等这一步回来按实际账目写。
         `合成 ${wanted.name}`,
         `做不出 ${wanted.name}`,
@@ -1407,7 +1669,7 @@ const interactCommands: AgentCommand[] = [
         crafted = await runSkill(
           agent.bot,
           lines,
-          () => skills.craftRecipe(agent.bot, wanted.name, wanted.count),
+          () => craftSmart(agent.bot, wanted.name, wanted.count),
           `刷新背包后合成 ${wanted.name}`,
           `刷新背包后仍做不出 ${wanted.name}`,
         );
@@ -1532,12 +1794,13 @@ const interactCommands: AgentCommand[] = [
       await settleInventory(agent.bot, 3, 50);
       await settleInventory(agent.bot, 2, 40);
       const have = countInInventory(agent.bot, want.name);
-      let ok = await skills.craftRecipe(agent.bot, want.name, want.count);
-      if (!ok) {
+      let craftResult = await craftSmartDetailed(agent.bot, want.name, want.count);
+      if (!craftResult.ok) {
         // 真机：有材料却连续报缺，重启才同步。再给背包一次同步机会后重试一次。
         await settleInventory(agent.bot, 5, 80);
-        ok = await skills.craftRecipe(agent.bot, want.name, want.count);
+        craftResult = await craftSmartDetailed(agent.bot, want.name, want.count);
       }
+      const ok = craftResult.ok;
       await settleInventory(agent.bot, 3, 50);
       // 回执报实际进包多少，不报请求了多少；读不到就说读不到，不猜。
       const now = await countInInventoryWithSync(agent.bot, want.name, 1, 800);
@@ -1560,9 +1823,9 @@ const interactCommands: AgentCommand[] = [
         return '背包读不到，不能判断材料够不够；先把 stats 打出来核对，再决定怎么做。';
       }
       return renderReport(
-        [step(`做不出 ${want.name}×${want.count}`)],
-        `检查材料（现在给的是 ${itemText(parsedIn.items) || '空'}）够不够；` +
-          '如果 stats 里其实有材料，说明是客户端背包同步延迟——不要重复挖/丢材料，稍后用 stats 再核对一次；必要时重启 agent 后再试。' +
+        [step(`做不出 ${want.name}×${want.count}`), step(craftResult.detail)],
+        '同类材料（任何木板/原木/煤炭/羊毛）会按全背包合计、支持混用；上面已写明缺什么、现有多少。' +
+          '如果 stats 里其实有材料，可能是客户端背包同步延迟——不要重复挖/丢材料，稍后用 stats 再核对一次。' +
           `想知道这个物品怎么做、缺哪些材料，用 getCraftingPlan(targetItem="…")；只有 3×3 的配方才需要工作台（那时用 useBlock(type=crafting_table, …)）。` +
           `背包里现有 ${want.name}×${have}。`,
       );

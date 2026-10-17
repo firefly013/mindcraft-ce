@@ -230,6 +230,18 @@ export const TOOL_TEXT: Record<string, { description: string; params: Record<str
     description: '往下挖指定距离。碰到岩浆、水、或下方掉落 ≥4 格就停。',
     params: { distance: '往下挖的距离' },
   },
+  stairUp: {
+    description:
+      '垂直上行（台阶模式）：边挖开头顶/正前方、边跳上高一层的实心格；前方空着会用背包方块垫一步。适合从竖井/矿洞往上爬。' +
+      '水和岩浆会提前停；每步有进度回执，超时/被 Stop/保命打断会返回已完成格数。',
+    params: { distance: '想上升的格数，1~64' },
+  },
+  pillarUp: {
+    description:
+      '垂直上行（柱子模式）：原地跳起，在脚下垫一块方块把自己垫高。digDown 挖出的 1×1 竖井最适合用它爬回来。' +
+      '需要背包里有圆石/石头/泥土/木板/原木等可放置方块；头顶有水/岩浆或没方块时会明确报失败原因。',
+    params: { distance: '想垫高的格数，1~64' },
+  },
   goToSurface: {
     description: '回到头顶最高的方块（一般就是地面）。',
     params: {},
