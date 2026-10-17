@@ -504,6 +504,8 @@ export class MineflayerBody {
     private pickupBackoffUntil = 0;
     /** 模型动作已经请求时，拾取正在收手；期间不再启动新的拾取。 */
     private pickupAbortRequested = false;
+    /** 当前 pickup 寻路的即时取消回调；模型动作来时直接停 pathfinder。 */
+    private pickupCancel: (() => void) | null = null;
     /** 模型动作请求已经在路上时，禁止新的自动拾取抢身体。 */
     private modelActionRequested = false;
 
@@ -777,12 +779,23 @@ export class MineflayerBody {
      */
     private async yieldAutoPickupToModel(): Promise<void> {
         if (!this.pickingUp) return;
-        // 模型动作优先：标记拾取取消并立刻放行，不等待拾取任务收尾。
+        // 模型动作优先：标记取消并调用 pickup 自己的即时取消回调。
         // pickupAbortRequested 与 interrupt_code 不同：ActionManager.clearBotLogs
-        // 清掉 interrupt_code 也不会影响它；拾取自己的寻路循环每 50ms 会看到
-        // 并主动 pathfinder.stop()，不会和模型动作抢方向盘（Feedback #64）。
+        // 清掉 interrupt_code 也不会影响它；取消回调会立刻 pathfinder.stop()。
         this.pickupAbortRequested = true;
         this.requestInterrupt();
+        try {
+            this.pickupCancel?.();
+        } catch {
+            // 取消失败由 50ms 轮询兜底。
+        }
+        // 等 pickup 真的收手再放行：否则它可能在模型动作开始后补一刀
+        // pathfinder.stop()，把模型动作的寻路也停掉。正常情况下取消回调立即
+        // resolve，这里只等几毫秒；500ms 是事件循环被卡住时的兜底上限。
+        const deadline = Date.now() + 500;
+        while (this.pickingUp && Date.now() < deadline) {
+            await new Promise<void>((resolve) => setTimeout(resolve, 10));
+        }
     }
 
     clearBotLogs(): void {
@@ -1652,7 +1665,16 @@ export class MineflayerBody {
                 if (settled) return;
                 settled = true;
                 clearInterval(timer);
+                this.pickupCancel = null;
                 resolve(ok);
+            };
+            this.pickupCancel = () => {
+                try {
+                    this.bot.pathfinder?.stop?.();
+                } catch {
+                    // 停不下来也要按取消返回。
+                }
+                finish(false);
             };
             const timer: ReturnType<typeof setInterval> = setInterval(() => {
                 const timedOut = Date.now() - started >= timeoutMs;
@@ -1709,6 +1731,7 @@ export class MineflayerBody {
                 arrived = false;
             } finally {
                 this.pickingUp = false;
+                this.pickupCancel = null;
                 // 模型动作的抢占标志由拾取任务收尾时清掉，确保它至少被本次
                 // walkToPickup/gotoPickupInterruptibly 看到一次。
                 this.pickupAbortRequested = false;
