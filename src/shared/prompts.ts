@@ -229,6 +229,14 @@ export const TOOL_TEXT: Record<string, { description: string; params: Record<str
     description: '回到头顶最高的方块（一般就是地面）。',
     params: {},
   },
+  enterNether: {
+    description:
+      '自动从主世界进入下界：先检查背包，至少要有 10 块黑曜石和 1 个打火石；材料够时会自动选址、搭 4×5 下界门框（10 块黑曜石）、点燃，并走进传送门等维度切换。' +
+      '4×5 门框的四个角在施工时需要用常见方块（dirt / cobblestone / stone / netherrack 等，最多 4 个）垫住；垫块留在门角外侧，不影响点火和通行，已有实心门角会直接复用。' +
+      '**不会挖掉或覆盖任何已有方块**：目标格不是空气就换址，失败时保留已放的门框，回执会说明卡在哪一步。' +
+      '附近已有传送门时会直接尝试走进去。点火受危险操作闸门保护；如果回执说没授权，先调 allowDangerousOps(ops="ignite", calls=1) 再调本工具。',
+    params: {},
+  },
   useOn: {
     description: '对最近的某种目标使用（右键）指定工具。',
     params: { tool_name: '要用的工具名，不用工具就写 "hand"。', target: '目标：实体类型、方块类型，或 "nothing" 表示无目标。' },

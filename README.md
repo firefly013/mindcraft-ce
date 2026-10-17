@@ -29,6 +29,17 @@ npm start -- --profiles ./profiles/deepseek.json --mc-port 51234
 
 ---
 
+## 自动进入下界
+
+身体侧提供 `enterNether` 工具：模型会先检查背包里有没有至少 10 块黑曜石和 1 个打火石，然后自动选址、搭好 4×5 下界门框、点火，并走入传送门等待维度切换。4×5 门框的四个角在施工时会用背包里的常见方块（dirt / cobblestone 等，最多 4 个）垫住；垫块留在门角外侧，不影响点火和通行，已有实心门角会直接复用。
+
+- **不动现场**：只往空气里放黑曜石；目标格被占用就换址，不会挖掉或覆盖已有方块。中途失败会保留已放的门框，并在回执里说明卡在哪一步。
+- **复用已有入口**：附近已经有点燃的传送门时，直接尝试走进去。
+- **点火要授权**：点火仍受危险操作闸门保护。先调用 `allowDangerousOps`（`ops="ignite"`，建议 `calls=1`），再调用 `enterNether`。
+- **纯函数可测**：材料门槛、门框几何、选址预检都在 `src/body/library/nether_portal.ts`，单元测试见 `tests/nether_portal.test.ts`。
+
+---
+
 ## 网页控制台与 CLI
 
 `npm start` 后会自动打开 `http://localhost:8080`，和上游一样。

@@ -1,5 +1,6 @@
 import * as skills from '../library/skills.js';
 import * as world from '../library/world.js';
+import { enterNether } from '../library/nether_portal.js';
 import { markDiscarded } from '../auto_pickup.js';
 import { permits } from '../safety/permits.js';
 import { safeguards } from '../safety/safeguards.js';
@@ -349,6 +350,16 @@ export const actionsList: AgentCommand[] = [
         perform: runAsAction(async (agent: any) => {
             await skills.goToSurface(agent.bot);
         })
+    },
+    {
+        name: '!enterNether',
+        description: td('enterNether'),
+        params: {},
+        // 规划、放 10 块门框、点火、走门都要时间，但必须有尽头。
+        perform: runAsAction(async (agent: any) => {
+            const result = await enterNether(agent.bot);
+            skills.log(agent.bot, result.message);
+        }, 5)
     },
     {
         name: '!useOn',
