@@ -27,7 +27,7 @@ import {
   type SurvivalSignals,
 } from '../src/body/library/survival.js';
 import { survivalActionList, survivalQueryList, SURVIVAL_POLICY, SURVIVAL_TOOL_TEXT } from '../src/body/commands/survival.js';
-import { escapeWaterSkill, findNearestDrySpot, hasSupport, isInWater, isWaterBlockName } from '../src/body/library/survival.js';
+import { escapeWaterSkill, findNearestDrySpot, floatUpSkill, hasSupport, isInWater, isOnDryGround, isWaterBlockName, swimToward } from '../src/body/library/survival.js';
 import { createToolCatalog } from '../src/brain/tools/catalog.js';
 import { isActionTool, validateToolCall } from '../src/brain/tools/validate.js';
 import type { ToolDeclaration, ToolKind } from '../src/shared/tools.js';
@@ -450,25 +450,22 @@ describe('registry 接入契约（不依赖共享入口改动）', () => {
 });
 
 /**
- * 水中脱困：脚 water / 头 air 时用。
- * 用一个"湖到岸边"的假地图：x=0..1 是水，x>=2 是干燥平台（脚下石头）。
- * 假身体按 forward 每步 +0.6 格，用来验证手动游泳回退。
+ * 水中脱困（task-28）：方向只准向上/干岸，禁止更低水位；"已上岸"必须
+ * 脚/头不在水 + 脚下实心 + 连续确认；危险时先向上挖/上浮；回执带水位变化。
  */
-function fakeLakeBot(opts: { x?: number; inWater?: boolean } = {}) {
+function fakeLakeBot(opts: { x?: number } = {}) {
     const pos = new Vec3(opts.x ?? 0.5, 60, 0.5);
     const controls: Record<string, boolean> = {};
-    const blockAt = (p: any): { name: string; transparent?: boolean } => {
+    const blockAt = (p: any): { name: string } => {
         const x = Math.round(Number(p.x));
         const y = Math.round(Number(p.y));
         const z = Math.round(Number(p.z));
         if (z !== 0) return { name: 'air' };
         if (x <= 1) {
-            // 湖：脚/头是水，湖底是石头。
             if (y === 60 || y === 61) return { name: 'water' };
             if (y === 59) return { name: 'stone' };
             return { name: 'air' };
         }
-        // 干燥平台：脚/头空气、脚下石头。
         if (y === 60 || y === 61) return { name: 'air' };
         if (y === 59) return { name: 'stone' };
         return { name: 'air' };
@@ -481,12 +478,21 @@ function fakeLakeBot(opts: { x?: number; inWater?: boolean } = {}) {
         lookAt: () => Promise.resolve(),
         setControlState: (key: string, down: boolean) => {
             controls[key] = down;
-            // 假装按前进就朝 +x 游；jump 不改位置（只验证按键会被松开）。
             if (down && key === 'forward') pos.x = Math.round((pos.x + 0.6) * 10) / 10;
         },
         _controls: controls,
     };
     return bot;
+}
+
+/** 只按 map 读方块的假身体；map 缺省是 air。 */
+function mapBot(map: Record<string, string>, pos = new Vec3(0.5, 60, 0.5)) {
+    return {
+        entity: { position: pos, yaw: 0 },
+        interrupt_code: false,
+        output: '',
+        blockAt: (p: any) => ({ name: map[`${Math.round(Number(p.x))},${Math.round(Number(p.y))},${Math.round(Number(p.z))}`] ?? 'air' }),
+    };
 }
 
 describe('isWaterBlockName / isInWater / hasSupport', () => {
@@ -505,48 +511,195 @@ describe('isWaterBlockName / isInWater / hasSupport', () => {
     });
 });
 
-describe('findNearestDrySpot', () => {
-    it('从湖里找到 x=2 的干燥平台（最近一圈）', () => {
-        const spot = findNearestDrySpot(fakeLakeBot(), 16);
-        expect(spot).not.toBeNull();
-        expect(spot?.x).toBe(2);
-        expect(spot?.y).toBe(60);
-        expect(spot?.z).toBe(0);
+describe('isOnDryGround：硬校验（脚/头不在水 + 脚下实心）', () => {
+    it('脚/头空气、脚下实心 → true', () => {
+        expect(isOnDryGround(mapBot({ '0,60,0': 'air', '0,61,0': 'air', '0,59,0': 'stone' }))).toBe(true);
     });
 
-    it('全是水时返回 null，不硬编一个落脚点', () => {
-        const bot = fakeLakeBot();
-        bot.blockAt = (p: any) => (Math.round(Number(p.y)) <= 61 ? { name: 'water' } : { name: 'stone' });
+    it('脚在水里 / 头在水里 / 脚下是水 / 脚下是空气 → 都 false', () => {
+        expect(isOnDryGround(mapBot({ '0,60,0': 'water', '0,61,0': 'air', '0,59,0': 'stone' }))).toBe(false);
+        expect(isOnDryGround(mapBot({ '0,60,0': 'air', '0,61,0': 'water', '0,59,0': 'stone' }))).toBe(false);
+        expect(isOnDryGround(mapBot({ '0,60,0': 'air', '0,61,0': 'air', '0,59,0': 'water' }))).toBe(false);
+        expect(isOnDryGround(mapBot({ '0,60,0': 'air', '0,61,0': 'air', '0,59,0': 'air' }))).toBe(false);
+    });
+});
+
+describe('findNearestDrySpot：只向上/同层，绝不选更低水位', () => {
+    it('同层最近的干岸，waterRise=0', () => {
+        const bot = mapBot({ '2,60,0': 'air', '2,61,0': 'air', '2,59,0': 'stone' });
+        expect(findNearestDrySpot(bot, 16)).toMatchObject({ x: 2, y: 60, z: 0, waterRise: 0 });
+    });
+
+    it('★只有更低的水位（dy<0）时不返回，宁可报没找到', () => {
+        const bot = mapBot({ '2,59,0': 'air', '2,60,0': 'air', '2,58,0': 'stone' });
+        expect(findNearestDrySpot(bot, 16)).toBeNull();
+    });
+
+    it('同层没有时看上方，waterRise>0（抬高一级的干岸）', () => {
+        const bot = mapBot({ '2,60,0': 'stone', '2,61,0': 'air', '2,62,0': 'air' });
+        expect(findNearestDrySpot(bot, 16)).toMatchObject({ x: 2, y: 61, waterRise: 1 });
+    });
+
+    it('同层近岸优先于更高的岸', () => {
+        const bot = mapBot({
+            '2,60,0': 'air', '2,61,0': 'air', '2,59,0': 'stone',
+            '3,62,0': 'air', '3,63,0': 'air', '3,61,0': 'stone',
+        });
+        expect(findNearestDrySpot(bot, 16)).toMatchObject({ y: 60, waterRise: 0 });
+    });
+
+    it('全是水时返回 null', () => {
+        const bot = mapBot({});
+        bot.blockAt = (p: any) => ({ name: Number(p.y) <= 61 ? 'water' : 'stone' });
         expect(findNearestDrySpot(bot, 4)).toBeNull();
     });
 });
 
-describe('escapeWaterSkill', () => {
-    it('不在水里时直接说不用，不动手', async () => {
+describe('escapeWaterSkill：不再越逃越深 / 不再误报', () => {
+    it('不在水里时直接说不用', async () => {
         const bot = fakeLakeBot({ x: 5 });
         const text = await escapeWaterSkill(bot, { goTo: () => Promise.resolve(false), sleep: () => Promise.resolve() });
         expect(text).toContain('不在水里');
     });
 
-    it('寻路失败时手动朝干燥点游，上岸后松掉所有按键', async () => {
+    it('手动游上同层干岸：硬校验通过 + 回执带水位变化 + 松开所有按键', async () => {
         const bot = fakeLakeBot();
         const text = await escapeWaterSkill(bot, {
             goTo: () => Promise.resolve(false),
+            mineUp: () => Promise.resolve(false),
             sleep: () => Promise.resolve(),
             maxMs: 5000,
         });
-        expect(text).toContain('上岸');
-        expect(bot.entity.position.x).toBeGreaterThanOrEqual(2);
-        // 关键：不能留着 forward/jump 按着，否则会上岸后继续冲。
+        expect(text).toContain('已真正脱险');
+        expect(text).toContain('水位变化');
+        expect(text).not.toContain('没能脱险');
         expect(bot._controls['forward']).toBe(false);
         expect(bot._controls['jump']).toBe(false);
     });
 
-    it('16 格内没有干燥点时如实说明，并给替代做法', async () => {
+    it('★抬高一级的干岸：往上浮，回执显示水位上浮', async () => {
+        const pos = new Vec3(0.5, 60, 0.5);
+        const controls: Record<string, boolean> = {};
+        const blockAt = (p: any): { name: string } => {
+            const x = Math.round(Number(p.x));
+            const y = Math.round(Number(p.y));
+            const z = Math.round(Number(p.z));
+            if (z !== 0) return { name: 'air' };
+            if (x <= 1) {
+                if (y === 60 || y === 61) return { name: 'water' };
+                if (y === 59) return { name: 'stone' };
+                return { name: 'air' };
+            }
+            if (y <= 60) return { name: 'stone' };
+            return { name: 'air' };
+        };
+        const bot: any = {
+            entity: { position: pos, yaw: 0 },
+            interrupt_code: false,
+            output: '',
+            blockAt,
+            lookAt: () => Promise.resolve(),
+            setControlState: (key: string, down: boolean) => {
+                controls[key] = down;
+                if (down && key === 'forward') pos.x = Math.round((pos.x + 0.6) * 10) / 10;
+                if (down && key === 'jump') pos.y = Math.round((pos.y + 0.5) * 10) / 10;
+            },
+            _controls: controls,
+        };
+        const text = await escapeWaterSkill(bot, {
+            goTo: () => Promise.resolve(false),
+            mineUp: () => Promise.resolve(false),
+            sleep: () => Promise.resolve(),
+            maxMs: 5000,
+        });
+        expect(text).toContain('已真正脱险');
+        expect(text).toContain('上浮');
+        expect(pos.y).toBeGreaterThan(60);
+    });
+
+    it('★始终没上岸：明确说 没能脱险，绝不假报，并给出水位变化', async () => {
         const bot = fakeLakeBot();
-        bot.blockAt = (p: any) => (Math.round(Number(p.y)) <= 61 ? { name: 'water' } : { name: 'stone' });
-        const text = await escapeWaterSkill(bot, { goTo: () => Promise.resolve(false), sleep: () => Promise.resolve() });
-        expect(text).toContain('没找到');
-        expect(text).toContain('placeBlock');
+        bot.blockAt = (p: any) => ({ name: Number(p.y) <= 61 ? 'water' : 'stone' });
+        const text = await escapeWaterSkill(bot, {
+            goTo: () => Promise.resolve(false),
+            mineUp: () => Promise.resolve(false),
+            sleep: () => Promise.resolve(),
+            maxMs: 200,
+        });
+        expect(text).toContain('没能脱险');
+        expect(text).toContain('水位变化');
+        expect(text).not.toContain('已真正脱险');
+        expect(text).toContain('不要往下游');
+    });
+});
+
+describe('swimToward：必须连续确认，单次瞬时干地不算数', () => {
+    it('只干一瞬间、随后仍在水里 → escaped=false', async () => {
+        let first = true;
+        const bot: any = {
+            entity: { position: new Vec3(0.5, 60, 0.5), yaw: 0 },
+            interrupt_code: false,
+            setControlState: () => undefined,
+            lookAt: () => Promise.resolve(),
+            blockAt: (p: any) => {
+                const y = Math.round(Number(p.y));
+                if (y === 60) {
+                    if (first) { first = false; return { name: 'air' }; }
+                    return { name: 'water' };
+                }
+                if (y === 61) return { name: 'air' };
+                if (y === 59) return { name: 'stone' };
+                return { name: 'air' };
+            },
+        };
+        const result = await swimToward(bot, { x: 0, y: 60, z: 0 }, {
+            sleep: () => Promise.resolve(),
+            now: () => Date.now(),
+            maxMs: 300,
+            mineUp: () => Promise.resolve(false),
+            confirmTicks: 3,
+            startY: 60,
+        });
+        expect(result.escaped).toBe(false);
+    });
+});
+
+describe('floatUpSkill：危险时先向上挖，不往前下方游', () => {
+    it('头顶实心 → 向上挖开，且从不按 forward', async () => {
+        const controls: Record<string, boolean> = {};
+        const mineCalls: Array<{ x: number; y: number; z: number }> = [];
+        const forwardPresses = { n: 0 };
+        let ceiling = true;
+        const bot: any = {
+            entity: { position: new Vec3(0.5, 60, 0.5), yaw: 0 },
+            interrupt_code: false,
+            blockAt: (p: any) => {
+                const y = Math.round(Number(p.y));
+                const z = Math.round(Number(p.z));
+                if (z !== 0) return { name: 'air' };
+                if (y === 60) return { name: 'water' };
+                if (y === 62 && ceiling) return { name: 'stone' };
+                if (y === 59) return { name: 'stone' };
+                return { name: 'air' };
+            },
+            setControlState: (key: string, down: boolean) => {
+                controls[key] = down;
+                if (key === 'forward' && down) forwardPresses.n += 1;
+            },
+        };
+        const res = await floatUpSkill(bot, {
+            sleep: () => Promise.resolve(),
+            now: () => Date.now(),
+            maxMs: 50,
+            mineUp: (_b, x, y, z) => {
+                mineCalls.push({ x, y, z });
+                ceiling = false;
+                return Promise.resolve(true);
+            },
+        });
+        expect(mineCalls.length).toBeGreaterThan(0);
+        expect(mineCalls[0].y).toBe(62);
+        expect(forwardPresses.n).toBe(0);
+        expect(res.ok).toBe(false);
     });
 });

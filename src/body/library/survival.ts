@@ -717,6 +717,11 @@ function isAirBlockName(name: unknown): boolean {
     return name === 'air' || name === 'cave_air' || name === 'void_air';
 }
 
+/** 实心方块：不是空气、不是水（岩浆也当实心/危险，别去挖）。 */
+function isSolidBlockName(name: unknown): boolean {
+    return typeof name === 'string' && !isAirBlockName(name) && !isWaterBlockName(name);
+}
+
 /** 读某一格的方块名（读不到返回 null）。 */
 function blockNameAtSafe(bot: any, x: number, y: number, z: number): string | null {
     try {
@@ -727,21 +732,29 @@ function blockNameAtSafe(bot: any, x: number, y: number, z: number): string | nu
     }
 }
 
+function botFeet(bot: any): { x: number; y: number; z: number } | null {
+    const p = bot?.entity?.position;
+    if (p == null) return null;
+    return { x: Math.floor(p.x), y: Math.floor(p.y), z: Math.floor(p.z) };
+}
+
+function botY(bot: any): number | null {
+    const y = bot?.entity?.position?.y;
+    return typeof y === 'number' && Number.isFinite(y) ? y : null;
+}
+
 /** 脚或头在水里就算卡水里。 */
 export function isInWater(bot: any): boolean {
-    const p = bot?.entity?.position;
-    if (p == null) return false;
-    const x = Math.floor(p.x);
-    const y = Math.floor(p.y);
-    const z = Math.floor(p.z);
-    return isWaterBlockName(blockNameAtSafe(bot, x, y, z)) || isWaterBlockName(blockNameAtSafe(bot, x, y + 1, z));
+    const f = botFeet(bot);
+    if (f == null) return false;
+    return isWaterBlockName(blockNameAtSafe(bot, f.x, f.y, f.z)) || isWaterBlockName(blockNameAtSafe(bot, f.x, f.y + 1, f.z));
 }
 
 /** 脚下有实体支撑（不是空气/水/岩浆）。 */
 export function hasSupport(bot: any): boolean {
-    const p = bot?.entity?.position;
-    if (p == null) return false;
-    const below = blockNameAtSafe(bot, Math.floor(p.x), Math.floor(p.y) - 1, Math.floor(p.z));
+    const f = botFeet(bot);
+    if (f == null) return false;
+    const below = blockNameAtSafe(bot, f.x, f.y - 1, f.z);
     return below != null && !isAirBlockName(below) && !isWaterBlockName(below) && below !== 'lava';
 }
 
@@ -756,10 +769,22 @@ export function isDryStandableAt(bot: any, x: number, y: number, z: number): boo
     return true;
 }
 
-export interface DrySpot { x: number; y: number; z: number; distance: number; }
+/**
+ * **硬校验**是否真的站在干地上：脚/头都必须是非水的可通行方块（空气），脚下必须实心。
+ * 只读一次；"连续确认"由调用方负责（防止用一次瞬时读数误报脱险）。
+ */
+export function isOnDryGround(bot: any): boolean {
+    const f = botFeet(bot);
+    if (f == null) return false;
+    return isDryStandableAt(bot, f.x, f.y, f.z);
+}
+
+export interface DrySpot { x: number; y: number; z: number; distance: number; waterRise: number; }
 
 /**
- * 最近的干燥可站立点：按水平半径一圈圈向外找，y 只搜脚下 -2~+3，不往深水里钻。
+ * 最近的干燥落脚点。**只接受不低于当前水位的点（dy >= 0），绝不选更低的水位**：
+ *   1) 先找同一层（dy=0）最近的干岸；
+ *   2) 没有再看上方 dy=1..6，越近 / 越低（别一下冲到高处）的优先。
  */
 export function findNearestDrySpot(bot: any, radius = 16): DrySpot | null {
     const p = bot?.entity?.position;
@@ -767,23 +792,32 @@ export function findNearestDrySpot(bot: any, radius = 16): DrySpot | null {
     const bx = Math.floor(p.x);
     const by = Math.floor(p.y);
     const bz = Math.floor(p.z);
-    for (let r = 1; r <= radius; r++) {
+    const shell = (r: number, dyMin: number, dyMax: number): DrySpot | null => {
         let best: DrySpot | null = null;
-        let bestD = Number.POSITIVE_INFINITY;
         for (let dx = -r; dx <= r; dx++) {
             for (let dz = -r; dz <= r; dz++) {
                 if (Math.max(Math.abs(dx), Math.abs(dz)) !== r) continue;
-                for (let dy = -2; dy <= 3; dy++) {
+                for (let dy = dyMin; dy <= dyMax; dy++) {
                     const x = bx + dx;
                     const y = by + dy;
                     const z = bz + dz;
                     if (!isDryStandableAt(bot, x, y, z)) continue;
-                    const d = Math.hypot(x + 0.5 - p.x, y - p.y, z + 0.5 - p.z);
-                    if (d < bestD) { bestD = d; best = { x, y, z, distance: Math.round(d * 10) / 10 }; }
+                    const score = Math.hypot(x + 0.5 - p.x, z + 0.5 - p.z) + dy * 0.25;
+                    if (best == null || score < best.distance) {
+                        best = { x, y, z, distance: Math.round(score * 10) / 10, waterRise: dy };
+                    }
                 }
             }
         }
-        if (best != null) return best;
+        return best;
+    };
+    for (let r = 1; r <= radius; r++) {
+        const sameLevel = shell(r, 0, 0);
+        if (sameLevel != null) return sameLevel;
+    }
+    for (let r = 1; r <= radius; r++) {
+        const above = shell(r, 1, 6);
+        if (above != null) return above;
     }
     return null;
 }
@@ -796,79 +830,242 @@ function posText(bot: any): string {
 
 export interface EscapeWaterDeps {
     goTo?: (bot: any, x: number, y: number, z: number, closeness: number) => Promise<boolean>;
+    /** 向上挖开实心方块（默认 skills.mineBlockAt）。 */
+    mineUp?: (bot: any, x: number, y: number, z: number) => Promise<boolean>;
     sleep?: (ms: number) => Promise<void>;
     now?: () => number;
     maxMs?: number;
+    /** 需要连续几次"干地 + 没沉到起点水位以下"才判定脱险（默认 3）。 */
+    confirmTicks?: number;
 }
 
-/** 手动朝目标游/跳：持续按 forward + jump（上浮/爬上台阶），直到上岸或卡住。 */
+/** 连续确认：连续 needed 次都满足干地硬校验且 y 没沉到起点以下。 */
+async function confirmDryGround(
+    bot: any,
+    opts: { sleep: (ms: number) => Promise<void>; startY: number | null; needed: number },
+): Promise<boolean> {
+    let streak = 0;
+    const cap = opts.needed + 2;
+    for (let i = 0; i < cap; i++) {
+        if (bot?.interrupt_code === true) return false;
+        const y = botY(bot);
+        const lowered = opts.startY != null && y != null && y < opts.startY - 0.5;
+        if (isOnDryGround(bot) && !lowered) {
+            streak += 1;
+            if (streak >= opts.needed) return true;
+        } else {
+            streak = 0;
+        }
+        await opts.sleep(120);
+    }
+    return false;
+}
+
+/**
+ * 头顶/头位被实心挡住就向上挖开一格（先头顶、再头）。返回 true 表示这一轮挖了。
+ */
+async function openAirAbove(bot: any, mineUp: (bot: any, x: number, y: number, z: number) => Promise<boolean>): Promise<boolean> {
+    const f = botFeet(bot);
+    if (f == null) return false;
+    const targets: Array<{ x: number; y: number; z: number }> = [
+        { x: f.x, y: f.y + 2, z: f.z },
+        { x: f.x, y: f.y + 1, z: f.z },
+    ];
+    for (const t of targets) {
+        if (isSolidBlockName(blockNameAtSafe(bot, t.x, t.y, t.z))) {
+            try {
+                return await mineUp(bot, t.x, t.y, t.z);
+            } catch {
+                return false;
+            }
+        }
+    }
+    return false;
+}
+
+/**
+ * 手动朝目标游/跳：**永远按 jump 上浮**，只在目标不低于当前位置时才按 forward；
+ * 头上有实心先向上挖。脱险必须连续 confirmTicks 次满足"干地 + 水位没下降"。
+ */
 export async function swimToward(
     bot: any,
     target: { x: number; y: number; z: number },
-    deps: Required<Pick<EscapeWaterDeps, 'sleep' | 'now'>> & { maxMs: number },
+    deps: Required<Pick<EscapeWaterDeps, 'sleep' | 'now'>> & {
+        maxMs: number;
+        mineUp?: EscapeWaterDeps['mineUp'];
+        confirmTicks?: number;
+        startY?: number | null;
+    },
 ): Promise<{ escaped: boolean; reason: string }> {
     const { sleep, now, maxMs } = deps;
     if (typeof bot?.setControlState !== 'function') return { escaped: false, reason: '身体还没就绪，按不了移动键' };
+    const mineUp = deps.mineUp ?? ((b: any, x: number, y: number, z: number) => skills.mineBlockAt(b, x, y, z));
+    const needed = Math.max(1, deps.confirmTicks ?? 3);
+    const startY = deps.startY ?? botY(bot);
     const start = now();
     let lastProgressAt = start;
     let last = { x: bot?.entity?.position?.x ?? 0, z: bot?.entity?.position?.z ?? 0 };
     const look = new Vec3(target.x + 0.5, target.y + 0.5, target.z + 0.5);
+    let dryStreak = 0;
     let iterations = 0;
     try {
         while (now() - start < maxMs && iterations++ < 400) {
             if (bot?.interrupt_code === true) return { escaped: false, reason: '被中断' };
-            if (!isInWater(bot) && hasSupport(bot)) return { escaped: true, reason: '上岸成功' };
-            try { await bot.lookAt(look, true); } catch { /* 转不过视角也继续按键 */ }
-            bot.setControlState('forward', true);
+            const here = bot?.entity?.position ?? { x: last.x, y: 0, z: last.z };
+            const currentY = botY(bot);
+            const lowered = startY != null && currentY != null && currentY < startY - 0.5;
+            if (isOnDryGround(bot) && !lowered) {
+                dryStreak += 1;
+                if (dryStreak >= needed) return { escaped: true, reason: `上岸成功（连续 ${needed} 次确认）` };
+                await sleep(100);
+                continue;
+            }
+            dryStreak = 0;
+            // 头上有实心先向上挖，绝不继续往下游。
+            await openAirAbove(bot, mineUp);
             bot.setControlState('jump', true);
+            if (lowered) {
+                // 已经沉过起点：只上浮，视线朝上，绝不按前进。
+                try { await bot.lookAt(new Vec3(here.x, (currentY ?? 0) + 3, here.z), true); } catch { /* 转不过视角也继续 */ }
+                bot.setControlState('forward', false);
+            } else {
+                try { await bot.lookAt(look, true); } catch { /* 转不过视角也继续按键 */ }
+                const targetNotBelow = target.y >= (currentY ?? target.y);
+                bot.setControlState('forward', targetNotBelow);
+                if (!targetNotBelow) bot.setControlState('back', false);
+            }
             await sleep(100);
-            const here = bot?.entity?.position ?? { x: last.x, z: last.z };
-            const moved = Math.hypot((here.x ?? 0) - last.x, (here.z ?? 0) - last.z);
-            if (moved > 0.2) { lastProgressAt = now(); last = { x: here.x, z: here.z }; }
-            else if (now() - lastProgressAt > 3000) return { escaped: false, reason: '朝岸边游了但 3 秒没有进展（可能被岸壁/方块挡住）' };
+            const after = bot?.entity?.position ?? { x: last.x, z: last.z };
+            const moved = Math.hypot((after.x ?? 0) - last.x, (after.z ?? 0) - last.z);
+            if (moved > 0.2) {
+                lastProgressAt = now();
+                last = { x: after.x, z: after.z };
+            } else if (now() - lastProgressAt > 3000) {
+                return { escaped: false, reason: '朝岸边游了但 3 秒没有进展（可能被岸壁/方块挡住）' };
+            }
         }
     } finally {
         for (const key of ['forward', 'jump', 'sprint']) {
             try { bot.setControlState(key, false); } catch { /* 尽力松手 */ }
         }
     }
-    if (!isInWater(bot) && hasSupport(bot)) return { escaped: true, reason: '上岸成功' };
+    const endY = botY(bot);
+    const lowered = startY != null && endY != null && endY < startY - 0.5;
+    if (isOnDryGround(bot) && !lowered) return { escaped: true, reason: '上岸成功' };
     return { escaped: false, reason: `游了 ${Math.round((now() - start) / 1000)} 秒还没上岸` };
 }
 
 /**
- * 水中脱困：先找 16 格内最近的干燥落脚点，寻路过去；失败就手动朝那个方向
- * 游/跳。全过程给明确回执（起点、目标、寻路为什么失败、最后到没到岸）。
+ * 危险 / 无干岸时先保命：向上挖开实心、持续上浮到空气，不往前下方游。
+ * 返回是否连续确认到了干地。
+ */
+export async function floatUpSkill(
+    bot: any,
+    deps: {
+        sleep: (ms: number) => Promise<void>;
+        now: () => number;
+        maxMs?: number;
+        mineUp?: EscapeWaterDeps['mineUp'];
+        confirmTicks?: number;
+        startY?: number | null;
+    },
+): Promise<{ ok: boolean; reason: string }> {
+    const sleep = deps.sleep;
+    const now = deps.now;
+    const maxMs = deps.maxMs ?? 6000;
+    const mineUp = deps.mineUp ?? ((b: any, x: number, y: number, z: number) => skills.mineBlockAt(b, x, y, z));
+    const needed = Math.max(1, deps.confirmTicks ?? 3);
+    const startY = deps.startY ?? botY(bot);
+    const start = now();
+    let dryStreak = 0;
+    let iterations = 0;
+    try {
+        while (now() - start < maxMs && iterations++ < 300) {
+            if (bot?.interrupt_code === true) return { ok: false, reason: '被中断' };
+            const currentY = botY(bot);
+            const lowered = startY != null && currentY != null && currentY < startY - 0.5;
+            if (isOnDryGround(bot) && !lowered) {
+                dryStreak += 1;
+                if (dryStreak >= needed) return { ok: true, reason: `上浮到空气并站稳（连续 ${needed} 次确认）` };
+                await sleep(120);
+                continue;
+            }
+            dryStreak = 0;
+            const dug = await openAirAbove(bot, mineUp);
+            if (!dug) bot.setControlState('jump', true);
+            await sleep(150);
+        }
+    } finally {
+        for (const key of ['forward', 'jump', 'sprint']) {
+            try { bot.setControlState(key, false); } catch { /* 尽力松手 */ }
+        }
+    }
+    return { ok: false, reason: '向上挖/上浮了但还没到干地' };
+}
+
+/**
+ * 水中脱困：优先同层 / 上方的最近干岸（**绝不选更低水位**）；寻路失败就手动游/跳，
+ * 全程只向上使劲；无法快速上岸时先向上挖 / 上浮到空气。回执带起点 / 终点 /
+ * 水位变化 / 是否通过硬校验。
  */
 export async function escapeWaterSkill(bot: any, deps: EscapeWaterDeps = {}): Promise<string> {
     const goTo = deps.goTo ?? ((b: any, x: number, y: number, z: number, c: number) => skills.goToPosition(b, x, y, z, c));
+    const mineUp = deps.mineUp ?? ((b: any, x: number, y: number, z: number) => skills.mineBlockAt(b, x, y, z));
     const sleep = deps.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
     const now = deps.now ?? Date.now;
     const maxMs = deps.maxMs ?? 12000;
+    const needed = Math.max(1, deps.confirmTicks ?? 3);
     if (!isInWater(bot)) {
         return logLine(bot, '你不在水里（脚/头都不是水），不用 escapeWater。要回地面可以用 goToSurface。');
     }
     const start = posText(bot);
-    const spot = findNearestDrySpot(bot, 16);
-    if (spot == null) {
-        return logLine(bot, '在水里，而且 16 格内没找到"脚/头是空气、脚下实心"的干燥落脚点。先朝任意岸边游，或贴着实心墙用 placeBlock 垫脚（placeHere 在水里没有支撑会 NoPath）。');
-    }
-    let pathError = '';
-    try {
-        const ok = await goTo(bot, spot.x, spot.y, spot.z, 1);
-        if (ok && !isInWater(bot)) {
-            return logLine(bot, `寻路上岸成功：从 ${start} 到了干燥落脚点 (${spot.x},${spot.y},${spot.z})（离水边约 ${spot.distance} 格）。`);
-        }
-    } catch (error: unknown) {
-        pathError = error instanceof Error ? error.message : String(error);
-    }
-    const swim = await swimToward(bot, spot, { sleep, now, maxMs });
-    if (swim.escaped) {
-        return logLine(bot, `寻路${pathError === '' ? '没走通' : `失败（${pathError}）`}，改为手动朝 (${spot.x},${spot.y},${spot.z}) 游/跳：${swim.reason}。现在在 ${posText(bot)}，脚下有支撑。`);
-    }
-    return logLine(bot, `寻路和手动游都没能上岸（${swim.reason}）。最近干燥点 (${spot.x},${spot.y},${spot.z})，现在在 ${posText(bot)}。可以朝岸边再试一次 escapeWater，或贴着实心墙用 placeBlock 垫脚（需要相邻支撑）。`);
-}
+    const startY = botY(bot);
+    const receipt = (how: string): string => {
+        const endY = botY(bot);
+        const delta = startY != null && endY != null ? Math.round((endY - startY) * 10) / 10 : null;
+        const riseText = delta == null ? '未知' : `${delta >= 0 ? '+' : ''}${delta}（${delta > 0 ? '上浮' : delta < 0 ? '下沉' : '未变'}）`;
+        return `已真正脱险（硬校验：脚/头不在水 + 脚下实心 + 连续 ${needed} 次确认）：${how}，起点 ${start} → ${posText(bot)}，水位变化 y ${riseText}。`;
+    };
 
+    const spot = findNearestDrySpot(bot, 16);
+    let pathError = '';
+    if (spot != null) {
+        try {
+            const ok = await goTo(bot, spot.x, spot.y, spot.z, 1);
+            if (ok && (await confirmDryGround(bot, { sleep, startY, needed }))) {
+                return logLine(bot, receipt(`寻路到干岸 (${spot.x},${spot.y},${spot.z})`));
+            }
+        } catch (error: unknown) {
+            pathError = error instanceof Error ? error.message : String(error);
+        }
+        const swim = await swimToward(bot, spot, { sleep, now, maxMs, mineUp, confirmTicks: needed, startY });
+        if (swim.escaped) {
+            return logLine(bot, receipt(`寻路${pathError === '' ? '没走通' : `失败（${pathError}）`}后手动游/跳，${swim.reason}`));
+        }
+    }
+
+    const float = await floatUpSkill(bot, {
+        sleep,
+        now,
+        maxMs: Math.max(4000, Math.min(maxMs, 8000)),
+        mineUp,
+        confirmTicks: needed,
+        startY,
+    });
+    if (float.ok) {
+        return logLine(bot, receipt(`无干岸，改为向上挖/上浮，${float.reason}`));
+    }
+
+    const endY = botY(bot);
+    const delta = startY != null && endY != null ? Math.round((endY - startY) * 10) / 10 : null;
+    const riseText = delta == null ? '未知' : `${delta >= 0 ? '+' : ''}${delta}（${delta > 0 ? '上浮' : delta < 0 ? '下沉' : '未变'}）`;
+    return logLine(
+        bot,
+        `没能脱险：${spot == null ? '16 格内没找到"脚/头空气、脚下实心"的干岸' : `最近干岸 (${spot.x},${spot.y},${spot.z}) 到不了`}；` +
+            `向上挖/上浮也没找到空气（${float.reason}）。起点 ${start}，现在 ${posText(bot)}，水位变化 y ${riseText}；` +
+            '硬校验仍未上岸（脚/头仍在水里或脚下没有实心）。**继续向上挖 / 贴墙 placeBlock 垫脚，不要往下游**；也可以朝岸边再试一次 escapeWater。',
+    );
+}
 
 // ---------------------------------------------------------------
 // task-13：流体源头搜索与水桶装填。
