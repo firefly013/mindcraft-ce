@@ -488,8 +488,10 @@ export async function makeObsidian(bot: any): Promise<MakeObsidianResult> {
     let attempts = 0;
     const maxAttempts = need * 4 + 12;
     let waterIndex = 0;
+    let dangerStop = false;
+    let lastSafeStand: Point | null = null;
 
-    while (produced < need && attempts < maxAttempts) {
+    while (!dangerStop && produced < need && attempts < maxAttempts) {
       attempts++;
       const counts = inventoryCounts(bot);
       produced = Math.max(produced, Math.max(0, obsidianCount(counts) - before));
@@ -525,6 +527,25 @@ export async function makeObsidian(bot: any): Promise<MakeObsidianResult> {
         continue;
       }
 
+      const feetBeforePour = (() => {
+        try {
+          const p: any = world.getPosition(bot);
+          return { x: Number(p?.x ?? target.stand.x), y: Number(p?.y ?? target.stand.y), z: Number(p?.z ?? target.stand.z) };
+        } catch {
+          return target.stand;
+        }
+      })();
+      if (isUnderfootOrSupport(target.liquid, feetBeforePour)) {
+        failures.push('拒绝浇筑/挖掘 ' + formatPoint(target.liquid) + '：它在你脚下或承重块下。下一步：换一块岩浆源，或先 placeBlock 垫到安全站位 ' + formatPoint(target.stand) + ' 后重试 makeObsidian。');
+        continue;
+      }
+      const lavaDistanceBeforePour = nearestLavaDistance(probe, feetBeforePour, 3);
+      if (lavaDistanceBeforePour < 2) {
+        failures.push('拒绝浇筑/挖掘 ' + formatPoint(target.liquid) + '：你离岩浆只有 ' + String(Math.round(lavaDistanceBeforePour * 10) / 10) + ' 格，小于 2。下一步：goToCoordinates' + formatPoint(target.stand) + ' 后重试 makeObsidian。');
+        continue;
+      }
+      lastSafeStand = target.stand;
+
       const lavaBlock = blockAtPoint(bot, target.liquid);
       if (lavaBlock == null || lavaBlock.name !== 'lava' || (lavaBlock.metadata != null && lavaBlock.metadata !== 0)) {
         failures.push('岩浆源 ' + formatPoint(target.liquid) + ' 已变化（读到 ' + String(lavaBlock?.name ?? '未知') + '），跳过。');
@@ -550,6 +571,27 @@ export async function makeObsidian(bot: any): Promise<MakeObsidianResult> {
         continue;
       }
 
+      const feetBeforeMine = (() => {
+        try {
+          const p: any = world.getPosition(bot);
+          return { x: Number(p?.x ?? target.stand.x), y: Number(p?.y ?? target.stand.y), z: Number(p?.z ?? target.stand.z) };
+        } catch {
+          return target.stand;
+        }
+      })();
+      if (isUnderfootOrSupport(target.liquid, feetBeforeMine)) {
+        failures.push('拒绝挖掘 ' + formatPoint(target.liquid) + '：黑曜石在脚下或承重块下。下一步：换一块岩浆源，或先 placeBlock 垫到安全站位 ' + formatPoint(target.stand) + ' 后重试 makeObsidian。');
+        continue;
+      }
+      if (!isSafeGroundAt(probe, feetBeforeMine)) {
+        const retreat = findRetreatStand(probe, feetBeforeMine, 4);
+        if (retreat != null) await goToStand(bot, retreat);
+        failures.push('挖前检测到脚下/岩浆危险，已停手' + (retreat == null ? '，但找不到安全撤退点' : '并后撤到 ' + formatPoint(retreat)) + '。下一步：goToCoordinates' + formatPoint(retreat ?? target.stand) + ' 后重试 makeObsidian。');
+        dangerStop = true;
+        break;
+      }
+      lastSafeStand = target.stand;
+
       const beforeMine = obsidianCount(inventoryCounts(bot));
       const equipped = await skills.equip(bot, 'diamond_pickaxe');
       if (!equipped) {
@@ -568,15 +610,43 @@ export async function makeObsidian(bot: any): Promise<MakeObsidianResult> {
       }
       mined.push(target.liquid);
       produced = Math.max(produced, obsidianCount(inventoryCounts(bot)) - before);
+
+      const feetAfterMine = (() => {
+        try {
+          const p: any = world.getPosition(bot);
+          return { x: Number(p?.x ?? target.stand.x), y: Number(p?.y ?? target.stand.y), z: Number(p?.z ?? target.stand.z) };
+        } catch {
+          return target.stand;
+        }
+      })();
+      if (!isSafeGroundAt(probe, feetAfterMine)) {
+        const retreat = findRetreatStand(probe, feetAfterMine, 4);
+        const retreated = retreat == null ? false : await goToStand(bot, retreat);
+        failures.push('挖完 ' + formatPoint(target.liquid) + ' 后检测到脚下/岩浆危险，已立即停手' + (retreat == null ? '，但找不到安全撤退点' : (retreated ? '并后撤到 ' + formatPoint(retreat) : '，后撤到 ' + formatPoint(retreat) + ' 失败')) + '。下一步：goToCoordinates' + formatPoint(retreat ?? target.stand) + ' 后重试 makeObsidian。');
+        dangerStop = true;
+        break;
+      }
+      lastSafeStand = target.stand;
     }
 
+    const nextTarget = lavaTargets.find((candidate) => !usedLava.has(pointKey(candidate.liquid))) ?? null;
     if (produced >= need) {
-      return { ok: true, produced, message: successReceipt(before, produced, mined, kit) };
+      const message =
+        successReceipt(before, produced, mined, kit) +
+        (nextTarget == null
+          ? '\n不要再走向岩浆边缘；附近没有更多候选岩浆源。'
+          : '\n不要再走向岩浆边缘；下一块可挖候选：岩浆 ' + formatPoint(nextTarget.liquid) + '，安全站位 ' + formatPoint(nextTarget.stand) + '。');
+      return { ok: true, produced, message };
     }
+    const nextStep = dangerStop
+      ? '已停手/后撤到 ' + (lastSafeStand == null ? '安全干燥点' : formatPoint(lastSafeStand)) + '；先 goToCoordinates 到该安全点，确认离岩浆≥2 再决定是否重试 makeObsidian。'
+      : nextTarget == null
+        ? '没有更多安全候选；先 goToCoordinates 到干燥安全点，补给后重试 makeObsidian。'
+        : '下一块候选：岩浆 ' + formatPoint(nextTarget.liquid) + '，安全站位 ' + formatPoint(nextTarget.stand) + '；先 goToCoordinates' + formatPoint(nextTarget.stand) + ' 再重试 makeObsidian。';
     return {
       ok: false,
       produced,
-      message: failureReceipt(before, produced, mined, failures, '阶段：浇筑/挖取循环结束，未达到 10 块；下面保留失败坐标和原因。', '先按上面失败坐标 mineBlock/collectBlocks 收走已生成 obsidian；补水后换一个安全岩浆源重试 makeObsidian。'),
+      message: failureReceipt(before, produced, mined, failures, '阶段：浇筑/挖取循环结束，未达到 10 块；下面保留失败坐标和原因。', nextStep),
     };
   } catch (error: unknown) {
     const detail = error instanceof Error ? error.message : String(error);
@@ -1133,4 +1203,57 @@ export function chooseLavaScaffoldMaterial(
     if (Number.isFinite(raw) && Math.floor(raw) >= 1) return material;
   }
   return null;
+}
+
+export function isUnderfootOrSupport(target: Point, feet: Point): boolean {
+  const fx = Math.floor(feet.x);
+  const fy = Math.floor(feet.y);
+  const fz = Math.floor(feet.z);
+  const tx = Math.floor(target.x);
+  const ty = Math.floor(target.y);
+  const tz = Math.floor(target.z);
+  return (tx === fx && ty === fy && tz === fz) || (tx === fx && ty === fy - 1 && tz === fz);
+}
+
+export function nearestLavaDistance(probe: BlockProbe, center: Point, radius: number = 3): number {
+  const r = Number.isFinite(radius) ? Math.max(1, Math.floor(radius)) : 3;
+  let best = Number.POSITIVE_INFINITY;
+  for (let dx = -r; dx <= r; dx++) {
+    for (let dy = -r; dy <= r; dy++) {
+      for (let dz = -r; dz <= r; dz++) {
+        const p = { x: center.x + dx, y: center.y + dy, z: center.z + dz };
+        const name = probeName(probe, p);
+        if (name !== 'lava' && name !== 'flowing_lava') continue;
+        const distance = Math.hypot(dx, dy, dz);
+        if (distance < best) best = distance;
+      }
+    }
+  }
+  return best;
+}
+
+export function isSafeGroundAt(probe: BlockProbe, feet: Point): boolean {
+  const floor: Point = { x: feet.x, y: feet.y - 1, z: feet.z };
+  const head: Point = { x: feet.x, y: feet.y + 1, z: feet.z };
+  if (!isAirName(probeName(probe, feet))) return false;
+  if (!isAirName(probeName(probe, head))) return false;
+  if (!isSafeFloorName(probeName(probe, floor))) return false;
+  return nearestLavaDistance(probe, feet, 3) >= 2;
+}
+
+export function findRetreatStand(probe: BlockProbe, origin: Point, radius: number = 4): Point | null {
+  const r = Number.isFinite(radius) ? Math.max(1, Math.floor(radius)) : 4;
+  const candidates: Array<{ stand: Point; distance: number }> = [];
+  for (let dx = -r; dx <= r; dx++) {
+    for (let dz = -r; dz <= r; dz++) {
+      for (const dy of [0, 1, -1]) {
+        if (dx === 0 && dz === 0 && dy === 0) continue;
+        const stand: Point = { x: origin.x + dx, y: origin.y + dy, z: origin.z + dz };
+        if (!isSafeGroundAt(probe, stand)) continue;
+        candidates.push({ stand, distance: Math.hypot(dx, dy, dz) });
+      }
+    }
+  }
+  candidates.sort((a, b) => a.distance - b.distance);
+  return candidates.length > 0 ? candidates[0].stand : null;
 }

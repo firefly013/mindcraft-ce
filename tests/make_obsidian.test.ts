@@ -14,7 +14,11 @@ import {
   findScaffoldStand,
   findWaterStandWithinReach,
   isStandingSafelyAt,
+  findRetreatStand,
   formatPoint,
+  isSafeGroundAt,
+  isUnderfootOrSupport,
+  nearestLavaDistance,
   nearestLavaInfo,
   planLavaStand,
   planWaterStand,
@@ -299,3 +303,44 @@ describe('task-23 岩浆操作位自动创造与硬校验', () => {
     expect(chooseLavaScaffoldMaterial({ deepslate: 2 })).toBe('deepslate');
     expect(chooseLavaScaffoldMaterial({})).toBeNull();
   });
+
+describe('task-30 挖取阶段防坠岩浆', () => {
+  it('目标在脚下或承重块下：硬拒绝', () => {
+    const feet: Point = { x: 5, y: 61, z: 5 };
+    expect(isUnderfootOrSupport({ x: 5, y: 61, z: 5 }, feet)).toBe(true);
+    expect(isUnderfootOrSupport({ x: 5, y: 60, z: 5 }, feet)).toBe(true);
+    expect(isUnderfootOrSupport({ x: 3, y: 60, z: 5 }, feet)).toBe(false);
+  });
+
+  it('离岩浆距离计算：相邻岩浆 <2，2 格外 >=2', () => {
+    const center: Point = { x: 0, y: 61, z: 0 };
+    expect(nearestLavaDistance(mapProbe({ '0,60,0': 'lava' }), center)).toBeCloseTo(1, 5);
+    expect(nearestLavaDistance(mapProbe({ '2,60,0': 'lava' }), center)).toBeCloseTo(Math.sqrt(5), 5);
+  });
+
+  it('安全地面硬判据：脚/头空气、脚下实心、离岩浆 >=2', () => {
+    const feet: Point = { x: 2, y: 61, z: 0 };
+    const safe = mapProbe({ '2,61,0': 'air', '2,62,0': 'air', '2,60,0': 'stone', '0,60,0': 'lava' });
+    expect(isSafeGroundAt(safe, feet)).toBe(true);
+
+    const tooClose = mapProbe({ '2,61,0': 'air', '2,62,0': 'air', '2,60,0': 'stone', '1,60,0': 'lava' });
+    expect(isSafeGroundAt(tooClose, feet)).toBe(false);
+  });
+
+  it('危险后撤：纯函数给出离岩浆 >=2 的安全坐标', () => {
+    const origin: Point = { x: 1, y: 61, z: 0 };
+    const entries: Record<string, string> = { '0,60,0': 'lava' };
+    for (let dx = -4; dx <= 4; dx++) {
+      for (let dz = -4; dz <= 4; dz++) {
+        entries[key({ x: 1 + dx, y: 60, z: dz })] = 'stone';
+      }
+    }
+    entries['0,60,0'] = 'lava';
+    const retreat = findRetreatStand(mapProbe(entries), origin, 4);
+    expect(retreat).not.toBeNull();
+    if (retreat != null) {
+      expect(isSafeGroundAt(mapProbe(entries), retreat)).toBe(true);
+      expect(Math.hypot(retreat.x - 0, retreat.y - 60, retreat.z - 0)).toBeGreaterThanOrEqual(2);
+    }
+  });
+});
