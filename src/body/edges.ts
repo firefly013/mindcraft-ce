@@ -65,6 +65,12 @@ export interface EdgeSnapshot {
   inLava?: boolean | null;
   /** 脚下/身边 3 格内有岩浆：lava.contact 只覆盖踩进去，这个提前一档。 */
   lavaNearby?: boolean | null;
+  /** 到最近岩浆的直线距离（格）。 */
+  lavaDistance?: number | null;
+  /** 脚下是否有实心支撑：安全站在岸上时预测性 lava L5 不该触发。 */
+  hasSupport?: boolean | null;
+  /** 前方岩浆且下一步可能掉入（前方下方不是实心）。 */
+  nextIsLavaFallRisk?: boolean | null;
   /** 受控岩浆作业且站位安全：lava.nearby 不该抢断模型动作。 */
   controlledLavaOperation?: boolean | null;
   belowVoid?: boolean | null;
@@ -282,8 +288,9 @@ export const DETECTORS: readonly Detector[] = Object.freeze([
   { type: 'world.lava.contact', level: 5, kind: 'flag', flag: 'inLava' },
   // 脚下/身边有岩浆就提前 L5：不能等踩进去（inLava）才反应。
   { type: 'world.lava.nearby', level: 5, kind: 'all',
-    fire: (s) => s.lavaNearby === true && s.controlledLavaOperation !== true,
-    clear: (s) => s.lavaNearby !== true || s.controlledLavaOperation === true,
+    // 只有真实危险：脚下/身周有岩浆且没有实心支撑（或已实际入岩浆）。
+    fire: (s) => s.lavaNearby === true && (s.hasSupport !== true || s.inLava === true) && s.controlledLavaOperation !== true,
+    clear: (s) => s.lavaNearby !== true || (s.hasSupport === true && s.inLava !== true) || s.controlledLavaOperation === true,
     minIntervalMs: 5_000 },
   // **入水也有事件**（用户问的缺口）：原来只有"头+脚都泡在水里"才有 L5 紧急，
   // 脚刚碰到水什么都不发生——预警比危险晚了一档（模型真机就是"氧气掉到 0 才
@@ -299,8 +306,11 @@ export const DETECTORS: readonly Detector[] = Object.freeze([
   {
     type: 'world.lava.about_to_enter', level: 5, kind: 'all',
     // 受控作业且站位安全时，预测性的前方岩浆不抢断；contact/真实入岩浆才中断。
-    fire: (s) => s.nextIsLava === true && s.moving === true && s.controlledLavaOperation !== true,
-    clear: (s) => s.nextIsLava !== true || s.moving !== true || s.controlledLavaOperation === true,
+    fire: (s) =>
+      s.nextIsLavaFallRisk === true &&
+      s.moving === true &&
+      s.controlledLavaOperation !== true,
+    clear: (s) => s.nextIsLavaFallRisk !== true || s.moving !== true || s.controlledLavaOperation === true,
   },
   { type: 'world.void.falling', level: 5, kind: 'flag', flag: 'belowVoid' },
   { type: 'world.water.drowning', level: 5, kind: 'all',
@@ -794,21 +804,25 @@ export function snapshotFromBot(bot: unknown, extra: SnapshotExtra = {}): EdgeSn
           const fy = Math.floor(feet.y);
           const fz = Math.floor(feet.z);
           let near = false;
+          let nearestLava = Number.POSITIVE_INFINITY;
           for (let dx = -3; dx <= 3 && !near; dx++) {
             for (let dy = -2; dy <= 2 && !near; dy++) {
               for (let dz = -3; dz <= 3; dz++) {
                 if (dx === 0 && dy === 0 && dz === 0) continue;
                 if (at({ x: fx + dx, y: fy + dy, z: fz + dz })['name'] === 'lava') {
                   near = true;
+                  nearestLava = Math.min(nearestLava, Math.hypot(dx, dy, dz));
                   break;
                 }
               }
             }
           }
           snap.lavaNearby = near ? true : undefined;
+          snap.lavaDistance = Number.isFinite(nearestLava) ? Math.round(nearestLava * 10) / 10 : undefined;
           const support = at({ x: fx, y: fy - 1, z: fz })['name'];
           const safeSupport =
             support != null && !['air', 'cave_air', 'void_air', 'water', 'lava', 'flowing_water', 'flowing_lava'].includes(String(support));
+          snap.hasSupport = safeSupport ? true : undefined;
           snap.controlledLavaOperation =
             extra.controlledLavaOperation === true &&
             snap.inLava !== true &&
@@ -883,12 +897,18 @@ export function snapshotFromBot(bot: unknown, extra: SnapshotExtra = {}): EdgeSn
         // 会被 sin(π)=1.2e-16 这类浮点噪声推到 -1 号方块，正南方向就查不到。
         const yaw = num((entity as { yaw?: unknown }).yaw);
         if (yaw != null && snap.moving === true) {
-          const ahead = at({
-            x: Math.floor(feet.x) + Math.round(-Math.sin(yaw) * 2),
-            y: feet.y,
-            z: Math.floor(feet.z) + Math.round(-Math.cos(yaw) * 2),
-          });
+          const aheadX = Math.floor(feet.x) + Math.round(-Math.sin(yaw) * 2);
+          const aheadZ = Math.floor(feet.z) + Math.round(-Math.cos(yaw) * 2);
+          const ahead = at({ x: aheadX, y: feet.y, z: aheadZ });
           snap.nextIsLava = ahead['name'] === 'lava' ? true : undefined;
+          if (snap.nextIsLava === true) {
+            const belowAhead = at({ x: aheadX, y: Math.floor(feet.y) - 1, z: aheadZ })['name'];
+            const belowSolid =
+              belowAhead != null &&
+              !['air', 'cave_air', 'void_air', 'water', 'lava', 'flowing_water', 'flowing_lava'].includes(String(belowAhead));
+            // 前方是岩浆且下一步下方不是实心：可能掉入，才报 about_to_enter。
+            snap.nextIsLavaFallRisk = belowSolid ? undefined : true;
+          }
         }
       }
     } catch {

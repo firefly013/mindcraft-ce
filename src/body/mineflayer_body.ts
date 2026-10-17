@@ -1392,6 +1392,17 @@ export class MineflayerBody {
             };
             // L5 的边沿：**事件带着它的处理一起走**（`reflex` 声明身体为它启动了
             // 哪个反射），不再是"大脑收到 L5 再回头点名调用保命"。
+            if (event.type.startsWith('world.lava.')) {
+                this.log.with('reflex').info({
+                    event: 'lava-edge',
+                    type: event.type,
+                    controlledLavaOperation: snapshot.controlledLavaOperation === true,
+                    hasSupport: snapshot.hasSupport === true,
+                    distance: snapshot.lavaDistance ?? null,
+                    inLava: snapshot.inLava === true,
+                    nextIsLava: snapshot.nextIsLava === true,
+                });
+            }
             const reflex = level === LEVEL.EMERGENCY ? MineflayerBody.EDGE_REFLEX[event.type] : undefined;
             if (reflex != null) {
                 this.emergency(event.type, payload, reflex.reflex, reflex.intent);

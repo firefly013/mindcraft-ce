@@ -106,3 +106,43 @@ describe('formatMakeObsidianProgress', () => {
   });
 });
 
+describe('task-34：预测性 lava 只在真实危险时触发', () => {
+  it('安全站在实心岸上：即使旁边有岩浆，lava.nearby 也不触发（不靠 flag）', () => {
+    const bot = baseBot({ '0,-1,0': 'stone', '1,0,0': 'lava' });
+    const snapshot = snapshotFromBot(bot, {});
+    expect(snapshot.lavaNearby).toBe(true);
+    expect(snapshot.hasSupport).toBe(true);
+    const types = createEdgeWatcher().poll(snapshot).map((e) => e.type);
+    expect(types).not.toContain('world.lava.nearby');
+  });
+
+  it('脚下没有实心支撑 + 旁边岩浆：lava.nearby 触发', () => {
+    const bot = baseBot({ '1,0,0': 'lava' });
+    const snapshot = snapshotFromBot(bot, {});
+    expect(snapshot.hasSupport).toBeUndefined();
+    const types = createEdgeWatcher().poll(snapshot).map((e) => e.type);
+    expect(types).toContain('world.lava.nearby');
+  });
+
+  it('前方岩浆但下一步下方实心：about_to_enter 不触发', () => {
+    const bot = baseBot({ '0,-1,0': 'stone', '0,0,-2': 'lava', '0,-1,-2': 'stone' });
+    bot.entity.yaw = 0;
+    bot.entity.velocity = { x: 1, y: 0, z: 0 };
+    const snapshot = snapshotFromBot(bot, {});
+    expect(snapshot.nextIsLava).toBe(true);
+    expect(snapshot.nextIsLavaFallRisk).toBeUndefined();
+    const types = createEdgeWatcher().poll(snapshot).map((e) => e.type);
+    expect(types).not.toContain('world.lava.about_to_enter');
+  });
+
+  it('前方岩浆且下一步下方非实心：about_to_enter 触发', () => {
+    const bot = baseBot({ '0,-1,0': 'stone', '0,0,-2': 'lava', '0,-1,-2': 'air' });
+    bot.entity.yaw = 0;
+    bot.entity.velocity = { x: 1, y: 0, z: 0 };
+    const snapshot = snapshotFromBot(bot, {});
+    expect(snapshot.nextIsLavaFallRisk).toBe(true);
+    const types = createEdgeWatcher().poll(snapshot).map((e) => e.type);
+    expect(types).toContain('world.lava.about_to_enter');
+  });
+});
+

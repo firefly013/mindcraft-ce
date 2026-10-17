@@ -89,8 +89,9 @@ describe('lava.nearby 边沿检测', () => {
       game: { dimension: 'overworld', minY: -64, height: 384, gameMode: 'survival' },
       time: { timeOfDay: 6000 },
       entities: {},
+      // task-34：安全实心岸上不再触发预测性 lava.nearby；这里故意脚下无支撑来触发真实危险。
       blockAt: (p: { x: number; y: number; z: number }) =>
-        p.x === 1 && p.y === 0 && p.z === 0 ? { name: 'lava' } : { name: 'stone' },
+        p.x === 1 && p.y === 0 && p.z === 0 ? { name: 'lava' } : { name: 'air' },
     };
     const snapshot = snapshotFromBot(bot);
     expect(snapshot.lavaNearby).toBe(true);
