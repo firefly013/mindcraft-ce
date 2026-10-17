@@ -473,9 +473,9 @@ export const actionsList: AgentCommand[] = [
         name: '!disableSafeguards',
         description: td('disableSafeguards'),
         params: {
-            'minutes': { type: 'int', description: tp('disableSafeguards', 'minutes'), domain: [1, 120] },
-            'calls': { type: 'int', description: tp('disableSafeguards', 'calls'), domain: [1, 20] },
-            'reason': { type: 'string', description: tp('disableSafeguards', 'reason') },
+            'minutes': { type: 'int', description: tp('disableSafeguards', 'minutes'), domain: [1, 120], optional: true },
+            'calls': { type: 'int', description: tp('disableSafeguards', 'calls'), domain: [1, 20], optional: true },
+            'reason': { type: 'string', description: tp('disableSafeguards', 'reason'), optional: true },
             'restore': { type: 'boolean', description: tp('disableSafeguards', 'restore') }
         },
         perform: function (agent: any, minutes: number, calls: number, reason: string, restore?: boolean): string {
