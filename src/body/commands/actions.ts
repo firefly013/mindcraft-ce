@@ -232,19 +232,26 @@ export const actionsList: AgentCommand[] = [
             'num': { type: 'int', description: tp('discard', 'num'), domain: [1, Number.MAX_SAFE_INTEGER] }
         },
         perform: runAsAction(async (agent: any, item_name: string, num: number) => {
-            const start_loc = agent.bot.entity.position;
-            await skills.moveAway(agent.bot, 5);
-            await skills.discard(agent.bot, item_name, num);
-
-            // **不要再走回原地**：原来扔完就 goToPosition 回 start_loc，而自动拾取的半径是
-
-            // 8 格——走回去正好把刚扔的东西又捡回来（模型报过"discard 自己走回来捡回"）。
-
-            // 同时登记一下，30 秒内自动拾取会跳过这个物品名。
-
-            markDiscarded(item_name);
-
-            skills.log(agent.bot, `扔掉了 ${num} 个 ${item_name}（3 分钟内自动拾取不会捡它，别指望在这个窗口内捡回来）。`);
+            // **原地丢，不寻路、不移动**：Feedback #36/#37——移交东西时先走 5 格
+            // 会让落点和队友以为的位置对不上。想离开掉落物范围请另外显式 goToCoordinates。
+            const bot = agent.bot;
+            const drop = bot.entity.position.clone();
+            const yaw = Number(bot?.entity?.yaw ?? 0);
+            const dx = -Math.sin(yaw);
+            const dz = Math.cos(yaw);
+            const landing = { x: drop.x + dx * 1.5, z: drop.z + dz * 1.5 };
+            const ok = await skills.discard(bot, item_name, num);
+            if (ok) {
+                markDiscarded(item_name);
+                skills.log(
+                    bot,
+                    '原地扔掉 ' + num + ' 个 ' + item_name + '：起点 @(' +
+                        drop.x.toFixed(2) + ',' + drop.y.toFixed(2) + ',' + drop.z.toFixed(2) +
+                        ')，面朝方向前方约 1.5 格落点 @(' +
+                        landing.x.toFixed(2) + ',' + drop.y.toFixed(2) + ',' + landing.z.toFixed(2) +
+                        ')；本次没有移动，3 分钟内自动拾取不会捡它。',
+                );
+            }
         })
     },
     {

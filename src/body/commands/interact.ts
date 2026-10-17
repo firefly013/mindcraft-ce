@@ -643,7 +643,9 @@ async function transferWithContainer(
     if (source.length === 0) {
       // **读不到 ≠ 空**：槽位表本身为空/读不到时，不能写「容器是空的」——
       // 真机上客户端窗口包延迟时就是这样误导模型的。
+      // **只列容器区间 [0, inventoryStart)**：不能把查看者背包槽也列出来。
       const slotList = slots
+        .slice(0, Math.min(boxEnd, slots.length))
         .map((slot, i) => (slot?.name != null ? `${i}:${slot.name}×${slot.count ?? 1}` : null))
         .filter((slot) => slot != null)
         .slice(0, 24)

@@ -1689,6 +1689,35 @@ export async function takeFromChest(bot: any, itemName: string, num: number = -1
     return totalTaken > 0;
 }
 
+/**
+ * 按 `inventoryStart` 分界读取容器内容，**只取容器区间**。
+ *
+ * 真机 Feedback #35：读箱子串进查看者背包，槽位从 12 跳到 28。
+ * mineflayer 的 `containerItems()` 在不同版本/容器类型下口径不稳，
+ * 这里直接拿 slots，严格用 inventoryStart 分界。
+ */
+export function containerContents(container: any): {
+    readable: boolean;
+    invStart: number;
+    end: number;
+    lines: string[];
+} {
+    const slots = Array.isArray(container?.slots) ? container.slots : null;
+    if (slots == null) {
+        return { readable: false, invStart: 0, end: 0, lines: ['容器槽位表读不到（不代表容器是空的）'] };
+    }
+    const rawStart = Number(container?.inventoryStart ?? 27);
+    const invStart = Number.isFinite(rawStart) ? Math.max(0, Math.floor(rawStart)) : 27;
+    const end = Math.min(slots.length, invStart);
+    const lines: string[] = [];
+    for (let i = 0; i < end; i++) {
+        const slot = slots[i] as { name?: unknown; count?: unknown } | null | undefined;
+        if (slot?.name == null) continue;
+        lines.push(String(slot.name) + '×' + String(slot.count ?? 1));
+    }
+    return { readable: true, invStart, end, lines };
+}
+
 export async function viewChest(bot: any): Promise<boolean> {
     /**
      * View the contents of the nearest chest.
@@ -1696,7 +1725,7 @@ export async function viewChest(bot: any): Promise<boolean> {
      * @returns {Promise<boolean>} true if the chest was viewed, false otherwise.
      * @example
      * await skills.viewChest(bot);
-     * **/
+     **/
     const chest: any = world.getNearestBlock(bot, 'chest', 32);
     if (!chest) {
         log(bot, `Could not find a chest nearby.`);
@@ -1704,18 +1733,17 @@ export async function viewChest(bot: any): Promise<boolean> {
     }
     await goToPosition(bot, chest.position.x, chest.position.y, chest.position.z, 2);
     const chestContainer: any = await bot.openContainer(chest);
-    const items: any[] = chestContainer.containerItems();
-    if (items.length === 0) {
-        log(bot, `The chest is empty.`);
-    }
-    else {
-        log(bot, `The chest contains:`);
-        for (const item of items) {
-            log(bot, `${item.count} ${item.name}`);
-        }
+    const contents = containerContents(chestContainer);
+    if (!contents.readable) {
+        log(bot, contents.lines.join('\n'));
+    } else if (contents.lines.length === 0) {
+        log(bot, '容器区间内没有物品（只读了槽位 0..' + contents.invStart + '，不含查看者背包）。');
+    } else {
+        log(bot, '容器内容（只读槽位 0..' + contents.invStart + '）：');
+        for (const line of contents.lines) log(bot, line);
     }
     await chestContainer.close();
-    return true;
+    return contents.readable;
 }
 
 export async function consume(bot: any, itemName: string = ""): Promise<boolean> {
