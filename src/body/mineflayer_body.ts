@@ -1328,6 +1328,7 @@ export class MineflayerBody {
             snapshot = snapshotFromBot(this.bot, {
                 currentAction: this.currentActionName(),
                 foodNames: Object.keys(FOOD_VALUE),
+                controlledLavaOperation: (this.bot as { controlledLavaOperation?: unknown }).controlledLavaOperation === true,
             });
         } catch {
             return;

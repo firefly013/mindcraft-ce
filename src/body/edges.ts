@@ -65,6 +65,8 @@ export interface EdgeSnapshot {
   inLava?: boolean | null;
   /** 脚下/身边 3 格内有岩浆：lava.contact 只覆盖踩进去，这个提前一档。 */
   lavaNearby?: boolean | null;
+  /** 受控岩浆作业且站位安全：lava.nearby 不该抢断模型动作。 */
+  controlledLavaOperation?: boolean | null;
   belowVoid?: boolean | null;
   inWater?: boolean | null;
   /** **头那一格是水**（可靠事实，与坏掉的 oxygenLevel 无关）。 */
@@ -280,8 +282,8 @@ export const DETECTORS: readonly Detector[] = Object.freeze([
   { type: 'world.lava.contact', level: 5, kind: 'flag', flag: 'inLava' },
   // 脚下/身边有岩浆就提前 L5：不能等踩进去（inLava）才反应。
   { type: 'world.lava.nearby', level: 5, kind: 'all',
-    fire: (s) => s.lavaNearby === true,
-    clear: (s) => s.lavaNearby !== true,
+    fire: (s) => s.lavaNearby === true && s.controlledLavaOperation !== true,
+    clear: (s) => s.lavaNearby !== true || s.controlledLavaOperation === true,
     minIntervalMs: 5_000 },
   // **入水也有事件**（用户问的缺口）：原来只有"头+脚都泡在水里"才有 L5 紧急，
   // 脚刚碰到水什么都不发生——预警比危险晚了一档（模型真机就是"氧气掉到 0 才
@@ -673,6 +675,8 @@ function deltaFor(detector: Detector, key: string | number | null, snapshot: Edg
 }
 
 export interface SnapshotExtra {
+  /** 受控岩浆作业（如 makeObsidian）期间为 true。 */
+  controlledLavaOperation?: boolean;
   currentAction?: string | null;
   foodNames?: string[];
 }
@@ -801,6 +805,17 @@ export function snapshotFromBot(bot: unknown, extra: SnapshotExtra = {}): EdgeSn
             }
           }
           snap.lavaNearby = near ? true : undefined;
+          const support = at({ x: fx, y: fy - 1, z: fz })['name'];
+          const safeSupport =
+            support != null && !['air', 'cave_air', 'void_air', 'water', 'lava', 'flowing_water', 'flowing_lava'].includes(String(support));
+          snap.controlledLavaOperation =
+            extra.controlledLavaOperation === true &&
+            snap.inLava !== true &&
+            snap.inWater !== true &&
+            (snap.health ?? 20) > 12 &&
+            safeSupport
+              ? true
+              : undefined;
         }
 
         // **真正淹没**：头也在水里。这是**可靠**信号——mineflayer 的

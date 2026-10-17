@@ -45,6 +45,14 @@ export interface MakeObsidianResult {
   ok: boolean;
   produced: number;
   message: string;
+  /** 已挖到的黑曜石坐标（进度）。 */
+  mined?: Point[];
+  /** 还能倒几次水。 */
+  remainingWaterBuckets?: number;
+  /** 下一块候选岩浆/安全站位；没有就是 null。 */
+  nextTarget?: { liquid: Point; stand: Point } | null;
+  /** 是否因为检测到真实危险而停手。 */
+  dangerStop?: boolean;
 }
 
 const AIR = new Set(['air', 'cave_air', 'void_air']);
@@ -346,7 +354,7 @@ export function failureReceipt(
   return lines.join('\n');
 }
 
-export async function makeObsidian(bot: any): Promise<MakeObsidianResult> {
+async function makeObsidianInner(bot: any): Promise<MakeObsidianResult> {
   try {
     const startCounts = inventoryCounts(bot);
     const before = obsidianCount(startCounts);
@@ -492,6 +500,12 @@ export async function makeObsidian(bot: any): Promise<MakeObsidianResult> {
     let lastSafeStand: Point | null = null;
 
     while (!dangerStop && produced < need && attempts < maxAttempts) {
+      // 被 Stop / 保命反射打断：controlledLavaOperation 不阻止真实危险中断；
+      // 这里立刻收手并把已完成进度带回去，而不是继续硬跑。
+      if ((bot as { interrupt_code?: unknown }).interrupt_code === true) {
+        failures.push('被 Stop/保命打断：已挖 ' + String(produced) + '/' + String(need) + ' 块，下面返回进度和下一块坐标。');
+        break;
+      }
       attempts++;
       const counts = inventoryCounts(bot);
       produced = Math.max(produced, Math.max(0, obsidianCount(counts) - before));
@@ -630,23 +644,31 @@ export async function makeObsidian(bot: any): Promise<MakeObsidianResult> {
     }
 
     const nextTarget = lavaTargets.find((candidate) => !usedLava.has(pointKey(candidate.liquid))) ?? null;
+    const remainingWaterBuckets = inventoryCounts(bot)['water_bucket'] ?? 0;
     if (produced >= need) {
       const message =
         successReceipt(before, produced, mined, kit) +
         (nextTarget == null
           ? '\n不要再走向岩浆边缘；附近没有更多候选岩浆源。'
           : '\n不要再走向岩浆边缘；下一块可挖候选：岩浆 ' + formatPoint(nextTarget.liquid) + '，安全站位 ' + formatPoint(nextTarget.stand) + '。');
-      return { ok: true, produced, message };
+      return { ok: true, produced, message, mined, remainingWaterBuckets, nextTarget, dangerStop };
     }
     const nextStep = dangerStop
       ? '已停手/后撤到 ' + (lastSafeStand == null ? '安全干燥点' : formatPoint(lastSafeStand)) + '；先 goToCoordinates 到该安全点，确认离岩浆≥2 再决定是否重试 makeObsidian。'
       : nextTarget == null
         ? '没有更多安全候选；先 goToCoordinates 到干燥安全点，补给后重试 makeObsidian。'
         : '下一块候选：岩浆 ' + formatPoint(nextTarget.liquid) + '，安全站位 ' + formatPoint(nextTarget.stand) + '；先 goToCoordinates' + formatPoint(nextTarget.stand) + ' 再重试 makeObsidian。';
+    const progressLine =
+      '进度：已生成/已挖 ' + String(produced) + '/' + String(need) + ' 块；剩余水桶 ' + String(remainingWaterBuckets) +
+      '；下一块候选：' + (nextTarget == null ? '没有' : ('岩浆 ' + formatPoint(nextTarget.liquid) + '，安全站位 ' + formatPoint(nextTarget.stand)));
     return {
       ok: false,
       produced,
-      message: failureReceipt(before, produced, mined, failures, '阶段：浇筑/挖取循环结束，未达到 10 块；下面保留失败坐标和原因。', nextStep),
+      message: failureReceipt(before, produced, mined, failures, '阶段：浇筑/挖取循环结束，未达到 10 块；下面保留失败坐标和原因。\n' + progressLine, nextStep),
+      mined,
+      remainingWaterBuckets,
+      nextTarget,
+      dangerStop,
     };
   } catch (error: unknown) {
     const detail = error instanceof Error ? error.message : String(error);
@@ -654,7 +676,26 @@ export async function makeObsidian(bot: any): Promise<MakeObsidianResult> {
       ok: false,
       produced: 0,
       message: 'makeObsidian 异常中止：' + detail + '。已生成的 obsidian 和现场都保留着。',
+      mined: [],
+      remainingWaterBuckets: inventoryCounts(bot)['water_bucket'] ?? 0,
+      nextTarget: null,
+      dangerStop: false,
     };
+  }
+}
+
+/**
+ * makeObsidian 期间置 controlledLavaOperation：安全站位上的 lava.nearby 不抢断动作。
+ * 真实入岩浆/水、流血、无支撑仍会走 L5 强制中断；结束后恢复原值。
+ */
+export async function makeObsidian(bot: any): Promise<MakeObsidianResult> {
+  const flagged = bot as { controlledLavaOperation?: boolean };
+  const previous = flagged.controlledLavaOperation === true;
+  flagged.controlledLavaOperation = true;
+  try {
+    return await makeObsidianInner(bot);
+  } finally {
+    flagged.controlledLavaOperation = previous;
   }
 }
 
