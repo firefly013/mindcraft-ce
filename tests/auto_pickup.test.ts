@@ -7,6 +7,7 @@ import {
   nearestDropWithin,
   markDiscarded,
   clearDiscards,
+  isDiscardedDrop,
 } from '../src/body/auto_pickup.js';
 import {
   confirmedPickupGains,
@@ -140,6 +141,21 @@ describe('markDiscarded', () => {
     markDiscarded('dirt');
     const bot = botWith([drop(2, 1, 64, 0, { displayName: 'cobblestone' })]);
     expect(nearestDropWithin(bot, 8)?.id).toBe(2);
+  });
+
+  it('isDiscardedDrop 按 id/displayName 归一化匹配，并在时间窗后失效', () => {
+    expect(isDiscardedDrop('Oak Log')).toBe(false);
+    markDiscarded('oak_log');
+    expect(isDiscardedDrop('Oak Log')).toBe(true);
+    expect(isDiscardedDrop('Dirt Block')).toBe(false);
+
+    const realNow = Date.now;
+    Date.now = (): number => realNow() + DISCARD_IGNORE_MS + 1_000;
+    try {
+      expect(isDiscardedDrop('Oak Log')).toBe(false);
+    } finally {
+      Date.now = realNow;
+    }
   });
 });
 

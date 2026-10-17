@@ -71,6 +71,17 @@ function isJustDiscarded(displayName: string, now: number): boolean {
 }
 
 /**
+ * 这个掉落物名现在是否在 discard 免疫窗口内。
+ *
+ *
+ * nearestDropWithin 用它过滤新目标；pickup 已经走起来之后，gotoPickupInterruptibly
+ * 还会每 50ms 复查一次，防止 markDiscarded 发生在目标实体已经出现之后。
+ */
+export function isDiscardedDrop(displayName: string): boolean {
+  return isJustDiscarded(displayName, Date.now());
+}
+
+/**
  * 半径内最近的掉落物；没有就是 null。
  *
  * mineflayer 里掉落物是 `name === 'item'` 的实体（真正的物品名在

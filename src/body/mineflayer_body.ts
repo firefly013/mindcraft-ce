@@ -65,7 +65,7 @@ import {
     snapshotFromBot,
 } from './edges.js';
 import { renderEventText } from '../shared/event_stream.js';
-import { nearestDropWithin, PICKUP_RADIUS, PICKUP_TIMEOUT_MS } from './auto_pickup.js';
+import { isDiscardedDrop, nearestDropWithin, PICKUP_RADIUS, PICKUP_TIMEOUT_MS } from './auto_pickup.js';
 import {
     confirmedPickupGains,
     formatInventoryGains,
@@ -506,8 +506,12 @@ export class MineflayerBody {
     private pickupAbortRequested = false;
     /** 当前 pickup 寻路的即时取消回调；模型动作来时直接停 pathfinder。 */
     private pickupCancel: (() => void) | null = null;
+    /** 当前 pickup 目标显示名；行走中复查 discard 免疫用。 */
+    private pickupTargetName: string | null = null;
     /** 模型动作请求已经在路上时，禁止新的自动拾取抢身体。 */
     private modelActionRequested = false;
+    /** 在途模型协议 action 数：查询/动作可能重叠，用计数而不是布尔。 */
+    private modelActionsInFlight = 0;
 
     /** 上一次"被怪打触发保命"的时间（10 秒防抖，免得连续挨打刷屏）。 */
     private lastThreatEmergencyAt = 0;
@@ -720,6 +724,11 @@ export class MineflayerBody {
      */
     private bodyBusy(): boolean {
         return this.actions.executing;
+    }
+
+    /** 模型协议 action 是否在途（查询/动作可能重叠，按计数判）。 */
+    private hasModelActionInFlight(): boolean {
+        return this.modelActionsInFlight > 0 || this.modelActionRequested;
     }
 
     requestInterrupt(): void {
@@ -1678,7 +1687,8 @@ export class MineflayerBody {
             };
             const timer: ReturnType<typeof setInterval> = setInterval(() => {
                 const timedOut = Date.now() - started >= timeoutMs;
-                if (this.pickupAbortRequested || this.bot?.interrupt_code || timedOut) {
+                const discarded = this.pickupTargetName != null && isDiscardedDrop(this.pickupTargetName);
+                if (this.pickupAbortRequested || this.bot?.interrupt_code || timedOut || discarded) {
                     try {
                         this.bot.pathfinder?.stop?.();
                     } catch {
@@ -1713,14 +1723,17 @@ export class MineflayerBody {
         const now = Date.now();
         if (this.pickupAbortRequested) return;
         if (now < this.pickupBackoffUntil) return;
+        // 刚 discard 的东西即使实体已经出现，也不许再被自己捡回。
+        if (isDiscardedDrop(target.name)) return;
         const go = shouldAttemptPickup({
-            busy: this.actions.executing || this.modelActionRequested,
+            busy: this.actions.executing || this.hasModelActionInFlight(),
             pickingUp: this.pickingUp,
             sinceLastAttemptMs: now - this.lastPickupAt,
             backoffRemainingMs: this.pickupBackoffUntil - now,
         });
         if (!go) return;
         this.lastPickupAt = now;
+        this.pickupTargetName = target.name;
         this.pickingUp = true;
         void (async (): Promise<void> => {
             const started = Date.now();
@@ -1732,12 +1745,13 @@ export class MineflayerBody {
             } finally {
                 this.pickingUp = false;
                 this.pickupCancel = null;
+                this.pickupTargetName = null;
                 // 模型动作的抢占标志由拾取任务收尾时清掉，确保它至少被本次
                 // walkToPickup/gotoPickupInterruptibly 看到一次。
                 this.pickupAbortRequested = false;
             }
             // 被模型动作抢占不算拾取失败：不累计退避，也不把通道算在拾取头上。
-            const preempted = this.modelActionRequested || this.actions.executing;
+            const preempted = this.hasModelActionInFlight() || this.actions.executing;
             let backoffMs = 0;
             if (arrived) {
                 this.pickupFailures = 0;
@@ -2063,9 +2077,12 @@ export class MineflayerBody {
             case 'action': {
                 const { name, args } = request.request;
                 // 模型的动作优先于自动拾取：先占位阻止新的拾取，再让旧的收手。
+                // 用计数而不是布尔：查询类 action 和占用类 action 可能重叠，
+                // 一个先结束不能把另一个的在途状态清掉（否则 pickup 会钻空子）。
                 this.modelActionRequested = true;
-                await this.yieldAutoPickupToModel();
+                this.modelActionsInFlight += 1;
                 try {
+                    await this.yieldAutoPickupToModel();
                     const text = await executeToolCall(this, name, args);
                     this.consumePermitFor(name);
                     return { ok: true, op: 'action', result: { ok: true, text, code: 'OK' } };
@@ -2080,7 +2097,8 @@ export class MineflayerBody {
                         result: { ok: false, text: `Tool ${name} failed: ${message}`, code: ERR.BODY_ERROR },
                     };
                 } finally {
-                    this.modelActionRequested = false;
+                    this.modelActionsInFlight = Math.max(0, this.modelActionsInFlight - 1);
+                    if (this.modelActionsInFlight === 0) this.modelActionRequested = false;
                 }
             }
             case 'say': {
@@ -2094,10 +2112,12 @@ export class MineflayerBody {
                 // Stop 无条件清模型锁：即使 ActionManager.stop 内部异常/超时，
                 // 也不能让 modelActionRequested 或 executing 残留卡住下一轮动作。
                 this.modelActionRequested = false;
+                this.modelActionsInFlight = 0;
                 try {
                     await this.actions.stop();
                 } finally {
                     this.modelActionRequested = false;
+                    this.modelActionsInFlight = 0;
                     this.actions.releaseCurrentAction();
                 }
                 return { ok: true, op: 'stop' };

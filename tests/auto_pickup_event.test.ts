@@ -7,7 +7,12 @@ import {
   expectedItemNameFromEntity,
   nearbyOtherPlayerNames,
 } from '../src/body/mineflayer_body.js';
+import { clearDiscards, markDiscarded } from '../src/body/auto_pickup.js';
 import { PICKUP_CONFIRM_DELAY_MS } from '../src/shared/auto_pickup.js';
+
+beforeEach(() => {
+  clearDiscards();
+});
 
 function fakeLogger(): any {
   return { with: () => ({ info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() }) };
@@ -215,6 +220,19 @@ describe('模型动作抢占 autoPickup', () => {
     expect(body.pickingUp).toBe(false);
   });
 
+  it('modelActionsInFlight > 0 时 pickup 不启动（覆盖重叠查询/动作）', () => {
+    const body: any = Object.create(MineflayerBody.prototype);
+    body.pickupAbortRequested = false;
+    body.pickingUp = false;
+    body.pickupBackoffUntil = 0;
+    body.lastPickupAt = 0;
+    body.actions = { executing: false };
+    body.modelActionRequested = false;
+    body.modelActionsInFlight = 1;
+    body.schedulePickup({ id: 1, name: 'item', x: 0, y: 64, z: 0, distance: 1 });
+    expect(body.pickingUp).toBe(false);
+  });
+
   it('退避期间不启动新拾取，不占身体通道', () => {
     const body: any = Object.create(MineflayerBody.prototype);
     body.pickupAbortRequested = false;
@@ -225,5 +243,40 @@ describe('模型动作抢占 autoPickup', () => {
     body.modelActionRequested = false;
     body.schedulePickup({ id: 1, name: 'item', x: 0, y: 64, z: 0, distance: 1 });
     expect(body.pickingUp).toBe(false);
+  });
+
+  it('discard 免疫窗口内即使目标实体已出现也不启动 pickup', () => {
+    markDiscarded('oak_log');
+    const body: any = Object.create(MineflayerBody.prototype);
+    body.pickupAbortRequested = false;
+    body.pickingUp = false;
+    body.pickupBackoffUntil = 0;
+    body.lastPickupAt = 0;
+    body.actions = { executing: false };
+    body.modelActionRequested = false;
+    body.modelActionsInFlight = 0;
+    body.schedulePickup({ id: 1, name: 'Oak Log', x: 0, y: 64, z: 0, distance: 1 });
+    expect(body.pickingUp).toBe(false);
+  });
+
+  it('行走中目标被 discard 免疫命中：50ms 内 stop 并返回 false', async () => {
+    vi.useFakeTimers();
+    try {
+      const body: any = Object.create(MineflayerBody.prototype);
+      body.bot = {
+        interrupt_code: false,
+        pathfinder: { goto: vi.fn(() => new Promise<never>(() => {})), stop: vi.fn() },
+      };
+      body.pickupAbortRequested = false;
+      body.pickupTargetName = 'Oak Log';
+      const pending = body.gotoPickupInterruptibly({}, 12_000);
+      await vi.advanceTimersByTimeAsync(60);
+      markDiscarded('oak_log');
+      await vi.advanceTimersByTimeAsync(60);
+      await expect(pending).resolves.toBe(false);
+      expect(body.bot.pathfinder.stop).toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
