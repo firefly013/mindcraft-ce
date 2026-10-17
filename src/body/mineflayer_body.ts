@@ -79,6 +79,8 @@ import { createLogger, type Logger } from '../shared/logger.js';
 import { MESSAGES } from '../shared/prompts.js';
 import settings from '../shared/settings.js';
 import pf from 'mineflayer-pathfinder';
+import Vec3 from 'vec3';
+import { chooseSafeFleeTarget } from './safety/flee.js';
 
 type EdgeWatcher = ReturnType<typeof createEdgeWatcher>;
 
@@ -368,6 +370,44 @@ export function shouldKillOnFatal(kind: 'uncaughtException' | 'unhandledRejectio
     return kind === 'uncaughtException';
 }
 
+/** 是不是 mineflayer 挖矿被取消产生的非致命 abort。 */
+export function isDiggingAborted(reason: unknown): boolean {
+    const msg = reason instanceof Error ? reason.message : String(reason);
+    return /Digging aborted/i.test(msg);
+}
+
+/**
+ * 安全包装 bot.stopDigging：mineflayer 的 digging task 在取消时会 reject
+ * `Digging aborted`，而 health/death/插件内部可能直接调 `bot.stopDigging()`
+ * 没人接，就变成 unhandledRejection。包装后同步 throw 和 Promise rejection 都吞掉。
+ */
+export function installSafeStopDigging(bot: any): void {
+    if (bot == null || typeof bot.stopDigging !== 'function') return;
+    if (bot.__safeStopDigging === true) return;
+    const original = bot.stopDigging.bind(bot);
+    const safe = (...args: unknown[]): unknown => {
+        try {
+            const result: any = original(...args);
+            if (result != null && typeof result.catch === 'function') {
+                result.catch((err: unknown) => {
+                    if (!isDiggingAborted(err)) {
+                        console.warn('stopDigging rejected:', err instanceof Error ? err.message : String(err));
+                    }
+                });
+            }
+            return result;
+        } catch (err: unknown) {
+            if (!isDiggingAborted(err)) {
+                console.warn('stopDigging threw:', err instanceof Error ? err.message : String(err));
+            }
+            return undefined;
+        }
+    };
+    (safe as any).__originalStopDigging = original;
+    bot.stopDigging = safe;
+    bot.__safeStopDigging = true;
+}
+
 /** 相机的最小接口。
  *
  * **故意不 import `VisionInterpreter` 的具体类型**：那条导入链会把
@@ -505,6 +545,8 @@ export class MineflayerBody {
 
         console.log(this.name, 'logging into minecraft...');
         this.bot = initBot(this.name);
+        // mineflayer 内部 health/death 会直接调 bot.stopDigging，先包一层吞掉 abort rejection。
+        installSafeStopDigging(this.bot);
 
         const onDisconnect = (event: string, reason: unknown): void => {
             void event;
@@ -752,6 +794,15 @@ export class MineflayerBody {
      */
     private installProcessGuards(): void {
         const fatal = (kind: 'uncaughtException' | 'unhandledRejection', reason: unknown): void => {
+            // `Digging aborted` 是挖矿取消的正常信号，不是 fatal；记录后继续。
+            if (kind === 'unhandledRejection' && isDiggingAborted(reason)) {
+                try {
+                    this.log.with('lifecycle').warn({ event: 'digging-aborted-nonfatal', err: String(reason) });
+                } catch {
+                    // 日志失败也不能让 abort 变成 fatal。
+                }
+                return;
+            }
             const info = describeFatalReason(reason);
             const action = ((): string => {
                 try {
@@ -1714,8 +1765,22 @@ export class MineflayerBody {
                 },
                 fleeTo: (x: number, z: number): void => {
                     try {
+                        const p = bot.entity.position;
+                        const from = { x: p.x, y: p.y, z: p.z };
+                        const dx = x - p.x;
+                        const dz = z - p.z;
+                        const distance = Math.max(1, Math.hypot(dx, dz));
+                        // 把来路方向当成威胁，安全落点选择器会沿着逃跑方向找可站立的岸。
+                        const awayFrom = { x: p.x - dx, y: p.y, z: p.z - dz };
+                        const blockAt = (bx: number, by: number, bz: number): { name?: unknown } | null =>
+                            bot.blockAt(new Vec3(bx, by, bz));
+                        const safe = chooseSafeFleeTarget(blockAt, from, awayFrom, distance);
+                        if (!safe.ok) {
+                            console.warn('emergency flee has no safe target:', safe.reason);
+                            return;
+                        }
                         bot.pathfinder.setMovements(movementsFor(bot));
-                        bot.pathfinder.setGoal(new pf.goals.GoalXZ(x, z));
+                        bot.pathfinder.setGoal(new pf.goals.GoalXZ(safe.target.x, safe.target.z));
                     } catch (err: unknown) {
                         console.warn('emergency flee failed:', err instanceof Error ? err.message : String(err));
                     }

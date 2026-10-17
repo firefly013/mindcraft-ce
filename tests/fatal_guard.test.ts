@@ -3,7 +3,7 @@
  */
 import { describe, expect, it, vi } from 'vitest';
 import { ActionManager } from '../src/body/action_manager.js';
-import { describeFatalReason, shouldKillOnFatal } from '../src/body/mineflayer_body.js';
+import { describeFatalReason, installSafeStopDigging, isDiggingAborted, shouldKillOnFatal } from '../src/body/mineflayer_body.js';
 
 describe('describeFatalReason', () => {
   it('Error 落盘 message + stack + 序列化后的 stack', () => {
@@ -54,3 +54,27 @@ describe('ActionManager 超时兜底', () => {
     }
   });
 });
+
+describe('Digging aborted 非致命', () => {
+  it('isDiggingAborted 识别 abort 文案', () => {
+    expect(isDiggingAborted(new Error('Digging aborted'))).toBe(true);
+    expect(isDiggingAborted('boom')).toBe(false);
+  });
+
+  it('installSafeStopDigging：同步 throw / Promise reject 都不逃逸', async () => {
+    const bot: any = {
+      stopDigging: () => {
+        throw new Error('Digging aborted');
+      },
+    };
+    installSafeStopDigging(bot);
+    expect(() => bot.stopDigging()).not.toThrow();
+
+    const rejecting: any = { stopDigging: () => Promise.reject(new Error('Digging aborted')) };
+    installSafeStopDigging(rejecting);
+    expect(() => rejecting.stopDigging()).not.toThrow();
+    await Promise.resolve();
+    await Promise.resolve();
+  });
+});
+

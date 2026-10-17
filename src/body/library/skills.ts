@@ -24,6 +24,7 @@ import {
 import { teleportRefusal } from "../safety/dangerous_blocks.js";
 import { movementsFor } from "../safety/movements.js";
 import { deepWaterAllowed } from "../safety/permits.js";
+import { assessStandingSpot, chooseSafeFleeTarget } from "../safety/flee.js";
 import { safeguards } from "../safety/safeguards.js";
 
 export function log(bot: any, ...messages: any[]): void {
@@ -1175,8 +1176,19 @@ export async function digWithTimeout(bot: any, block: any, where: string): Promi
                 gonePromise,
             ]);
         } catch (err: unknown) {
+            const msg = err instanceof Error ? err.message : String(err);
+            if (/Digging aborted/i.test(msg)) {
+                // 外部 health/death/插件调 stopDigging 会走到这里：这是正常中断，不是故障。
+                log(bot, '挖 ' + name + ' ' + where + ' 被外部 stopDigging 正常中断（Digging aborted），本次动作结束。');
+                try {
+                    bot.stopDigging?.();
+                } catch {
+                    // 已经中断了，停不下来也无所谓。
+                }
+                return false;
+            }
             outcome = 'error';
-            log(bot, '挖 ' + name + ' ' + where + ' 抛错：' + (err instanceof Error ? err.message : String(err)));
+            log(bot, '挖 ' + name + ' ' + where + ' 抛错：' + msg);
         } finally {
             if (timer !== undefined) clearTimeout(timer);
             clearInterval(progressTimer);
@@ -2540,51 +2552,51 @@ export async function followPlayer(bot: any, username: string, distance: number 
 }
 
 
-export async function moveAway(bot: any, distance: number): Promise<boolean> {
-    /**
-     * Move away from current position in any direction.
-     * @param {MinecraftBot} bot, reference to the minecraft bot.
-     * @param {number} distance, the distance to move away.
-     * @returns {Promise<boolean>} true if the bot moved away, false otherwise.
-     * @example
-     * await skills.moveAway(bot, 8);
-     **/
+/**
+ * 安全逃跑：先选一个避开 lava/水/落差、有实心支撑的落点，再走。
+ *
+ * Feedback #60：旧 moveAway 用 GoalInvert 盲目远离当前位置，直接走进岩浆。
+ * 找不到安全落点时不再硬走，改用 pillarUp 向上垫一格争取空间。
+ */
+async function moveAwaySafely(
+    bot: any,
+    awayFrom: { x: number; y: number; z: number } | null,
+    distance: number,
+    label: string,
+): Promise<boolean> {
     const pos: any = bot.entity.position;
-    const goal: any = new (pf as any).goals.GoalNear(pos.x, pos.y, pos.z, distance);
-    const inverted_goal: any = new (pf as any).goals.GoalInvert(goal);
-    bot.pathfinder.setMovements(movementsFor(bot));
-
-    if (settings.cheat) {
-        const move: any = movementsFor(bot);
-        const path: any = await bot.pathfinder.getPathTo(move, inverted_goal, 10000);
-        const last_move: any = path.path[path.path.length-1];
-        if (last_move) {
-            const x: number = Math.floor(last_move.x);
-            const y: number = Math.floor(last_move.y);
-            const z: number = Math.floor(last_move.z);
-            bot.chat('/tp @s ' + x + ' ' + y + ' ' + z);
-            return true;
-        }
+    const from = { x: pos.x, y: pos.y, z: pos.z };
+    const blockAt = (x: number, y: number, z: number): { name?: unknown } | null => bot.blockAt(new Vec3(x, y, z));
+    const choice = chooseSafeFleeTarget(blockAt, from, awayFrom, distance);
+    if (!choice.ok) {
+        log(bot, label + ' 找不到安全落点：' + choice.reason + '；不再硬走，改用 pillarUp 向上争取空间。');
+        const climbed = await pillarUp(bot, 1);
+        log(bot, climbed ? label + ' 已向上垫一格，请下一轮重新评估逃跑方向。' : label + ' 向上也失败，留在原地等安全时机。');
+        return climbed;
     }
+    log(bot, label + ' 选到安全落点 @(' + choice.target.x + ',' + choice.target.y + ',' + choice.target.z + ')（' + choice.reason + '）。');
+    const moved = await goToPosition(bot, choice.target.x, choice.target.y, choice.target.z, 0);
+    const check = assessStandingSpot(blockAt, choice.target.x, choice.target.y, choice.target.z);
+    if (!moved || !check.ok) {
+        log(bot, label + ' 到达/落点校验失败：' + (check.ok ? '路径没走通' : check.reason) + '；停在当前可控位置。');
+        return false;
+    }
+    const newPos: any = bot.entity.position;
+    log(bot, label + ' 安全到达 @(' + newPos.x.toFixed(1) + ',' + newPos.y.toFixed(1) + ',' + newPos.z.toFixed(1) + ')。');
+    return true;
+}
 
-    const moved = await goToGoal(bot, inverted_goal);
-    const new_pos: any = bot.entity.position;
-    log(bot, `Moved away from ${pos.floored()} to ${new_pos.floored()}.`);
-    return moved;
+export async function moveAway(bot: any, distance: number): Promise<boolean> {
+    return await moveAwaySafely(bot, null, distance, 'moveAway');
 }
 
 export async function moveAwayFromEntity(bot: any, entity: any, distance: number = 16): Promise<boolean> {
-    /**
-     * Move away from the given entity.
-     * @param {MinecraftBot} bot, reference to the minecraft bot.
-     * @param {Entity} entity, the entity to move away from.
-     * @param {number} distance, the distance to move away.
-     * @returns {Promise<boolean>} true if the bot moved away, false otherwise.
-     **/
-    const goal: any = new (pf as any).goals.GoalFollow(entity, distance);
-    const inverted_goal: any = new (pf as any).goals.GoalInvert(goal);
-    bot.pathfinder.setMovements(movementsFor(bot));
-    return await runPathfindingInterruptibly(bot, inverted_goal);
+    const target = entity?.position ?? null;
+    const awayFrom =
+        target != null && typeof target.x === 'number' && typeof target.y === 'number' && typeof target.z === 'number'
+            ? { x: target.x, y: target.y, z: target.z }
+            : null;
+    return await moveAwaySafely(bot, awayFrom, distance, 'moveAwayFromEntity');
 }
 
 export async function avoidEnemies(bot: any, distance: number = 16): Promise<boolean> {

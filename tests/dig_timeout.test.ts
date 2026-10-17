@@ -188,3 +188,18 @@ describe('dig 看门狗：目标变空气就停止等待', () => {
   });
 });
 
+describe('外部 stopDigging 正常中断', () => {
+  it('bot.dig 抛 Digging aborted：当正常中断返回 false，不重试不抛', async () => {
+    const bot: any = {
+      output: '',
+      dig: vi.fn(() => Promise.reject(new Error('Digging aborted'))),
+      stopDigging: vi.fn(),
+      heldItem: { type: 1, name: 'diamond_pickaxe' },
+      targetDigBlock: null,
+    };
+    await expect(digWithTimeout(bot, block('iron_ore', 4600, 3), '@(0,0,0)')).resolves.toBe(false);
+    expect(bot.output).toContain('正常中断');
+    expect(bot.dig).toHaveBeenCalledTimes(1);
+  });
+});
+
