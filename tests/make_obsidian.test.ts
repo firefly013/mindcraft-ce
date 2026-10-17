@@ -6,11 +6,16 @@ import {
   evaluateLavaTarget,
   evaluateWaterSource,
   failureReceipt,
+  findLavaMineStand,
+  findLavaScaffoldStand,
+  findLavaStandWithinReach,
   findMineStand,
   findScaffoldStand,
   findWaterStandWithinReach,
+  isStandingSafelyAt,
   formatPoint,
   nearestLavaInfo,
+  planLavaStand,
   planWaterStand,
   makeObsidian,
   makeObsidianActionList,
@@ -78,7 +83,9 @@ describe('安全岩浆/水源选址（纯函数）', () => {
     const lava: Point = { x: 0, y: 60, z: 0 };
     const result = evaluateLavaTarget(lava, mapProbe(validLavaWorld(lava)));
     expect(result.ok).toBe(true);
-    expect(result.stand).toEqual({ x: 1, y: 61, z: 0 });
+    expect(result.stand?.y).toBe(61);
+    expect(Math.abs(result.stand?.x ?? 0)).toBe(1);
+    expect(result.stand?.z).toBe(0);
   });
 
   it('岩浆旁没有干燥实心岸：拒绝并说明', () => {
@@ -105,7 +112,7 @@ describe('安全岩浆/水源选址（纯函数）', () => {
     const chosen = chooseSafeLavaTargets([nearBad, farGood], { x: 0, y: 60, z: 0 }, mapProbe(entries));
     expect(chosen).toHaveLength(1);
     expect(chosen[0]?.liquid).toEqual(farGood);
-    expect(chosen[0]?.stand).toEqual({ x: 11, y: 61, z: 0 });
+    expect([{ x: 9, y: 61, z: 0 }, { x: 11, y: 61, z: 0 }, { x: 10, y: 61, z: -1 }, { x: 10, y: 61, z: 1 }]).toContainEqual(chosen[0]?.stand);
   });
 
   it('安全水源候选会过滤真的无岸边目标', () => {
@@ -218,3 +225,61 @@ describe('task-14 装水位放宽与可行动回执', () => {
     expect(text).toContain('下一步：goToCoordinates');
   });
 });
+
+describe('task-23 岩浆操作位自动创造与硬校验', () => {
+  it('岩浆安全位放宽到 4.5 格内任意高一格实心岸，不再只认相邻一格', () => {
+    const lava: Point = { x: 0, y: 60, z: 0 };
+    const entries: Record<string, string> = { '0,60,0': 'lava', '2,60,0': 'stone' };
+    const stand = findLavaStandWithinReach(lava, mapProbe(entries));
+    expect(stand).toEqual({ x: 2, y: 61, z: 0 });
+    const evaluation = evaluateLavaTarget(lava, mapProbe(entries));
+    expect(evaluation.ok).toBe(true);
+    expect(evaluation.stand).toEqual({ x: 2, y: 61, z: 0 });
+  });
+
+  it('没有现成岩浆操作位时，纯函数给出具体圆石垫脚坐标', () => {
+    const lava: Point = { x: 0, y: 60, z: 0 };
+    const entries: Record<string, string> = { '0,60,0': 'lava', '3,60,0': 'stone' };
+    const plan = findLavaScaffoldStand(lava, mapProbe(entries));
+    expect(plan?.floor).toEqual({ x: 2, y: 60, z: 0 });
+    expect(plan?.stand).toEqual({ x: 2, y: 61, z: 0 });
+  });
+
+  it('没有站位但可挖遮挡时，纯函数给出具体 mineBlock 坐标', () => {
+    const lava: Point = { x: 0, y: 60, z: 0 };
+    const entries: Record<string, string> = {
+      '0,60,0': 'lava',
+      '2,60,0': 'stone',
+      '2,61,0': 'short_grass',
+    };
+    const plan = findLavaMineStand(lava, mapProbe(entries));
+    expect(plan?.stand).toEqual({ x: 2, y: 61, z: 0 });
+    expect(plan?.mines).toEqual([{ x: 2, y: 61, z: 0 }]);
+  });
+
+  it('完全无解时也要给建议坐标，不让模型猜', () => {
+    const lava: Point = { x: 0, y: 60, z: 0 };
+    const plan = planLavaStand(lava, mapProbe({ '0,60,0': 'lava' }));
+    expect(plan.mode).toBe('none');
+    expect(plan.suggestedStand).not.toBeNull();
+    expect(plan.suggestedFloor).not.toBeNull();
+  });
+});
+
+  it('倒水前硬校验：脚/头必须是空气、脚下必须是高一格实心岸', () => {
+    const lava: Point = { x: 0, y: 60, z: 0 };
+    const stand: Point = { x: 2, y: 61, z: 0 };
+    const target = { liquid: lava, stand, distance: 0 };
+    const entries: Record<string, string> = {
+      '2,61,0': 'air',
+      '2,62,0': 'air',
+      '2,60,0': 'stone',
+    };
+    const bot: any = {
+      entity: { position: { x: 2.2, y: 61, z: 0.2 } },
+      blockAt: (p: any) => ({ name: entries[key({ x: p.x, y: p.y, z: p.z })] ?? 'air' }),
+    };
+    expect(isStandingSafelyAt(bot, target)).toBe(true);
+    entries['2,60,0'] = 'air';
+    expect(isStandingSafelyAt(bot, target)).toBe(false);
+  });
