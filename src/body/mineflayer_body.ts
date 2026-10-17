@@ -255,28 +255,59 @@ export function nearestOtherPlayerName(bot: unknown, radius: number = 8): string
  * 真机 Feedback #24：长寻路中敌人贴脸连射，保命反射只是排队，没有先把
  * 正在跑的模型动作打断，bot 被带走后淹死。威胁超过阈值时先调这里。
  */
+/**
+ * 受控岩浆作业是否处于安全站位：用于 emergency 入口跳过预测性 lava 保命。
+ */
+export function isControlledSafeLavaOperation(bot: any): boolean {
+    if (bot?.controlledLavaOperation !== true) return false;
+    const pos = bot?.entity?.position;
+    if (pos == null) return false;
+    const nameAt = (dy: number): string | null => {
+        try {
+            const p = typeof pos.offset === 'function' ? pos.offset(0, dy, 0) : { x: pos.x, y: Number(pos.y ?? 0) + dy, z: pos.z };
+            const name = bot?.blockAt?.(p)?.name;
+            return typeof name === 'string' ? name : null;
+        } catch {
+            return null;
+        }
+    };
+    const feet = nameAt(0);
+    const head = nameAt(1);
+    const support = nameAt(-1);
+    const hazard = (name: string | null): boolean =>
+        name === 'lava' || name === 'water' || name === 'flowing_lava' || name === 'flowing_water';
+    const solid = (name: string | null): boolean =>
+        name != null && !hazard(name) && name !== 'air' && name !== 'cave_air' && name !== 'void_air';
+    const health = typeof bot?.health === 'number' ? bot.health : 20;
+    return !hazard(feet) && !hazard(head) && solid(support) && health > 12;
+}
+
+/**
+ * 保命硬中断：**只置 interrupt_code + 停寻路/清控制**。
+ *
+ * 不直接调 `bot.stopDigging()`：mineflayer 的 stopDigging 会 cancel 一个
+ * `Digging aborted` 的 Promise，旧代码没人接就变成 unhandledRejection 杀 body。
+ * 挖矿由 digWithTimeout 每 200ms 轮询 interrupt_code 自行 stopDigging 退出。
+ */
 export function forceStopBody(agent: any): void {
+    const bot = agent?.bot;
+    if (bot != null) bot.interrupt_code = true;
     try {
-        agent?.requestInterrupt?.();
+        bot?.clearControlStates?.();
     } catch {
         // 继续尝试其余停法。
     }
     try {
-        agent?.bot?.clearControlStates?.();
+        bot?.pathfinder?.stop?.();
     } catch {
         // 同上。
     }
     try {
-        agent?.bot?.pathfinder?.stop?.();
+        const cancelled: any = bot?.collectBlock?.cancelTask?.();
+        if (cancelled != null && typeof cancelled.catch === 'function') cancelled.catch(() => undefined);
     } catch {
         // 同上。
     }
-    try {
-        agent?.bot?.stopDigging?.();
-    } catch {
-        // 同上。
-    }
-    if (agent?.bot != null) agent.bot.interrupt_code = true;
 }
 
 export interface ThreatEmergencyInput {
@@ -625,11 +656,50 @@ export class MineflayerBody {
     }
 
     requestInterrupt(): void {
+        if (this.bot == null) return;
         this.bot.interrupt_code = true;
-        this.bot.stopDigging();
-        this.bot.collectBlock.cancelTask();
-        this.bot.pathfinder.stop();
-        stopPvp(this.bot);
+        // mineflayer 的 stopDigging 在同/异步两条路上都可能抛 `Digging aborted`；
+        // 这里是保命/Stop 的中断路径，不能因为一次 abort rejection 杀 body。
+        const swallow = (result: any): void => {
+            try {
+                if (result != null && typeof result.catch === 'function') result.catch(() => undefined);
+            } catch {
+                // 同步 throw 已由外层 try 处理。
+            }
+        };
+        try {
+            swallow(this.bot.stopDigging?.());
+        } catch (err: unknown) {
+            this.noteNonFatal('stopDigging', err);
+        }
+        try {
+            swallow(this.bot.collectBlock?.cancelTask?.());
+        } catch (err: unknown) {
+            this.noteNonFatal('collectBlock.cancelTask', err);
+        }
+        try {
+            this.bot.pathfinder?.stop?.();
+        } catch (err: unknown) {
+            this.noteNonFatal('pathfinder.stop', err);
+        }
+        try {
+            stopPvp(this.bot);
+        } catch (err: unknown) {
+            this.noteNonFatal('stopPvp', err);
+        }
+    }
+
+    /** 非致命中断异常只记日志，不升级成 fatal。 */
+    private noteNonFatal(where: string, err: unknown): void {
+        try {
+            this.log.with('lifecycle').warn({
+                event: 'interrupt-swallowed',
+                where,
+                err: err instanceof Error ? err.message : String(err),
+            });
+        } catch {
+            // 日志失败也不能让中断路径崩。
+        }
     }
 
     /**
@@ -770,6 +840,16 @@ export class MineflayerBody {
             this.log.with('reflex').info({ event: 'emergency-triggered', type, reflex, intent });
         } catch {
             // 日志失败不能阻止保命动作。
+        }
+        // 受控安全岩浆作业：预测性 lava 保命在入口直接跳过（task-32/33/34 的豁免
+        // 也应该在这里兜一层，避免 pollEdges 口径变化或动作间隙漏网）。
+        if (type.startsWith('world.lava.') && isControlledSafeLavaOperation(this.bot)) {
+            try {
+                this.log.with('reflex').info({ event: 'emergency-skipped', type, reason: 'controlled-lava-safe' });
+            } catch {
+                // 日志失败也要跳过。
+            }
+            return;
         }
         // **先硬中断正在跑的模型动作**，再通知/排队保命：
         // 真机 Feedback #24 长寻路遇敌时，反射只是排队，身体还在被寻路带走，

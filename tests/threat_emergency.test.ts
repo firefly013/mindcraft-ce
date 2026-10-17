@@ -42,10 +42,12 @@ describe('forceStopBody', () => {
     };
     const agent = { bot, requestInterrupt: vi.fn() };
     forceStopBody(agent);
-    expect(agent.requestInterrupt).toHaveBeenCalledTimes(1);
+    // task-35：不再直接 stopDigging（digWithTimeout 轮询 interrupt_code 自己退出），
+    // 也不调用 requestInterrupt，避免 Digging aborted 变成 unhandledRejection。
+    expect(agent.requestInterrupt).not.toHaveBeenCalled();
     expect(bot.clearControlStates).toHaveBeenCalledTimes(1);
     expect(bot.pathfinder.stop).toHaveBeenCalledTimes(1);
-    expect(bot.stopDigging).toHaveBeenCalledTimes(1);
+    expect(bot.stopDigging).not.toHaveBeenCalled();
     expect(bot.interrupt_code).toBe(true);
   });
 });
