@@ -1139,3 +1139,82 @@ export function formatEndgameReport(assessment: EndGearAssessment, advice: Endga
     }
     return lines.join('\n');
 }
+// ============================ 十一、按优先级喝药（纯决策） ============================
+export interface DrinkDecisionInput {
+    effects?: EffectInfo[];
+    stock: PotionStock;
+    /** 当前血量 0~20；读不到给 null。 */
+    health?: number | null;
+    /** 在末地：摔落风险和龙息风险都拉满。 */
+    inEnd?: boolean;
+    /** 现在在空中/正在下坠。 */
+    airborne?: boolean;
+    /** 缓降剩多少秒算"快没了"，默认 30。 */
+    refreshBelowSeconds?: number;
+}
+
+export interface DrinkDecision {
+    /** 该喝哪一类；null = 现在不需要喝。 */
+    kind: PotionKind | 'milk' | null;
+    reason: string;
+    /** 逐项诊断（没喝时告诉模型背包里都有什么）。 */
+    considered: string[];
+}
+
+/**
+ * 末地喝药的优先级。做成纯函数是为了能离线测：**决策和"怎么喝"是两件事**。
+ *
+ * 为什么需要它：所有药水在背包里都叫 `potion`，现有 `consume(item_name)` 按物品名找，
+ * 模型没法表达"喝缓降"。这里替模型把顺序定死（并写在工具描述里，不是隐藏规则）：
+ *
+ * 1. **缓降**：在末地/空中，且没 Buff 或剩余 < 30s → 立刻补。摔死是末地头号死法。
+ * 2. **再生 / 治疗**：血量 ≤ 10（半血）时先回血。
+ * 3. **抗性提升**：在末地且没有抗性 Buff → 顶一个（爆炸和撞击都能减）。
+ * 4. 都不满足 → 不喝，回执里列出背包还有哪些药。
+ */
+export function choosePotionToDrink(input: DrinkDecisionInput): DrinkDecision {
+    const stock = input.stock;
+    const refresh = input.refreshBelowSeconds ?? 30;
+    const considered: string[] = [];
+    const fallRisk = input.inEnd === true || input.airborne === true;
+    const slowFallingLeft = activeEffectSeconds(input.effects, 'slow_falling');
+
+    if (stock.slow_falling > 0 && fallRisk && (slowFallingLeft == null || slowFallingLeft < refresh)) {
+        return {
+            kind: 'slow_falling',
+            reason:
+                slowFallingLeft == null
+                    ? `没有缓降 Buff，而${input.airborne === true ? '你现在在空中' : '你在末地'}——龙的翅膀能把你掀到几十格高空，先补缓降。`
+                    : `缓降只剩 ${slowFallingLeft}s（少于 ${refresh}s），被掀飞前先续上。`,
+            considered,
+        };
+    }
+    considered.push(`缓降：库存 ${stock.slow_falling} 瓶，Buff ${slowFallingLeft == null ? '无' : `${slowFallingLeft}s`}`);
+
+    const health = input.health ?? null;
+    if (health != null && health <= 10) {
+        if (stock.regeneration > 0) {
+            return { kind: 'regeneration', reason: `血量只剩 ${health}/20：先喝再生，把血线拉回来。`, considered };
+        }
+        if (stock.healing > 0) {
+            return { kind: 'healing', reason: `血量只剩 ${health}/20：没有再生，先用治疗顶一口。`, considered };
+        }
+        considered.push('再生/治疗：低血但库存为 0');
+    } else {
+        considered.push(`再生/治疗：血量 ${health == null ? '读不到' : `${health}/20`}，还没到半血`);
+    }
+
+    if (input.inEnd === true && !hasActiveEffect(input.effects, 'resistance') && stock.resistance > 0) {
+        return { kind: 'resistance', reason: '在末地且没有抗性提升：先顶一瓶，爆炸和撞击都按这个减。', considered };
+    }
+    considered.push(`抗性：库存 ${stock.resistance} 瓶，Buff ${hasActiveEffect(input.effects, 'resistance') ? '有' : '无'}`);
+
+    const stockText = POTION_KINDS.filter((kind) => kind !== 'other' && stock[kind] > 0)
+        .map((kind) => `${kind}×${stock[kind]}`)
+        .join('、');
+    return {
+        kind: null,
+        reason: `按末地优先级现在不需要喝药。背包里的药水：${stockText === '' ? '（一瓶都没有）' : stockText}。`,
+        considered,
+    };
+}

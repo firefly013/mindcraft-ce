@@ -13,12 +13,15 @@
  * 标了 `TODO(真机)` 的地方是**我无法离线验证**的 mineflayer 行为（床的两格放置、
  * 主动引爆床、投掷末影之眼），已经在 docs/endgame/01-actions.md 里列成验证清单。
  */
+import Vec3Class from 'vec3';
 import * as skills from './skills.js';
 import * as world from './world.js';
+import { opContextFor, permits } from '../safety/permits.js';
 import {
     DRAGON_MAX_HEALTH,
     END_PODIUM,
     assessEndGear,
+    choosePotionToDrink,
     findPotionItem,
     formatEndgameReport,
     horizontalDistance,
@@ -27,6 +30,8 @@ import {
     planBedBombing,
     planBreathEscape,
     planCrystalAssault,
+    planRecovery,
+    potionStock,
     vec,
     type BreathCloud,
     type EffectInfo,
@@ -80,7 +85,7 @@ export const endgameToolSpecs: EndgameToolSpec[] = [
             '进去会落在 (100,49,0) 的黑曜石平台上，面朝西，平台和主岛之间可能隔着虚空。',
         params: {},
         timeoutMinutes: 5,
-        backing: '复用 skills.goToNearestBlock + useToolOn(eye_of_ender, end_portal_frame)；维度切换判定照抄 nether_portal.ts 的 dimensionChanged。',
+        backing: '复用 skills.goToNearestBlock + useToolOn(ender_eye, end_portal_frame)；维度切换判定照抄 nether_portal.ts 的 dimensionChanged。',
     },
     {
         name: 'clearEndCrystals',
@@ -140,24 +145,25 @@ export const endgameToolSpecs: EndgameToolSpec[] = [
         backing: '新增动作命令；纯计算在 endgame.planRecovery，执行复用 goToCoordinates / enterEnd。',
     },
     {
-        name: 'locateStronghold',
+        name: 'drinkMilk',
         kind: 'action',
         description:
-            '掷末影之眼找要塞：眼沿指向飞约 12 格（每次 20% 概率碎），跟到眼睛开始往下钻就往下挖。' +
-            '**需要新原语**：目前没有"投掷手里的物品"这个原子动作。',
-        params: {},
-        timeoutMinutes: 10,
-        backing: '⚠ 缺原语：需要新增 throwHeld（右键投掷）。在它落地前，先让模型用 goToCoordinates 沿眼的方向走 + 自己判断。',
-    },
-    {
-        name: 'throwEnderPearl',
-        kind: 'action',
-        description:
-            '扔末影珍珠位移/自救：被龙掀到空中时往地面扔一颗能免摔；平台离主岛太远时也能靠它过去。' +
-            '同样依赖"投掷"原语。',
+            '喝牛奶桶：立刻清掉自己身上的**全部**状态效果。**会连自己刚喝的缓降/再生/抗性一起清掉**，' +
+            '所以只在中了负面效果（中毒/虚弱/缓慢…）时用，别当疗伤药；也**不能灭火**。',
         params: {},
         timeoutMinutes: 2,
-        backing: '⚠ 缺原语：同 locateStronghold 的 throwHeld。',
+        backing: '调用 endgame_routine.drinkPotionByKind(bot, "milk")（equip + consume）。',
+    },
+    {
+        name: 'throwHeld',
+        kind: 'action',
+        description:
+            '把手里的东西扔出去（先 equip）：末影之眼指路找要塞（飞约 12 格，每次 20% 概率碎），' +
+            '末影珍珠位移/免摔伤（下坠时会自动往脚下扔）。扔完会核对手里那一叠的数量有没有真的减少，' +
+            '没减少就如实报"没扔成"，不假装成功。',
+        params: {},
+        timeoutMinutes: 1,
+        backing: '原子原语 throwHeld 在 library/endgame_routine.ts（瞄准 + activateItem + 数量核对），已实现。',
     },
 ];
 
@@ -429,13 +435,33 @@ export async function bedBombDragon(bot: any, options: { beds?: number; dryRun?:
 
     const bedItem = pickBedItemName(bot);
     if (bedItem == null) return '背包里没有床。';
+
+    // 末地点床 = 尝试睡觉 = 爆炸。**先把闸门问清楚：没授权就一个方块都不放。**
+    const verdict = permits.isAllowed('sleep_in_bed', opContextFor(bot), Date.now());
+    if (!verdict.allowed) {
+        return '床炸要先授权：调 allowDangerousOps(ops="sleep_in_bed", calls=1)（一张床 = 一次），再调这个工具。没有放任何方块。';
+    }
+
     // TODO(真机): 床是两格方块，placeBlock 对 bed 的支持未验证；失败就退回手工放。
     const placed = await skills.placeBlock(bot, bedItem, bedCell.x, bedCell.y, bedCell.z);
     if (!placed) return '床没放下去（两格方块的放置还没在真机验证过），先别点它。';
     skills.log(bot, `床放好了，预计打掉龙 ${plan.expectedDragonDamage.toFixed(0)} HP；${plan.reason}`);
-    // TODO(真机): 引爆就是"在末地尝试睡觉"。必须先 allowDangerousOps("sleep_in_bed")，
-    // 然后 bot.sleep(bot.blockAt(bedCell)) 或 bot.activateBlock(...)，并接住爆炸导致的异常。
-    return '床已就位。TODO(真机)：引爆调用还没接上，见 docs/endgame/01-actions.md 的验证清单。';
+
+    const bedBlock = typeof bot?.blockAt === 'function' ? bot.blockAt(new Vec3Class(bedCell.x, bedCell.y, bedCell.z)) : null;
+    if (bedBlock == null) return '床放好了但读不到那一格，没敢点（怕点错东西）。';
+    const healthBefore = typeof bot?.health === 'number' ? bot.health : null;
+    try {
+        // TODO(真机): bot.sleep 与 bot.activateBlock 在末地谁更好用要实测；两个都会炸，
+        // 所以用 race + 吞异常，别让预期中的爆炸把整条命令带崩。
+        await Promise.race([bot.sleep(bedBlock), skills.wait(bot, 2000)]);
+    } catch {
+        // 预期：末地睡不成，床炸了
+    }
+    await skills.moveAway(bot, 6);
+    const healthAfter = typeof bot?.health === 'number' ? bot.health : null;
+    const hurt = healthBefore != null && healthAfter != null ? Math.max(0, healthBefore - healthAfter) : null;
+    const hurtText = hurt == null ? '自伤读不到' : hurt > 6 ? `自伤 ${hurt} 点偏高——下次先把掩体补好或退得更远` : `自伤 ${hurt} 点`;
+    return `床炸完了（${hurtText}）。预期打掉龙 ${plan.expectedDragonDamage.toFixed(0)} HP；如果龙没掉血，说明它没停在床上方。`;
 }
 
 export function pickBedItemName(bot: any): string | null {
@@ -484,3 +510,391 @@ export function endgameStatusReport(bot: any): string {
 
 /** 供 Lead 接线时用的阶段枚举导出（避免文档和代码里两份字符串）。 */
 export type { EndgamePhase };
+
+// ============================ 四、末地动作：把 plan 变成 bot 动作 ============================
+
+/** 回执格式统一：第一行结论，后面每行一个细节。 */
+export function endgameReceipt(headline: string, details: string[] = []): string {
+    const lines = [headline];
+    for (const detail of details) lines.push(`- ${detail}`);
+    return lines.join('\n');
+}
+
+/** 按谓词数背包里有多少个（`world.getInventoryCounts` 的薄封装，坏数据一律当 0）。 */
+function countOf(bot: any, predicate: (name: string) => boolean): number {
+    const counts = safeInventoryCounts(bot);
+    let total = 0;
+    for (const [rawName, rawCount] of Object.entries(counts)) {
+        if (!predicate(normalizeName(rawName))) continue;
+        total += Number.isFinite(rawCount) ? Math.max(0, rawCount) : 0;
+    }
+    return total;
+}
+
+export function countEyesOfEnder(bot: any): number {
+    return countOf(bot, (name) => name === 'ender_eye');
+}
+
+export function countEnderPearls(bot: any): number {
+    return countOf(bot, (name) => name === 'ender_pearl');
+}
+
+/** 拆水晶的家当：弓/弩、箭、镐、TNT。 */
+export function crystalToolKit(bot: any): { bow: string | null; arrows: number; pickaxe: boolean; tnt: number } {
+    const counts = safeInventoryCounts(bot);
+    const bow = ['bow', 'crossbow'].find((name) => (counts[name] ?? 0) > 0) ?? null;
+    const arrows =
+        (counts['arrow'] ?? 0) + (counts['spectral_arrow'] ?? 0) + (counts['tipped_arrow'] ?? 0);
+    const pickaxe = Object.keys(counts).some((name) => normalizeName(name).endsWith('_pickaxe'));
+    return { bow, arrows, pickaxe, tnt: counts['tnt'] ?? 0 };
+}
+
+/**
+ * 拉弓射一箭。
+ *
+ * TODO(真机)：`activateItem`（开始拉弓）→ 等 → `deactivateItem`（放箭）这套是按协议
+ * 推的，离线验证不了：要确认箭真的飞出去、拉弓多久命中率最好。弩是立刻击发，时序不同，
+ * 这里先按弓处理。
+ */
+export async function shootAtEntity(bot: any, entity: any, chargeMs = 900): Promise<string> {
+    const kit = crystalToolKit(bot);
+    if (kit.bow == null) return '没有弓/弩，射不了——先去弄一把。';
+    if (kit.arrows <= 0) return '没有箭，射不了。';
+    const equipped = await skills.equip(bot, kit.bow);
+    if (!equipped) return `弓/弩没拿到手上（${kit.bow}），射不了。`;
+    const position = toVec(entity?.position);
+    if (position == null) return '目标位置读不到，射不了。';
+    const height = typeof entity?.height === 'number' ? entity.height : 1;
+    try {
+        await bot.lookAt(new Vec3Class(position.x, position.y + height / 2, position.z), true);
+        await bot.activateItem();
+        await skills.wait(bot, chargeMs);
+        await bot.deactivateItem();
+        await skills.wait(bot, 300);
+    } catch (err) {
+        return `射箭时出错：${err instanceof Error ? err.message : String(err)}`;
+    }
+    return `朝 ${entity?.name ?? '目标'} 放了一箭（拉弓 ${chargeMs}ms）。如果没打中，先看准星是不是被方块挡住了。`;
+}
+
+/** 按优先级喝药。**决策是纯函数**（`choosePotionToDrink`），这里只负责找药、喝、回报。 */
+export async function drinkPotionsByPriority(bot: any): Promise<string> {
+    const signals = readEndSignals(bot);
+    const stock = potionStock(safeInventoryItems(bot));
+    const health = typeof bot?.health === 'number' ? bot.health : null;
+    const airborne = bot?.entity?.onGround === false;
+    const decision = choosePotionToDrink({
+        effects: signals.effects,
+        stock,
+        health,
+        inEnd: signals.inEnd,
+        airborne,
+    });
+    if (decision.kind == null) return decision.reason;
+    const drank = await drinkPotionByKind(bot, decision.kind);
+    if (!drank) return `想喝 ${decision.kind}（${decision.reason}），但背包里没有这一类药水。`;
+    return `喝了 ${decision.kind}：${decision.reason}`;
+}
+
+/** 被掀飞/高空坠落时的自保：往脚下扔一颗末影珍珠。不适用时返回 null。 */
+export async function pearlFallRescue(bot: any): Promise<string | null> {
+    if (bot?.entity?.onGround !== false) return null;
+    const velocity = toVec(bot?.entity?.velocity);
+    if (velocity == null || velocity.y >= -0.4) return null;
+    if (countEnderPearls(bot) <= 0) return null;
+    const position = toVec(bot?.entity?.position);
+    if (position == null) return null;
+    const equipped = await skills.equip(bot, 'ender_pearl');
+    if (!equipped) return null;
+    const threw = await throwHeld(bot, vec(position.x, position.y - 8, position.z));
+    return threw
+        ? `正在下坠（vy=${velocity.y.toFixed(2)}）：往脚下扔了一颗末影珍珠落地。`
+        : '正在下坠，但末影珍珠没扔出去（手里数量没变）——改用缓降药水/水桶自救。';
+}
+
+/** 躲龙息。先自保（空中扔珍珠），再按 `planBreathEscape` 挪出伤害区/20 格。 */
+export async function dodgeDragonBreathSkill(bot: any): Promise<string> {
+    const rescue = await pearlFallRescue(bot);
+    if (rescue != null) return rescue;
+
+    const start = toVec(bot?.entity?.position);
+    if (start == null) return '读不到自己的坐标，先别乱跑。';
+    const first = planBreathEscape({
+        self: start,
+        clouds: readBreathClouds(bot),
+        dragonPerched: readDragonPerched(bot),
+    });
+    if (first.urgency === 'none') return first.reason;
+
+    let latest = first;
+    for (let step = 0; step < 6; step++) {
+        const self = toVec(bot?.entity?.position) ?? start;
+        latest = planBreathEscape({
+            self,
+            clouds: readBreathClouds(bot),
+            dragonPerched: readDragonPerched(bot),
+        });
+        if (latest.urgency === 'none') break;
+        const target = latest.escapeTarget;
+        const reached = await skills.goToPosition(bot, target.x, target.y, target.z, 1.2);
+        if (!reached) break;
+    }
+    return `${first.reason} 已经往 (${Math.round(latest.escapeTarget.x)},${Math.round(latest.escapeTarget.z)}) 方向挪开；还是不安全就再调一次。`;
+}
+
+/** 投掷手里的东西（末影之眼指路 / 末影珍珠位移·自救）。 */
+export async function throwHeldSkill(bot: any): Promise<string> {
+    const held: any = bot?.heldItem;
+    if (held == null || typeof held.name !== 'string') {
+        return '手上是空的：先用 equip 把要扔的东西拿到手上（ender_eye 末影之眼 / ender_pearl 末影珍珠），再调这个工具。';
+    }
+    const name = normalizeName(held.name);
+    const position = toVec(bot?.entity?.position);
+    const velocity = toVec(bot?.entity?.velocity);
+    const falling = bot?.entity?.onGround === false && velocity != null && velocity.y < -0.4;
+    const aim = falling && position != null ? vec(position.x, position.y - 8, position.z) : null;
+    const threw = await throwHeld(bot, aim);
+    if (!threw) {
+        return `没有把 ${name} 扔出去（手里数量没变）：可能服务端没采纳，或者手里这个不是投掷物。`;
+    }
+    if (name.includes('ender_eye')) {
+        return endgameReceipt('末影之眼扔出去了，它朝最近的要塞方向飞约 12 格。', [
+            '跟着眼睛指的方向走；眼睛开始往下钻 → 要塞在脚下，往下挖。',
+            '每次扔有 20% 概率碎掉，多备几颗（12 颗眼才够填满传送门）。',
+        ]);
+    }
+    if (name.includes('ender_pearl')) {
+        return falling ? '下坠中往脚下扔了一颗末影珍珠，摔落伤害基本免掉。' : '末影珍珠扔出去了。';
+    }
+    return `扔出了 ${name}。`;
+}
+
+/** 进末地：已有传送门就走进去；没有就把空框架用末影之眼填满，再走进去。 */
+export async function enterEndSkill(bot: any): Promise<string> {
+    const before = readDimension(bot);
+    if (before === 'the_end') return '已经在末地了，不用再进。';
+    const details: string[] = [];
+
+    const stepThrough = async (portal: any): Promise<boolean> => {
+        const p = toVec(portal?.position);
+        if (p == null) return false;
+        await skills.goToPosition(bot, p.x + 0.5, p.y, p.z + 0.5, 0.5);
+        return skills.waitFor(bot, () => readDimension(bot) === 'the_end', 15000);
+    };
+
+    const existing = world.getNearestBlock(bot, 'end_portal', 48);
+    if (existing != null) {
+        const p = toVec(existing.position);
+        details.push(`发现已激活的末地传送门 (${p == null ? '?' : `${Math.round(p.x)},${Math.round(p.y)},${Math.round(p.z)}`})`);
+        if (await stepThrough(existing)) {
+            details.push(`维度：${before ?? '未知'} → the_end。落点 (100,49,0) 面朝西，先看平台和主岛之间有没有空隙。`);
+            return endgameReceipt('已进入末地。', details);
+        }
+        details.push('走过去了但维度没切：可能没真的踩进传送门方块。用 stats 看坐标，再调一次。');
+        return endgameReceipt('没进成末地。', details);
+    }
+
+    details.push('48 格内没有已激活的末地传送门，改找传送门框架');
+    const frames = world.getNearestBlocksWhere(
+        bot,
+        (block: any) => block?.name === 'end_portal_frame' && ((block.metadata ?? 0) & 4) === 0,
+        32,
+        12,
+    );
+    if (frames.length === 0) {
+        details.push('附近没有空的末地传送门框架：要塞不在这。先用末影之眼找要塞，站到传送门房再调这个工具。');
+        return endgameReceipt('没有找到可以放眼的传送门框架。', details);
+    }
+    details.push(`找到 ${frames.length} 个空框架`);
+    if (countEyesOfEnder(bot) <= 0) {
+        details.push('背包里没有末影之眼：打末影人拿珍珠 + 烈焰粉合成 ender_eye（12 颗才够填满）。');
+        return endgameReceipt('有框架，但没有末影之眼。', details);
+    }
+
+    let filled = 0;
+    for (const frame of frames) {
+        if (countEyesOfEnder(bot) <= 0) break;
+        if (await skills.useToolOnBlock(bot, 'ender_eye', frame)) filled += 1;
+    }
+    details.push(`填了 ${filled} 个框架，还剩 ${countEyesOfEnder(bot)} 颗眼`);
+
+    const opened = world.getNearestBlock(bot, 'end_portal', 48);
+    if (opened == null) {
+        details.push('12 个框架全部有眼才会激活；再攒几颗眼回来把剩下的填满。');
+        return endgameReceipt(`填了 ${filled} 个，传送门还没亮。`, details);
+    }
+    details.push('传送门亮了，走进去');
+    if (await stepThrough(opened)) {
+        details.push(`维度：${before ?? '未知'} → the_end。落点 (100,49,0) 面朝西。`);
+        return endgameReceipt('已进入末地。', details);
+    }
+    details.push('传送门激活了但没走进去（维度没切），再调一次。');
+    return endgameReceipt('没进成末地。', details);
+}
+
+/** 找那颗水晶对应的实体（先按 id 对，再按坐标兜底）。 */
+function findCrystalEntity(bot: any, crystal: EndCrystalInfo): any | null {
+    const entities = bot?.entities;
+    if (entities == null || typeof entities !== 'object') return null;
+    const entries = Object.entries(entities as Record<string, any>);
+    if (crystal.id != null) {
+        const byId = entries.find(([id]) => id === String(crystal.id));
+        if (byId != null && typeof (byId[1] as any)?.name === 'string') return byId[1];
+    }
+    for (const [, entity] of entries) {
+        const e: any = entity;
+        if (typeof e?.name !== 'string' || !e.name.includes('end_crystal')) continue;
+        const p = toVec(e.position);
+        if (p == null) continue;
+        if (horizontalDistance(p, crystal.position) <= 2 && Math.abs(p.y - crystal.position.y) <= 3) return e;
+    }
+    return null;
+}
+
+/** 笼中水晶的安全打法：在铁栏杆顶上放 TNT，点火，立刻后撤。 */
+async function tntTheCage(bot: any, crystal: EndCrystalInfo, details: string[]): Promise<string> {
+    if ((safeInventoryCounts(bot)['tnt'] ?? 0) <= 0) {
+        details.push('没有 TNT：要么去合成（火药+沙子），要么上柱子拆铁栏杆（先喝缓降）。');
+        return endgameReceipt('笼中水晶现在拆不掉。', details);
+    }
+    const verdict = permits.isAllowed('ignite', opContextFor(bot), Date.now());
+    if (!verdict.allowed) {
+        details.push('在铁栏杆顶上放 TNT 后要点火：先 allowDangerousOps(ops="ignite", calls=1)。**这次没有放任何东西**。');
+        return endgameReceipt('点火没授权，中止。', details);
+    }
+    const top = vec(crystal.position.x, crystal.position.y + 1, crystal.position.z);
+    const placed = await skills.placeBlock(bot, 'tnt', top.x, top.y, top.z);
+    if (!placed) {
+        details.push(`TNT 没放到 (${top.x},${top.y},${top.z})（上面可能不是空格/够不着）`);
+        return endgameReceipt('TNT 没放下去。', details);
+    }
+    const tntBlock = typeof bot?.blockAt === 'function' ? bot.blockAt(new Vec3Class(top.x, top.y, top.z)) : null;
+    if (tntBlock == null) {
+        details.push('TNT 放下了但读不到那一格，没敢点火（怕点错别的方块）。');
+        return endgameReceipt('TNT 已就位但没点火。', details);
+    }
+    await skills.useToolOnBlock(bot, 'flint_and_steel', tntBlock);
+    await skills.moveAway(bot, 6);
+    details.push('点了火并后撤 6 格：TNT 大约 4 秒后炸，水晶会跟着炸。');
+    return endgameReceipt('笼中水晶的 TNT 已点燃。', details);
+}
+
+/** 拆水晶：按 `planCrystalAssault` 的顺序处理下一颗（每次调用拆一颗）。 */
+export async function clearEndCrystalsSkill(bot: any): Promise<string> {
+    const position = toVec(bot?.entity?.position);
+    if (position == null) return '读不到自己的坐标，先别碰水晶。';
+    const crystals = readEndCrystals(bot);
+    if (crystals.length === 0) {
+        return '视野里没有末地水晶了。如果还能看见治疗光束，说明区块外还有没拆的；否则可以直接打龙。';
+    }
+    const kit = crystalToolKit(bot);
+    const plan = planCrystalAssault({
+        crystals,
+        self: position,
+        hasPickaxe: kit.pickaxe,
+        tntCount: kit.tnt,
+    });
+    const target = plan.targets[0];
+    if (target == null) return plan.message;
+
+    const at = `(${Math.round(target.crystal.position.x)},${Math.round(target.crystal.position.y)},${Math.round(target.crystal.position.z)})`;
+    const details: string[] = [
+        `目标：${target.crystal.caged === true ? '笼中水晶' : '普通水晶'} ${at}，离你 ${target.distance.toFixed(1)} 格`,
+        target.note,
+    ];
+
+    if (target.distance < plan.safeShootDistance) {
+        const stand = target.standPoint;
+        const moved = await skills.goToPosition(bot, stand.x, stand.y, stand.z, 2);
+        details.push(
+            moved
+                ? `退到安全射程（爆炸威力 6，要 ≥${plan.safeShootDistance} 格）`
+                : '后退没走成（路被堵？）：射的时候注意别被爆炸波及',
+        );
+    }
+
+    if (target.method === 'tnt_cage') return tntTheCage(bot, target.crystal, details);
+
+    const entity = findCrystalEntity(bot, target.crystal);
+    if (entity == null) return endgameReceipt('那颗水晶的实体找不到了（可能刚被拆掉）。', details);
+    details.push(await shootAtEntity(bot, entity));
+    if (target.method === 'climb_cage') {
+        details.push('这是笼中水晶：地面射经常被铁栏杆挡住。这一箭没效果就用 TNT 掏，或者上柱子拆栏杆（先喝缓降）。');
+    }
+    return endgameReceipt('朝水晶放了一箭，听爆炸声 / 看它还亮不亮。', details);
+}
+
+/** 死亡回收：读记录下来的 last_death_position，按 5 分钟/区块加载规则给方案；同维度就带你走。 */
+export async function recoverAfterDeathSkill(agent: any): Promise<string> {
+    const bot = agent?.bot;
+    const recalled = agent?.memory_bank?.recallPlace?.('last_death_position');
+    if (!Array.isArray(recalled) || recalled.length < 3) {
+        return '没有记录到死亡点（last_death_position 是空的）：要么还没死过，要么被清了。';
+    }
+    const x = Number(recalled[0]);
+    const y = Number(recalled[1]);
+    const z = Number(recalled[2]);
+    const current = readDimension(bot);
+    const plan = planRecovery({
+        deathDimension: current ?? 'unknown',
+        deathPosition: vec(x, y, z),
+        secondsSinceDeath: 0,
+        chunkLoadedSinceDeath: false,
+    });
+    const details: string[] = [`记录点：(${Math.round(x)},${Math.round(y)},${Math.round(z)})`, ...plan.steps, plan.message];
+
+    if (current === 'the_end') {
+        details.push('你现在就在末地：直接过去捡；路上先确认龙在哪，别在它头顶上捡东西。');
+        const arrived = await skills.goToPosition(bot, x, y, z, 2);
+        details.push(arrived ? '走到记录点附近了，把地上的东西捡回来。' : '没能走过去（路被堵/落差太大）：用 goToCoordinates 分段靠近。');
+    } else {
+        details.push(
+            `你现在在 ${current ?? '未知维度'}，跨维度那一段（回要塞 → 进末地）要自己走，这个工具不会替你传送。`,
+        );
+    }
+    return endgameReceipt('死亡回收', details);
+}
+
+/**
+ * 投掷手里的东西（末影之眼 / 末影珍珠 / 雪球 / 鸡蛋）——末地找要塞和空中自救都要它。
+ *
+ * **为什么不在 `skills.ts`**：那是共享文件，接线期别人正在改；这个原语目前只有末地命令
+ * 用得到，就先住在末地库里，等稳定了再由 Lead 决定要不要搬进 `skills.ts`。
+ *
+ * 三件事：先瞄准（可选）→ `activateItem` 右键 → **核对手里那一叠的数量**。
+ * 数量没减少就说明服务端没采纳（或手里这个不是投掷物），如实报出来，绝不假装成功。
+ */
+export async function throwHeld(bot: any, aim: Vec3 | null = null): Promise<boolean> {
+    const held: any = bot?.heldItem;
+    if (held == null || typeof held.name !== 'string') {
+        skills.log(bot, '手上是空的：先用 equip 要扔的东西拿到手上（ender_eye 末影之眼 / ender_pearl 末影珍珠），再投掷。');
+        return false;
+    }
+    const before: number = typeof held.count === 'number' ? held.count : 1;
+    if (aim != null && Number.isFinite(aim.x) && Number.isFinite(aim.y) && Number.isFinite(aim.z)) {
+        try {
+            await bot.lookAt(new Vec3Class(aim.x, aim.y, aim.z), true);
+        } catch {
+            skills.log(bot, '瞄准时出错，按当前视角扔。');
+        }
+    }
+    try {
+        await bot.activateItem();
+    } catch (err: unknown) {
+        skills.log(bot, `投掷失败：${err instanceof Error ? err.message : String(err)}`);
+        return false;
+    }
+    // 服务端要过一两个 tick 才会扣掉手里的数量；等一小会儿再核对。
+    await skills.wait(bot, 300);
+    const after: any = bot.heldItem;
+    const afterCount: number =
+        after != null && after.name === held.name && typeof after.count === 'number' ? after.count : 0;
+    const threw: boolean = afterCount < before;
+    skills.log(
+        bot,
+        threw
+            ? `扔出了 1 个 ${held.name}（还剩 ${afterCount} 个）。`
+            : `发了"使用物品"包，但 ${held.name} 数量没变（${before} → ${afterCount}）：可能服务端没采纳，或者手里这个不是投掷物。别当作扔成功。`,
+    );
+    return threw;
+}
