@@ -1,0 +1,130 @@
+/**
+ * task-21：挖方块动态超时 + 超时续挖。
+ */
+import { describe, expect, it, vi } from 'vitest';
+import { estimateDigTimeoutMs, digWithTimeout, mineBlockAt } from '../src/body/library/skills.js';
+
+function block(name: string, digMs: number, hardness = 1): any {
+  return {
+    name,
+    hardness,
+    position: { x: 0, y: 0, z: 0 },
+    canHarvest: () => true,
+    digTime: () => digMs,
+  };
+}
+
+describe('estimateDigTimeoutMs', () => {
+  it('黑曜石按挖取时间 ×2 + buffer，至少覆盖 9.4s 两倍', () => {
+    const plan = estimateDigTimeoutMs(block('obsidian', 9400, 50), 1);
+    expect(plan.expectedMs).toBe(9400);
+    expect(plan.timeoutMs).toBe(9400 * 2 + 3000);
+  });
+
+  it('钻石矿 0.75s：至少给 minMs，不会 9 秒不到就放弃', () => {
+    const plan = estimateDigTimeoutMs(block('deepslate_diamond_ore', 750, 3), 1);
+    expect(plan.timeoutMs).toBeGreaterThanOrEqual(12_000);
+  });
+
+  it('没有 digTime 时按硬度兜底', () => {
+    const plan = estimateDigTimeoutMs({ name: 'obsidian', hardness: 50 }, 1);
+    expect(plan.expectedMs).toBe(45_000);
+    expect(plan.timeoutMs).toBeGreaterThan(45_000);
+  });
+
+  it('不可破坏方块单独标记', () => {
+    const plan = estimateDigTimeoutMs({ name: 'bedrock', hardness: -1, digTime: () => Infinity }, null);
+    expect(plan.unbreakable).toBe(true);
+  });
+});
+
+describe('digWithTimeout 超时续挖', () => {
+  it('第一次超时后继续第二次，成功回报实际用时', async () => {
+    vi.useFakeTimers();
+    try {
+      const dig = vi.fn()
+        .mockImplementationOnce(() => new Promise<never>(() => {}))
+        .mockResolvedValueOnce(undefined);
+      const bot = {
+        output: '',
+        dig,
+        stopDigging: vi.fn(),
+        heldItem: { type: 1, name: 'diamond_pickaxe' },
+        targetDigBlock: null,
+      };
+      const target = block('obsidian', 100, 50);
+      const pending = digWithTimeout(bot, target, '@(0,0,0)');
+      await vi.advanceTimersByTimeAsync(12_100);
+      await vi.advanceTimersByTimeAsync(300);
+      await pending;
+      expect(dig).toHaveBeenCalledTimes(2);
+      expect(bot.output).toContain('续挖');
+      expect(bot.output).toContain('完成');
+      expect(bot.output).toContain('用时');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('两次都超时才返回 false，并写清仍在挖 / 累计时长', async () => {
+    vi.useFakeTimers();
+    try {
+      const bot = {
+        output: '',
+        dig: vi.fn(() => new Promise<never>(() => {})),
+        stopDigging: vi.fn(),
+        heldItem: { type: 1 },
+        targetDigBlock: { name: 'obsidian' },
+      };
+      const pending = digWithTimeout(bot, block('obsidian', 100, 50), '@(0,0,0)');
+      await vi.advanceTimersByTimeAsync(12_100);
+      await vi.advanceTimersByTimeAsync(300);
+      await vi.advanceTimersByTimeAsync(12_100);
+      await expect(pending).resolves.toBe(false);
+      expect(bot.output).toContain('仍在挖');
+      expect(bot.output).toContain('累计');
+      expect(bot.stopDigging).toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
+describe('mineBlockAt 共用动态超时', () => {
+  it('正确工具：正常挖掉', async () => {
+    const target = block('obsidian', 50, 50);
+    const bot = {
+      output: '',
+      game: { gameMode: 'survival' },
+      heldItem: { type: 1, name: 'diamond_pickaxe' },
+      entity: { position: { distanceTo: () => 2 } },
+      blockAt: () => target,
+      tool: { equipForBlock: async () => {} },
+      dig: async () => {},
+      stopDigging: () => {},
+      targetDigBlock: null,
+    };
+    await expect(mineBlockAt(bot, 0, 0, 0)).resolves.toBe(true);
+    expect(bot.output).toContain('挖掉了');
+    expect(bot.output).toContain('用时');
+  });
+
+  it('工具不够：不白等动态超时，明确报工具不对', async () => {
+    const target = block('obsidian', 9400, 50);
+    target.canHarvest = () => false;
+    const bot = {
+      output: '',
+      game: { gameMode: 'survival' },
+      heldItem: { type: 1, name: 'wooden_pickaxe' },
+      entity: { position: { distanceTo: () => 2 } },
+      blockAt: () => target,
+      tool: { equipForBlock: async () => {} },
+      dig: vi.fn(),
+      stopDigging: vi.fn(),
+      targetDigBlock: null,
+    };
+    await expect(mineBlockAt(bot, 0, 0, 0)).resolves.toBe(false);
+    expect(bot.output).toContain('没有能挖');
+    expect(bot.dig).not.toHaveBeenCalled();
+  });
+});

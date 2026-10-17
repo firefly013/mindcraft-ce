@@ -13,6 +13,8 @@
 export const PICKUP_RADIUS = 8;
 /** 两次拾取尝试之间的最小间隔（毫秒）。 */
 export const PICKUP_INTERVAL_MS = 1500;
+/** 连续失败后的最大退避（毫秒）。 */
+export const PICKUP_BACKOFF_MAX_MS = 30_000;
 /**
  * 走过去捡的**超时**。
  *
@@ -40,12 +42,14 @@ export interface PickupTarget {
 }
 
 export interface PickupGate {
-  /** 身体通道上已经有别的动作在跑。 */
+  /** 身体通道上已经有别的动作在跑，或模型动作请求已经在路上。 */
   busy: boolean;
   /** 上一次拾取还没结束。 */
   pickingUp: boolean;
   /** 距离上次尝试过了多少毫秒。 */
   sinceLastAttemptMs: number;
+  /** 连续失败后的剩余退避；>0 就不许再抢身体。 */
+  backoffRemainingMs?: number;
 }
 
 /**
@@ -57,5 +61,18 @@ export interface PickupGate {
 export function shouldAttemptPickup(gate: PickupGate): boolean {
   if (gate.pickingUp) return false;
   if (gate.busy) return false;
+  if ((gate.backoffRemainingMs ?? 0) > 0) return false;
   return gate.sinceLastAttemptMs >= PICKUP_INTERVAL_MS;
+}
+
+/**
+ * 连续失败 n 次后的退避时长（指数退避，封顶 30 秒）。
+ *
+ * 真机 Feedback #28：拾取连续失败却每 1.5 秒继续抢身体，模型工具调用被
+ * ACTION_BUSY 连拒。失败一次就该拉长下一次尝试间隔，别和模型抢方向盘。
+ */
+export function nextPickupBackoffMs(failures: number): number {
+  if (failures <= 0) return 0;
+  const base = PICKUP_INTERVAL_MS * Math.pow(2, Math.min(failures, 5));
+  return Math.min(PICKUP_BACKOFF_MAX_MS, base);
 }

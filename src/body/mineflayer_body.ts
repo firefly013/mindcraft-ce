@@ -67,7 +67,7 @@ import {
 } from './edges.js';
 import { renderEventText } from '../shared/event_stream.js';
 import { nearestDropWithin, PICKUP_RADIUS, PICKUP_TIMEOUT_MS } from './auto_pickup.js';
-import { shouldAttemptPickup } from '../shared/auto_pickup.js';
+import { nextPickupBackoffMs, shouldAttemptPickup } from '../shared/auto_pickup.js';
 import type { PickupTarget } from '../shared/auto_pickup.js';
 import { stripBang } from '../shared/tools.js';
 import { getFullState } from './library/full_state.js';
@@ -303,6 +303,40 @@ export function shouldThreatEmergency(input: ThreatEmergencyInput): boolean {
     return input.damage > 0 || input.health <= (input.lowHealth ?? 12);
 }
 
+/** fatal reason 的可落盘形态：message + stack + 尽量完整的对象序列化。 */
+export function describeFatalReason(reason: unknown): { message: string; stack: string | null; serialized: string } {
+    const message = reason instanceof Error ? reason.message : String(reason);
+    const stack = reason instanceof Error && typeof reason.stack === 'string' ? reason.stack : null;
+    let serialized: string;
+    try {
+        if (reason instanceof Error) {
+            serialized = JSON.stringify({ name: reason.name, message: reason.message, stack: reason.stack });
+        } else if (reason != null && typeof reason === 'object') {
+            const seen = new WeakSet<object>();
+            serialized = JSON.stringify(reason, (_key, value: unknown) => {
+                if (value instanceof Error) {
+                    return { name: value.name, message: value.message, stack: value.stack };
+                }
+                if (value != null && typeof value === 'object') {
+                    if (seen.has(value)) return '[circular]';
+                    seen.add(value);
+                }
+                return value;
+            }) ?? String(reason);
+        } else {
+            serialized = String(reason);
+        }
+    } catch {
+        serialized = '[unserializable]';
+    }
+    return { message, stack, serialized };
+}
+
+/** uncaughtException 状态不可恢复；unhandledRejection 默认记录并继续。 */
+export function shouldKillOnFatal(kind: 'uncaughtException' | 'unhandledRejection'): boolean {
+    return kind === 'uncaughtException';
+}
+
 /** 相机的最小接口。
  *
  * **故意不 import `VisionInterpreter` 的具体类型**：那条导入链会把
@@ -366,6 +400,11 @@ export class MineflayerBody {
     private log: Logger;
     private lastHurtEmitAt = 0;
     private lastCollectEmitAt = 0;
+    /** 连续拾取失败次数与退避截止时间：失败后不许每 1.5 秒继续抢身体。 */
+    private pickupFailures = 0;
+    private pickupBackoffUntil = 0;
+    /** 模型动作请求已经在路上时，禁止新的自动拾取抢身体。 */
+    private modelActionRequested = false;
 
     /** 上一次"被怪打触发保命"的时间（10 秒防抖，免得连续挨打刷屏）。 */
     private lastThreatEmergencyAt = 0;
@@ -603,12 +642,13 @@ export class MineflayerBody {
      */
     private async yieldAutoPickupToModel(): Promise<void> {
         if (!this.pickingUp) return;
+        // 模型动作优先：只给拾取 300ms 收手，不能把模型工具调用拖成 ACTION_BUSY。
         this.requestInterrupt();
-        const deadline = Date.now() + 2000;
+        const deadline = Date.now() + 300;
         while (this.pickingUp && Date.now() < deadline) {
             await new Promise<void>((resolve) => setTimeout(resolve, 20));
         }
-        // 还在跑就再发一次打断；随后模型动作入口会清掉 interrupt_code。
+        // 还在跑就再发一次打断；modelActionRequested 会阻止新的拾取抢身体。
         if (this.pickingUp) this.requestInterrupt();
     }
 
@@ -641,8 +681,8 @@ export class MineflayerBody {
      * 猜。装了这个之后，fatal 原因、当前 action、报错文本都会写进日志。
      */
     private installProcessGuards(): void {
-        const fatal = (kind: string, err: unknown): void => {
-            const msg = err instanceof Error ? err.message : String(err);
+        const fatal = (kind: 'uncaughtException' | 'unhandledRejection', reason: unknown): void => {
+            const info = describeFatalReason(reason);
             const action = ((): string => {
                 try {
                     return this.currentActionName() ?? this.actions?.currentActionLabel ?? 'none';
@@ -651,12 +691,22 @@ export class MineflayerBody {
                 }
             })();
             try {
-                this.log.with('lifecycle').error({ event: 'fatal', kind, action, err: msg });
+                this.log.with('lifecycle').error({
+                    event: 'fatal',
+                    kind,
+                    action,
+                    err: info.message,
+                    stack: info.stack,
+                    reason: info.serialized,
+                });
             } catch {
                 // 日志失败也不能阻止退出原因上屏。
             }
-            console.error(this.name + ' fatal ' + kind + ' while action ' + action + ': ' + msg);
-            this.cleanKill('fatal ' + kind + ' while action "' + action + '": ' + msg, 1);
+            console.error(this.name + ' fatal ' + kind + ' while action ' + action + ': ' + info.message);
+            if (info.stack != null) console.error(info.stack);
+            if (shouldKillOnFatal(kind)) {
+                this.cleanKill('fatal ' + kind + ' while action "' + action + '": ' + info.message, 1);
+            }
         };
         process.on('uncaughtException', (err) => fatal('uncaughtException', err));
         process.on('unhandledRejection', (reason) => fatal('unhandledRejection', reason));
@@ -1380,10 +1430,12 @@ export class MineflayerBody {
      */
     private schedulePickup(target: PickupTarget): void {
         const now = Date.now();
+        if (now < this.pickupBackoffUntil) return;
         const go = shouldAttemptPickup({
-            busy: this.actions.executing,
+            busy: this.actions.executing || this.modelActionRequested,
             pickingUp: this.pickingUp,
             sinceLastAttemptMs: now - this.lastPickupAt,
+            backoffRemainingMs: this.pickupBackoffUntil - now,
         });
         if (!go) return;
         this.lastPickupAt = now;
@@ -1403,6 +1455,17 @@ export class MineflayerBody {
             } finally {
                 this.pickingUp = false;
             }
+            // 被模型动作抢占不算拾取失败：不累计退避，也不把通道算在拾取头上。
+            const preempted = this.modelActionRequested || this.actions.executing;
+            let backoffMs = 0;
+            if (arrived) {
+                this.pickupFailures = 0;
+                this.pickupBackoffUntil = 0;
+            } else if (!preempted) {
+                this.pickupFailures += 1;
+                backoffMs = nextPickupBackoffMs(this.pickupFailures);
+                this.pickupBackoffUntil = Date.now() + backoffMs;
+            }
             this.notify(
                 'reflex.done',
                 KIND.WORLD,
@@ -1411,9 +1474,15 @@ export class MineflayerBody {
                     reflex: 'pickup',
                     outcome: arrived ? 'ok' : 'failed',
                     detail: arrived
-                        ? `走到了 ${target.name} 的位置，掉落物会被踩进背包。`
-                        : `没走到 ${target.name} 的位置（超时，或被模型的动作打断）。`,
+                        ? '走到了 ' + target.name + ' 的位置，掉落物会被踩进背包。'
+                        : preempted
+                            ? '拾取被模型动作抢占，已释放身体通道（模型优先，本次不额外退避）。'
+                            : '没走到 ' + target.name + ' 的位置（超时）；' +
+                                '已释放身体通道，退避 ' + Math.round(backoffMs / 1000) + ' 秒后再试（连续失败 ' + this.pickupFailures + ' 次）。',
                     ms: Date.now() - started,
+                    failures: arrived ? 0 : this.pickupFailures,
+                    backoffMs,
+                    preempted,
                 },
                 { completes: 'pickup' },
             );
@@ -1663,7 +1732,8 @@ export class MineflayerBody {
             }
             case 'action': {
                 const { name, args } = request.request;
-                // 模型的动作优先于自动拾取：先让拾取停下来，再跑工具。
+                // 模型的动作优先于自动拾取：先占位阻止新的拾取，再让旧的收手。
+                this.modelActionRequested = true;
                 await this.yieldAutoPickupToModel();
                 try {
                     const text = await executeToolCall(this, name, args);
@@ -1679,6 +1749,8 @@ export class MineflayerBody {
                         op: 'action',
                         result: { ok: false, text: `Tool ${name} failed: ${message}`, code: ERR.BODY_ERROR },
                     };
+                } finally {
+                    this.modelActionRequested = false;
                 }
             }
             case 'say': {

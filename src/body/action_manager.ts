@@ -227,10 +227,24 @@ export class ActionManager {
 
     _startTimeout(TIMEOUT_MINS = 10): ReturnType<typeof setTimeout> {
         return setTimeout(async () => {
-            console.warn(MESSAGES.actionTimeout(TIMEOUT_MINS));
-            this.timedout = true;
-            this.agent.history.add('system', MESSAGES.actionTimeout(TIMEOUT_MINS));
-            await this.stop(); // last attempt to stop
+            try {
+                console.warn(MESSAGES.actionTimeout(TIMEOUT_MINS));
+                this.timedout = true;
+                // 身体进程没有 agent.history —— 这里以前直接 `.add`，超时后在
+                // setTimeout 的 async 回调里抛 TypeError，变成 unhandledRejection
+                // 把 body 静默带走（真机 action:stay 期间抓到的就是这条）。
+                const history: any = (this.agent as any)?.history;
+                if (history != null && typeof history.add === 'function') {
+                    history.add('system', MESSAGES.actionTimeout(TIMEOUT_MINS));
+                }
+                await this.stop(); // last attempt to stop
+            } catch (err: unknown) {
+                // 超时兜底本身不能再把进程带崩：记录后继续走 ActionManager.stop 的路径。
+                console.error(
+                    'action timeout handler failed:',
+                    err instanceof Error ? err.stack ?? err.message : String(err),
+                );
+            }
         }, TIMEOUT_MINS * 60 * 1000);
     }
 }

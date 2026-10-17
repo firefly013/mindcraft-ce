@@ -1000,26 +1000,140 @@ export async function pickupNearbyItems(bot: any): Promise<boolean> {
  * 分档：`5000 + 硬度 × 800`，下限 8 秒、上限 30 秒。
  * 黑曜石(50)→30 秒，远古残骸(30)→29 秒，石头(1.5)→8 秒，泥土(0.5)→8 秒。
  */
-async function digWithTimeout(bot: any, block: any, where: string): Promise<boolean> {
-    const hardness: number =
-        typeof block?.hardness === 'number' ? block.hardness : typeof block?.blockEnum?.hardness === 'number' ? block.blockEnum.hardness : 0;
-    const timeoutMs = Math.min(30_000, Math.max(8_000, 5_000 + hardness * 800));
-    const timer = new Promise<'timeout'>((resolve) => setTimeout(() => resolve('timeout'), timeoutMs));
-    const dug = await Promise.race([bot.dig(block, true).then(() => 'ok' as const), timer]);
-    if (dug === 'timeout') {
+export interface DigTimeoutPlan {
+    timeoutMs: number;
+    expectedMs: number;
+    hardness: number;
+    toolId: number | null;
+    unbreakable: boolean;
+}
+
+/**
+ * 按方块硬度 + 当前工具动态估算挖穿超时。
+ *
+ * 真机 Feedback #30：黑曜石正常约 9.4 秒，旧的固定 9 秒/固定 8 秒超时让它
+ * 永远挖不动，下界门在工具层直接堵死。这里优先用 mineflayer 的
+ * `block.digTime(heldItemType)`（它已经算好工具倍率），再按
+ * expected * multiplier + buffer，至少 minMs。
+ */
+export function estimateDigTimeoutMs(
+    block: any,
+    toolId: number | null = null,
+    opts: { minMs?: number; bufferMs?: number; multiplier?: number; maxMs?: number } = {},
+): DigTimeoutPlan {
+    const hardness = typeof block?.hardness === 'number' ? block.hardness : 0;
+    let expectedMs: number | null = null;
+    if (typeof block?.digTime === 'function') {
         try {
-            bot.stopDigging();
+            const t = block.digTime(toolId, false, false, false);
+            if (Number.isFinite(t) && t > 0) expectedMs = t;
+            else if (t === Infinity) expectedMs = Infinity;
         } catch {
-            // 停不下来就算了，下面照样如实报。
+            expectedMs = null;
         }
-        log(
-            bot,
-            `挖 ${block?.name ?? '?'} ${where} **超时 ${Math.round(timeoutMs / 1000)} 秒没挖完**` +
-                `（这方块硬度 ${hardness}，是慢方块；多半是中途被打断、方块变了、或者上一个动作被 Stop 过）。已停下，不再干等。`,
-        );
-        return false;
     }
-    return true;
+    const unbreakable = expectedMs === Infinity || hardness === -1;
+    if (expectedMs == null) {
+        // 没有 digTime 的替身/旧版本：用硬度粗略兜底（黑曜石 50 -> 45s）。
+        expectedMs = hardness > 0 ? 5000 + hardness * 800 : 1000;
+    }
+    const minMs = opts.minMs ?? 12_000;
+    const bufferMs = opts.bufferMs ?? 3_000;
+    const multiplier = opts.multiplier ?? 2;
+    const maxMs = opts.maxMs ?? 120_000;
+    const timeoutMs = unbreakable
+        ? minMs
+        : Math.min(maxMs, Math.max(minMs, expectedMs * multiplier + bufferMs));
+    return { timeoutMs, expectedMs, hardness, toolId, unbreakable };
+}
+
+/** 等 ms 的 Promise（digWithTimeout 内部用，避免悬挂定时器）。 */
+function sleep(ms: number): Promise<void> {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * 挖方块并动态超时；超时后**优先续挖一次**，不直接放弃。
+ *
+ * 回执写清：当前方块、实际用时、预计用时、第几次尝试、是否还在挖。
+ */
+export async function digWithTimeout(bot: any, block: any, where: string): Promise<boolean> {
+    const toolId: number | null = typeof bot?.heldItem?.type === 'number' ? bot.heldItem.type : null;
+    const plan = estimateDigTimeoutMs(block, toolId);
+    const attempts = 2;
+    let totalMs = 0;
+    const expectedText = plan.expectedMs === Infinity ? '不可破坏/工具不够' : Math.round(plan.expectedMs / 100) / 10 + 's';
+    for (let attempt = 1; attempt <= attempts; attempt++) {
+        if (bot?.interrupt_code) {
+            log(bot, '挖 ' + (block?.name ?? '?') + ' ' + where + ' 被 Stop/保命打断，已放弃（累计 ' + Math.round(totalMs / 1000) + 's）。');
+            try {
+                bot.stopDigging?.();
+            } catch {
+                // 停不下来也如实返回。
+            }
+            return false;
+        }
+        const started = Date.now();
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        const timeoutPromise = new Promise<'timeout'>((resolve) => {
+            timer = setTimeout(() => resolve('timeout'), plan.timeoutMs);
+        });
+        let outcome: 'ok' | 'timeout' | 'error';
+        try {
+            outcome = await Promise.race([
+                bot.dig(block, true).then(() => 'ok' as const),
+                timeoutPromise,
+            ]);
+        } catch (err: unknown) {
+            outcome = 'error';
+            log(bot, '挖 ' + (block?.name ?? '?') + ' ' + where + ' 抛错：' + (err instanceof Error ? err.message : String(err)));
+        } finally {
+            if (timer !== undefined) clearTimeout(timer);
+        }
+        const elapsed = Date.now() - started;
+        totalMs += elapsed;
+        const stillDigging = bot?.targetDigBlock != null;
+        if (outcome === 'ok') {
+            log(
+                bot,
+                '挖 ' + (block?.name ?? '?') + ' ' + where + ' 完成：用时 ' + Math.round(elapsed / 100) / 10 +
+                    's（预计 ' + expectedText + '，第 ' + attempt + '/' + attempts + ' 次尝试，硬度 ' + plan.hardness + '）。',
+            );
+            return true;
+        }
+        if (outcome === 'timeout') {
+            log(
+                bot,
+                '挖 ' + (block?.name ?? '?') + ' ' + where + ' 第 ' + attempt + '/' + attempts + ' 次超时：实际 ' +
+                    Math.round(elapsed / 100) / 10 + 's，预计 ' + expectedText + '（硬度 ' + plan.hardness +
+                    '），仍在挖=' + stillDigging + '。',
+            );
+        }
+        if (attempt < attempts) {
+            log(bot, '续挖 ' + (block?.name ?? '?') + ' ' + where + '（第 ' + (attempt + 1) + ' 次，' + (outcome === 'timeout' ? '在已有进度上继续' : '重试') + '）...');
+            if (!stillDigging) {
+                // 已经停了就让它彻底停，下一次 dig 重新起步；仍在挖则直接续。
+                try {
+                    bot.stopDigging?.();
+                } catch {
+                    // 忽略。
+                }
+            }
+            await sleep(200);
+            continue;
+        }
+    }
+    try {
+        bot.stopDigging?.();
+    } catch {
+        // 忽略。
+    }
+    log(
+        bot,
+        '挖 ' + (block?.name ?? '?') + ' ' + where + ' 结束：连续 ' + attempts + ' 次超时/失败，累计 ' +
+            Math.round(totalMs / 1000) + 's；仍在挖=' + (bot?.targetDigBlock != null) + '。可稍后重试或换工具。',
+    );
+    return false;
 }
 
 export async function breakBlockAt(bot: any, x: number, y: number, z: number): Promise<boolean> {
@@ -1672,7 +1786,8 @@ export async function goToGoal(bot: any, goal: any, _persist?: boolean): Promise
     const nonDestructiveMovements: any = movementsFor(bot);
     const dontBreakBlocks: string[] = ['glass', 'glass_pane'];
     for (const block of dontBreakBlocks) {
-        nonDestructiveMovements.blocksCantBreak.add((mc as any).getBlockId(block));
+        // 某些 Movements 版本/替身没有 blocksCantBreak，audit .add 时把这条兜住。
+        nonDestructiveMovements.blocksCantBreak?.add?.((mc as any).getBlockId(block));
     }
     nonDestructiveMovements.placeCost = 2;
     nonDestructiveMovements.digCost = 10;
@@ -2747,6 +2862,16 @@ export async function mineBlockAt(bot: any, x: number, y: number, z: number): Pr
     try {
         // 尽力换上合适的工具；换不上也让 dig 自己试（原版手也能挖土/木）。
         try { await bot.tool?.equipForBlock?.(target); } catch { /* best-effort */ }
+        // 工具不够就别白等动态超时：黑曜石手挖要很久，明确报工具不对更有用。
+        const heldId: number | null = typeof bot?.heldItem?.type === 'number' ? bot.heldItem.type : null;
+        if (
+            bot?.game?.gameMode !== 'creative' &&
+            typeof target.canHarvest === 'function' &&
+            !target.canHarvest(heldId)
+        ) {
+            log(bot, '没有能挖 ' + target.name + ' 的工具（手持 ' + (bot?.heldItem?.name ?? '空手') + '）；先换镐/正确工具再来。');
+            return false;
+        }
         // **同一个入口**：mineBlock 以前是裸的 await bot.dig()，8 秒超时没覆盖到它
         // （模型真机报"mineBlock 挖黑曜石空回执×2 + 卡死 280 秒"，而其他 17 格全正常）。
         if (!(await digWithTimeout(bot, target, `@(${x},${y},${z})`))) return false;

@@ -1296,7 +1296,8 @@ export function assignRecipeToInventory(
     const tag = familyTagOf(name);
     if (tag == null) continue;
     if (!familyUsed.has(tag)) familyUsed.set(tag, new Set());
-    (familyUsed.get(tag) as Set<string>).add(name);
+    const family = familyUsed.get(tag);
+    if (family != null) family.add(name);
   }
   const mixed = [...familyUsed.values()].some((set) => set.size > 1);
   return { recipe: clone, used: Object.fromEntries(used), mixed };

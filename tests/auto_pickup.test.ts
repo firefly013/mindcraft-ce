@@ -9,8 +9,10 @@ import {
   clearDiscards,
 } from '../src/body/auto_pickup.js';
 import {
+  nextPickupBackoffMs,
   shouldAttemptPickup,
   DISCARD_IGNORE_MS,
+  PICKUP_BACKOFF_MAX_MS,
   PICKUP_INTERVAL_MS,
   PICKUP_RADIUS,
 } from '../src/shared/auto_pickup.js';
@@ -42,6 +44,15 @@ describe('shouldAttemptPickup', () => {
     // 冷却没到。
     expect(shouldAttemptPickup({ ...base, sinceLastAttemptMs: PICKUP_INTERVAL_MS - 1 })).toBe(false);
     expect(shouldAttemptPickup({ ...base, sinceLastAttemptMs: PICKUP_INTERVAL_MS })).toBe(true);
+    // 失败退避期间：即使冷却到了也不许抢身体。
+    expect(shouldAttemptPickup({ ...base, backoffRemainingMs: 5000 })).toBe(false);
+  });
+
+  it('失败退避指数增长并封顶，成功后归零', () => {
+    expect(nextPickupBackoffMs(0)).toBe(0);
+    expect(nextPickupBackoffMs(1)).toBeGreaterThanOrEqual(PICKUP_INTERVAL_MS);
+    expect(nextPickupBackoffMs(2)).toBeGreaterThan(nextPickupBackoffMs(1));
+    expect(nextPickupBackoffMs(99)).toBe(PICKUP_BACKOFF_MAX_MS);
   });
 });
 
