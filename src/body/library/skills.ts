@@ -3865,6 +3865,28 @@ export const MOVE_DIRECTIONS = Object.freeze([
 export type MoveDirection = (typeof MOVE_DIRECTIONS)[number];
 
 /** 相对/绝对方向 → 世界坐标下的单位向量（+X 东，+Z 南，与 Minecraft 一致）。 */
+function isLavaBlockName(name: unknown): boolean {
+    return name === 'lava' || name === 'flowing_lava';
+}
+
+/** 朝某个方向前方 ahead 格是否有岩浆（脚/身/头三格任一）。 */
+function moveHazardAhead(bot: any, vector: { x: number; z: number }, ahead = 1.2): string | null {
+    const p = bot?.entity?.position;
+    if (p == null || typeof bot?.blockAt !== 'function') return null;
+    const fx = Math.floor(p.x + vector.x * ahead);
+    const fz = Math.floor(p.z + vector.z * ahead);
+    const fy = Math.floor(p.y);
+    for (const dy of [-1, 0, 1]) {
+        try {
+            const name = bot.blockAt(new (Vec3 as any)(fx, fy + dy, fz))?.name;
+            if (isLavaBlockName(name)) return `岩浆 @(${fx},${fy + dy},${fz})`;
+        } catch {
+            // 读不到就不猜。
+        }
+    }
+    return null;
+}
+
 function worldVectorFor(bot: any, direction: MoveDirection): { x: number; z: number } {
     switch (direction) {
         case 'north': return { x: 0, z: -1 };
@@ -3929,11 +3951,14 @@ export async function moveBy(
     let lastProgressAt = startedAt;
     let lastDistance = 0;
     let moved = 0;
+    let hazardStop: string | null = null;
 
     try {
         for (const key of pressed) bot.setControlState(key, true);
         while (true) {
             if (bot.interrupt_code) break;
+            hazardStop = moveHazardAhead(bot, vector);
+            if (hazardStop != null) break;
             const now = Date.now();
             const here = { x: bot.entity?.position?.x ?? 0, z: bot.entity?.position?.z ?? 0 };
             moved = horizontalDistance(start, here);
@@ -3958,6 +3983,11 @@ export async function moveBy(
         }
     }
 
+    if (hazardStop != null) {
+        const roundedHazard = Math.round(moved * 10) / 10;
+        log(bot, `朝${direction}前方是${hazardStop}，已挪 ${roundedHazard} 格就停下（不会走进岩浆）。`);
+        return false;
+    }
     const rounded = Math.round(moved * 10) / 10;
     if (moved >= distance - 0.2) {
         log(bot, `朝${direction}走了 ${rounded} 格（目标 ${distance} 格）${mode === 'sneak' ? '，走完已站起' : ''}。`);
