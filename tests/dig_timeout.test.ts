@@ -152,3 +152,39 @@ describe('mineBlockAt 共用动态超时', () => {
     expect(bot.dig).not.toHaveBeenCalled();
   });
 });
+
+describe('dig 看门狗：目标变空气就停止等待', () => {
+  it('bot.dig 永不返回，但目标方块已经变空气：判成功并回报看门狗', async () => {
+    vi.useFakeTimers();
+    try {
+      let calls = 0;
+      const target: any = {
+        name: 'iron_ore',
+        hardness: 3,
+        position: { x: 0, y: 0, z: 0 },
+        canHarvest: () => true,
+        digTime: () => 4600,
+      };
+      const bot: any = {
+        output: '',
+        dig: vi.fn(() => new Promise<never>(() => {})),
+        stopDigging: vi.fn(),
+        heldItem: { type: 1, name: 'diamond_pickaxe' },
+        targetDigBlock: { name: 'iron_ore' },
+        blockAt: () => {
+          calls += 1;
+          return calls > 5 ? { name: 'air' } : { name: 'iron_ore' };
+        },
+      };
+      const pending = digWithTimeout(bot, target, '@(0,0,0)');
+      // 看门狗每 200ms 查一次；推进 1 秒足够它发现目标已经空。
+      await vi.advanceTimersByTimeAsync(1_000);
+      await expect(pending).resolves.toBe(true);
+      expect(bot.output).toContain('看门狗');
+      expect(bot.output).toContain('iron_ore');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+

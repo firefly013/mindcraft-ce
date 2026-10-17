@@ -1078,6 +1078,43 @@ function sleep(ms: number): Promise<void> {
  *
  * 回执写清：当前方块、实际用时、预计用时、第几次尝试、是否仍在挖、每 3 秒进度。
  */
+export function isAirBlockName(name: string | null | undefined): boolean {
+    return name != null && DIG_AIR_NAMES.has(name);
+}
+
+/** 挖取现场：目标当前方块名、手持工具、是否能挖。 */
+export function digTargetState(bot: any, block: any): {
+    name: string | null;
+    heldName: string | null;
+    heldType: number | null;
+    canHarvest: boolean | null;
+} {
+    const name = ((): string | null => {
+        try {
+            return bot?.blockAt?.(block?.position)?.name ?? null;
+        } catch {
+            return null;
+        }
+    })();
+    const heldName = typeof bot?.heldItem?.name === 'string' ? bot.heldItem.name : null;
+    const heldType = typeof bot?.heldItem?.type === 'number' ? bot.heldItem.type : null;
+    let canHarvest: boolean | null = null;
+    try {
+        if (typeof block?.canHarvest === 'function') canHarvest = block.canHarvest(heldType);
+    } catch {
+        canHarvest = null;
+    }
+    return { name, heldName, heldType, canHarvest };
+}
+
+/**
+ * 挖方块并动态超时。
+ *
+ * **独立看门狗**：bot.dig 在方块中途变化/客户端不同步时会永不 resolve。
+ * 这里每 200ms 直接读目标方块，一旦变成空气就停止等待并判成功——真机
+ * Feedback #30 的 1.4m 铁矿 2 分钟不返回，就是 dig 永远不 resolve。
+ * 超时后先 stopDigging 再续挖，并在回执里带目标方块/工具状态。
+ */
 export async function digWithTimeout(bot: any, block: any, where: string): Promise<boolean> {
     const name = block?.name ?? '?';
     const toolId: number | null = typeof bot?.heldItem?.type === 'number' ? bot.heldItem.type : null;
@@ -1095,6 +1132,9 @@ export async function digWithTimeout(bot: any, block: any, where: string): Promi
     const attempts = 2;
     let totalMs = 0;
     const expectedText = plan.expectedMs === Infinity ? '不可破坏/工具不够' : Math.round(plan.expectedMs / 100) / 10 + 's';
+    const stateText = (state: ReturnType<typeof digTargetState>): string =>
+        '目标=' + (state.name ?? '读不到') + '，手持=' + (state.heldName ?? '空手') +
+        '，canHarvest=' + (state.canHarvest == null ? '未知' : String(state.canHarvest));
     for (let attempt = 1; attempt <= attempts; attempt++) {
         if (bot?.interrupt_code) {
             log(bot, '挖 ' + name + ' ' + where + ' 被 Stop/保命打断，已放弃（累计 ' + Math.round(totalMs / 1000) + 's）。');
@@ -1105,25 +1145,34 @@ export async function digWithTimeout(bot: any, block: any, where: string): Promi
             }
             return false;
         }
+        const stateBefore = digTargetState(bot, block);
         const started = Date.now();
         let timer: ReturnType<typeof setTimeout> | undefined;
+        let watcher: ReturnType<typeof setInterval> | undefined;
         const timeoutPromise = new Promise<'timeout'>((resolve) => {
             timer = setTimeout(() => resolve('timeout'), plan.timeoutMs);
         });
+        const gonePromise = new Promise<'gone'>((resolve) => {
+            watcher = setInterval(() => {
+                const current = digTargetState(bot, block).name;
+                if (isAirBlockName(current)) resolve('gone');
+            }, 200);
+        });
         const progressTimer: ReturnType<typeof setInterval> = setInterval(() => {
             const elapsed = Date.now() - started;
-            const still = bot?.targetDigBlock != null;
+            const state = digTargetState(bot, block);
             log(
                 bot,
-                '挖 ' + name + ' ' + where + ' 进度：已 ' + Math.round(elapsed / 1000) + 's，仍在挖=' + still +
-                    (still ? '' : '（dig 还没返回，可能被客户端同步卡住）') + '。',
+                '挖 ' + name + ' ' + where + ' 进度：已 ' + Math.round(elapsed / 1000) + 's，仍在挖=' +
+                    (bot?.targetDigBlock != null) + '，' + stateText(state) + '。',
             );
         }, 3_000);
-        let outcome: 'ok' | 'timeout' | 'error';
+        let outcome: 'ok' | 'gone' | 'timeout' | 'error';
         try {
             outcome = await Promise.race([
                 bot.dig(block, true).then(() => 'ok' as const),
                 timeoutPromise,
+                gonePromise,
             ]);
         } catch (err: unknown) {
             outcome = 'error';
@@ -1131,35 +1180,50 @@ export async function digWithTimeout(bot: any, block: any, where: string): Promi
         } finally {
             if (timer !== undefined) clearTimeout(timer);
             clearInterval(progressTimer);
+            if (watcher !== undefined) clearInterval(watcher);
         }
         const elapsed = Date.now() - started;
         totalMs += elapsed;
+        const stateAfter = digTargetState(bot, block);
         const stillDigging = bot?.targetDigBlock != null;
+        if (outcome === 'gone' || isAirBlockName(stateAfter.name)) {
+            if (outcome === 'gone') {
+                log(bot, '挖 ' + name + ' ' + where + ' 看门狗发现目标已变空气：dig 未返回也判成功（用时 ' +
+                    Math.round(elapsed / 100) / 10 + 's）。' + stateText(stateBefore) + ' -> ' + stateText(stateAfter) + '。');
+            } else {
+                log(bot, '挖 ' + name + ' ' + where + ' 完成：用时 ' + Math.round(elapsed / 100) / 10 +
+                    's（预计 ' + expectedText + '，第 ' + attempt + '/' + attempts + ' 次，硬度 ' + plan.hardness + '）。');
+            }
+            try {
+                if (outcome === 'gone') bot.stopDigging?.();
+            } catch {
+                // 目标已空，stopDigging 失败不影响结果。
+            }
+            return true;
+        }
         if (outcome === 'ok') {
-            log(
-                bot,
-                '挖 ' + name + ' ' + where + ' 完成：用时 ' + Math.round(elapsed / 100) / 10 +
-                    's（预计 ' + expectedText + '，第 ' + attempt + '/' + attempts + ' 次尝试，硬度 ' + plan.hardness + '）。',
-            );
+            log(bot, '挖 ' + name + ' ' + where + ' 完成：用时 ' + Math.round(elapsed / 100) / 10 +
+                's（预计 ' + expectedText + '，第 ' + attempt + '/' + attempts + ' 次，硬度 ' + plan.hardness + '）。');
             return true;
         }
         if (outcome === 'timeout') {
-            log(
-                bot,
-                '挖 ' + name + ' ' + where + ' 第 ' + attempt + '/' + attempts + ' 次超时：实际 ' +
-                    Math.round(elapsed / 100) / 10 + 's，预计 ' + expectedText + '（硬度 ' + plan.hardness +
-                    '），仍在挖=' + stillDigging + '。',
-            );
+            log(bot, '挖 ' + name + ' ' + where + ' 第 ' + attempt + '/' + attempts + ' 次超时：实际 ' +
+                Math.round(elapsed / 100) / 10 + 's，预计 ' + expectedText + '（硬度 ' + plan.hardness + '），仍在挖=' +
+                stillDigging + '；' + stateText(stateAfter) + '。');
+        }
+        // 无论 dig 是否还挂着，续挖前先停一次，让下一轮从干净状态重新发起。
+        try {
+            bot.stopDigging?.();
+        } catch {
+            // 忽略。
         }
         if (attempt < attempts) {
-            log(bot, '续挖 ' + name + ' ' + where + '（第 ' + (attempt + 1) + ' 次，' + (outcome === 'timeout' ? '在已有进度上继续' : '重试') + '）...');
-            if (!stillDigging) {
-                try {
-                    bot.stopDigging?.();
-                } catch {
-                    // 忽略。
-                }
+            const refreshed = digTargetState(bot, block);
+            if (isAirBlockName(refreshed.name)) {
+                log(bot, '续挖前发现 ' + name + ' ' + where + ' 已经是空气，直接判成功。');
+                return true;
             }
+            log(bot, '续挖 ' + name + ' ' + where + '（第 ' + (attempt + 1) + ' 次；' + stateText(refreshed) + '）...');
             await sleep(200);
             continue;
         }
@@ -1172,7 +1236,8 @@ export async function digWithTimeout(bot: any, block: any, where: string): Promi
     log(
         bot,
         '挖 ' + name + ' ' + where + ' 结束：连续 ' + attempts + ' 次超时/失败，累计 ' +
-            Math.round(totalMs / 1000) + 's；仍在挖=' + (bot?.targetDigBlock != null) + '。可稍后重试或换工具。',
+            Math.round(totalMs / 1000) + 's；仍在挖=' + (bot?.targetDigBlock != null) + '；' +
+            stateText(digTargetState(bot, block)) + '。可稍后重试或换工具。',
     );
     return false;
 }
