@@ -96,6 +96,9 @@ describe('lava.nearby 边沿检测', () => {
     const snapshot = snapshotFromBot(bot);
     expect(snapshot.lavaNearby).toBe(true);
     const events = createEdgeWatcher().poll(snapshot);
-    expect(events.map((e) => e.type)).toContain('world.lava.nearby');
+    const nearby = events.find((e) => e.type === 'world.lava.nearby');
+    expect(nearby).toBeDefined();
+    // task-37：预测性 nearby 降为 L3，只告知不抢断。
+    expect(nearby?.level).toBe(3);
   });
 });

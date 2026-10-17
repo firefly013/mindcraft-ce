@@ -42,6 +42,8 @@ export class ActionManager {
     currentActionLabel: string;
     currentActionFn: ActionFn | null;
     timedout: boolean;
+    /** 当前动作开始时刻；锁快照用。 */
+    currentStartedAt: number;
 
     constructor(agent: any) {
         this.agent = agent;
@@ -49,6 +51,7 @@ export class ActionManager {
         this.currentActionLabel = '';
         this.currentActionFn = null;
         this.timedout = false;
+        this.currentStartedAt = 0;
     }
 
     /**
@@ -103,7 +106,18 @@ export class ActionManager {
      */
     releaseCurrentAction(): void {
         this.executing = false;
+        this.currentActionLabel = '';
         this.currentActionFn = null;
+        this.currentStartedAt = 0;
+    }
+
+    /** 锁快照：谁占用、多久。busy/Stop 日志都靠它。 */
+    lockSnapshot(): { executing: boolean; label: string; runningMs: number } {
+        return {
+            executing: this.executing,
+            label: this.currentActionLabel === '' ? '(idle)' : this.currentActionLabel,
+            runningMs: this.currentStartedAt === 0 ? 0 : Math.max(0, Date.now() - this.currentStartedAt),
+        };
     }
 
     /**
@@ -115,6 +129,8 @@ export class ActionManager {
      */
     async stop(): Promise<void> {
         if (!this.executing) return;
+        const lock = this.lockSnapshot();
+        console.log('stopping action lock:', JSON.stringify(lock));
         const stuckLabel = this.currentActionLabel === '' ? '(unknown action)' : this.currentActionLabel;
         const timeout = setTimeout(() => {
             this.hardInterrupt();
@@ -136,6 +152,8 @@ export class ActionManager {
             this.hardInterrupt();
         }
         clearTimeout(timeout);
+        // stop 返回时动作已经停了：锁快照必须归零，模型下一轮立刻能继续。
+        this.releaseCurrentAction();
     }
 
     async _executeAction(actionLabel: string, actionFn: ActionFn, timeout = -1): Promise<ActionResult> {
@@ -155,6 +173,7 @@ export class ActionManager {
             this.executing = true;
             this.currentActionLabel = actionLabel;
             this.currentActionFn = actionFn;
+            this.currentStartedAt = Date.now();
 
             // timeout in minutes
             if (timeout > 0) {
@@ -168,6 +187,7 @@ export class ActionManager {
             this.executing = false;
             this.currentActionLabel = '';
             this.currentActionFn = null;
+            this.currentStartedAt = 0;
             if (TIMEOUT !== undefined) clearTimeout(TIMEOUT);
 
             // get bot activity summary
@@ -187,6 +207,7 @@ export class ActionManager {
             this.executing = false;
             this.currentActionLabel = '';
             this.currentActionFn = null;
+            this.currentStartedAt = 0;
             if (TIMEOUT !== undefined) clearTimeout(TIMEOUT);
             console.error("Action triggered catch:", err);
             // Log the full stack trace

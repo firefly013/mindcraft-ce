@@ -189,6 +189,9 @@ describe('ActionRunner', () => {
     const busy = await h.runner.run('collectBlocks', { type: 'oak_log', num: 4 });
     expect(busy.status).toBe('rejected');
     expect(busy.reason).toContain('goToPlayer');
+    // busy 回执要带占用者/时长/generation，模型才知道谁卡着。
+    expect(busy.reason).toContain('generation');
+    expect(busy.reason).toContain('秒');
     // 拒绝文案不再命令模型先 Stop：要不要打断由模型自己判断。
     expect(busy.reason).toContain('确实要改做别的事');
     expect(h.executed).toEqual(['goToPlayer']);

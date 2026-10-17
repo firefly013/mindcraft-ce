@@ -853,7 +853,33 @@ export class Agent {
 
     /** 全部停下：动作停、回到 idle。 */
     private async fullStop(): Promise<void> {
-        await this.body?.stop();
+        // **Stop 必须无条件清模型动作锁**：body 的 actions.stop 只解身体锁，
+        // 大脑 Scheduler 那个 action 不释放的话，之后所有动作都会被 ACTION_BUSY
+        // 拒（真机 Feedback #55/#56：快照 idle，但 makeObsidian/useOn/stay 全被拒，
+        // Stop 也不放行）。先释放大脑通道，再让身体收手。
+        const stopped = this.scheduler?.stopAll();
+        try {
+            this.log.with('action').info({
+                event: 'full-stop',
+                stopped,
+                scheduler: this.scheduler?.describe(),
+            });
+        } catch {
+            // 日志失败不能阻止 Stop。
+        }
+        try {
+            await this.body?.stop();
+        } catch (err: unknown) {
+            try {
+                this.log.with('action').warn({
+                    event: 'full-stop-body-error',
+                    err: err instanceof Error ? err.message : String(err),
+                    scheduler: this.scheduler?.describe(),
+                });
+            } catch {
+                // 同上。
+            }
+        }
     }
 
     /**

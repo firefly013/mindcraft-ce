@@ -855,6 +855,9 @@ export class MineflayerBody {
         // 真机 Feedback #24 长寻路遇敌时，反射只是排队，身体还在被寻路带走，
         // 等 rescue 跑到 stopAll 时人已经在水里了。
         forceStopBody(this);
+        // 急停后模型锁也要清零：否则下一次模型动作可能被 ACTION_BUSY/modelActionRequested
+        // 残留挡住（body 的 actions.executing 由 ActionManager 自己收敛）。
+        this.modelActionRequested = false;
         this.notify(type, KIND.WORLD, LEVEL.EMERGENCY, payload, { reflex });
         this.reflexQueue.push({ reflex, intent });
         void this.drainReflexes();
@@ -1895,7 +1898,15 @@ export class MineflayerBody {
                 return { ok: true, op: 'say' };
             }
             case 'stop':
-                await this.actions.stop();
+                // Stop 无条件清模型锁：即使 ActionManager.stop 内部异常/超时，
+                // 也不能让 modelActionRequested 或 executing 残留卡住下一轮动作。
+                this.modelActionRequested = false;
+                try {
+                    await this.actions.stop();
+                } finally {
+                    this.modelActionRequested = false;
+                    this.actions.releaseCurrentAction();
+                }
                 return { ok: true, op: 'stop' };
             case 'fullState':
                 return { ok: true, op: 'fullState', state: getFullState(this as never) };

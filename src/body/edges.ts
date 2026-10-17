@@ -287,8 +287,9 @@ export const DETECTORS: readonly Detector[] = Object.freeze([
   // L5 保命（host 侧读布尔旗，边沿+分级在这里）。
   { type: 'world.lava.contact', level: 5, kind: 'flag', flag: 'inLava' },
   // 脚下/身边有岩浆就提前 L5：不能等踩进去（inLava）才反应。
-  { type: 'world.lava.nearby', level: 5, kind: 'all',
-    // 只有真实危险：脚下/身周有岩浆且没有实心支撑（或已实际入岩浆）。
+  { type: 'world.lava.nearby', level: 3, kind: 'all',
+    // 预测性提醒：降到 L3（只记录/告知，不抢断动作）。真实 contact 仍是 L5；
+    // about_to_enter 仍 L5，但只在下一步确实会掉入时触发。
     fire: (s) => s.lavaNearby === true && (s.hasSupport !== true || s.inLava === true) && s.controlledLavaOperation !== true,
     clear: (s) => s.lavaNearby !== true || (s.hasSupport === true && s.inLava !== true) || s.controlledLavaOperation === true,
     minIntervalMs: 5_000 },

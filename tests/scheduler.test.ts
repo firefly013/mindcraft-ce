@@ -34,6 +34,15 @@ describe('动作通道：一次一个', () => {
     expect(s.isCurrent(gen)).toBe(true);
   });
 
+  it('currentAction 带 generation，busy 日志能说清是谁/多久', () => {
+    const s = new Scheduler();
+    s.startAction('digDown');
+    const current = s.currentAction();
+    expect(current?.id).toBe('digDown');
+    expect(current?.generation).toBe(s.describe().generation);
+    expect(typeof current?.startedAt).toBe('number');
+  });
+
   it('Stop 与保命急停记录不同的失效原因', () => {
     const s = new Scheduler();
     s.startAction('a');

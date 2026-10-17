@@ -178,10 +178,41 @@ describe('ActionManager 硬中断', () => {
     }
   });
 
+  it('stop 完成后 executing/锁快照归零，通道立刻可用', async () => {
+    const { agent, manager } = makeAgent();
+    manager.executing = true;
+    manager.currentActionLabel = 'digDown';
+    manager.currentStartedAt = Date.now() - 5000;
+    agent.requestInterrupt.mockImplementation(() => {
+      manager.executing = false;
+    });
+    await manager.stop();
+    expect(manager.executing).toBe(false);
+    expect(manager.lockSnapshot()).toEqual({ executing: false, label: '(idle)', runningMs: 0 });
+  });
+
   it('没在跑动作时 stop 是空操作，不打扰身体', async () => {
     const { agent, manager } = makeAgent();
     await manager.stop();
     expect(agent.requestInterrupt).not.toHaveBeenCalled();
     expect(agent.cleanKill).not.toHaveBeenCalled();
+  });
+});
+
+describe('body stop 清模型锁', () => {
+  it('handle(stop) 无条件清 modelActionRequested 并 release 当前动作', async () => {
+    const { MineflayerBody } = await import('../src/body/mineflayer_body.js');
+    const releaseCurrentAction = vi.fn();
+    const body: any = Object.create(MineflayerBody.prototype);
+    body.modelActionRequested = true;
+    body.actions = {
+      stop: vi.fn(async () => {}),
+      releaseCurrentAction,
+    };
+    const response = await body.handle({ op: 'stop' });
+    expect(response).toMatchObject({ ok: true, op: 'stop' });
+    expect(body.modelActionRequested).toBe(false);
+    expect(body.actions.stop).toHaveBeenCalledTimes(1);
+    expect(releaseCurrentAction).toHaveBeenCalledTimes(1);
   });
 });

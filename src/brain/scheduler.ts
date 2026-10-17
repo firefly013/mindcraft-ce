@@ -19,6 +19,8 @@ export interface CurrentAction {
   id: string;
   args: unknown;
   startedAt: number;
+  /** 认领时的调度器 generation，busy 回执/锁快照用。 */
+  generation: number;
 }
 
 /** generation 失效的原因：Stop 还是保命急停。 */
@@ -55,7 +57,7 @@ export class Scheduler {
   startAction(id: string, args: unknown = null): StartActionVerdict {
     if (this.emergency) return { accepted: false, code: 'EMERGENCY_LOCKED' };
     if (this.action != null) return { accepted: false, code: 'ACTION_BUSY' };
-    this.action = { id, args, startedAt: Date.now() };
+    this.action = { id, args, startedAt: Date.now(), generation: this.generation };
     return { accepted: true, actionId: id, generation: this.generation };
   }
 

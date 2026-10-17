@@ -120,7 +120,10 @@ export class ActionRunner {
       // 直接告诉它"已经在做了"，让它等结果。
       if (claim.code === 'ACTION_BUSY' && running != null && running.id === name) {
         this.trace({ kind: 'busy_same', name, actionId: running.id });
-        const reason = `${name} 已经在跑了，不用重发，也不用 Stop——它跑完会自己报结果。`;
+        const runningSeconds = Math.max(0, Math.round((Date.now() - running.startedAt) / 1000));
+        const reason =
+          name + ' 已经在跑了，不用重发，也不用 Stop——它跑完会自己报结果。' +
+          '（占用者 ' + running.id + '，generation ' + String(running.generation) + '，已 ' + String(runningSeconds) + ' 秒）';
         await this.record(`already running: ${reason}`, name, args);
         return {
           status: 'accepted',
@@ -128,7 +131,8 @@ export class ActionRunner {
             already_running: true,
             action_id: running.id,
             call_id: this.activeCallId ?? running.id,
-            generation: this.activeGeneration,
+            generation: running.generation,
+            running_for_seconds: runningSeconds,
             reason,
           },
         };
@@ -142,9 +146,10 @@ export class ActionRunner {
         runningSeconds:
           running == null ? 0 : Math.max(0, Math.round((Date.now() - running.startedAt) / 1000)),
       });
+      const runningSeconds = running == null ? 0 : Math.max(0, Math.round((Date.now() - running.startedAt) / 1000));
       const reason =
         running != null
-          ? `另一个动作正在跑（${running.id}，已 ${Math.max(0, Math.round((Date.now() - running.startedAt) / 1000))} 秒）。` +
+          ? `另一个动作正在跑（${running.id}，generation ${String(running.generation)}，已 ${String(runningSeconds)} 秒）。` +
             `它会自己报结果；只有你确实要改做别的事时，才需要先 Stop。`
           : 'An action is already running. Stop() first, then retry.';
       await this.record(`rejected: ${reason}`, name, args);
