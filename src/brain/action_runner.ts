@@ -52,6 +52,9 @@ export interface ActionNotice {
 /** 动作跑太久没有任何结果时，主动发一条进度回执的间隔（毫秒）。 */
 export const ACTION_PROGRESS_NOTICE_MS = 60_000;
 
+/** 动作在脑侧的最长挂起时间；到点强制释放动作通道。 */
+const ACTION_MAX_MS = 10 * 60 * 1000;
+
 export interface ActionRunnerDeps {
   scheduler: Scheduler;
   /**
@@ -205,6 +208,26 @@ export class ActionRunner {
         },
       });
     }, ACTION_PROGRESS_NOTICE_MS);
+    // **最后保险丝**：身体侧长时间不返回时，动作通道不能永久泄漏。
+    // 真机出现过 currentAction 卡住、快照却显示 idle 的幽灵锁；到点强制释放，
+    // 让模型至少能继续发动作（身体侧自己的 action 超时会负责收手）。
+    const watchdog = setTimeout(() => {
+      const running = this.scheduler.currentAction();
+      if (running == null || running.id !== name) return;
+      this.scheduler.stopAll();
+      this.notify({
+        call: name,
+        action_id: name,
+        call_id: callId,
+        generation,
+        result: {
+          status: 'completed',
+          data:
+            `[${callId} · generation ${generation}] ${name} 超过 ${ACTION_MAX_MS / 60000} 分钟没有返回，` +
+            '已强制释放动作通道；它可能仍在跑，请先用 Stop 或 stats 核对，不要盲目重发。',
+        },
+      });
+    }, ACTION_MAX_MS);
     let data: string;
     try {
       data = await this.execute(name, args);
@@ -212,6 +235,7 @@ export class ActionRunner {
       data = `Tool ${name} failed: ${err instanceof Error ? err.message : String(err)}`;
     } finally {
       clearInterval(progressTimer);
+      clearTimeout(watchdog);
     }
     // 过期（被 Stop / 急停作废）：就地丢弃，不记账、不放行。
     // **但仍然报一条**：动作没了、通道空了，模型却看不到任何交代，只能反复拍
