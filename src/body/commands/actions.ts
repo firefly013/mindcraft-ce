@@ -353,9 +353,9 @@ export const actionsList: AgentCommand[] = [
             'z': { type: 'int', description: tp('lookAtPosition', 'z') }
         },
         perform: async function(agent: any, x: number, y: number, z: number): Promise<string> {
-            let result = "";
+            let result = '';
             const actionFn = async (): Promise<void> => {
-                result = await agent.vision_interpreter.lookAtPosition(x, y, z);
+                result = await skills.lookAtCoordinates(agent.bot, x, y, z);
             };
             await agent.actions.runAction('action:lookAtPosition', actionFn);
             return result;

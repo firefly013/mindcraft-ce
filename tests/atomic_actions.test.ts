@@ -141,24 +141,24 @@ describe('视角命令', () => {
     it('lookInDirection 的方位角符合 Minecraft 约定（南 0 / 西 90 / 北 180 / 东 -90）', async () => {
         for (const [direction, expected] of [
             ['south', 0],
-            ['west', 90],
-            ['north', 180],
-            ['east', -90],
+            ['west', Math.PI / 2],
+            ['north', Math.PI],
+            ['east', -Math.PI / 2],
         ] as const) {
             const bot = fakeBot();
             expect(await lookInDirection(bot, direction)).toBe(true);
-            expect(bot.entity.yaw).toBe(expected);
+            expect(bot.entity.yaw).toBeCloseTo(expected, 5);
         }
     });
 
     it('up / down 只改俯仰，不动水平朝向', async () => {
         const bot = fakeBot({ yaw: 145 });
         await lookInDirection(bot, 'up');
-        expect(bot.entity.pitch).toBe(-90);
-        expect(bot.entity.yaw).toBe(145);
+        expect(bot.entity.pitch).toBeCloseTo(-Math.PI / 2, 5);
+        expect(bot.entity.yaw).toBeCloseTo(145, 5);
 
         await lookInDirection(bot, 'down');
-        expect(bot.entity.pitch).toBe(90);
+        expect(bot.entity.pitch).toBeCloseTo(Math.PI / 2, 5);
     });
 
     it('不认识的方位给出可用值清单', async () => {
@@ -170,11 +170,11 @@ describe('视角命令', () => {
     it('turnView 转的是增量，且俯仰被夹在 ±90', async () => {
         const bot = fakeBot({ yaw: 10, pitch: 0 });
         await turnView(bot, 15, 30);
-        expect(bot.entity.yaw).toBe(25);
-        expect(bot.entity.pitch).toBe(30);
+        expect(bot.entity.yaw).toBeCloseTo(10 + Math.PI / 12, 5);
+        expect(bot.entity.pitch).toBeCloseTo(Math.PI / 6, 5);
 
         await turnView(bot, 0, 999);
-        expect(bot.entity.pitch).toBe(90); // 不许翻过头
+        expect(bot.entity.pitch).toBeCloseTo(Math.PI / 2, 5); // 不许翻过头
     });
 });
 

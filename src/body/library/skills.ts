@@ -1580,7 +1580,7 @@ export async function placeBlock(bot: any, blockType: string, x: number, y: numb
         }
         else {
             await bot.equip(block_item, 'hand');
-            await bot.lookAt(buildOffBlock.position.offset(0.5, 0.5, 0.5), true);
+            await faceTarget(bot, buildOffBlock.position.offset(0.5, 0.5, 0.5), String(buildOffBlock.name));
             await bot.placeBlock(buildOffBlock, faceVec);
             log(bot, `Placed ${blockType} at ${target_dest}.`);
             // **确认方块真的落地了再 return true**：这个 true 是对调用方的
@@ -3549,6 +3549,8 @@ export async function useToolOn(bot: any, toolName: string, targetName: string):
             const equipped: boolean = await equip(bot, toolName);
             if (!equipped) return false;
         }
+        // **交互前自动面向目标**：不依赖模型先 turnView；1.2 格内失败很多时候只是没看它。
+        await faceTarget(bot, entity.position.offset(0, (typeof entity.height === 'number' ? entity.height : 1.8) / 2, 0), String(targetName));
         await bot.useOn(entity);
         log(bot, `Used ${toolName} on ${targetName}.`);
     } else {
@@ -3622,7 +3624,7 @@ export async function useToolOn(bot: any, toolName: string, targetName: string):
     } else {
         log(bot, `Already within ${reach.toFixed(1)} blocks of ${block.name}, using it from here.`);
     }
-    await bot.lookAt(block.position.offset(0.5, 0.5, 0.5), true);
+    await faceTarget(bot, block.position.offset(0.5, 0.5, 0.5), String(block.name));
 
     // if block in view is closer than the target block, it is in our way. try to move closer
     const viewBlocked = (): boolean => {
@@ -3653,7 +3655,7 @@ export async function useToolOn(bot: any, toolName: string, targetName: string):
         for (const [sx, sy, sz] of spots) {
             try {
                 await goToPosition(bot, sx, sy, sz, 1);
-                await bot.lookAt(block.position.offset(0.5, 0.5, 0.5), true);
+                await faceTarget(bot, block.position.offset(0.5, 0.5, 0.5), String(block.name));
             } catch {
                 continue;
             }
@@ -3989,48 +3991,157 @@ const DIRECTION_YAW: Record<string, number> = {
  * 和 `lookAtPosition` 的分工：那个是"看向某个坐标"（要算角度），这个是"朝向某个
  * 方位"——模型想说"面朝北"时不该被迫先算一个坐标出来。
  */
+const DEG_TO_RAD = Math.PI / 180;
+const RAD_TO_DEG = 180 / Math.PI;
+
+export function degToRad(deg: number): number {
+    return deg * DEG_TO_RAD;
+}
+
+export function radToDeg(rad: number): number {
+    return rad * RAD_TO_DEG;
+}
+
+function angleDiffRad(a: number, b: number): number {
+    let d = (a - b) % (Math.PI * 2);
+    if (d > Math.PI) d -= Math.PI * 2;
+    if (d < -Math.PI) d += Math.PI * 2;
+    return Math.abs(d);
+}
+
+/** 由目标点算 yaw/pitch（弧度），公式与 mineflayer 的 bot.lookAt 一致。 */
+export function anglesToPoint(
+    bot: any,
+    point: { x: number; y: number; z: number },
+): { yawRad: number; pitchRad: number; yawDeg: number; pitchDeg: number } {
+    const pos = bot?.entity?.position ?? { x: 0, y: 0, z: 0 };
+    const eyeHeight = typeof bot?.entity?.eyeHeight === 'number' ? bot.entity.eyeHeight : 1.62;
+    const dx = point.x - pos.x;
+    const dy = point.y - (pos.y + eyeHeight);
+    const dz = point.z - pos.z;
+    const ground = Math.sqrt(dx * dx + dz * dz);
+    const yawRad = Math.atan2(-dx, -dz);
+    const pitchRad = Math.atan2(dy, ground);
+    return { yawRad, pitchRad, yawDeg: radToDeg(yawRad), pitchDeg: radToDeg(pitchRad) };
+}
+
+/** 真正调用 bot.look(yawRad, pitchRad, force=true)，并等它反映到 entity 读数。 */
+export async function setLookDegrees(
+    bot: any,
+    yawDeg: number,
+    pitchDeg: number,
+    force: boolean = true,
+): Promise<{ beforeYaw: number; beforePitch: number; afterYaw: number; afterPitch: number }> {
+    const beforeYaw = radToDeg(Number(bot?.entity?.yaw ?? 0));
+    const beforePitch = radToDeg(Number(bot?.entity?.pitch ?? 0));
+    const yawRad = degToRad(yawDeg);
+    const pitchRad = degToRad(Math.max(-90, Math.min(90, pitchDeg)));
+    if (typeof bot?.look !== 'function') return { beforeYaw, beforePitch, afterYaw: beforeYaw, afterPitch: beforePitch };
+    await bot.look(yawRad, pitchRad, force);
+    await waitFor(
+        bot,
+        () =>
+            angleDiffRad(Number(bot?.entity?.yaw ?? 0), yawRad) < 0.05 &&
+            Math.abs(Number(bot?.entity?.pitch ?? 0) - pitchRad) < 0.05,
+        600,
+        30,
+    );
+    return {
+        beforeYaw,
+        beforePitch,
+        afterYaw: radToDeg(Number(bot?.entity?.yaw ?? yawRad)),
+        afterPitch: radToDeg(Number(bot?.entity?.pitch ?? pitchRad)),
+    };
+}
+
+/** 面向某个坐标（交互/放置前自动调用它，不依赖模型先转向）。 */
+export async function faceTarget(
+    bot: any,
+    point: { x: number; y: number; z: number },
+    label: string = '目标',
+): Promise<boolean> {
+    const angles = anglesToPoint(bot, point);
+    const result = await setLookDegrees(bot, angles.yawDeg, angles.pitchDeg, true);
+    log(
+        bot,
+        '自动面向 ' + label + '：yaw ' + result.beforeYaw.toFixed(1) + '° → ' + result.afterYaw.toFixed(1) +
+            '°，pitch ' + result.beforePitch.toFixed(1) + '° → ' + result.afterPitch.toFixed(1) + '°。',
+    );
+    return true;
+}
+
+/** 看向指定坐标：真调 bot.look，回执带 before→after yaw/pitch 和准星校验。 */
+export async function lookAtCoordinates(bot: any, x: number, y: number, z: number): Promise<string> {
+    if (bot == null || typeof bot.look !== 'function') return '身体还没就绪，转不了头。';
+    const target = new Vec3(x + 0.5, y + 0.5, z + 0.5);
+    const angles = anglesToPoint(bot, target);
+    const result = await setLookDegrees(bot, angles.yawDeg, angles.pitchDeg, true);
+    let cursorText: string;
+    try {
+        const cursor: any = bot.blockAtCursor?.(128) ?? null;
+        const cp = cursor?.position;
+        cursorText = cp == null
+            ? '准星前方 128 格内没有方块'
+            : (Math.floor(cp.x) === Math.floor(x) && Math.floor(cp.y) === Math.floor(y) && Math.floor(cp.z) === Math.floor(z)
+                ? '准星落在目标方块上'
+                : '准星落在 ' + cursor.name + ' @(' + cp.x + ',' + cp.y + ',' + cp.z + ')，没对上 (' + x + ',' + y + ',' + z + ')');
+    } catch {
+        cursorText = '准星校验读不到';
+    }
+    return (
+        '看向 (' + x + ',' + y + ',' + z + ')：yaw ' + result.beforeYaw.toFixed(1) + '° → ' + result.afterYaw.toFixed(1) +
+        '°，pitch ' + result.beforePitch.toFixed(1) + '° → ' + result.afterPitch.toFixed(1) + '°；' + cursorText + '。'
+    );
+}
+
+/**
+ * 把视角转到某个方位（北/南/东/西），或者抬到正上/正下。
+ *
+ * 和 `lookAtPosition` 的分工：那个是"看向某个坐标"（要算角度），这个是"朝向某个
+ * 方位"——模型想说"面朝北"时不该被迫先算一个坐标出来。
+ */
 export async function lookInDirection(bot: any, direction: string, pitch?: number): Promise<boolean> {
     if (bot == null || typeof bot.look !== 'function') return false;
     const name = String(direction ?? '').trim().toLowerCase();
-    const currentYaw = bot.entity?.yaw ?? 0;
+    const beforeYaw = radToDeg(Number(bot.entity?.yaw ?? 0));
+    const beforePitch = radToDeg(Number(bot.entity?.pitch ?? 0));
     if (name === 'up' || name === 'down') {
         const target = name === 'up' ? -90 : 90;
-        await bot.look(currentYaw, target, true);
-        log(bot, `视角转到朝${name === 'up' ? '上' : '下'}。`);
+        const result = await setLookDegrees(bot, beforeYaw, target, true);
+        log(bot, '视角转到朝' + (name === 'up' ? '上' : '下') + '：pitch ' + result.beforePitch.toFixed(1) + '° → ' + result.afterPitch.toFixed(1) + '°。');
         return true;
     }
-    const yaw = DIRECTION_YAW[name];
-    if (yaw == null) {
-        log(bot, `不认识的方位 ${direction}；可用：north、south、east、west、up、down。`);
+    const yawDeg = DIRECTION_YAW[name];
+    if (yawDeg == null) {
+        log(bot, '不认识的方位 ' + direction + '；可用：north、south、east、west、up、down。');
         return false;
     }
     const targetPitch = typeof pitch === 'number' ? Math.max(-90, Math.min(90, pitch)) : 0;
-    await bot.look(yaw, targetPitch, true);
-    log(bot, `视角转到朝${name}（水平${targetPitch === 0 ? '平视' : `俯仰 ${targetPitch}°`}）。`);
+    const result = await setLookDegrees(bot, yawDeg, targetPitch, true);
+    log(
+        bot,
+        '视角转到朝 ' + name + '：yaw ' + result.beforeYaw.toFixed(1) + '° → ' + result.afterYaw.toFixed(1) +
+            '°，pitch ' + result.beforePitch.toFixed(1) + '° → ' + result.afterPitch.toFixed(1) + '°。',
+    );
     return true;
 }
 
 /**
  * 在当前视角上转一个增量（度）。俯仰被夹在 ±90 之间。
- *
- * 为什么要有增量版：模型看到画面里的东西在左边一点点，它想"再往左转一点"，
- * 这时算绝对角度既麻烦又容易错。
  */
 export async function turnView(bot: any, yawDelta: number, pitchDelta: number = 0): Promise<boolean> {
     if (bot == null || typeof bot.look !== 'function') return false;
-    const yaw = (bot.entity?.yaw ?? 0) + yawDelta;
-    const pitch = Math.max(-90, Math.min(90, (bot.entity?.pitch ?? 0) + pitchDelta));
-    await bot.look(yaw, pitch, true);
-    log(bot, `视角转了 水平 ${yawDelta}°、俯仰 ${pitchDelta}°。`);
+    const yawDeg = radToDeg(Number(bot.entity?.yaw ?? 0)) + yawDelta;
+    const pitchDeg = Math.max(-90, Math.min(90, radToDeg(Number(bot.entity?.pitch ?? 0)) + pitchDelta));
+    const result = await setLookDegrees(bot, yawDeg, pitchDeg, true);
+    log(
+        bot,
+        '视角转了 水平 ' + yawDelta + '°、俯仰 ' + pitchDelta + '°：yaw ' + result.beforeYaw.toFixed(1) + '° → ' +
+            result.afterYaw.toFixed(1) + '°，pitch ' + result.beforePitch.toFixed(1) + '° → ' + result.afterPitch.toFixed(1) + '°。',
+    );
     return true;
 }
 
-/**
- * 准星指着的那个东西是什么。**只读，不占身体通道。**
- *
- * 这是模型问得最多的三个问题之一（另两个是"我朝哪"和"那东西在哪"），
- * 而它从截图里读不出来——画面里那点像素看不出方块名和坐标。
- */
 export function inspectAimed(bot: any, maxDistance: number = 5): string {
     if (bot == null) return '身体还没就绪。';
     const lines: string[] = [];
