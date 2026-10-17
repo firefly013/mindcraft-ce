@@ -37,8 +37,20 @@ const ZERO_USAGE: AssistantMessage['usage'] = {
   cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 };
 
-/** 瞬时失败重试的退避基数；第 n 次重试延迟 base * 2^(n-1)。 */
-export const MODEL_RETRY_BASE_DELAY_MS = 500;
+/** 瞬时失败重试的退避基数；第 n 次重试延迟 base * 2^(n-1) 再乘 jitter。 */
+export const MODEL_RETRY_BASE_DELAY_MS = 1_000;
+
+/** 单次重试退避的上限（防止 MINDCRAFT_MODEL_RETRIES 设大后等太久）。 */
+export const MODEL_RETRY_MAX_DELAY_MS = 15_000;
+
+/** 连续请求失败达到这个次数后短暂熔断/降频。 */
+export const MODEL_CIRCUIT_FAILURE_THRESHOLD = 2;
+
+/** 熔断后的冷却时间。 */
+export const MODEL_CIRCUIT_COOLDOWN_MS = 30_000;
+
+/** 还没到熔断阈值时，下一次请求的首次降频延迟。 */
+export const MODEL_CIRCUIT_FIRST_DELAY_MS = 2_000;
 
 export interface ModelRetryInfo {
   /** 第几次重试，1 起。 */
@@ -46,6 +58,20 @@ export interface ModelRetryInfo {
   maxRetries: number;
   delayMs: number;
   errorMessage: string;
+}
+
+/**
+ * 第 attempt 次重试的退避：指数 base*2^(attempt-1)，上限 15s，再叠 50%-100% jitter。
+ * randomValue 应落在 [0,1]；测试固定成 1 即可得到无 jitter 的上限值。
+ */
+export function modelRetryDelayMs(attempt: number, randomValue = Math.random()): number {
+  const exponential = Math.min(
+    MODEL_RETRY_BASE_DELAY_MS * 2 ** Math.max(0, attempt - 1),
+    MODEL_RETRY_MAX_DELAY_MS,
+  );
+  const clampedRandom = Math.min(1, Math.max(0, randomValue));
+  const jittered = exponential * (0.5 + clampedRandom * 0.5);
+  return Math.max(1, Math.round(jittered));
 }
 
 /** 确定性错误：鉴权、参数、模型不存在、额度等，重试也不会变。 */
@@ -140,11 +166,21 @@ export interface PiModelOptions {
   fetch?: typeof globalThis.fetch;
   /**
    * 瞬时错误重试次数（不含首次请求）。默认读 MINDCRAFT_MODEL_RETRIES，
-   * 未设置时用 2；0 表示关闭重试。
+   * 未设置时用 4；0 表示关闭重试。
    */
   maxRetries?: number;
   /** 测试注入：重试退避的 sleep；默认 setTimeout。 */
   retrySleep?: (delayMs: number) => Promise<void>;
+  /** 测试注入：jitter 随机数；默认 Math.random。 */
+  retryRandom?: () => number;
+  /** 连续瞬态失败达到多少次打开熔断；默认 2。 */
+  circuitFailureThreshold?: number;
+  /** 熔断冷却时间；默认 30s。 */
+  circuitCooldownMs?: number;
+  /** 未到熔断阈值前首次降频延迟；默认 2s。 */
+  circuitFirstDelayMs?: number;
+  /** 测试注入：时钟；默认 Date.now。 */
+  now?: () => number;
   /** 重试日志出口；默认 console.warn，记录第几次重试与退避时长。 */
   onRetry?: (info: ModelRetryInfo) => void;
   /** 测试注入：直接给已解析 provider，跳过 resolveProvider。 */
@@ -159,7 +195,14 @@ export class PiModel implements AIModel {
   private readonly options: PiModelOptions;
   private readonly maxRetries: number;
   private readonly retrySleep: (delayMs: number) => Promise<void>;
+  private readonly retryRandom: () => number;
   private readonly onRetry: (info: ModelRetryInfo) => void;
+  private readonly circuitFailureThreshold: number;
+  private readonly circuitCooldownMs: number;
+  private readonly circuitFirstDelayMs: number;
+  private readonly now: () => number;
+  private transientFailureStreak = 0;
+  private gateOpenUntil = 0;
 
   constructor(profile: unknown, options: PiModelOptions = {}) {
     this.resolved = options.resolvedProvider ?? resolveProvider(profile);
@@ -168,6 +211,11 @@ export class PiModel implements AIModel {
     this.maxRetries = options.maxRetries ?? resolveModelRetries();
     this.retrySleep =
       options.retrySleep ?? ((delayMs) => new Promise((resolve) => setTimeout(resolve, delayMs)));
+    this.retryRandom = options.retryRandom ?? (() => Math.random());
+    this.circuitFailureThreshold = options.circuitFailureThreshold ?? MODEL_CIRCUIT_FAILURE_THRESHOLD;
+    this.circuitCooldownMs = options.circuitCooldownMs ?? MODEL_CIRCUIT_COOLDOWN_MS;
+    this.circuitFirstDelayMs = options.circuitFirstDelayMs ?? MODEL_CIRCUIT_FIRST_DELAY_MS;
+    this.now = options.now ?? (() => Date.now());
     this.onRetry =
       options.onRetry ??
       ((info) => {
@@ -205,20 +253,68 @@ export class PiModel implements AIModel {
     };
   }
 
+  /** 熔断/降频闸门：如果还在冷却期，先等完再放行一次探测请求。 */
+  private async waitForGate(): Promise<void> {
+    const remainingMs = this.gateOpenUntil - this.now();
+    if (remainingMs <= 0) return;
+    console.warn(
+      '[model] request gate open; waiting ' + remainingMs + 'ms before next request',
+    );
+    await this.retrySleep(remainingMs);
+    this.gateOpenUntil = 0;
+  }
+
+  private recordSuccess(): void {
+    this.transientFailureStreak = 0;
+    this.gateOpenUntil = 0;
+  }
+
+  /**
+   * 连续瞬时失败达到阈值后短暂熔断；未到阈值时先做一次降频。
+   * 鉴权/参数等非瞬时错误不会走到这里。
+   */
+  private recordTransientFailure(errorMessage: string): void {
+    this.transientFailureStreak += 1;
+    if (this.transientFailureStreak >= this.circuitFailureThreshold) {
+      this.gateOpenUntil = this.now() + this.circuitCooldownMs;
+      console.warn(
+        '[model] ' + this.transientFailureStreak + ' consecutive transient failures; circuit open for ' +
+          this.circuitCooldownMs + 'ms (last: ' + errorMessage + ')',
+      );
+      this.transientFailureStreak = 0;
+      return;
+    }
+
+    const delayMs = Math.min(
+      this.circuitFirstDelayMs * 2 ** (this.transientFailureStreak - 1),
+      this.circuitCooldownMs,
+    );
+    this.gateOpenUntil = Math.max(this.gateOpenUntil, this.now() + delayMs);
+    console.warn(
+      '[model] transient failure streak ' + this.transientFailureStreak + '/' +
+        this.circuitFailureThreshold + '; next request delayed ' + delayMs + 'ms',
+    );
+  }
+
   /**
    * 带瞬时错误重试的 complete：网络/超时/5xx 最多重试 maxRetries 次；
-   * 鉴权/参数等确定性错误立即返回或抛出，不重试。
+   * 鉴权/参数等确定性错误立即返回或抛出，不重试；连续失败后短暂降频/熔断。
    */
   private async completeWithRetry(
     model: Model<Api>,
     request: () => Promise<AssistantMessage>,
   ): Promise<AssistantMessage> {
+    await this.waitForGate();
+
     for (let retryCount = 0; ; retryCount += 1) {
       let message: AssistantMessage | undefined;
       let thrown: unknown;
       try {
         message = await request();
-        if (message.stopReason !== 'error') return message;
+        if (message.stopReason !== 'error') {
+          this.recordSuccess();
+          return message;
+        }
       } catch (error: unknown) {
         thrown = error;
       }
@@ -235,12 +331,13 @@ export class PiModel implements AIModel {
           : isTransientModelFailure(thrown);
 
       if (!retryable || retryCount >= this.maxRetries) {
+        if (retryable) this.recordTransientFailure(detail);
         if (message != null) return message;
         throw thrown;
       }
 
       const attempt = retryCount + 1;
-      const delayMs = MODEL_RETRY_BASE_DELAY_MS * 2 ** (attempt - 1);
+      const delayMs = modelRetryDelayMs(attempt, this.retryRandom());
       this.onRetry({ attempt, maxRetries: this.maxRetries, delayMs, errorMessage: detail });
       await this.retrySleep(delayMs);
     }

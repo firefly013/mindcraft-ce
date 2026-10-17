@@ -63,6 +63,8 @@ export interface EdgeSnapshot {
   biome?: string | null;
   alive?: boolean | null;
   inLava?: boolean | null;
+  /** 脚下/身边 3 格内有岩浆：lava.contact 只覆盖踩进去，这个提前一档。 */
+  lavaNearby?: boolean | null;
   belowVoid?: boolean | null;
   inWater?: boolean | null;
   /** **头那一格是水**（可靠事实，与坏掉的 oxygenLevel 无关）。 */
@@ -276,6 +278,11 @@ function metadataValue(entity: unknown, index: number): number | null {
 export const DETECTORS: readonly Detector[] = Object.freeze([
   // L5 保命（host 侧读布尔旗，边沿+分级在这里）。
   { type: 'world.lava.contact', level: 5, kind: 'flag', flag: 'inLava' },
+  // 脚下/身边有岩浆就提前 L5：不能等踩进去（inLava）才反应。
+  { type: 'world.lava.nearby', level: 5, kind: 'all',
+    fire: (s) => s.lavaNearby === true,
+    clear: (s) => s.lavaNearby !== true,
+    minIntervalMs: 5_000 },
   // **入水也有事件**（用户问的缺口）：原来只有"头+脚都泡在水里"才有 L5 紧急，
   // 脚刚碰到水什么都不发生——预警比危险晚了一档（模型真机就是"氧气掉到 0 才
   // 知道自己在水里"）。inWater 是可靠信号（脚下方块是水），白白不用是浪费。
@@ -776,6 +783,25 @@ export function snapshotFromBot(bot: unknown, extra: SnapshotExtra = {}): EdgeSn
         const feetName = feetBlock['name'];
         snap.inLava = feetName === 'lava' ? true : undefined;
         snap.inWater = feetName === 'water' ? true : undefined;
+        // 脚/头/身周三格内有岩浆：提前报 L5，给保命反射争取时间。
+        {
+          const fx = Math.floor(feet.x);
+          const fy = Math.floor(feet.y);
+          const fz = Math.floor(feet.z);
+          let near = false;
+          for (let dx = -3; dx <= 3 && !near; dx++) {
+            for (let dy = -2; dy <= 2 && !near; dy++) {
+              for (let dz = -3; dz <= 3; dz++) {
+                if (dx === 0 && dy === 0 && dz === 0) continue;
+                if (at({ x: fx + dx, y: fy + dy, z: fz + dz })['name'] === 'lava') {
+                  near = true;
+                  break;
+                }
+              }
+            }
+          }
+          snap.lavaNearby = near ? true : undefined;
+        }
 
         // **真正淹没**：头也在水里。这是**可靠**信号——mineflayer 的
 

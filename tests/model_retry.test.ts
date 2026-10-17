@@ -1,9 +1,13 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { AssistantMessage } from '@earendil-works/pi-ai';
 import {
+  MODEL_CIRCUIT_COOLDOWN_MS,
+  MODEL_CIRCUIT_FAILURE_THRESHOLD,
   MODEL_RETRY_BASE_DELAY_MS,
+  MODEL_RETRY_MAX_DELAY_MS,
   PiModel,
   isTransientModelFailure,
+  modelRetryDelayMs,
   type ModelRetryInfo,
 } from '../src/brain/runtime/model.js';
 import {
@@ -74,9 +78,9 @@ function fakeResolved(complete: CompleteFn): ResolvedProvider {
 }
 
 describe('模型重试配置', () => {
-  it('默认 2 次，MINDCRAFT_MODEL_RETRIES 可覆盖，0 关闭', () => {
-    expect(DEFAULT_MODEL_RETRIES).toBeGreaterThanOrEqual(1);
-    expect(DEFAULT_MODEL_RETRIES).toBeLessThanOrEqual(2);
+  it('默认 4 次，MINDCRAFT_MODEL_RETRIES 可覆盖，0 关闭', () => {
+    expect(DEFAULT_MODEL_RETRIES).toBeGreaterThanOrEqual(3);
+    expect(DEFAULT_MODEL_RETRIES).toBeLessThanOrEqual(5);
     expect(resolveModelRetries({} as unknown as NodeJS.ProcessEnv)).toBe(DEFAULT_MODEL_RETRIES);
     expect(resolveModelRetries({ [MODEL_RETRIES_ENV]: '0' } as unknown as NodeJS.ProcessEnv)).toBe(0);
     expect(resolveModelRetries({ [MODEL_RETRIES_ENV]: '3' } as unknown as NodeJS.ProcessEnv)).toBe(3);
@@ -127,6 +131,18 @@ describe('瞬时错误分类', () => {
   });
 });
 
+describe('重试退避与 jitter', () => {
+  it('指数退避并叠加 50%-100% jitter，封顶 15s', () => {
+    expect(modelRetryDelayMs(1, 1)).toBe(MODEL_RETRY_BASE_DELAY_MS);
+    expect(modelRetryDelayMs(2, 1)).toBe(MODEL_RETRY_BASE_DELAY_MS * 2);
+    expect(modelRetryDelayMs(3, 1)).toBe(MODEL_RETRY_BASE_DELAY_MS * 4);
+    expect(modelRetryDelayMs(4, 1)).toBe(MODEL_RETRY_BASE_DELAY_MS * 8);
+    expect(modelRetryDelayMs(10, 1)).toBe(MODEL_RETRY_MAX_DELAY_MS);
+    expect(modelRetryDelayMs(1, 0)).toBe(MODEL_RETRY_BASE_DELAY_MS / 2);
+    expect(modelRetryDelayMs(10, 0)).toBe(MODEL_RETRY_MAX_DELAY_MS / 2);
+  });
+});
+
 describe('PiModel 瞬时重试', () => {
   it('网络错误后重试成功，日志写第几次与退避多久', async () => {
     let calls = 0;
@@ -141,6 +157,7 @@ describe('PiModel 瞬时重试', () => {
       {
         resolvedProvider: fakeResolved(complete as unknown as CompleteFn),
         maxRetries: 2,
+        retryRandom: () => 1,
         retrySleep: async (delayMs) => { sleeps.push(delayMs); },
         onRetry: (info) => { retryLog.push(info); },
       },
@@ -167,6 +184,7 @@ describe('PiModel 瞬时重试', () => {
       {
         resolvedProvider: fakeResolved(complete as unknown as CompleteFn),
         maxRetries: 2,
+        retryRandom: () => 1,
         retrySleep: async () => {},
         onRetry: (info) => { retryLog.push(info); },
       },
@@ -175,7 +193,7 @@ describe('PiModel 瞬时重试', () => {
     await expect(model.sendRequest([], 'sys')).resolves.toBe('My brain disconnected, try again.');
     expect(complete).toHaveBeenCalledTimes(3);
     expect(retryLog.map((info) => info.attempt)).toEqual([1, 2]);
-    expect(retryLog.map((info) => info.delayMs)).toEqual([500, 1000]);
+    expect(retryLog.map((info) => info.delayMs)).toEqual([1000, 2000]);
   });
 
   it('鉴权错误不重试', async () => {
@@ -231,6 +249,7 @@ describe('PiModel 瞬时重试', () => {
       {
         resolvedProvider: fakeResolved(complete as unknown as CompleteFn),
         maxRetries: 1,
+        retryRandom: () => 1,
         retrySleep: async () => {},
       },
     );
@@ -239,8 +258,68 @@ describe('PiModel 瞬时重试', () => {
     const logged = String(warn.mock.calls[0]?.[0] ?? '');
     expect(logged).toContain('retry 1/1');
     expect(logged).toContain('timed out');
-    expect(logged).toContain('500ms');
+    expect(logged).toContain('1000ms');
     warn.mockRestore();
+  });
+
+  it('连续瞬态失败先降频、再短暂熔断，避免请求风暴', async () => {
+    let nowMs = 0;
+    const sleeps: number[] = [];
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const complete = vi.fn(async () => errorMessage('Connection error'));
+    const model = new PiModel(
+      {},
+      {
+        resolvedProvider: fakeResolved(complete as unknown as CompleteFn),
+        maxRetries: 0,
+        circuitFailureThreshold: MODEL_CIRCUIT_FAILURE_THRESHOLD,
+        circuitCooldownMs: MODEL_CIRCUIT_COOLDOWN_MS,
+        circuitFirstDelayMs: 2000,
+        retrySleep: async (delayMs) => { sleeps.push(delayMs); nowMs += delayMs; },
+        now: () => nowMs,
+        onRetry: () => {},
+      },
+    );
+
+    await model.sendRequest([], 'sys');
+    await model.sendRequest([], 'sys');
+    await model.sendRequest([], 'sys');
+
+    expect(complete).toHaveBeenCalledTimes(3);
+    expect(sleeps).toEqual([2000, MODEL_CIRCUIT_COOLDOWN_MS]);
+    const logs = warn.mock.calls.map((call) => String(call[0] ?? '')).join('\n');
+    expect(logs).toContain('next request delayed 2000ms');
+    expect(logs).toContain('circuit open for ' + MODEL_CIRCUIT_COOLDOWN_MS + 'ms');
+    warn.mockRestore();
+  });
+
+  it('降频后的第一次成功会重置连续失败计数', async () => {
+    let nowMs = 0;
+    let calls = 0;
+    const sleeps: number[] = [];
+    const complete = vi.fn(async () => {
+      calls += 1;
+      return calls === 1 ? errorMessage('Connection error') : textMessage('ok');
+    });
+    const model = new PiModel(
+      {},
+      {
+        resolvedProvider: fakeResolved(complete as unknown as CompleteFn),
+        maxRetries: 0,
+        circuitFailureThreshold: MODEL_CIRCUIT_FAILURE_THRESHOLD,
+        circuitFirstDelayMs: 2000,
+        retrySleep: async (delayMs) => { sleeps.push(delayMs); nowMs += delayMs; },
+        now: () => nowMs,
+        onRetry: () => {},
+      },
+    );
+
+    await expect(model.sendRequest([], 'sys')).resolves.toBe('My brain disconnected, try again.');
+    await expect(model.sendRequest([], 'sys')).resolves.toBe('ok');
+    await expect(model.sendRequest([], 'sys')).resolves.toBe('ok');
+
+    expect(complete).toHaveBeenCalledTimes(3);
+    expect(sleeps).toEqual([2000]);
   });
 
   it('sendRequestWithTools 同样走瞬时重试', async () => {

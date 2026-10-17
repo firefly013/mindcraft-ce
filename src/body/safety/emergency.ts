@@ -167,6 +167,12 @@ export interface EmergencyBot {
   submerged?(): boolean;
   /** 往上浮（在水里连跳 + 抬头）。可选，配合 submerged 用。 */
   swimUp?(): void;
+  /** 脚下方块名（lava 反射用）。 */
+  feetBlockName?(): string | null;
+  /** 头所在方块名（lava 反射用）。 */
+  headBlockName?(): string | null;
+  /** 最近岩浆的水平坐标（lava 反射用来选逃跑方向）。 */
+  lavaNear?(): { x: number; z: number } | null;
   /**
    * 保命是不是被模型关掉了（`!disableSafeguards`）。**可选**：不实现 = 没关。
    *
@@ -193,7 +199,7 @@ export interface EmergencyResult {
  *   - `surface`：头在水里 → 只上浮，浮出来就结束。
  *   - `flee`：有威胁/危险 → 逃开、顺手吃一口，安全了结束。
  */
-export type EmergencyIntent = 'surface' | 'flee';
+export type EmergencyIntent = 'surface' | 'flee' | 'lava';
 
 /** 溺水：只要头还在水里就往上浮，浮出来就算处理完了。 */
 async function runSurface(
@@ -211,6 +217,47 @@ async function runSurface(
       return { escaped: true, reason: 'safe', position: bot.feet(), health: bot.health };
     }
     bot.swimUp?.();
+    await io.sleep(io.tickMs);
+  }
+}
+
+/**
+ * 岩浆脱困：立刻 stopAll（模型动作被 forceStopBody 打断），
+ * 然后往上跳/往远离最近岩浆的方向逃，直到脚/头不再是岩浆。
+ */
+async function runLavaEscape(
+  bot: EmergencyBot,
+  io: { tickMs: number; sleep: (ms: number) => Promise<void>; now: () => number },
+): Promise<EmergencyResult> {
+  bot.stopAll();
+  if (bot.safeguardsOff?.() === true) {
+    return { escaped: false, reason: 'safe', position: bot.feet(), health: bot.health };
+  }
+  const started = io.now();
+  for (;;) {
+    const feetName = bot.feetBlockName?.() ?? null;
+    const headName = bot.headBlockName?.() ?? null;
+    if (feetName !== 'lava' && headName !== 'lava') {
+      return { escaped: true, reason: 'safe', position: bot.feet(), health: bot.health };
+    }
+    // 先往上：浅岩浆池跳出来就安全了。
+    bot.swimUp?.();
+    // 再往远离最近岩浆的方向逃一段。
+    const near = bot.lavaNear?.();
+    const feet = bot.feet();
+    if (feet != null) {
+      if (near != null) {
+        const dx = feet.x - near.x;
+        const dz = feet.z - near.z;
+        const len = Math.hypot(dx, dz) || 1;
+        bot.fleeTo(feet.x + (dx / len) * 4, feet.z + (dz / len) * 4);
+      } else {
+        bot.fleeTo(feet.x + 4, feet.z + 4);
+      }
+    }
+    if (io.now() - started > 8000) {
+      return { escaped: false, reason: 'safe', position: bot.feet(), health: bot.health };
+    }
     await io.sleep(io.tickMs);
   }
 }
@@ -236,6 +283,7 @@ export async function runEmergency(
 
   // 处理是**按事件类型**选定的：溺水归溺水，威胁归威胁，不互相代劳。
   if (opts.intent === 'surface') return runSurface(bot, { tickMs, sleep });
+  if (opts.intent === 'lava') return runLavaEscape(bot, { tickMs, sleep, now });
 
   bot.stopAll();
 

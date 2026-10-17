@@ -824,8 +824,9 @@ export class MineflayerBody {
      */
     private static readonly EDGE_REFLEX: Record<string, { reflex: string; intent: EmergencyIntent }> = {
         'world.water.drowning': { reflex: 'surface', intent: 'surface' },
-        'world.lava.contact': { reflex: 'escape', intent: 'flee' },
-        'world.lava.about_to_enter': { reflex: 'escape', intent: 'flee' },
+        'world.lava.contact': { reflex: 'escape', intent: 'lava' },
+        'world.lava.about_to_enter': { reflex: 'escape', intent: 'lava' },
+        'world.lava.nearby': { reflex: 'escape', intent: 'lava' },
         'world.fire.burning_low_hp': { reflex: 'escape', intent: 'flee' },
         'world.void.falling': { reflex: 'escape', intent: 'flee' },
         'world.fall.lethal': { reflex: 'escape', intent: 'flee' },
@@ -1629,11 +1630,46 @@ export class MineflayerBody {
                 },
                 swimUp: (): void => {
                     try {
-                        // 水里按 jump 就是上浮；顺便抬头，免得贴着天花板原地顶。
+                        // 水里/岩浆里按 jump 就是上浮；顺便抬头，免得贴着天花板原地顶。
                         bot.setControlState('jump', true);
                         void bot.look(bot.entity.yaw, -Math.PI / 2, true);
                     } catch {
                         // 拿不到实体就没什么可做的。
+                    }
+                },
+                feetBlockName: (): string | null => {
+                    try {
+                        return bot.blockAt(bot.entity.position)?.name ?? null;
+                    } catch {
+                        return null;
+                    }
+                },
+                headBlockName: (): string | null => {
+                    try {
+                        return bot.blockAt(bot.entity.position.offset(0, 1.6, 0))?.name ?? null;
+                    } catch {
+                        return null;
+                    }
+                },
+                lavaNear: (): { x: number; z: number } | null => {
+                    try {
+                        const p = bot.entity.position;
+                        let best: { x: number; z: number; d: number } | null = null;
+                        for (let dx = -3; dx <= 3; dx++) {
+                            for (let dy = -2; dy <= 1; dy++) {
+                                for (let dz = -3; dz <= 3; dz++) {
+                                    const b = bot.blockAt(p.offset(dx, dy, dz));
+                                    if (b?.name !== 'lava') continue;
+                                    const d = Math.hypot(dx, dz) + Math.abs(dy) * 0.1;
+                                    if (best == null || d < best.d) {
+                                        best = { x: Math.floor(p.x) + dx, z: Math.floor(p.z) + dz, d };
+                                    }
+                                }
+                            }
+                        }
+                        return best == null ? null : { x: best.x, z: best.z };
+                    } catch {
+                        return null;
                     }
                 },
                 // 模型用 !disableSafeguards 签了生死状 → 连溺水都不再上浮。

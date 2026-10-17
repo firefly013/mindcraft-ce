@@ -15,10 +15,34 @@ function block(name: string, digMs: number, hardness = 1): any {
 }
 
 describe('estimateDigTimeoutMs', () => {
-  it('黑曜石按挖取时间 ×2 + buffer，至少覆盖 9.4s 两倍', () => {
+  it('黑曜石按挖取时间 ×4 + buffer，覆盖实测 2.6×', () => {
     const plan = estimateDigTimeoutMs(block('obsidian', 9400, 50), 1);
     expect(plan.expectedMs).toBe(9400);
-    expect(plan.timeoutMs).toBe(9400 * 2 + 3000);
+    expect(plan.timeoutMs).toBe(9400 * 4 + 3000);
+  });
+
+  it('digWithTimeout 优先用 bot.digTime(block) 的实测口径', async () => {
+    vi.useFakeTimers();
+    try {
+      const bot = {
+        output: '',
+        dig: vi.fn(() => new Promise<never>(() => {})),
+        stopDigging: vi.fn(),
+        heldItem: { type: 1, name: 'diamond_pickaxe' },
+        targetDigBlock: null,
+        digTime: () => 15_000,
+      };
+      const pending = digWithTimeout(bot, block('obsidian', 9400, 50), '@(0,0,0)');
+      // 15s × 4 + 3s = 63s；到 40s 时还不该超时。
+      await vi.advanceTimersByTimeAsync(40_000);
+      expect(bot.stopDigging).not.toHaveBeenCalled();
+      // 第一次超时（63s）+ 续挖第二次再超时（63s）+ 200ms 间隔。
+      await vi.advanceTimersByTimeAsync(200_000);
+      await expect(pending).resolves.toBe(false);
+      expect(bot.stopDigging).toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('钻石矿 0.75s：至少给 minMs，不会 9 秒不到就放弃', () => {

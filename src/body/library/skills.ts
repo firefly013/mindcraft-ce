@@ -1037,11 +1037,13 @@ export interface DigTimeoutPlan {
 export function estimateDigTimeoutMs(
     block: any,
     toolId: number | null = null,
-    opts: { minMs?: number; bufferMs?: number; multiplier?: number; maxMs?: number } = {},
+    opts: { minMs?: number; bufferMs?: number; multiplier?: number; maxMs?: number; digTimeMs?: number } = {},
 ): DigTimeoutPlan {
     const hardness = typeof block?.hardness === 'number' ? block.hardness : 0;
     let expectedMs: number | null = null;
-    if (typeof block?.digTime === 'function') {
+    if (opts.digTimeMs != null) {
+        expectedMs = opts.digTimeMs;
+    } else if (typeof block?.digTime === 'function') {
         try {
             const t = block.digTime(toolId, false, false, false);
             if (Number.isFinite(t) && t > 0) expectedMs = t;
@@ -1057,8 +1059,9 @@ export function estimateDigTimeoutMs(
     }
     const minMs = opts.minMs ?? 12_000;
     const bufferMs = opts.bufferMs ?? 3_000;
-    const multiplier = opts.multiplier ?? 2;
-    const maxMs = opts.maxMs ?? 120_000;
+    // 真机实测约 2.6×；给到 4× + buffer，黑曜石（预计 9.4s / 实测 24s）必须能过。
+    const multiplier = opts.multiplier ?? 4;
+    const maxMs = opts.maxMs ?? 180_000;
     const timeoutMs = unbreakable
         ? minMs
         : Math.min(maxMs, Math.max(minMs, expectedMs * multiplier + bufferMs));
@@ -1071,19 +1074,30 @@ function sleep(ms: number): Promise<void> {
 }
 
 /**
- * 挖方块并动态超时；超时后**优先续挖一次**，不直接放弃。
+ * 挖方块并动态超时；一次超时后在已有进度上续挖，尽量挖穿而不是放弃。
  *
- * 回执写清：当前方块、实际用时、预计用时、第几次尝试、是否还在挖。
+ * 回执写清：当前方块、实际用时、预计用时、第几次尝试、是否仍在挖、每 3 秒进度。
  */
 export async function digWithTimeout(bot: any, block: any, where: string): Promise<boolean> {
+    const name = block?.name ?? '?';
     const toolId: number | null = typeof bot?.heldItem?.type === 'number' ? bot.heldItem.type : null;
-    const plan = estimateDigTimeoutMs(block, toolId);
+    let expectedOverride: number | undefined;
+    if (typeof bot?.digTime === 'function') {
+        try {
+            const t = bot.digTime(block);
+            if (Number.isFinite(t) && t > 0) expectedOverride = t;
+            else if (t === Infinity) expectedOverride = Infinity;
+        } catch {
+            expectedOverride = undefined;
+        }
+    }
+    const plan = estimateDigTimeoutMs(block, toolId, expectedOverride == null ? {} : { digTimeMs: expectedOverride });
     const attempts = 2;
     let totalMs = 0;
     const expectedText = plan.expectedMs === Infinity ? '不可破坏/工具不够' : Math.round(plan.expectedMs / 100) / 10 + 's';
     for (let attempt = 1; attempt <= attempts; attempt++) {
         if (bot?.interrupt_code) {
-            log(bot, '挖 ' + (block?.name ?? '?') + ' ' + where + ' 被 Stop/保命打断，已放弃（累计 ' + Math.round(totalMs / 1000) + 's）。');
+            log(bot, '挖 ' + name + ' ' + where + ' 被 Stop/保命打断，已放弃（累计 ' + Math.round(totalMs / 1000) + 's）。');
             try {
                 bot.stopDigging?.();
             } catch {
@@ -1096,6 +1110,15 @@ export async function digWithTimeout(bot: any, block: any, where: string): Promi
         const timeoutPromise = new Promise<'timeout'>((resolve) => {
             timer = setTimeout(() => resolve('timeout'), plan.timeoutMs);
         });
+        const progressTimer: ReturnType<typeof setInterval> = setInterval(() => {
+            const elapsed = Date.now() - started;
+            const still = bot?.targetDigBlock != null;
+            log(
+                bot,
+                '挖 ' + name + ' ' + where + ' 进度：已 ' + Math.round(elapsed / 1000) + 's，仍在挖=' + still +
+                    (still ? '' : '（dig 还没返回，可能被客户端同步卡住）') + '。',
+            );
+        }, 3_000);
         let outcome: 'ok' | 'timeout' | 'error';
         try {
             outcome = await Promise.race([
@@ -1104,9 +1127,10 @@ export async function digWithTimeout(bot: any, block: any, where: string): Promi
             ]);
         } catch (err: unknown) {
             outcome = 'error';
-            log(bot, '挖 ' + (block?.name ?? '?') + ' ' + where + ' 抛错：' + (err instanceof Error ? err.message : String(err)));
+            log(bot, '挖 ' + name + ' ' + where + ' 抛错：' + (err instanceof Error ? err.message : String(err)));
         } finally {
             if (timer !== undefined) clearTimeout(timer);
+            clearInterval(progressTimer);
         }
         const elapsed = Date.now() - started;
         totalMs += elapsed;
@@ -1114,7 +1138,7 @@ export async function digWithTimeout(bot: any, block: any, where: string): Promi
         if (outcome === 'ok') {
             log(
                 bot,
-                '挖 ' + (block?.name ?? '?') + ' ' + where + ' 完成：用时 ' + Math.round(elapsed / 100) / 10 +
+                '挖 ' + name + ' ' + where + ' 完成：用时 ' + Math.round(elapsed / 100) / 10 +
                     's（预计 ' + expectedText + '，第 ' + attempt + '/' + attempts + ' 次尝试，硬度 ' + plan.hardness + '）。',
             );
             return true;
@@ -1122,15 +1146,14 @@ export async function digWithTimeout(bot: any, block: any, where: string): Promi
         if (outcome === 'timeout') {
             log(
                 bot,
-                '挖 ' + (block?.name ?? '?') + ' ' + where + ' 第 ' + attempt + '/' + attempts + ' 次超时：实际 ' +
+                '挖 ' + name + ' ' + where + ' 第 ' + attempt + '/' + attempts + ' 次超时：实际 ' +
                     Math.round(elapsed / 100) / 10 + 's，预计 ' + expectedText + '（硬度 ' + plan.hardness +
                     '），仍在挖=' + stillDigging + '。',
             );
         }
         if (attempt < attempts) {
-            log(bot, '续挖 ' + (block?.name ?? '?') + ' ' + where + '（第 ' + (attempt + 1) + ' 次，' + (outcome === 'timeout' ? '在已有进度上继续' : '重试') + '）...');
+            log(bot, '续挖 ' + name + ' ' + where + '（第 ' + (attempt + 1) + ' 次，' + (outcome === 'timeout' ? '在已有进度上继续' : '重试') + '）...');
             if (!stillDigging) {
-                // 已经停了就让它彻底停，下一次 dig 重新起步；仍在挖则直接续。
                 try {
                     bot.stopDigging?.();
                 } catch {
@@ -1148,7 +1171,7 @@ export async function digWithTimeout(bot: any, block: any, where: string): Promi
     }
     log(
         bot,
-        '挖 ' + (block?.name ?? '?') + ' ' + where + ' 结束：连续 ' + attempts + ' 次超时/失败，累计 ' +
+        '挖 ' + name + ' ' + where + ' 结束：连续 ' + attempts + ' 次超时/失败，累计 ' +
             Math.round(totalMs / 1000) + 's；仍在挖=' + (bot?.targetDigBlock != null) + '。可稍后重试或换工具。',
     );
     return false;
@@ -1239,6 +1262,66 @@ async function waitForBlockAt(
     }
 }
 
+/** placeBlock 清障前的风险判据。 */
+export interface PlaceBlockRisk {
+    ok: boolean;
+    reason: string;
+}
+
+function blockName(block: { name?: unknown } | null | undefined): string | null {
+    return typeof block?.name === 'string' ? block.name : null;
+}
+
+/**
+ * 清障/放置前检查站位：绝不挖脚下承重块，目标旁有岩浆/水/悬崖就拒绝。
+ *
+ * 真机 Feedback #34：placeBlock 清障挖掉了机器人脚下的 deepslate，bot 掉
+ * 进 y=-57 岩浆烧死。承重块不是障碍物，是命。
+ */
+export function assessPlaceBlockRisk(
+    blockAt: (x: number, y: number, z: number) => { name?: unknown } | null,
+    feet: { x: number; y: number; z: number },
+    target: { x: number; y: number; z: number },
+): PlaceBlockRisk {
+    const fx = Math.floor(feet.x);
+    const fy = Math.floor(feet.y);
+    const fz = Math.floor(feet.z);
+    const tx = Math.floor(target.x);
+    const ty = Math.floor(target.y);
+    const tz = Math.floor(target.z);
+    const nameAt = (x: number, y: number, z: number): string | null => blockName(blockAt(x, y, z));
+
+    // 1) 玩家站立格/脚下承重格：绝不能拆。
+    if (tx === fx && tz === fz && (ty === fy || ty === fy - 1)) {
+        return { ok: false, reason: '目标格是你脚下/站立格的承重方块，拆了会掉下去' };
+    }
+    const feetName = nameAt(fx, fy, fz);
+    const supportName = nameAt(fx, fy - 1, fz);
+    if (feetName === 'lava' || feetName === 'water') {
+        return { ok: false, reason: '你正站在 ' + feetName + ' 里，先脱离再放/清障' };
+    }
+    if (supportName == null || supportName === 'air' || supportName === 'lava' || supportName === 'water') {
+        return { ok: false, reason: '脚下没有实心支撑，先 goToCoordinates 站到安全地面' };
+    }
+
+    // 2) 目标格/目标下方紧邻格是危险流体或空：直接拒绝。
+    const targetName = nameAt(tx, ty, tz);
+    if (targetName === 'lava') return { ok: false, reason: '目标格就是岩浆，不能挖/放' };
+    if (targetName === 'water') return { ok: false, reason: '目标格就是水，先处理水源' };
+    const belowTarget = nameAt(tx, ty - 1, tz);
+    if (belowTarget === 'lava' || belowTarget === 'water') {
+        return { ok: false, reason: '目标格下方紧邻 ' + belowTarget + '，清障会挖穿到岩浆/水' };
+    }
+    // 3) 目标紧邻岩浆：清障可能放岩浆进来。
+    for (const [dx, dy, dz] of [[1,0,0],[-1,0,0],[0,0,1],[0,0,-1],[0,-1,0],[0,1,0]]) {
+        const adjacent = nameAt(tx + dx, ty + dy, tz + dz);
+        if (adjacent === 'lava') {
+            return { ok: false, reason: '目标格紧邻岩浆，清障风险高；先换一格或用 placeHere' };
+        }
+    }
+    return { ok: true, reason: '' };
+}
+
 export async function placeBlock(bot: any, blockType: string, x: number, y: number, z: number, placeOn: string = 'bottom', dontCheat: boolean = false): Promise<boolean> {
     /**
      * Place the given block type at the given position. It will build off from any adjacent blocks. Will fail if there is a block in the way or nothing to build off of.
@@ -1258,6 +1341,15 @@ export async function placeBlock(bot: any, blockType: string, x: number, y: numb
     const target_dest: any = new (Vec3 as any)(Math.floor(x), Math.floor(y), Math.floor(z));
 
     if (blockType === 'air') {
+        const risk = assessPlaceBlockRisk(
+            (bx, by, bz) => bot.blockAt(new Vec3(bx, by, bz)),
+            bot.entity.position,
+            { x, y, z },
+        );
+        if (!risk.ok) {
+            log(bot, '拒绝 removing block at ' + target_dest + '：' + risk.reason + '。');
+            return false;
+        }
         log(bot, `Placing air (removing block) at ${target_dest}.`);
         return await breakBlockAt(bot, x, y, z);
     }
@@ -1337,6 +1429,19 @@ export async function placeBlock(bot: any, blockType: string, x: number, y: numb
     }
     const empty_blocks: string[] = ['air', 'water', 'lava', 'grass', 'short_grass', 'tall_grass', 'snow', 'dead_bush', 'fern'];
     if (!empty_blocks.includes(targetBlock.name)) {
+        const risk = assessPlaceBlockRisk(
+            (bx, by, bz) => bot.blockAt(new Vec3(bx, by, bz)),
+            bot.entity.position,
+            { x, y, z },
+        );
+        if (!risk.ok) {
+            log(
+                bot,
+                '拒绝清障 ' + targetBlock.name + ' @' + targetBlock.position + '：' + risk.reason +
+                    '。替代方案：换一格放、先用 goToCoordinates 站到安全实心处，或用 placeHere。',
+            );
+            return false;
+        }
         log(bot, `${targetBlock.name} in the way at ${targetBlock.position}.`);
         const removed: boolean = await breakBlockAt(bot, x, y, z);
         if (!removed) {

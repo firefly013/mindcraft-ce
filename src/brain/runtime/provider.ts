@@ -45,7 +45,7 @@ const FALLBACK_CONTEXT_WINDOW = 128_000;
 const FALLBACK_MAX_TOKENS = 4096;
 
 /** 模型请求瞬时失败时，默认重试次数（不含首次请求）。 */
-export const DEFAULT_MODEL_RETRIES = 2;
+export const DEFAULT_MODEL_RETRIES = 4;
 
 /** 覆盖默认模型重试次数的环境变量；0 表示关闭重试。 */
 export const MODEL_RETRIES_ENV = 'MINDCRAFT_MODEL_RETRIES';
@@ -53,7 +53,7 @@ export const MODEL_RETRIES_ENV = 'MINDCRAFT_MODEL_RETRIES';
 /**
  * 读取 MINDCRAFT_MODEL_RETRIES。
  *
- * 只接受非负整数；空串、负数、小数、非数字都回退到默认值（默认 2）。
+ * 只接受非负整数；空串、负数、小数、非数字都回退到默认值（默认 4）。
  * 解析放在 provider 层是因为这里已经集中处理环境变量与默认值。
  */
 export function resolveModelRetries(
