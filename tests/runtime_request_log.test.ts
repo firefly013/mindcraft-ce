@@ -1,5 +1,5 @@
 /**
- * 请求日志：D1（一文件一代、覆盖写）/ D2（压仓翻页）/ D3（= 模型实际收到的消息列）。
+ * 请求日志：D1（一文件一代、覆盖写）/ D2（上下文压缩翻页）/ D3（= 模型实际收到的消息列）。
  */
 import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -87,7 +87,7 @@ describe('D1：一个文件 = 一代上下文，覆盖写', () => {
   });
 });
 
-describe('D2：压仓翻页', () => {
+describe('D2：上下文压缩翻页', () => {
   it('翻页后是新文件，旧文件保留', () => {
     const dir = tempDir();
     const sink = sinkIn(dir);
@@ -181,8 +181,8 @@ describe('D3：日志 = 模型实际收到的消息列', () => {
   });
 });
 
-describe('真集成：hook 真的接在生成与压仓上', () => {
-  it('一次请求写出日志；压仓后翻页', async () => {
+describe('真集成：hook 真的接在生成与上下文压缩上', () => {
+  it('一次请求写出日志；上下文压缩后翻页', async () => {
     const dir = tempDir();
     const sink = sinkIn(dir, ['Look']);
 
@@ -196,6 +196,7 @@ describe('真集成：hook 真的接在生成与压仓上', () => {
       providerId: faux.provider.id,
       apiKey: undefined,
       headers: null,
+      params: {},
       contextWindow: model.contextWindow,
     };
     faux.setResponses([
@@ -226,13 +227,13 @@ describe('真集成：hook 真的接在生成与压仓上', () => {
     expect(readdirSync(dir)).toContain('request-001.log');
     expect(readFileSync(join(dir, 'request-001.log'), 'utf8')).toContain('[user] 第一次');
 
-    // 窗口很小（300 − 20 = 280），继续塞长内容必然触发压仓 → 翻页
+    // 窗口很小（300 − 20 = 280），继续塞长内容必然触发上下文压缩 → 翻页
     const long = '填充文本'.repeat(60);
     for (let i = 0; i < 4; i++) {
       await (await runtime.submit(`${long} 第${i}条`)).wait(ctx);
     }
 
-    // 先确认压仓真的发生了，再看翻页——否则分不清"没压仓"和"hook 没接上"
+    // 先确认上下文压缩真的发生了，再看翻页——否则分不清"没上下文压缩"和"hook 没接上"
     const page = await runtime.conversation.entries({}, 100, undefined, ctx);
     expect(page.items.some((entry) => entry.kind.includes('compaction'))).toBe(true);
 

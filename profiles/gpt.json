@@ -1,12 +1,10 @@
 {
-    "name": "gpt",
+    "$schema": "../schemas/profile.schema.json",
 
+    // 官方 OpenAI 端点。key 从 auth.json 的 "openai" 或环境变量 OPENAI_API_KEY 来。
+    "name": "gpt",
     "model": {
-        "model": "gpt-5.4",
-        "params": {
-            "reasoning": {
-                "effort": "low"
-            }
-        }
+        "provider": "openai",
+        "model": "gpt-5.4"
     }
 }

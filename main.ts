@@ -1,6 +1,6 @@
 import * as Mindcraft from './src/brain/mindserver/mindcraft.js';
 import settings from './settings.js';
-import type { Settings } from './src/shared/types/common.js';
+import { ConfigError, loadAuthConfig, loadProvidersConfig, loadProfile } from './src/shared/config/load.js';
 import yargs from 'yargs';
 import { hideBin } from 'yargs/helpers';
 import { readFileSync } from 'fs';
@@ -9,6 +9,8 @@ export interface MainArgs {
     profiles?: string[];
     task_path?: string;
     task_id?: string;
+    mcHost?: string;
+    mcPort?: number;
 }
 
 function parseArguments(): MainArgs {
@@ -25,6 +27,14 @@ function parseArguments(): MainArgs {
             type: 'string',
             describe: 'Task ID to execute'
         })
+        .option('mc-host', {
+            type: 'string',
+            describe: 'Minecraft server host (defaults to settings.host)'
+        })
+        .option('mc-port', {
+            type: 'number',
+            describe: 'Minecraft server port; omit to scan the host for LAN servers'
+        })
         .help()
         .alias('help', 'h')
         .parseSync();
@@ -32,64 +42,103 @@ function parseArguments(): MainArgs {
         profiles: parsed.profiles?.map(String),
         task_path: parsed.task_path,
         task_id: parsed.task_id,
+        mcHost: typeof parsed.mcHost === 'string' ? parsed.mcHost : undefined,
+        mcPort: typeof parsed.mcPort === 'number' ? parsed.mcPort : undefined,
     };
 }
-const args = parseArguments();
-if (args.profiles) {
-    settings.profiles = args.profiles;
-}
-if (args.task_path) {
-    const tasks: Record<string, Record<string, unknown>> = JSON.parse(readFileSync(args.task_path, 'utf8'));
-    if (args.task_id) {
-        const selected = tasks[args.task_id];
-        if (selected) {
-            selected['task_id'] = args.task_id;
-            settings.task = selected;
+
+/**
+ * 配置错误一律**当场退出**（退出码 1）。
+ *
+ * 规矩：配置文件解析失败、校验失败、引用的模型找不到，都在这里炸出来，
+ * 而不是取个默认值继续跑——跑起来的错配比启动失败难查得多。
+ */
+try {
+    const args = parseArguments();
+    if (args.task_path) {
+        const tasks: Record<string, Record<string, unknown>> = JSON.parse(readFileSync(args.task_path, 'utf8'));
+        if (args.task_id) {
+            const selected = tasks[args.task_id];
+            if (selected) {
+                selected['task_id'] = args.task_id;
+                settings.task = selected;
+            }
+            else {
+                throw new ConfigError(args.task_path, [`找不到 task_id "${args.task_id}"`]);
+            }
         }
         else {
-            throw new Error(`task_id "${args.task_id}" not found in ${args.task_path}`);
+            throw new ConfigError(args.task_path, ['提供了 task_path 就必须给 task_id']);
         }
     }
-    else {
-        throw new Error('task_id is required when task_path is provided');
-    }
-}
 
-// these environment variables override certain settings
-if (process.env.MINECRAFT_PORT) {
-    settings.port = process.env.MINECRAFT_PORT;
-}
-if (process.env.MINDSERVER_PORT) {
-    settings.mindserver_port = process.env.MINDSERVER_PORT;
-}
-if (process.env.PROFILES) {
-    const parsedProfiles: unknown = JSON.parse(process.env.PROFILES);
-    if (Array.isArray(parsedProfiles) && parsedProfiles.length > 0) {
-        settings.profiles = parsedProfiles.map(String);
+    if (process.env.SETTINGS_JSON) {
+        const parsedSettings: unknown = JSON.parse(process.env.SETTINGS_JSON);
+        if (parsedSettings == null || typeof parsedSettings !== 'object' || Array.isArray(parsedSettings)) {
+            throw new ConfigError('$SETTINGS_JSON', ['必须是一个 JSON 对象']);
+        }
+        Object.assign(settings, parsedSettings);
     }
-}
-if (process.env.BLOCKED_ACTIONS) {
-    const parsedBlocked: unknown = JSON.parse(process.env.BLOCKED_ACTIONS);
-    if (Array.isArray(parsedBlocked)) {
+
+    // these environment variables override certain settings
+    if (process.env.MINECRAFT_PORT) {
+        settings.port = process.env.MINECRAFT_PORT;
+    }
+    if (process.env.MINDSERVER_PORT) {
+        settings.mindserver_port = process.env.MINDSERVER_PORT;
+    }
+    if (process.env.PROFILES) {
+        const parsedProfiles: unknown = JSON.parse(process.env.PROFILES);
+        if (!Array.isArray(parsedProfiles)) {
+            throw new ConfigError('$PROFILES', ['必须是 JSON 数组']);
+        }
+        if (parsedProfiles.length > 0) {
+            settings.profiles = parsedProfiles.map(String);
+        }
+    }
+    if (process.env.BLOCKED_ACTIONS) {
+        const parsedBlocked: unknown = JSON.parse(process.env.BLOCKED_ACTIONS);
+        if (!Array.isArray(parsedBlocked)) {
+            throw new ConfigError('$BLOCKED_ACTIONS', ['必须是 JSON 数组']);
+        }
         settings.blocked_actions = parsedBlocked.map(String);
     }
-}
-if (process.env.SETTINGS_JSON) {
-    try {
-        const parsedSettings: unknown = JSON.parse(process.env.SETTINGS_JSON);
-        if (typeof parsedSettings === 'object' && parsedSettings !== null) {
-            Object.assign(settings, parsedSettings);
-        }
-    } catch (err) {
-        console.error("Failed to parse environment variable for SETTINGS_JSON:", err);
+    // CLI 参数优先级最高，放在所有文件与环境变量之后。
+    if (args.profiles) {
+        settings.profiles = args.profiles;
     }
-}
+    if (args.mcHost) {
+        settings.host = args.mcHost;
+    }
+    if (args.mcPort != null) {
+        settings.port = args.mcPort;
+    }
+    if (settings.port == null) {
+        settings.port = -1;
+    }
+    if (settings.profiles.length === 0) {
+        throw new ConfigError('settings.profiles', ['没有配置任何 Bot。用 --profiles 指定 profile，或把路径写进 settings.ts 的 profiles。']);
+    }
 
+    // 供应商与凭据先过一遍校验：错在这里就该退出，而不是等每个 bot 起来再炸。
+    loadProvidersConfig();
+    loadAuthConfig();
 
-void Mindcraft.init(false, settings.mindserver_port, settings.auto_open_ui);
+    void Mindcraft.init(false, settings.mindserver_port, settings.auto_open_ui);
 
-for (const profile of settings.profiles) {
-    const profile_json: unknown = JSON.parse(readFileSync(profile, 'utf8'));
-    settings.profile = profile_json as Settings['profile'];
-    void Mindcraft.createAgent(settings);
+    for (const profilePath of settings.profiles) {
+        settings.profile = loadProfile(profilePath);
+        // `createAgent` 在这里已经跑过一遍模型解析（端点、模型、凭据），失败就退出：
+        // 让一个连不上模型的 bot 进程起来再死，只会变成重启循环。
+        const created = await Mindcraft.createAgent(settings);
+        if (!created.success) {
+            throw new ConfigError(profilePath, [created.error ?? '创建 agent 失败']);
+        }
+    }
+} catch (error: unknown) {
+    if (error instanceof ConfigError) {
+        console.error(`配置错误：\n${error.message}`);
+        process.exit(1);
+    }
+    throw error;
 }

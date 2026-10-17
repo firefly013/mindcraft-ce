@@ -23,7 +23,8 @@
 import { describe, expect, it } from 'vitest';
 import type { Submission } from '@earendil-works/pi-durable';
 import { ActionRunner } from '../src/brain/action_runner.js';
-import { LEVEL, Scheduler } from '../src/brain/scheduler.js';
+import { LEVEL } from '../src/shared/events.js';
+import { Scheduler } from '../src/brain/scheduler.js';
 import { createToolCatalog } from '../src/brain/tools/catalog.js';
 import { EventIntake } from '../src/brain/runtime/events.js';
 import { toolDeclarations } from '../src/body/commands/registry.js';
@@ -182,14 +183,23 @@ describe('B2：L4 打断在途回答，但**动作不受影响**', () => {
     const intake = new EventIntake();
     intake.attach({
       submit: () => Promise.resolve(fakeSubmission()),
+      write: () => Promise.resolve(),
       abort: () => {
         generationAlive = false;
         return Promise.resolve();
       },
-      rescue: () => Promise.resolve(),
     });
 
-    intake.notify({ level: LEVEL.PREEMPT as never, text: '换个目标' });
+    intake.notify({
+      type: 'user.message',
+      kind: 'User',
+      level: LEVEL.PREEMPT,
+      payload: { message: '换个目标' },
+      text: '换个目标',
+      ts: Date.now(),
+      reflex: null,
+      completes: null,
+    });
     await intake.settle();
 
     // 回答被掐掉、事件重新提交（生成线重开）

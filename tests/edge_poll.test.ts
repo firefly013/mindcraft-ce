@@ -62,7 +62,7 @@ describe('snapshotFromBot', () => {
   });
 
   it('reads the common fields off a mineflayer-shaped bot', () => {
-    const s = snapshotFromBot(stubBot(), { currentAction: 'a', goal: 'g' });
+    const s = snapshotFromBot(stubBot(), { currentAction: 'a' });
     expect(s.health).toBe(20);
     expect(s.food).toBe(15);
     expect(s.isNight).toBe(false);

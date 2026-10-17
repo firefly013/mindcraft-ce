@@ -13,8 +13,11 @@ export default defineConfig({
       include: [
         'src/shared/prompts.ts',
         'src/shared/utils/math.ts',
-        'src/shared/utils/keys.ts',
         'src/shared/utils/tokens.ts',
+        'src/shared/config/json.ts',
+        'src/shared/config/load.ts',
+        'src/shared/config/schema.ts',
+        'src/shared/config/value.ts',
         'src/body/memory_bank.ts',
         'src/body/auto_pickup.ts',
         'src/shared/logger.ts',

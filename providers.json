@@ -1,0 +1,57 @@
+{
+    "$schema": "./schemas/providers.schema.json",
+
+    // 端点与模型。profile 里只写引用（"provider/model"），端点、窗口、采样参数写在这里。
+    // 允许注释（JSONC）。key 不写在这，写在 auth.json。
+    "providers": {
+        // pi-ai 内置供应商之一：端点、窗口（1M）、compat 都由内置目录给出，
+        // 这里只补"这个部署特有的东西"——额外的 header 与采样参数。
+        "opencode-go": {
+            "headers": { "x-opencode-session": "${OPENCODE_SESSION_ID}" },
+            "models": [
+                {
+                    "id": "deepseek-v4.1-flash",
+                    "samplingParams": { "thinking": { "type": "disabled" } }
+                }
+            ]
+        },
+
+        // DeepSeek 官方 OpenAI 兼容端点。
+        // 文档：https://api-docs.deepseek.com/
+        "deepseek": {
+            "baseUrl": "https://api.deepseek.com",
+            "models": [
+                {
+                    "id": "deepseek-flash",
+                    "name": "DeepSeek-V4.1-Flash",
+                    "reasoning": true,
+                    "contextWindow": 1000000,
+                    "maxTokens": 393216,
+                    "input": ["text", "image"],
+                    "samplingParams": {
+                        "thinking": { "type": "enabled" },
+                        "reasoning_effort": "high"
+                    }
+                }
+            ]
+        },
+
+        // 内置 OpenAI 端点，只覆写 gpt-5.4 的采样参数。
+        "openai": {
+            "modelOverrides": {
+                "gpt-5.4": {
+                    "samplingParams": { "reasoning": { "effort": "low" } }
+                }
+            }
+        },
+
+        // 自建/其它 OpenAI 兼容端点：带上 baseUrl 就能用，key 随便给个占位。
+        // 加一个端点就在这里加一条，profile 里换成 "local/模型名" 即可。
+        "local": {
+            "baseUrl": "http://127.0.0.1:1234/v1",
+            "models": [
+                { "id": "qwen2.5-coder-7b", "contextWindow": 32768, "maxTokens": 4096 }
+            ]
+        }
+    }
+}

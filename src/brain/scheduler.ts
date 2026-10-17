@@ -1,55 +1,24 @@
 /*
- * 事件调度器：决定哪个事件开启一次模型请求、哪个搭车、哪个抢占。
+ * 动作通道仲裁 + 紧急锁。
  *
- * 纯逻辑，无 I/O。Agent 有两条相互独立的线：
- *   - 推理线：一次模型请求是否正在进行（apiBusy）；
- *   - 动作线：同一时刻最多一个占用的身体动作（ActionManager 串行执行）。
- * 本类是到达事件与这两条线之间的裁判。
+ * **它不再是事件调度器。**事件的分发在 `runtime/events.ts`：处理由**事件类型**
+ * 决定（`runtime/handlers.ts`），等级只决定"用多大力气把模型叫来看一眼"。
+ * 这里剩下的只有两条**独立**的线之间的仲裁：
  *
- * 事件分级词汇（L1–L5、KIND）住在 `shared/events.ts`——身体侧的边沿检测器
- * 按同一份表给事件定级。这里只负责"到达的事件该怎么处理"。
+ *   - **动作线**：同一时刻最多一个占用型动作（`ActionRunner` 认领/释放）。
+ *     大脑是这条线的唯一真相——身体只执行，不仲裁，所以两侧不会各说各话。
+ *   - **紧急锁**：L5 的身体侧反射在跑的时候锁住通道，模型的动作不许插进来
+ *     （它在水底下上浮，模型这时发个 `mineBlock` 只会打乱节奏）。锁由事件驱动：
+ *     反射**开始**的事件锁，反射**完成**的事件（`completes`）解锁。
  *
- * 事件被某个请求带上即视为 "seen"。被抢占的请求会 un-see
- * 它带走的东西，让重启的新请求重新带上而不是丢掉。跑完
- * `finishRequest` 的请求消费掉它看到的东西；循环回到 idle
- * 时剪掉已消费的分发状态（真正的历史由 History 保管，
- * 这里的 map 只是分发状态，不是日志）。
+ * 纯逻辑，无 I/O。
  */
 
-import { KIND, KINDS, LEVEL, type EventPayload, type Kind, type Level } from '../shared/events.js';
-
-export { KIND, LEVEL };
-export type { EventPayload, Kind, Level };
-
-interface StoredEvent extends EventPayload {
-  seq: number;
-  consumed: boolean;
-  seenBy: number;
-}
-
-export type Decision =
-  | 'stored'
-  | 'start'
-  | 'queued'
-  | 'preempt'
-  | 'emergency'
-  | 'idle'
-  | 'stale';
-
-export interface PushVerdict {
-  decision: Decision;
-  seq: number;
-  cancelledRequest?: number | null;
-}
-
-export interface BeginVerdict {
-  requestId: number;
-  events: StoredEvent[];
-  reused?: boolean;
-}
-
-export interface FinishVerdict {
-  decision: Decision;
+/** 当前占着身体通道的动作：名字 + 调用参数 + 认领时刻。 */
+export interface CurrentAction {
+  id: string;
+  args: unknown;
+  startedAt: number;
 }
 
 export interface StartActionVerdict {
@@ -59,116 +28,25 @@ export interface StartActionVerdict {
   code?: 'ACTION_BUSY' | 'EMERGENCY_LOCKED';
 }
 
+/** 给状态上报（dashboard / 调试日志）看的快照。 */
 export interface SchedulerSnapshot {
-  apiBusy: boolean;
-  currentRequestId: number;
   actionId: string | null;
   generation: number;
   emergency: boolean;
-  pending: number;
-}
-
-/** 当前占着身体通道的动作：名字 + 调用参数 + 认领时刻。 */
-export interface CurrentAction {
-  id: string;
-  args: unknown;
-  startedAt: number;
 }
 
 export class Scheduler {
-  private apiBusy = false;
-  private currentRequestId = 0;
-  private requestSeq = 0;
   private action: CurrentAction | null = null;
   private generation = 0;
   private emergency = false;
-  private eventSeq = 0;
-  private events = new Map<number, StoredEvent>();
 
   /**
-   * 收进一个事件，返回循环此刻该怎么处理它。
+   * 认领动作通道。动作跑着（`ACTION_BUSY`）或紧急锁住（`EMERGENCY_LOCKED`）
+   * 就拒绝——不排队、不顶替。
    *
-   * `stored` = 归档，不唤醒；`start` = 立刻开请求；
-   * `queued` = 搭下一次请求的车；`preempt` = 取消当前请求重开；
-   * `emergency` = 一切停下。
-   */
-  pushEvent({ kind, level, payload }: EventPayload): PushVerdict {
-    if (!KINDS.has(kind)) throw new RangeError(`unknown event kind: ${kind}`);
-    if (!Number.isInteger(level) || level < 1 || level > 5) {
-      throw new RangeError(`event level must be 1-5, got ${level}`);
-    }
-    const seq = ++this.eventSeq;
-    this.events.set(seq, { seq, kind, level, payload, consumed: false, seenBy: 0 });
-
-    if (level <= LEVEL.STATE) return { decision: 'stored', seq };
-    if (this.emergency) return { decision: 'stored', seq };
-    if (level === LEVEL.WAKE) {
-      return { decision: this.apiBusy ? 'queued' : 'start', seq };
-    }
-    if (level === LEVEL.PREEMPT) {
-      if (!this.apiBusy) return { decision: 'start', seq };
-      const cancelledRequest = this.currentRequestId;
-      this.unsee(cancelledRequest);
-      this.apiBusy = false;
-      this.currentRequestId = 0;
-      return { decision: 'preempt', seq, cancelledRequest };
-    }
-    // LEVEL.EMERGENCY
-    const cancelledRequest = this.apiBusy ? this.currentRequestId : null;
-    if (cancelledRequest != null) this.unsee(cancelledRequest);
-    this.apiBusy = false;
-    this.currentRequestId = 0;
-    this.action = null;
-    this.generation++;
-    this.emergency = true;
-    // emergency handler 接管这个事件：锁结束时它不能再以未见工作的
-    // 面目出现，否则会为自己再唤醒一次请求。
-    const stored = this.events.get(seq);
-    if (stored) stored.consumed = true;
-    return { decision: 'emergency', seq, cancelledRequest };
-  }
-
-  /**
-   * 开一个请求。收走所有未消费的 level-2+ 事件（最老的先），
-   * 记为被本次请求 seen。Level-1 事件永不搭请求。
-   */
-  beginRequest(): BeginVerdict {
-    if (this.apiBusy) return { requestId: this.currentRequestId, events: [], reused: true };
-    const requestId = ++this.requestSeq;
-    const events: StoredEvent[] = [];
-    for (const event of this.events.values()) {
-      if (!event.consumed && event.level >= LEVEL.STATE) {
-        event.consumed = true;
-        event.seenBy = requestId;
-        events.push({ ...event });
-      }
-    }
-    this.apiBusy = true;
-    this.currentRequestId = requestId;
-    return { requestId, events };
-  }
-
-  /**
-   * 模型调了 `Finish()`。过期 id（被抢占的请求姗姗来迟）什么都不改变。
-   * 否则：还有未见的 level-3+ 事件就再来一轮（`start`），没有则推理线
-   * 转 idle 并剪掉已消费的分发状态。
-   */
-  finishRequest(requestId: number): FinishVerdict {
-    if (requestId !== this.currentRequestId) return { decision: 'stale' };
-    this.apiBusy = false;
-    this.currentRequestId = 0;
-    if (this.hasUnseen(LEVEL.WAKE)) return { decision: 'start' };
-    this.pruneConsumed();
-    return { decision: 'idle' };
-  }
-
-  /**
-   * 认领动作通道。动作跑着（`ACTION_BUSY`）或 emergency 锁住
-   * （`EMERGENCY_LOCKED`）就拒绝——不排队、不顶替。
-   *
-   * 记下名字与参数，是为了让调用方能回答"被拒的这次是不是就是
-   * 正在跑的那件事"：同一个动作重复下发应当幂等忽略，而不是逼模型
-   * 先 Stop 再重开（那会把模型自己正在做的事打断）。
+   * 记下名字与参数，是为了让调用方能回答"被拒的这次是不是就是正在跑的那件事"：
+   * 同一个动作重复下发应当幂等忽略，而不是逼模型先 Stop 再重开（那会把模型
+   * 自己正在做的事打断）。
    */
   startAction(id: string, args: unknown = null): StartActionVerdict {
     if (this.emergency) return { accepted: false, code: 'EMERGENCY_LOCKED' };
@@ -180,20 +58,6 @@ export class Scheduler {
   /** 正在跑的动作；空闲时为 null。 */
   currentAction(): CurrentAction | null {
     return this.action == null ? null : { ...this.action };
-  }
-
-  /**
-   * 抢占：如果当前占着通道的正是 `id`，就把它作废并让出通道。
-   *
-   * 专给**低优先级的后台行为**用（目前只有自动拾取）：它是"房客"，
-   * 模型要用身体就立刻让位，不该让模型吃到 `ACTION_BUSY`。
-   * generation 一并 +1，被抢占那个动作的收尾回调/循环会看到自己过期而停下。
-   */
-  preempt(id: string): boolean {
-    if (this.action == null || this.action.id !== id) return false;
-    this.action = null;
-    this.generation++;
-    return true;
   }
 
   /**
@@ -226,46 +90,36 @@ export class Scheduler {
     return generation === this.generation;
   }
 
-  /** 结束 emergency 锁。有堆积的 level-3+ 事件就再唤醒循环。 */
-  endEmergency(): FinishVerdict {
+  /**
+   * 紧急锁：L5 的身体侧反射开始跑。
+   *
+   * **锁的时候顺带把正在跑的动作作废**——它多半就是"正在水里往下挖"那种
+   * 把机器人送进险境的动作，让保命反射和它抢身体没有意义。
+   */
+  beginEmergency(): void {
+    if (this.emergency) return;
+    this.emergency = true;
+    this.action = null;
+    this.generation++;
+  }
+
+  /** 紧急锁解除：最后一个反射报告完成。没有锁的时候是空操作。 */
+  endEmergency(): void {
     this.emergency = false;
-    if (this.hasUnseen(LEVEL.WAKE)) return { decision: 'start' };
-    this.pruneConsumed();
-    return { decision: 'idle' };
+  }
+
+  /** 现在是否处于紧急锁。 */
+  get locked(): boolean {
+    return this.emergency;
   }
 
   /** 给状态上报（dashboard / 调试日志）看的分发状态快照。 */
   describe(): SchedulerSnapshot {
     return {
-      apiBusy: this.apiBusy,
-      currentRequestId: this.currentRequestId,
       actionId: this.action?.id ?? null,
       generation: this.generation,
       emergency: this.emergency,
-      pending: [...this.events.values()].filter((e) => !e.consumed).length,
     };
-  }
-
-  private hasUnseen(minLevel: Level): boolean {
-    for (const event of this.events.values()) {
-      if (!event.consumed && event.level >= minLevel) return true;
-    }
-    return false;
-  }
-
-  private unsee(requestId: number): void {
-    for (const event of this.events.values()) {
-      if (event.seenBy === requestId) {
-        event.consumed = false;
-        event.seenBy = 0;
-      }
-    }
-  }
-
-  private pruneConsumed(): void {
-    for (const [seq, event] of this.events) {
-      if (event.consumed) this.events.delete(seq);
-    }
   }
 }
 

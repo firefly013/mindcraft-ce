@@ -3,7 +3,7 @@ import type { Settings } from './src/shared/types/common.js';
 const settings: Settings = {
     "minecraft_version": "auto", // or specific version like "1.21.11"
     "host": "127.0.0.1", // or "localhost", "your.ip.address.here"
-    "port": 55916, // set to -1 to automatically scan for open ports
+    // 端口不写在这里。启动时用 --mc-port 指定，不指定就扫描 host 上的局域网端口。
     "auth": "offline", // or "microsoft"
 
     // the mindserver manages all agents and hosts the UI
@@ -11,13 +11,7 @@ const settings: Settings = {
     "auto_open_ui": true, // opens UI in browser on startup
 
     "profiles": [
-        "./profiles/opencode.json",
-        // "./profiles/gpt.json",
-
-        // 只有一个 OpenAI 兼容供应商：加 bot 就再加一个 profile，
-        // 用 model.url 指到别的兼容端点即可（见 profiles/opencode.json）。
-        // each profile spawns one standalone bot; bots do not talk to each other
-        // individual profiles override values from the base profile
+        // 不内置默认 Bot。启动时用 --profiles 指定，或在这里加入自己的 profile。
     ],
 
     "load_memory": false, // load memory from previous session
@@ -30,7 +24,7 @@ const settings: Settings = {
     "blocked_actions" : [], // tools to disable（按命令名，例如 "!searchWiki"）
     "cheat": false, // allow server-cheat shortcuts (/tp, /setblock, instant place) in skills. Requires OP.
 
-    // 上下文不再有条数上限：唯一的裁剪机制是压仓，触发线是
+    // 上下文不再有条数上限：唯一的裁剪机制是上下文压缩，触发线是
     // profile 的 context_window - reserve_tokens（见 src/agent/compaction.ts）。
 
     "spawn_timeout": 30, // num seconds allowed for the bot to spawn before throwing error. Increase when spawning takes a while.

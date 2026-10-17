@@ -30,6 +30,7 @@
         "prismarine-viewer": "1.33.0",
         "socket.io": "4.8.3",
         "socket.io-client": "4.8.3",
+        "typebox": "1.3.27",
         "ws": "8.21.1",
         "three": "0.128.0",
         "vec3": "0.2.0",
@@ -48,6 +49,7 @@
         "typecheck": "tsc --noEmit",
         "lint": "eslint .",
         "check:prompts": "tsx scripts/check-prompts.ts",
+        "generate:schemas": "tsx scripts/generate-schemas.ts",
         "test": "vitest run --coverage",
         "reinstall": "npm run clean:modules && npm ci",
         "clean:modules": "node -e \"const fs=require('fs');if(fs.existsSync('node_modules'))fs.rmSync('node_modules',{recursive:true,force:true});\""

@@ -17,13 +17,6 @@ import { join } from 'node:path';
 import { BACKGROUND_CONTEXT } from '@earendil-works/chord/context';
 import { defineExtension } from '@earendil-works/pi-durable';
 import { ActionRunner } from './action_runner.js';
-import {
-    AUTO_PICKUP_ID,
-    PICKUP_RADIUS,
-    PICKUP_TIMEOUT_MS,
-    shouldAttemptPickup,
-    type PickupTarget,
-} from '../shared/auto_pickup.js';
 import { buildGameTools, actionChannelInvoker } from './tools/game_tools.js';
 import { createToolCatalog, EMPTY_TOOL_CATALOG, type ToolCatalog } from './tools/catalog.js';
 import type { ToolDeclaration } from '../shared/tools.js';
@@ -35,8 +28,9 @@ import { renderLiveState } from '../shared/live_state.js';
 import type { LiveState } from '../shared/live_state.js';
 import type { PlanTodoInput } from './plan.js';
 import { PlanStore } from './plan.js';
-import { KIND, LEVEL, Scheduler } from './scheduler.js';
-import type { Kind, Level } from './scheduler.js';
+import { KIND, LEVEL } from '../shared/events.js';
+import type { Kind, Level } from '../shared/events.js';
+import { Scheduler } from './scheduler.js';
 import { serverProxy, sendOutputToServer } from './mindserver_proxy.js';
 import settings from '../shared/settings.js';
 import { Task } from './tasks/tasks.js';
@@ -52,11 +46,14 @@ import {
   createUpdatePlanTool,
 } from './tools/control_tools.js';
 import { EventIntake } from './runtime/events.js';
+import type { GameEvent } from './runtime/events.js';
+import type { EventHandler } from './runtime/handlers.js';
 import { compactionLogHook, providerLogHook } from './runtime/log_hooks.js';
 import { migrateLegacyState, readLegacySave } from './runtime/legacy.js';
 import { createLogger, nullLogger, type Logger } from '../shared/logger.js';
 import { liveTailFromText } from './runtime/perception.js';
 import { systemPromptFromProfile } from './runtime/prompt.js';
+import { loadProfile, validateProfile } from '../shared/config/load.js';
 import { compactionPageHook, createRequestLogSink, requestLogHook } from './runtime/request_log.js';
 import type { ToolOutcome } from './tools/tools.js';
 import type { Body } from '../shared/body.js';
@@ -64,13 +61,10 @@ import type { BodyCapabilities } from '../shared/protocol/types.js';
 import { RemoteBody } from './remote_body.js';
 import { bodyExitInfo, startBody, stopBody } from './process/body_launcher.js';
 import type { CloseInfo } from '../shared/protocol/transport.js';
-import type { BodyEvent, ChatPush } from '../shared/protocol/types.js';
+import type { BodyEvent, ChatMessage } from '../shared/protocol/types.js';
 
 /** CLI 事件缓冲上限。一次调试会话够用就行，别让数组无限长。 */
 const CLI_EVENT_LOG_LIMIT = 200;
-
-/** 任务完成度轮询间隔。与身体心跳同频（主线里它就在同一个 update 里）。 */
-const TASK_POLL_MS = 300;
 
 /** CLI 拿走的一条事件。 */
 export interface CliEvent {
@@ -80,18 +74,6 @@ export interface CliEvent {
     text: string;
 }
 
-/**
- * 控制类工具：它们**自己不发额度，也不消耗额度**。
- *
- * 模型申请"接下来 3 次动作别拦我"，如果申请这一步就吃掉一次，那它到手只剩 2 次，
- * 语义变成"申请 N 次实际能用 N-1 次" —— 模型很难算清，于是干脆不敢用这个功能。
- */
-const CONTROL_TOOLS = new Set([
-    '!allowDangerousOps',
-    '!disableSafeguards',
-    '!restoreAllSafety',
-]);
-
 export class Agent {
     count_id: number = 0;
 
@@ -100,7 +82,7 @@ export class Agent {
     blocked_actions: string[] = [];
     respondFunc: ((username: string, message: string) => Promise<void>) | undefined;
     scheduler!: Scheduler;
-    loopLog: Array<{ kind: string; level: number; payload: unknown }> = [];
+    loopLog: Array<{ type: string; kind: string; level: number; payload: unknown }> = [];
     /**
      * 计划（goal / todos）。**在 `name` 就绪后才建**——落盘路径要用它。
      * 见 `initProfile` 里的赋值；在那之前是空的纯内存实例（还没有名字可存）。
@@ -116,7 +98,12 @@ export class Agent {
     /** 身体协议端口。由进程入口（`src/brain/index.ts`）在 `start()` 前设好。 */
     private bodyPort: number | null = null;
 
-    /** 背包槽位缓存（每 300ms 刷一次）。只给 `Task` 数物品用，见 `inventorySlots()`。 */
+    /**
+     * 背包槽位缓存。**由 `inventory.changed` 事件喂**（身体在每次变化的那一刻
+     * 报一次，连初始状态一起），不再有 300ms 轮询。
+     *
+     * 只给 `Task` 数物品用，见 `inventorySlots()`。
+     */
     private slotsCache: ({ name: string; count: number } | null)[] = [];
 
     /**
@@ -133,8 +120,8 @@ export class Agent {
         const files: string[] = Array.isArray(raw) ? (raw as string[]) : [];
         for (const f of files) {
             try {
-                const profile = JSON.parse(readFileSync(f, 'utf8')) as { name?: unknown };
-                if (typeof profile.name === 'string' && profile.name !== '') this.teammateNames.add(profile.name);
+                const profile = loadProfile(f);
+                if (profile.name !== '') this.teammateNames.add(profile.name);
             } catch {
                 // 读不到就算了，最坏情况是队友的话也走用户回合。
             }
@@ -149,11 +136,11 @@ export class Agent {
      * （`EventIntake.attach`）。连接建立到就绪之间的事件因此不会丢。
      */
     private wiring: BotWiring | null = null;
-    /** L1–L5 事件的唯一入口。`buildRuntime` 里接上运行时。 */
+    /** 事件 → 处理的唯一入口。`buildRuntime` 里接上运行时。 */
     private readonly intake = new EventIntake();
     /** 动作通道：占身体的动作走它（E1–E4 的契约住在这里）。 */
     private actionRunner: ActionRunner | null = null;
-    /** profile 原文：供应商、压仓参数、提示词集都从它读。 */
+    /** profile 原文：供应商、上下文压缩参数、提示词集都从它读。 */
     private profile: Record<string, unknown> | null = null;
     /**
      * 结构化日志：`bots/<name>/logs/agent-YYYYMMDD.log`（JSONL，同步写盘）。
@@ -199,7 +186,15 @@ export class Agent {
             process.exit(1);
             return;
         }
-        this.profile = profile as Record<string, unknown>;
+        // profile 是随 settings 传过来的（可能是网页上传的），这里再校验一次：
+        // 形状不对就带着说明退出，而不是让下面各处读到 undefined。
+        try {
+            this.profile = validateProfile(profile) as unknown as Record<string, unknown>;
+        } catch (error: unknown) {
+            console.error(error instanceof Error ? error.message : String(error));
+            process.exit(1);
+            return;
+        }
         this.name = String(this.profile['name'] ?? this.name).trim();
         console.log(`Initializing agent ${this.name}...`);
 
@@ -298,20 +293,30 @@ export class Agent {
 
         // 事件：身体观察到的 → 审计台账 + intake。
         // 文本已由身体用同一个渲染器渲染好，**不再重渲**；但结构化那份
-        // （kind/level/payload）要单独进 `loopLog`——它是"谁在什么时候叫醒了
-        // agent"的唯一记录，`Feedback` 的历史摘要直接读它。
+        // （type/kind/level/payload）要单独进 `loopLog`——它是"谁在什么时候
+        // 叫醒了 agent"的唯一记录，`Feedback` 的历史摘要直接读它。
         body.onEvent((event: BodyEvent) => {
             const kind = event.kind as Kind;
             const level = event.level as Level;
-            this.recordEvent(kind, level, event.payload);
+            this.recordEvent(event.type, kind, level, event.payload);
             // 文本归属：身体渲染了就用它的，没渲染则由大脑渲染（Java 身体渲染不了）。
             // 见 `eventTextFor` 与 D-59。
-            this.intake.notify({ level, text: eventTextFor(kind, level, event.payload, event.text) });
+            this.intake.notify({
+                type: event.type,
+                kind,
+                level,
+                payload: event.payload,
+                text: eventTextFor(kind, level, event.payload, event.text),
+                ts: event.ts,
+                // 身体声明"我为这条事件启动了哪个处理"，以及"这条是哪个处理的完成报告"。
+                // 等级不决定谁处理——那是事件类型的事（见 handlers.ts）。
+                reflex: event.reflex ?? null,
+                completes: event.completes ?? null,
+            });
         });
-        // 聊天：单独一路，由大脑判"人还是队友"。
-        body.onChat((chat: ChatPush) => {
-            void this.onChat(chat);
-        });
+        // 聊天也是事件，走同一个入口——"是玩家在问我还是队友在报坐标"是它在大脑侧的
+        // 处理（见 `buildEventHandlers` 的 `player.chat`）。
+
         // **身体没了 → 大脑跟着退**。这条是分层新引入的失败模式：单进程时代身体崩了
         // 就等于整个进程崩了，没有人需要"发现"这件事；分层之后大脑会变成一个
         // 看不见的僵尸——心跳照跑、模型照调、每个动作都失败，而日志里一条错都没有。
@@ -325,7 +330,6 @@ export class Agent {
             void this.announceBodyLost(info);
         });
 
-        this.startBodyPoll();
         return caps;
     }
 
@@ -361,158 +365,53 @@ export class Agent {
     }
 
     /**
-     * 大脑的 300ms 心跳：任务完成度 + 自动拾取。
+     * 大脑侧的处理表：**事件类型 → 处理**。
      *
-     * 主线里这两件事都在身体的 `update()` 里跑。**节奏必须保持一致**（300ms），
-     * 否则"任务完成"和"捡起脚边的东西"的发现会变慢或变快，那是行为变化。
+     * 这里只登记**大脑侧的反射**（不需要模型、但也不需要身体侧毫秒级反应的事）。
+     * 身体侧的反射由身体自己在事件里声明（`event.reflex`），模型的处理是默认
+     * ——查不到就是"交给模型看看"。见 `runtime/handlers.ts` 的三条规则。
      *
-     * 自动拾取为什么在大脑而不是身体：**它是为 VLM 做的外层设施**，不是身体的
-     * 通用能力——它存在的唯一理由是"大模型不会主动去踩掉落物"。分层的第一原则是
-     * 身体暴露能力、大脑制定策略，所以它归这里。副产品是身体不再需要自己的
-     * `Scheduler`（仲裁只剩大脑一份），"两套通道各自为政"的病根随之消失。
+     * **为什么不再有 300ms 轮询**：这两件事以前都挂在同一个心跳上，用"定期盲问"
+     * 代替"发生变化的那一刻报告"。轮询的错不在于多几次往返，而在于**在世界没有
+     * 变化的时候声称"发生了"**——那是伪造事件。现在它们各自是身体推来的边沿事件。
      */
-    private startBodyPoll(): void {
-        const timer = setInterval(() => {
-            void this.refreshInventorySlots();
-            this.checkTaskDone();
-            void this.maybeAutoPickup();
-        }, TASK_POLL_MS);
-        timer.unref?.();
+    private buildEventHandlers(): EventHandler[] {
+        return [
+            {
+                types: ['inventory.changed'],
+                executor: 'reflex',
+                note: '背包变化：更新计数缓存并复查任务是否完成',
+                run: (event) => this.reflexInventoryChanged(event),
+            },
+            {
+                types: ['player.chat', 'developer.message'],
+                executor: 'reflex',
+                note: '聊天路由：玩家 → 必须回应的用户事件；队友 → 背景消息',
+                run: (event) => {
+                    this.routeChat(event);
+                    return Promise.resolve();
+                },
+            },
+        ];
     }
-
-    /** 自动拾取：上次尝试时刻 / 是否正在捡（防重叠）/ 是否正被模型的动作饿着。 */
-    private lastPickupAt = 0;
-    private pickingUp = false;
-    private pickupStarved = false;
-    /** 探测"附近有没有掉落物"也是一次协议往返，同样不能重叠。 */
-    private pickupProbing = false;
 
     /**
-     * 自动拾取调度：到点、没在捡、身体空闲就试一次。
+     * `inventory.changed` 的处理：更新计数缓存，然后复查任务是否完成。
      *
-     * 它是"最低优先级的房客"——通道被模型的动作占着就老实等着；反过来模型
-     * 要用身体时可以在 `ActionRunner` 里把它抢占掉（`Scheduler.preempt`），
-     * **模型永远不该因为后台行为吃到 ACTION_BUSY**。
+     * 载荷带的是**新的完整槽位表**（身体在变化的那一刻采的），所以这里既不需要
+     * 再问一次身体，也不需要定时刷新。
      *
-     * 这段逻辑本来是身体的（同进程，同步读 `bot.entities`）。搬到大脑后多两个
-     * 异步点（探测目标、走过去），所以加了 `pickupProbing` 防重叠——**语义没变，
-     * 只是多了一层"异步期间不要重入"的保护**。
+     * 这条处理**不单独留记录**：它的可观测结果就是"任务完成/失败"那条事件
+     * （`checkTaskDone` 会发），再写一条"我更新了缓存"是纯噪音。
      */
-    private async maybeAutoPickup(): Promise<void> {
-        if (this.body == null || this.pickupProbing) return;
-        const now = Date.now();
-        const target = await this.probePickupTarget();
-        if (target == null) {
-            this.pickupStarved = false;
-            return;
-        }
-        // **"身体忙不忙"以大脑的调度器为唯一真相**（身体只执行，不仲裁）。
-        const busy = this.scheduler.currentAction() != null;
-        if (
-            !shouldAttemptPickup({
-                busy,
-                pickingUp: this.pickingUp,
-                sinceLastAttemptMs: now - this.lastPickupAt,
-            })
-        ) {
-            // "有掉落物、但通道被**模型的动作**占着"是最值得看见的一种失败：它
-            // 意味着拾取根本轮不上（模型连着发动作）。每次挨饿只记一行，不刷屏。
-            //
-            // 必须排除"被自己占着"（上一次拾取还没结束）——那是正常重叠，
-            // 报出来会变成 `blockedBy: autoPickup`，日志就在说假话了。
-            if (busy && !this.pickingUp && !this.pickupStarved) {
-                this.pickupStarved = true;
-                this.log.with('pickup').warn({
-                    note: '通道被模型的动作占着，先不捡',
-                    target: target.name,
-                    distance: Number(target.distance.toFixed(1)),
-                    blockedBy: this.currentActionName(),
-                });
-            }
-            if (!busy) this.pickupStarved = false;
-            return;
-        }
-        this.pickupStarved = false;
-        this.lastPickupAt = now;
-        this.pickingUp = true;
-        void this.tryAutoPickup(target).finally(() => {
-            this.pickingUp = false;
-        });
+    private reflexInventoryChanged(event: GameEvent): Promise<void> {
+        const payload = event.payload as { slots?: ({ name: string; count: number } | null)[] } | null;
+        if (payload?.slots != null) this.slotsCache = payload.slots;
+        this.checkTaskDone();
+        return Promise.resolve();
     }
 
-    /** 探一次"附近最近的掉落物"。协议往返，所以单独包一层防重入。 */
-    private async probePickupTarget(): Promise<PickupTarget | null> {
-        if (this.body == null) return null;
-        this.pickupProbing = true;
-        try {
-            return await this.body.pickupTarget(PICKUP_RADIUS);
-        } catch {
-            return null;
-        } finally {
-            this.pickupProbing = false;
-        }
-    }
-
-    /** 走一步去把指定掉落物踩进背包；失败/超时/被抢占都安静收场。 */
-    private async tryAutoPickup(target: PickupTarget): Promise<void> {
-        const claim = this.scheduler.startAction(AUTO_PICKUP_ID, { id: target.id });
-        if (!claim.accepted) return;
-        const log = this.log.with('pickup');
-        log.info({ phase: 'start', target: target.name, distance: Number(target.distance.toFixed(1)) });
-        const generation = claim.generation ?? 0;
-        let timer: ReturnType<typeof setTimeout> | undefined;
-        const started = Date.now();
-        const body = this.body;
-        try {
-            if (body == null) return;
-            // 走到目标点 = 把掉落物踩进背包。`walkTo` 走完才 resolve；
-            // 被抢占（generation 变了）也立刻收手：模型要用身体了。
-            const arrived = await Promise.race([
-                body.walkTo(target.x, target.y, target.z, 0),
-                (async (): Promise<boolean> => {
-                    while (this.scheduler.isCurrent(generation)) {
-                        await new Promise<void>((resolve) => setTimeout(resolve, 150));
-                    }
-                    return false;
-                })(),
-                new Promise<boolean>((resolve) => {
-                    timer = setTimeout(() => resolve(false), PICKUP_TIMEOUT_MS);
-                }),
-            ]);
-            if (!arrived) {
-                try {
-                    await body.stopMovement();
-                } catch {
-                    // 停不下来就算了，通道照样释放。
-                }
-            }
-            log.info({
-                phase: arrived ? 'arrived' : 'gave-up',
-                target: target.name,
-                ms: Date.now() - started,
-                preempted: !this.scheduler.isCurrent(generation),
-            });
-        } catch (err: unknown) {
-            log.error({ target: target.name, error: err instanceof Error ? err.message : String(err) });
-        } finally {
-            if (timer !== undefined) clearTimeout(timer);
-            // **只有这一代还活着才释放**：被 Stop/抢占过的话，通道已经不属于它了，
-            // 这时 releaseAction 会把模型刚认领的通道误放掉。
-            if (this.scheduler.isCurrent(generation)) this.scheduler.releaseAction();
-        }
-    }
-
-    private async refreshInventorySlots(): Promise<void> {
-        const body = this.body;
-        if (body == null) return;
-        try {
-            this.slotsCache = await body.inventorySlots();
-        } catch {
-            // 刷不到就沿用旧值；Task 的判定会退化成"没找到目标物品"。
-        }
-    }
-
-    /** `Task` 数物品用。见 `refreshInventorySlots`。 */
+    /** `Task` 数物品用。由 `inventory.changed` 事件维护。 */
     inventorySlots(): ({ name: string; count: number } | null)[] {
         return this.slotsCache;
     }
@@ -551,22 +450,32 @@ export class Agent {
     private currentSource: string = 'system';
 
     /**
-     * 事件的**唯一入口**。
+     * 事件的**唯一入口**（大脑自己产生的那几条）。
      *
-     * 事件就是一条消息：渲染成文本后交给 `EventIntake`，由它按级别落到原生
-     * 原语（L1/L2 `write` 被动 entry、L3 `steer` 引导、L4 `abort`+`submit`、
-     * L5 `abort`+保命反射+恢复）。
+     * 事件就是一条消息：渲染成文本后交给 `EventIntake`，由它按**事件类型**
+     * 找处理（见 `buildEventHandlers`），按**等级**决定投递力度
+     * （L2 `write` 记录、L3 `steer` 唤醒、L4 `abort`+`submit`、
+     * L5 `abort`+锁通道+`submit`）。
      *
      * `loopLog` 仍然留一份审计台账——它是"谁在什么时候叫醒了 agent"的唯一
      * 记录，和模型看到什么无关，但排障时救命。
      *
      * **身体推来的事件不走这里**：它们由身体用同一个 `renderEventText` 渲染好，
-     * 直接进 `intake`（见 `connectBody`）。这里只处理**大脑自己产生**的那几条
-     * （任务完成/失败、工具结果、聊天）。
+     * 直接进 `intake`（见 `attachBody`）。这里只处理**大脑自己产生**的那几条
+     * （任务完成/失败、工具结果、初始化消息）。
      */
-    private notify(kind: Kind, level: Level, payload: unknown): void {
-        this.recordEvent(kind, level, payload);
-        this.intake.notify({ level, text: renderEventText(kind, level, payload) });
+    private notify(type: string, kind: Kind, level: Level, payload: unknown): void {
+        this.recordEvent(type, kind, level, payload);
+        this.intake.notify({
+            type,
+            kind,
+            level,
+            payload,
+            text: renderEventText(kind, level, payload),
+            ts: Date.now(),
+            reflex: null,
+            completes: null,
+        });
     }
 
     /**
@@ -576,30 +485,28 @@ export class Agent {
      * 而投递路径有两条（身体渲染好的 / 大脑自己渲染的）。合并成一个函数就会
      * 逼着身体推来的事件重渲一遍，那正是两侧文本会漂移的由来。
      */
-    private recordEvent(kind: Kind, level: Level, payload: unknown): void {
-        this.loopLog.push({ kind, level, payload });
+    private recordEvent(type: string, kind: Kind, level: Level, payload: unknown): void {
+        this.loopLog.push({ type, kind, level, payload });
         if (this.loopLog.length > EVENT_LOG_LIMIT) {
             this.loopLog.splice(0, this.loopLog.length - EVENT_LOG_LIMIT);
         }
-        this.log.with('event').debug({ phase: 'queued', kind, level, payload });
+        this.log.with('event').debug({ phase: 'queued', type, kind, level, payload });
     }
 
     /**
-     * 处理一条来自身体的聊天。
+     * `player.chat` / `developer.message` 的处理：把一条"有人说话了"变成该走的东西。
      *
-     * **人和队友走不同的路**：
-     *   - 队友的话是高频背景音（他们一直在互相报坐标），投成**事件**就够；
-     *   - **玩家（人）在跟你说话，是必须回应的** —— 投成**真正的用户回合**。
+     * **这就是"聊天也是事件"的落点**：身体只报"谁说了什么"（它不知道谁是队友），
+     * 而"这是玩家在问我、还是队友在报坐标"依赖 profiles——那是大脑的知识，
+     * 所以它是这条事件的**处理**。
      *
-     * 真机现象：玩家在聊天框问"你们能听到我说话吗？"，两个 bot 收到了、也进了上下文
-     * （日志里同一句话被重复渲染了 120+ 次），但**一句话不回**。因为它是**事件**、
-     * 不是"有人在问我"——事件尾巴每个请求都重放一遍，模型看多了就当背景噪音。
-     * 用户回合不一样：它进对话历史，模型必须对它产出一轮。
-     *
-     * **这个判断留在大脑**：谁是队友来自 profiles，是大脑的知识。
+     * 真机现象（这条处理的来由）：玩家在聊天框问"你们能听到我说话吗？"，两个 bot
+     * 收到了、也进了上下文（日志里同一句话被重复渲染了 120+ 次），但**一句话不回**
+     * ——因为它在模型眼里是背景噪音。所以玩家的话必须带上"有人在直接问你、
+     * 先回一句"的框，并且 `expectReply` 落在载荷里。
      */
-    private async onChat(chat: ChatPush): Promise<void> {
-        const { from: username, message, whisper } = chat;
+    private routeChat(event: GameEvent): void {
+        const { from: username, message, whisper } = event.payload as ChatMessage;
         if (message === '') return;
         if (username === this.name) return;
         if (settings.only_chat_with.length > 0 && !settings.only_chat_with.includes(username)) return;
@@ -616,12 +523,10 @@ export class Agent {
 
             console.log(this.name, 'received message from', username, ':', message);
 
-            // **开发者通道不是聊天**：`bots/<name>/inbox.txt` 的行要按"注入一条
-            // 用户事件"处理（主线就是 `handleMessage('developer', line, USER, WAKE)`）。
-            // 如果按"玩家在跟我说话"处理，它会走 `runtime.submit` 变成必须回应的
-            // 用户回合——那是给真人用的语义，脚本刷日志时会刷出一堆多余的回合。
+            // **开发者通道不是聊天**：`bots/<name>/inbox.txt` 的行按"注入一条用户事件"
+            // 处理。如果按"玩家在跟我说话"处理，脚本刷日志时会刷出一堆多余的回合。
             if (username === 'developer') {
-                await this.handleMessage('developer', message, KIND.USER, LEVEL.WAKE);
+                this.handleMessage('developer', message, KIND.USER, LEVEL.WAKE);
                 return;
             }
 
@@ -629,26 +534,25 @@ export class Agent {
             // 聊天默认 L3 唤醒；喊急停词的直接抢占当前请求。
             const lower = message.toLowerCase();
             const urgent = STOP_WORDS.some((w) => lower.includes(w.toLowerCase()));
+            const level = urgent ? LEVEL.PREEMPT : LEVEL.WAKE;
             if (!this.teammateNames.has(username)) {
                 const text =
                     '玩家 ' + username + ' 对你说：' + message +
                     (whisper ? '（这是私聊，别人听不到）' : '') +
                     '\n**有人在直接跟你说话，先用 Say（或正文）回一句，再继续手上的活。**';
-                void this.wiring?.runtime.submit(text);
-                return;
-            }
-
-            await this.handleMessage(
-                username,
-                message,
-                KIND.USER,
-                urgent ? LEVEL.PREEMPT : LEVEL.WAKE,
-                {
+                this.handleMessage(username, text, KIND.USER, level, {
                     whisper,
                     mention: lower.includes(this.name.toLowerCase()),
                     expectReply: true,
-                },
-            );
+                });
+                return;
+            }
+
+            this.handleMessage(username, message, KIND.USER, level, {
+                whisper,
+                mention: lower.includes(this.name.toLowerCase()),
+                expectReply: true,
+            });
         } catch (error: unknown) {
             console.error('Error handling message:', error);
         }
@@ -658,7 +562,7 @@ export class Agent {
      * 装配 deliberative 层。
      *
      * 与旧的 `buildLoop` 的区别：没有手写循环、没有 `Prompter`、没有 `History`。
-     * 回合、历史、压仓、持久化全部由 pi-durable 的 `Conversation` 承担；我们
+     * 回合、历史、上下文压缩、持久化全部由 pi-durable 的 `Conversation` 承担；我们
      * 只提供**工具集**与**每轮尾巴**。
      *
      * `ActionRunner`（身体通道）**保留**：E1–E4 的契约住在这里，它不是
@@ -682,7 +586,7 @@ export class Agent {
             execute: (tool: string, toolArgs: Record<string, unknown>): Promise<string> =>
                 this.bodyAct(tool, toolArgs),
             notify: (payload: { call: string; result: ToolOutcome }): void => {
-                this.notify(KIND.TOOL, LEVEL.WAKE, payload);
+                this.notify('tool.action.done', KIND.TOOL, LEVEL.WAKE, payload);
             },
             // 身体通道的观测：认领 / 忙时幂等 / 忙时别动作 / 完成 / 过期丢弃。
             // 这些是 E1–E4 契约的行为证据，以前全静默。
@@ -741,8 +645,6 @@ export class Agent {
                         // 跨重启要跟着会话回来。以前它只在内存里，重启即归零
                         // （Feedback #23：模型说遇到 5~6 次重启，每次打回原点）。
                         this.persistPlan();
-                        // 目标变了就同步给身体：边沿检测器要用它。
-                        void this.syncGoal();
                         return snapshot;
                     }),
                     createFeedbackTool({
@@ -760,14 +662,18 @@ export class Agent {
                 onSay: (text: string): void => {
                     this.routeResponse(this.currentSource, text);
                 },
-                // 保命反射在身体侧跑（L5 的通道），这里只是把请求转发过去。
-                rescue: () => this.rescue(),
+                // 大脑侧的反射（掉落物、背包变化）。身体侧的反射由身体在事件里
+                // 自己声明，模型的处理是默认。
+                handlers: this.buildEventHandlers(),
+                // 动作通道锁：L5 的反射开始跑就锁上，最后一个报告完成才解开。
+                beginEmergency: () => this.scheduler.beginEmergency(),
+                endEmergency: () => this.scheduler.endEmergency(),
                 extensions: [
                     defineExtension({
                         name: 'request-log',
                         hooks: [requestLogHook(sink), compactionPageHook(sink)],
                     }),
-                    // provider 终态响应（含 errorMessage）+ 压仓。这两件以前完全
+                    // provider 终态响应（含 errorMessage）+ 上下文压缩。这两件以前完全
                     // 不可见——42 轮静默失败就是漏了前者。
                     defineExtension({
                         name: 'agent-log',
@@ -805,9 +711,6 @@ export class Agent {
 
             // 恢复上一次的计划。**必须在迁移之后**——迁移可能刚把旧存档写进文档。
             await this.restorePlan();
-
-            // 目标单向同步给身体：边沿检测器要用它。
-            void this.syncGoal();
         } catch (error: unknown) {
             console.error('Runtime init failed:', error instanceof Error ? error.message : String(error));
         }
@@ -934,19 +837,6 @@ export class Agent {
       };
     }
 
-    /** 目标变化时同步给身体（见 `BrainRequest['setGoal']`）。 */
-    private async syncGoal(): Promise<void> {
-        const body = this.body;
-        if (body == null) return;
-        const plan = this.plan.snapshot();
-        const task = this.task as { goal?: unknown } | null;
-        try {
-            await body.setGoal(plan.goal ?? (typeof task?.goal === 'string' ? task.goal : null));
-        } catch {
-            // 同步失败不影响决策；最坏情况是边沿检测器按"没有目标"判。
-        }
-    }
-
     private async captureScreenshot(): Promise<string | null> {
         const body = this.body;
         if (body == null) return null;
@@ -958,17 +848,6 @@ export class Agent {
         } catch (err: unknown) {
             this.log.with('vision').warn({ phase: 'capture-failed', err: String(err) });
             return null;
-        }
-    }
-
-    /** L5 的保命反射：交给身体跑（毫秒级的事不能等一轮推理）。 */
-    private async rescue(): Promise<void> {
-        const body = this.body;
-        if (body == null) return;
-        try {
-            await body.rescue();
-        } catch (err: unknown) {
-            this.log.with('emergency').warn({ phase: 'failed', err: String(err) });
         }
     }
 
@@ -1003,34 +882,11 @@ export class Agent {
             log.warn({ name, args, note: '工具通道尚未就绪' });
             return '工具通道尚未就绪，稍后再试。';
         }
-        let text: string;
-        try {
-            text = await actionChannelInvoker(runner)(name, args);
-        } finally {
-            // **失败也要消耗** —— 这是"按次数授权"全部意义所在：模型申请 3 次，
-            // 第 2 次寻路失败，额度当场用完，闸门立刻回到默认禁止、保命重新接管。
-            // 放 finally 里就是为了让异常路径也扣：不然模型可以无限重试同一件事。
-            // **只读查询也不扣。** 次数制授权配额的是"危险操作"，而 `stats` /
-            // `getCraftingPlan` 这类查询根本不碰危险操作——扣它们等于凭空烧额度：
-            // 模型授权 2 次，中间查一次背包，回来看就只剩 1 次了，它完全不知道
-            // 那一次花在哪（Feedback #4：'我这轮只调了 allowDangerousOps 这一个
-            // 工具'，额度却从 2 变 1——它没意识到 stats 也算一次工具调用）。
-            // 模型不敢查了，比多扣一次额度更糟。
-            if (!CONTROL_TOOLS.has(name) && !this.catalog.isReadOnly(name)) {
-                // **额度在身体侧扣**：`permits` / `safeguards` 是模块级单例，而授权
-                // 由身体里的命令实现发出、由身体里的 `skills.ts` 读取。大脑这边
-                // 也有一份自己的拷贝——在那边扣等于没扣，后果是**次数制授权与
-                // 保命关闭永不过期**（次数制的 `expiresAt` 是 null）。
-                try {
-                    const spent = await this.body?.consumeCall();
-                    if (spent != null && (spent.permitSpent || spent.guardSpent)) {
-                        log.info({ name, note: '次数额度用尽，闸门/保命恢复默认' });
-                    }
-                } catch (err: unknown) {
-                    log.warn({ name, note: '扣额度失败（身体不可达）', err: String(err) });
-                }
-            }
-        }
+        // **额度不在这里扣**：计数的单位是"身体执行了一次动作"，而唯一确定这件
+        // 事的地方就是身体（它自己的 `action` 处理里扣，并且同样豁免申请额度的
+        // 控制工具与只读查询）。以前为此专门有一条 `consumeCall` 协议指令，
+        // 那是在同步一份身体本来就知道的事实。
+        const text = await actionChannelInvoker(runner)(name, args);
         log.info({ name, args, ms: Date.now() - started, result: text });
         return text;
     }
@@ -1221,7 +1077,7 @@ export class Agent {
         // 不再在这里往历史里塞一份：这条消息会作为事件经 `notify()` 进上下文
         // （L3 走 steer 输入）。两处都写就是同一请求里喂两遍。
         this.currentSource = source;
-        this.notify(kind, level, { source, message, ...extra });
+        this.notify('user.message', kind, level, { source, message, ...extra });
         return true;
     }
 
@@ -1268,8 +1124,7 @@ export class Agent {
             if (res) {
                 // 任务完成/失败先进消息队列（失败 L4，成功 L3），再收尾退出。
                 const failed = typeof res.score === 'number' && res.score < 1;
-                this.notify(KIND.WORLD, failed ? LEVEL.PREEMPT : LEVEL.WAKE, {
-                    type: failed ? 'task.failed' : 'task.done',
+                this.notify(failed ? 'task.failed' : 'task.done', KIND.WORLD, failed ? LEVEL.PREEMPT : LEVEL.WAKE, {
                     score: res.score,
                 });
                 void this.wiring?.runtime.write({

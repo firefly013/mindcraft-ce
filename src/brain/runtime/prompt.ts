@@ -48,8 +48,8 @@ export function staticSystemPrompt(conversing: string | undefined, name: string)
 /**
  * 从 profile 解析提示词集并渲染。
  *
- * `profile` 收 `unknown` 是因为调用方（`settings.profile`）本来就是无类型的；
- * 未知的 `prompt_set` 由 `resolvePromptSet` 回退到默认集。
+ * `profile` 收 `unknown` 是因为调用方（`settings.profile`）在跨进程传输后是无类型的；
+ * 未知的 `promptSet` 由 `resolvePromptSet` 回退到默认集。
  */
 export function systemPromptFromProfile(profile: unknown, name: string): string {
   const prompts = resolvePromptSet(profile as AgentProfile | undefined) as Record<string, string>;

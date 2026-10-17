@@ -8,7 +8,7 @@
  * | `provider` | 什么都不打。42 轮请求全部 `stopReason:"error"`、模型一个字答不出来，stdout 上一个字都没有 | 每次终态响应都记 `stopReason` / `errorMessage` / usage，**error 走 error 级别并镜像到 stdout** |
  * | `compact` | 只能靠 request 文件翻页间接猜 | 记原因 / 压掉多少条 / 保留段第一条 |
  *
- * 两个 hook 都返回 `undefined`：只看不改，请求原样发出、压仓用框架默认摘要。
+ * 两个 hook 都返回 `undefined`：只看不改，请求原样发出、上下文压缩用框架默认摘要。
  */
 import {
   CompactionTask,
@@ -49,7 +49,7 @@ export function providerLogHook(logger: Logger): HookRegistration {
   });
 }
 
-/** 压仓：为什么压、压掉多少条、保留段从哪开始。 */
+/** 上下文压缩：为什么压、压掉多少条、保留段从哪开始。 */
 export function compactionLogHook(logger: Logger): HookRegistration {
   const log = logger.with('compact');
   return hook(CompactionTask, {

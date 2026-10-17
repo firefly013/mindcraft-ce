@@ -58,19 +58,25 @@ export interface ActionResult {
 }
 
 /**
- * 身体主动推的事件。字段与 `runtime/events.ts` 的 `GameEvent` 对齐。
+ * 身体主动推的事件。字段与 `brain/runtime/events.ts` 的 `GameEvent` 对齐。
  *
- * `level` 是**数字**（`scheduler.ts` 的 `Level`）——它决定了大脑用什么原语
- * 处理这条事件（write / steer / preempt / emergency）。用字符串会在两侧各写
- * 一份映射表，那种东西迟早会不一致。
- * `text` 是身体按主线 `renderEventText` 渲染好的文本，大脑不再重渲一遍。
+ * `level` 是**数字**（`shared/events.ts` 的 `Level`）——它决定了大脑用什么
+ * 力度把模型叫来看一眼（write / steer / abort / 锁通道）。用字符串会在两侧
+ * 各写一份映射表，那种东西迟早会不一致。
+ *
+ * **等级是事件的属性，不是处理的属性**：这条事件由谁来处理（身体侧的反射、
+ * 大脑侧的反射、还是模型）由 `type` 决定，不由等级决定。
+ *
+ * `text` 是身体按 `renderEventText` 渲染好的文本，大脑不再重渲一遍。
  */
 export interface BodyEvent {
+    /** 事件类型（处理的匹配键），如 `world.water.drowning`。两侧逐字一致。 */
+    type: string;
     level: number;
     /**
      * 渲染好的事件文本（给模型看的）。
      *
-     * **这是优化，不是真源。** 真源是下面的 `{kind, level, payload}` 三元组——
+     * **这是优化，不是真源。** 真源是下面的 `{type, level, payload}` 三元组——
      * 谁渲染取决于谁有那个渲染器：Mineflayer 身体能 import `renderEventText`
      * （同一份 TS 代码），所以它渲染；**Java 身体渲染不了**（那是 TS 函数），
      * 它发空串，由**大脑**渲染。
@@ -82,14 +88,28 @@ export interface BodyEvent {
     /** 事件发生的时间戳（毫秒）。 */
     ts: number;
     /**
-     * 事件的类别（`scheduler.KIND`）。**冗余但必要**：`text` 已经是渲染好的
-     * 成品，而大脑的审计台账 `loopLog` 记的是**结构化的** `{kind, level, payload}`
-     * （`Feedback` 工具的历史摘要直接 JSON 化它）。只在 `text` 里塞类别名，
-     * 台账就只能记一句人话，模型拿不到结构。
+     * 事件的类别（`shared/events.ts` 的 `Kind`）。**冗余但必要**：`text` 已经是
+     * 渲染好的成品，而大脑的审计台账 `loopLog` 记的是**结构化的**
+     * `{type, kind, level, payload}`（`Feedback` 工具的历史摘要直接 JSON 化它）。
+     * 只在 `text` 里塞类别名，台账就只能记一句人话，模型拿不到结构。
      */
     kind: string;
     /** 原始载荷，同上。 */
     payload: unknown;
+    /**
+     * **身体为这条事件启动了哪个反射处理**（没有就是 null/缺省）。
+     *
+     * 身体是唯一知道"我为这条事件做了什么"的地方，所以由它声明；大脑据此
+     * 锁动作通道，并在收到对应 `completes` 时解锁。没有它 = 这条事件没人在
+     * 身体侧处理，走模型。
+     */
+    reflex?: string | null;
+    /**
+     * 这条事件是哪个反射处理的**完成报告**（配对 `reflex`）。
+     *
+     * 处理结果就是这样进上下文的：处理不是隐式副作用，它留下一条记录。
+     */
+    completes?: string | null;
 }
 
 /**
@@ -97,6 +117,14 @@ export interface BodyEvent {
  *
  * 用可辨识联合而不是一堆方法，是为了让**传输层只认一种信封**：加一个操作
  * 就是加一个 `op`，不用动 transport。
+ *
+ * **能力尽量走工具（`action`）**：这里只留"工具装不下"的东西——握手、观测
+ * （快照/画面）、说话、停机，以及 MindServer UI 要的整份状态。曾经的
+ * `walkTo` / `stopMovement` / `pickupTarget` / `inventory.slots` / `setGoal` /
+ * `consumeCall` / `rescue` / `players` / `position` 全是把某个大脑侧策略需要的
+ * 身体能力开了个专用后门，现在它们各自回到了本该在的位置：**移动是工具，
+ * 掉落物与背包变化是事件，保命与拾取是身体的反射，额度由身体自己扣，
+ * 在线玩家与坐标在世界快照里**。
  */
 export type BrainRequest =
     /**
@@ -108,7 +136,6 @@ export type BrainRequest =
      * 产物时再加，那时它才是真的在防一件事，而且加回来就是十几行。
      */
     | { op: 'hello' }
-    | { op: 'ping' }
     | { op: 'sample' }
     | { op: 'image' }
     | { op: 'action'; request: ActionRequest }
@@ -116,56 +143,13 @@ export type BrainRequest =
     | { op: 'say'; text: string; to?: string }
     /** 停掉身体上正在跑的一切（Stop / 死亡 / 抢占时用）。 */
     | { op: 'stop' }
-    /** 保命反射。身体侧跑，不等大脑一轮。 */
-    | { op: 'rescue' }
     /** MindServer UI 用的整份状态。 */
     | { op: 'fullState' }
-    /**
-     * 同步当前目标给身体。
-     *
-     * 目标属于决策层（`PlanStore` 在大脑），但**边沿检测器要用它**：
-     * `snapshotFromBot(bot, {goal})` 里 goal 参与"这件事跟目标有关系吗"
-     * 的判断。所以大脑在目标变化时单向同步一次，身体只读不写、不解释。
-     */
-    | { op: 'setGoal'; goal: string | null }
-    /**
-     * 扣一次"按次数"额度（危险操作授权 / 保命抑制）。
-     *
-     * **必须在身体侧扣**：这两份状态是**模块级单例**，而授权是命令实现
-     * （`commands/actions.ts`，跑在身体里）发的，读取点是 `skills.ts`
-     * （也在身体里）。大脑那边也有一份自己的拷贝——在那边扣等于没扣，
-     * 后果是**次数制授权与保命关闭永不过期**（次数制的 `expiresAt` 是 null）。
-     */
-    | { op: 'consumeCall' }
-    /**
-     * 半径内最近的掉落物。**这是能力，不是策略**：身体只回答"附近有什么东西"，
-     * "要不要去捡"由大脑决定（自动拾取是为 VLM 做的外层设施）。
-     */
-    | { op: 'pickupTarget'; radius: number }
-    /** 走过去。走完才回（被 `stopMovement` 打断则提前回）。**能力**。 */
-    | { op: 'walkTo'; x: number; y: number; z: number; closeness: number }
-    /** 停下移动（打断 `walkTo`）。**能力**。 */
-    | { op: 'stopMovement' }
-    /**
-     * 背包原始槽位。只给 `Task`（minecollab 任务）数目标物品用。
-     *
-     * 不走 `sample` 是因为 `LiveState` 的背包是**给人看**的摘要（预算裁剪过），
-     * 而任务判定要的是精确计数。这条是现存的真实需求，不是预留。
-     */
-    | { op: 'inventory.slots' }
-    /**
-     * 在线玩家名。只给 `Task` 的 `teleportBots`（minecollab 任务布置）用——
-     * 它要把 bot 传送到人类玩家身边，需要知道有谁在线。
-     */
-    | { op: 'players' }
-    /** 当前位置。同上，任务布置用。 */
-    | { op: 'position' }
     | { op: 'shutdown' };
 
 /** 身体 → 大脑 的应答。 */
 export type BodyResponse =
     | { ok: true; op: 'hello'; capabilities: BodyCapabilities }
-    | { ok: true; op: 'ping'; ts: number }
     /** 世界快照。`LiveState` 是纯数据，渲染留在大脑侧（渲染是纯函数）。 */
     | { ok: true; op: 'sample'; state: unknown }
     /** 现拍画面（base64 jpeg）。拍不到给 null，大脑侧安静降级成纯文本。 */
@@ -173,38 +157,28 @@ export type BodyResponse =
     | { ok: true; op: 'action'; result: ActionResult }
     | { ok: true; op: 'say' }
     | { ok: true; op: 'stop' }
-    | { ok: true; op: 'rescue'; triggered: boolean; text: string }
     | { ok: true; op: 'fullState'; state: unknown }
-    | { ok: true; op: 'setGoal' }
-    | { ok: true; op: 'consumeCall'; permitSpent: boolean; guardSpent: boolean }
-    | { ok: true; op: 'pickupTarget'; target: { id: number; name: string; x: number; y: number; z: number; distance: number } | null }
-    | { ok: true; op: 'walkTo'; arrived: boolean }
-    | { ok: true; op: 'stopMovement' }
-    | { ok: true; op: 'inventory.slots'; slots: ({ name: string; count: number } | null)[] }
-    | { ok: true; op: 'players'; names: string[] }
-    | { ok: true; op: 'position'; x: number; y: number; z: number }
     | { ok: true; op: 'shutdown' }
     | { ok: false; op: string; error: string; code: string };
 
 /**
- * 聊天单列一类推送，**不混进事件里**。
+ * 一条聊天：它是**事件**（`player.chat`）的载荷，不是第二条通道。
  *
- * 理由：主线区分了"玩家在跟你说话"和"队友在报坐标"——前者必须投成真正的
- * 用户回合（`runtime.submit`），后者才是事件。这个区分依赖**大脑侧**的知识
- * （谁是队友来自 profiles），所以身体只负责如实转发，由大脑判。
- * 如果把它塞进通用 `event`，这个区分就丢了，主线修过的"他们收到但不理我"
- * 会原样复发。
+ * `from` / `message` / `whisper` 是身体能如实报告的全部；"这是玩家在问我、
+ * 还是队友在报坐标"依赖**大脑侧**的知识（谁是队友来自 profiles），
+ * 所以那是这条事件的**处理**，不是它自己该带的信息。
+ *
+ * 以前它单列一条 `push: 'chat'` 通道，理由是"区分不能丢"——但那个区分一直
+ * 都是大脑做的，通道并列只是让"一切皆事件"出现了一个例外。
  */
-export interface ChatPush {
+export interface ChatMessage {
     from: string;
     message: string;
     whisper: boolean;
 }
 
-/** 身体 → 大脑 的推送（无应答）。 */
-export type BodyPush =
-    | { push: 'event'; event: BodyEvent }
-    | { push: 'chat'; chat: ChatPush };
+/** 身体 → 大脑 的推送（无应答）。**只有事件一条通道**。 */
+export type BodyPush = { push: 'event'; event: BodyEvent };
 
 /** 线上跑的信封。 */
 export type Envelope =

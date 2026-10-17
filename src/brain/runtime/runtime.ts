@@ -39,7 +39,7 @@ export interface BotRuntimeOptions {
   /** 落盘根目录，默认 `./bots/<name>`。 */
   baseDir?: string;
   /**
-   * 压仓策略。用 `compactionPolicyFromProfile(profile)` 解析后传进来。
+   * 上下文压缩策略。用 `compactionPolicyFromProfile(profile)` 解析后传进来。
    * 不给就用 pi-durable 的内置默认（与主线的 profile 默认值一致）。
    */
   compaction?: CompactionPolicy;
@@ -74,8 +74,9 @@ export interface BotRuntime {
   /**
    * 被动写一条 entry：**不唤醒模型**，但会出现在下一次请求的上下文里。
    *
-   * 这是 L1/L2「只记账，随下一次请求顺带发给模型」的落点——实测确认它不会
-   * 让 `callCount` 增加（见 `tests/runtime_inbox_semantics.test.ts`）。
+   * 这是 L2「记录，不唤醒」的落点：事件在发生的那一刻就进了上下文，但不会
+   * 拉模型起来——实测确认它不会让 `callCount` 增加
+   * （见 `tests/runtime_inbox_semantics.test.ts`）。
    */
   write(entry: EntryDraft): Promise<Submission>;
   /** 中断当前 run（L4/L5 抢占的落点）。 */

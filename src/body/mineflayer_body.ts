@@ -31,7 +31,6 @@ import type {
     BodyPush,
     BrainRequest,
     BodyResponse,
-    ChatPush,
 } from '../shared/protocol/types.js';
 import { ERR } from '../shared/protocol/types.js';
 import { initBot, isHostile } from './data/mcdata.js';
@@ -47,7 +46,7 @@ import { sampleLiveState } from './live_state.js';
 import { renderLiveState } from '../shared/live_state.js';
 import type { SampleContext } from './live_state.js';
 import { nearestThreat, runEmergency, FOOD_VALUE, shouldTriggerEmergency } from './safety/emergency.js';
-import type { ThreatEntity } from './safety/emergency.js';
+import type { EmergencyIntent, EmergencyResult, ThreatEntity } from './safety/emergency.js';
 import {
     consume,
     forceExitWater,
@@ -67,7 +66,10 @@ import {
     snapshotFromBot,
 } from './edges.js';
 import { renderEventText } from '../shared/event_stream.js';
-import { AUTO_PICKUP_ID, nearestDropWithin } from './auto_pickup.js';
+import { nearestDropWithin, PICKUP_RADIUS, PICKUP_TIMEOUT_MS } from './auto_pickup.js';
+import { shouldAttemptPickup } from '../shared/auto_pickup.js';
+import type { PickupTarget } from '../shared/auto_pickup.js';
+import { stripBang } from '../shared/tools.js';
 import { getFullState } from './library/full_state.js';
 import { decodeCursor, EMPTY_CURSOR, encodeCursor, readInbox, type InboxCursor } from './inbox.js';
 import { safeguards } from './safety/safeguards.js';
@@ -209,6 +211,9 @@ export interface MineflayerBodyOptions {
  */
 const OXYGEN_ACT_MS = 13_500;
 
+/** 申请额度的三个控制工具：它们**自己不发额度，也不消耗额度**。 */
+const CONTROL_TOOL_NAMES = new Set(['allowDangerousOps', 'disableSafeguards', 'restoreAllSafety']);
+
 export class MineflayerBody {
     readonly name: string;
     readonly countId: number;
@@ -221,11 +226,13 @@ export class MineflayerBody {
     edgeWatcher: EdgeWatcher | null = null;
 
     /**
-     * 当前目标。**由大脑同步过来**（`setGoal`）——目标属于决策层，
-     * 但边沿检测器（`pollEdges`）要用它判断"这件事跟目标有关系吗"。
-     * 不变量：这只是大脑上一次告诉我们的值，可能比大脑的现状旧一点。
+     * 已经报过的那一件掉落物（实体 id）。同一件不重复报——事件是"发生"，
+     * 不是"当前状态"；状态由每一轮的世界快照承担。
      */
-    private goal: string | null = null;
+    private seenDropId: string | null = null;
+
+    /** 上一次报过的背包账目签名。变了才报（第一次观察也算一次变化）。 */
+    private inventorySignature: string | null = null;
 
     private sink: EventSink;
     private log: Logger;
@@ -249,17 +256,9 @@ export class MineflayerBody {
     private stuckSince = 0;
     private lastHeartbeatAt = Date.now();
     private lowHpArmed = false;
+    /** 自动拾取：上一次尝试的时刻 / 是否正在捡（见 `schedulePickup`）。 */
     private lastPickupAt = 0;
     private pickingUp = false;
-    private pickupStarved = false;
-    /**
-     * 身体正在执行一次"外部要求的移动"（`walkTo`）。
-     *
-     * 为什么需要它：分层之后**身体没有自己的 Scheduler 了**——仲裁在大脑，
-     * 身体只暴露能力。"身体忙不忙"因此由两件事组成：模型的动作
-     * （`actions.executing`）和外部要求的移动（本字段）。
-     */
-    private externalWalk = false;
 
     /** 开发者通道的读游标。逻辑在 `inbox.ts`（那边可单测）。 */
     private inbox: InboxCursor = EMPTY_CURSOR;
@@ -399,11 +398,13 @@ export class MineflayerBody {
     // ── 命令实现用得着的表面（`executeToolCall` 的 agent）────────────────────
 
     /**
-     * 当前正在跑的动作名。模型的动作优先，其次是外部要求的移动。
-     * （分层后身体没有自己的调度器，"谁在占身体"这件事只剩这两个来源。）
+     * 当前正在跑的动作名（模型的动作）。身体正在自主走路的反射（拾取）也报出来，
+     * 免得模型看到"身体空着"却调不动。
      */
     currentActionName(): string | null {
-        return this.actions?.currentActionLabel || (this.externalWalk ? AUTO_PICKUP_ID : null);
+        const label = this.actions?.currentActionLabel;
+        if (label) return label;
+        return this.pickingUp ? 'autoPickup' : null;
     }
 
     /**
@@ -419,14 +420,15 @@ export class MineflayerBody {
     /**
      * 感知采样的**唯一入口**。
      *
-     * `goal` / `todos` 属于大脑（`PlanStore` 在那里），所以这里留空，
-     * 由大脑拿到快照后自己填回去再渲染——渲染函数是纯的，形状不变。
+     * `goal` / `todos` **身体不知道、也不该知道**：它们是大知识（`PlanStore`
+     * 在大脑），由大脑在记录事件时自己填。以前靠一条 `setGoal` 把大脑的状态
+     * 镜像进身体，那是"同一份事实两个持有者"——现在身体只报客观发生了什么，
+     * 相关性判断留在大脑的处理里。
      */
     sampleContext(): SampleContext {
         return {
             bot: this.bot,
             vision: this.vision_interpreter,
-            goal: this.goal,
             todos: [],
             currentAction: this.currentActionName(),
         };
@@ -439,12 +441,14 @@ export class MineflayerBody {
     /**
      * 身体此刻有没有人在用。
      *
-     * 两个来源：模型的动作（`actions.executing`）与外部要求的移动（`externalWalk`）。
+     * 来源只有模型的动作（`actions.executing`）——身体的自主反射（保命上浮、
+     * 走过去捡东西）不算"占用"：它们是本能的兜底，模型要用身体时它们让位。
+     *
      * 两个反射必须靠它避开——主线注释明写"模型正在干活就不抢方向盘"
      * 和"正在跑容器动作时绝不能碰"，那两条都是**正确性**要求，不是优化。
      */
     private bodyBusy(): boolean {
-        return this.actions.executing || this.externalWalk;
+        return this.actions.executing;
     }
 
     requestInterrupt(): void {
@@ -475,13 +479,119 @@ export class MineflayerBody {
      * 事件的唯一出口。与主线 `Agent.notify` 的区别只有一处：那边直接喂
      * `intake`，这边过协议推给大脑。**文本渲染仍走同一个 `renderEventText`**，
      * 所以模型看到的字一个字都没变。
+     *
+     * `type` 是**处理的匹配键**；`level` 只是这条事件的属性（用多大力气把模型
+     * 叫来看一眼）。`reflex` / `completes` 是身体在声明"这条事件我已经交给哪个
+     * 处理了 / 这是哪个处理的完成报告"。
      */
-    private notify(kind: Kind, level: Level, payload: unknown): void {
+    private notify(
+        type: string,
+        kind: Kind,
+        level: Level,
+        payload: unknown,
+        extra: { reflex?: string | null; completes?: string | null } = {},
+    ): void {
         const text = renderEventText(kind, level, payload);
-        // `kind` / `payload` 一起发过去：文本给模型看，结构化那份给大脑的
+        // `type` / `kind` / `payload` 一起发过去：文本给模型看，结构化那份给大脑的
         // 审计台账（见 `BodyEvent` 的说明）。多两个字段，省掉大脑重渲一遍。
-        this.push({ push: 'event', event: { level, text, ts: Date.now(), kind, payload } });
+        this.push({
+            push: 'event',
+            event: {
+                type,
+                kind,
+                level,
+                text,
+                ts: Date.now(),
+                payload,
+                reflex: extra.reflex ?? null,
+                completes: extra.completes ?? null,
+            },
+        });
     }
+
+    // ── 身体侧的处理（反射）────────────────────────────────────────────────
+
+    /** 身体侧反射的串行队列：同一时刻只跑一个——两个保命循环抢身体没有意义。 */
+    private reflexQueue: Array<{ reflex: string; intent: EmergencyIntent }> = [];
+    private reflexRunning = false;
+
+    /**
+     * 一条 L5 事件 = **事件 + 身体侧的处理**。
+     *
+     * 顺序不能反：**事件先推出去**（大脑据此立刻打断在途推理、锁住动作通道），
+     * 处理随后在身体侧跑（毫秒级的事不能等一轮推理）。处理跑完再发一条
+     * `reflex.done`（带 `completes`），那条记录就是"我替你做了什么"，同样进上下文。
+     *
+     * 这样就没有"保命"这个独立的协议操作了：处理是**事件类型**的属性，
+     * 不是等级 5 的属性，也不需要大脑隔着一趟协议来点名调用。
+     */
+    private emergency(type: string, payload: unknown, reflex: string, intent: EmergencyIntent): void {
+        this.notify(type, KIND.WORLD, LEVEL.EMERGENCY, payload, { reflex });
+        this.reflexQueue.push({ reflex, intent });
+        void this.drainReflexes();
+    }
+
+    /** 排空反射队列（已经在跑就什么都不做）。 */
+    private async drainReflexes(): Promise<void> {
+        if (this.reflexRunning) return;
+        this.reflexRunning = true;
+        try {
+            for (;;) {
+                const next = this.reflexQueue.shift();
+                if (next == null) break;
+                const started = Date.now();
+                let outcome: 'ok' | 'failed' | 'partial' = 'ok';
+                let detail = '';
+                try {
+                    const result = await this.rescue(next.intent);
+                    if (result.reason === 'died') {
+                        outcome = 'failed';
+                        detail = '处理过程中死亡。';
+                    } else if (result.escaped) {
+                        outcome = 'ok';
+                        detail = next.intent === 'surface' ? '已经把头露出水面。' : '已经脱离威胁。';
+                    } else {
+                        outcome = 'partial';
+                        detail = '处理结束了，但没能确认脱险。';
+                    }
+                } catch (err: unknown) {
+                    outcome = 'failed';
+                    detail = err instanceof Error ? err.message : String(err);
+                }
+                this.notify(
+                    'reflex.done',
+                    KIND.WORLD,
+                    LEVEL.STATE,
+                    { reflex: next.reflex, outcome, detail, ms: Date.now() - started },
+                    { completes: next.reflex },
+                );
+            }
+        } finally {
+            this.reflexRunning = false;
+        }
+    }
+
+    /**
+     * 身体侧的反射出口：**事件类型 → 处理**。
+     *
+     * 旧实现把所有 L5 事件都丢给同一个循环，让循环进去以后自己再猜一遍处境
+     * （先看是不是溺水、再看有没有怪）。那是"处理被按等级归并"——事件类型的
+     * 信息在到达处理的那一刻就丢了，也没法只给某一类事件换处理。
+     * 现在这张表就是一一对应：溺水归上浮，其余危险归逃跑。
+     */
+    private static readonly EDGE_REFLEX: Record<string, { reflex: string; intent: EmergencyIntent }> = {
+        'world.water.drowning': { reflex: 'surface', intent: 'surface' },
+        'world.lava.contact': { reflex: 'escape', intent: 'flee' },
+        'world.lava.about_to_enter': { reflex: 'escape', intent: 'flee' },
+        'world.fire.burning_low_hp': { reflex: 'escape', intent: 'flee' },
+        'world.void.falling': { reflex: 'escape', intent: 'flee' },
+        'world.fall.lethal': { reflex: 'escape', intent: 'flee' },
+        'world.trapped.low_hp': { reflex: 'escape', intent: 'flee' },
+        'world.tnt.primed_nearby': { reflex: 'escape', intent: 'flee' },
+        'world.creeper.swelling': { reflex: 'escape', intent: 'flee' },
+        'bot.health_danger': { reflex: 'escape', intent: 'flee' },
+        'bot.attacked': { reflex: 'escape', intent: 'flee' },
+    };
 
     private push(push: BodyPush): void {
         try {
@@ -500,12 +610,19 @@ export class MineflayerBody {
      * profile 知识（谁是队友）。身体只如实转发，由大脑判。
      */
     private setupInteractionHandlers(): void {
-        const chat = (username: string, message: string, whisper: boolean): void => {
-            if (message === '') return;
-            if (username === this.name) return;
-            const payload: ChatPush = { from: username, message, whisper };
-            this.push({ push: 'chat', chat: payload });
-        };
+            const chat = (username: string, message: string, whisper: boolean): void => {
+                if (message === '') return;
+                if (username === this.name) return;
+                // **聊天也是事件**（`player.chat`）。身体只如实转发"有人说了什么"，
+                // 而"这是玩家在问我、还是队友在报坐标"依赖大脑侧的知识（谁是队友
+                // 来自 profiles）——所以那是这条事件在大脑侧的**处理**，
+                // 不是身体该替它判的事。
+                this.notify('player.chat', KIND.USER, LEVEL.WAKE, {
+                    from: username,
+                    message,
+                    whisper,
+                });
+            };
 
         this.bot.on('whisper', (username: string, message: string) => chat(username, message, true));
         this.bot.on('chat', (username: string, message: string) => chat(username, message, false));
@@ -559,8 +676,7 @@ export class MineflayerBody {
                 const hurt = shouldEmitHurt(prev_health, this.bot.health, this.lastHurtEmitAt, Date.now());
                 if (hurt.fire) {
                     this.lastHurtEmitAt = Date.now();
-                    this.notify(KIND.WORLD, LEVEL.STATE, {
-                        type: 'bot.hurt',
+                    this.notify('bot.hurt', KIND.WORLD, LEVEL.STATE, {
                         health: this.bot.health,
                         damage: hurt.damage,
                     });
@@ -579,13 +695,17 @@ export class MineflayerBody {
                     })();
                     if (threat != null && Date.now() - this.lastThreatEmergencyAt > 10_000) {
                         this.lastThreatEmergencyAt = Date.now();
-                        this.notify(KIND.WORLD, LEVEL.EMERGENCY, {
-                            type: 'bot.attacked',
-                            health: this.bot.health,
-                            damage: hurt.damage,
-                            by: threat.name,
-                            threatMeters: threat.distance,
-                        });
+                        this.emergency(
+                            'bot.attacked',
+                            {
+                                health: this.bot.health,
+                                damage: hurt.damage,
+                                by: threat.name,
+                                threatMeters: threat.distance,
+                            },
+                            'escape',
+                            'flee',
+                        );
                     }
                 }
             }
@@ -593,7 +713,7 @@ export class MineflayerBody {
             // 低血边沿：掉进线以下发一次 L5，回到 12 以上才重新 armed。
             if (shouldTriggerEmergency(this.bot.health) && !this.lowHpArmed) {
                 this.lowHpArmed = true;
-                this.notify(KIND.WORLD, LEVEL.EMERGENCY, { health: this.bot.health });
+                this.emergency('bot.health_danger', { health: this.bot.health }, 'escape', 'flee');
             } else if (typeof this.bot.health === 'number' && this.bot.health >= 12) {
                 this.lowHpArmed = false;
             }
@@ -654,9 +774,9 @@ export class MineflayerBody {
                 //
                 // 这里**不走 `handleMessage`**：它静音时会直接丢事件（`stfu`），
                 // 而死亡不该被静音吃掉。
-                this.notify(KIND.WORLD, LEVEL.STATE, { source: 'system', message: text });
+                this.notify('agent.death', KIND.WORLD, LEVEL.STATE, { source: 'system', message: text });
                 // 再用 L4 把模型叫起来（优先通道，立刻插队）。
-                this.notify(KIND.WORLD, LEVEL.PREEMPT, {
+                this.notify('agent.death.wake', KIND.WORLD, LEVEL.PREEMPT, {
                     source: 'system',
                     message: MESSAGES.deathWake(),
                 });
@@ -682,7 +802,7 @@ export class MineflayerBody {
                 if (now - this.lastCollectEmitAt < 2000) return;
                 this.lastCollectEmitAt = now;
                 const picked = this.inventoryDelta();
-                this.notify(KIND.WORLD, LEVEL.WAKE, { type: 'inventory.collected', item: picked.text, gained: picked.gained });
+                this.notify('inventory.collected', KIND.WORLD, LEVEL.WAKE, { item: picked.text, gained: picked.gained });
             } catch (err: unknown) {
                 console.error('collect event failed:', err instanceof Error ? err.message : String(err));
             }
@@ -690,8 +810,7 @@ export class MineflayerBody {
         // 开箱：容器界面打开即事件（关箱不报，没信息量）。
         this.bot.on('windowOpen', (window: any) => {
             try {
-                this.notify(KIND.WORLD, LEVEL.WAKE, {
-                    type: 'inventory.container',
+                this.notify('inventory.container', KIND.WORLD, LEVEL.WAKE, {
                     // 标题要**归一化成一句人话**：`window.title` 在这个版本里是个对象
                     // （聊天组件），`String()` 出来就是 `[object Object]`——模型的
                     // Feedback 原文："容器标题被序列化成了 [object Object]"。
@@ -723,15 +842,15 @@ export class MineflayerBody {
     /**
      * 一个心跳。
      *
-     * `checkTaskDone()` **不在这里**——任务与完成度是决策层概念，大脑那边
-     * 自己按同样的 300ms 节奏轮询（见 `Agent.startTaskPoll`）。
+     * `checkTaskDone()` **不在这里**——任务与完成度是决策层概念，大脑那边由
+     * `inventory.changed` 事件的处理触发（不再有定时轮询）。
      */
     update(delta: number): void {
         void delta;
         // 开发者通道：读 inbox 的新行（见 pollInbox）。
         this.pollInbox();
         // 自动拾取**不在身体里了**：它是为 VLM 做的外层设施（模型不会捡东西），
-        // 属于大脑的策略。见 `Agent.startBodyPoll` 与 DECISIONS D-46。
+        // 属于大脑的策略。身体只负责在掉落物出现的那一刻报一条事件。
         // 兜底关窗：残留的开着的容器界面会废掉一整类世界交互（见 maybeCloseStaleScreen）。
         this.maybeCloseStaleScreen();
         // 深水强制出水（见 maybeForceExitWater）。同样是后台行为，不能 await。
@@ -893,8 +1012,12 @@ export class MineflayerBody {
                 this.saveInboxCursor();
             }
             for (const line of lines) {
-                const chatPayload: ChatPush = { from: 'developer', message: line, whisper: false };
-                this.push({ push: 'chat', chat: chatPayload });
+                // 开发者通道也走同一类事件：它只是"消息"，不假装是玩家在说话。
+                this.notify('developer.message', KIND.USER, LEVEL.WAKE, {
+                    from: 'developer',
+                    message: line,
+                    whisper: false,
+                });
             }
         } catch {
             // 没有 inbox 文件是常态，不是错误。
@@ -936,9 +1059,6 @@ export class MineflayerBody {
         try {
             snapshot = snapshotFromBot(this.bot, {
                 currentAction: this.currentActionName(),
-                // 目标来自大脑（`setGoal`）。拿不到就是 null——检测器对 null
-                // 的处理与主线"没有任务目标"时一致。
-                goal: this.goal,
                 foodNames: Object.keys(FOOD_VALUE),
             });
         } catch {
@@ -966,8 +1086,7 @@ export class MineflayerBody {
             if (stuck) {
                 const seconds = Math.round((now - this.stuckSince) / 1000);
                 this.stuckSince = now;
-                this.notify(KIND.WORLD, LEVEL.PREEMPT, {
-                    type: 'task.stuck',
+                this.notify('task.stuck', KIND.WORLD, LEVEL.PREEMPT, {
                     position: pos,
                     action: currentAction,
                     // 把"卡了多久"写进去，模型能据此判断是真卡还是刚起步。
@@ -978,8 +1097,11 @@ export class MineflayerBody {
         // 心跳：5 分钟无动作无请求，醒一次做反思，防睡死。
         if (isHeartbeatDue(this.lastHeartbeatAt, now) && this.currentActionName() == null) {
             this.lastHeartbeatAt = now;
-            this.notify(KIND.WORLD, LEVEL.WAKE, { type: 'system.heartbeat' });
+            this.notify('system.heartbeat', KIND.WORLD, LEVEL.WAKE, { at: now });
         }
+        // 掉落物与背包变化：**边沿事件**，不是"每 300ms 问一次大脑要不要捡"。
+        this.pollDrops();
+        this.pollInventory();
         if (events.length === 0) return;
         events.sort((a, b) => b.level - a.level);
         for (const event of events) {
@@ -987,24 +1109,121 @@ export class MineflayerBody {
                 { type: event.type, level: event.level, key: event.key },
                 snapshot,
             );
-            this.notify(KIND.WORLD, schedulerLevelFor(edgeLevel), {
-                type: event.type,
+            const level = schedulerLevelFor(edgeLevel);
+            const payload = {
                 key: event.key,
                 delta: event.delta,
                 actionContext: event.actionContext,
-            });
+            };
+            // L5 的边沿：**事件带着它的处理一起走**（`reflex` 声明身体为它启动了
+            // 哪个反射），不再是"大脑收到 L5 再回头点名调用保命"。
+            const reflex = level === LEVEL.EMERGENCY ? MineflayerBody.EDGE_REFLEX[event.type] : undefined;
+            if (reflex != null) {
+                this.emergency(event.type, payload, reflex.reflex, reflex.intent);
+            } else {
+                this.notify(event.type, KIND.WORLD, level, payload);
+            }
         }
+    }
+
+    /**
+     * 掉落物出现：**在它出现的那一刻报一次**，而不是每 300ms 问一次"附近有没有"。
+     *
+     * 轮询的错不在于多几次往返，而在于**在世界没有变化的时候声称"发生了"**——
+     * 那是伪造事件，而且伪造出来的"发生"没有时点，模型永远不知道该以哪一刻为准。
+     * 大脑侧的处理（走过去踩进背包）挂在事件类型 `item.drop.nearby` 上。
+     */
+    private pollDrops(): void {
+        let target: PickupTarget | null;
+        try {
+            target = nearestDropWithin(this.bot, PICKUP_RADIUS);
+        } catch {
+            return;
+        }
+        const key = target == null ? null : String(target.id);
+        if (key === this.seenDropId) return; // 还是那一件：没有新发生的事
+        this.seenDropId = key;
+        if (target == null) return;
+        // **事件与处理一起走**：事件让模型知道地上出现了什么（L2，不唤醒），
+        // 处理是身体自己走过去踩进背包（不用等一轮推理）。
+        this.notify('item.drop.nearby', KIND.WORLD, LEVEL.STATE, target, { reflex: 'pickup' });
+        this.schedulePickup(target);
+    }
+
+    /**
+     * 自动拾取的处理：走过去把掉落物踩进背包。
+     *
+     * 它是**最低优先级的房客**：身体正在给模型干活时（`actions.executing`）
+     * 就老实等着，下一次边沿再试；反过来模型要用身体时，身体动作入口的
+     * `stop()` 会打断这段走路——**模型的动作永远优先**。
+     *
+     * 为什么它住在身体侧：走路 + 踩掉落物全是 `bot` 操作，毫秒到秒级，
+     * 等不了一轮推理；而且"身体忙不忙"在这里是同步可读的
+     * （`actions.executing`），在大脑侧只能靠一趟协议往返猜。
+     */
+    private schedulePickup(target: PickupTarget): void {
+        const now = Date.now();
+        const go = shouldAttemptPickup({
+            busy: this.actions.executing,
+            pickingUp: this.pickingUp,
+            sinceLastAttemptMs: now - this.lastPickupAt,
+        });
+        if (!go) return;
+        this.lastPickupAt = now;
+        this.pickingUp = true;
+        void (async (): Promise<void> => {
+            const started = Date.now();
+            let arrived: boolean;
+            try {
+                arrived = await Promise.race([
+                    goToPosition(this.bot, target.x, target.y, target.z, 0),
+                    new Promise<boolean>((resolve) => {
+                        setTimeout(() => resolve(false), PICKUP_TIMEOUT_MS);
+                    }),
+                ]);
+            } catch {
+                arrived = false;
+            } finally {
+                this.pickingUp = false;
+            }
+            this.notify(
+                'reflex.done',
+                KIND.WORLD,
+                LEVEL.STATE,
+                {
+                    reflex: 'pickup',
+                    outcome: arrived ? 'ok' : 'failed',
+                    detail: arrived
+                        ? `走到了 ${target.name} 的位置，掉落物会被踩进背包。`
+                        : `没走到 ${target.name} 的位置（超时，或被模型的动作打断）。`,
+                    ms: Date.now() - started,
+                },
+                { completes: 'pickup' },
+            );
+        })();
+    }
+
+    /**
+     * 背包变化：**变化的那一刻报一次**，载荷是新的完整槽位表。
+     *
+     * 第一次观察也算一次变化（从"还不知道"到"已知"），所以大脑启动后不用再
+     * 专门问一次背包——`Task` 数物品用的缓存就是这条事件喂起来的。
+     */
+    private pollInventory(): void {
+        let slots: ({ name: string; count: number } | null)[];
+        try {
+            slots = this.getInventorySlots();
+        } catch {
+            return;
+        }
+        const signature = JSON.stringify(slots);
+        if (signature === this.inventorySignature) return;
+        this.inventorySignature = signature;
+        this.notify('inventory.changed', KIND.WORLD, LEVEL.STATE, { slots });
     }
 
     // ── 保命反射（L5）──────────────────────────────────────────────────────
 
-    /**
-     * L5 的保命反射。**跑在身体侧**，不等大脑一轮——这就是把 `rescue` 做成
-     * 协议操作而不是大脑回调的原因：主线里它是 `rescue: () => this.runEmergency()`，
-     * 而 `runEmergency` 全是 `bot` 操作。
-     *
-     * 配置对象逐字搬自主线 `Agent.runEmergency`。
-     */
     /**
      * 半径内最近的敌对生物（没有就 null）。
      *
@@ -1029,7 +1248,7 @@ export class MineflayerBody {
                         position?: { x?: number; y?: number; z?: number };
                     };
                     const name = typeof e.name === 'string' ? e.name : 'unknown';
-                    // **判定复用 mcdata 的 `isHostile(e)`**——rescue 的 threats()
+                    // **判定复用 mcdata 的 `isHostile(e)`**——`rescue()` 的 threats()
                     // 用的是同一个函数，两处结论天然一致。id 沿用原值（nearestThreat
                     // 只用它当标识）。
                     const id = typeof (raw as { id?: unknown }).id === 'number' ? (raw as { id: number }).id : -1;
@@ -1052,10 +1271,17 @@ export class MineflayerBody {
         }
     }
 
-    async rescue(): Promise<{ triggered: boolean; text: string }> {
+    /**
+     * 身体侧的保命处理：**按事件类型选定的那一种处境**跑一次。
+     *
+     * 它不再是一个被大脑隔着一趟协议点名调用的独立操作——调用它的是这条
+     * 事件自己的处理（见 `emergency()` / `EDGE_REFLEX`）。返回值就是处理的
+     * 结果，会被写成 `reflex.done` 记录进上下文。
+     */
+    async rescue(intent: EmergencyIntent): Promise<EmergencyResult> {
         const bot = this.bot;
         try {
-            await runEmergency({
+            return await runEmergency({
                 get health(): number {
                     return typeof bot.health === 'number' ? bot.health : 0;
                 },
@@ -1126,13 +1352,13 @@ export class MineflayerBody {
                 },
                 // 模型用 !disableSafeguards 签了生死状 → 连溺水都不再上浮。
                 safeguardsOff: (): boolean => safeguards.isSuppressed(Date.now()),
+            }, {
+                // **处理按事件类型选定**：溺水只上浮，威胁只逃跑，不互相代劳。
+                intent,
             });
-            // 主线的 `runEmergency` 不返回结果（它自己决定要不要动作）。
-            // 协议上需要一个 `triggered` 字段，这里只能如实说"跑过了"。
-            return { triggered: true, text: '' };
         } catch (err: unknown) {
-            this.log.with('emergency').warn({ phase: 'failed', err: String(err) });
-            return { triggered: false, text: String(err) };
+            this.log.with('emergency').warn({ phase: 'failed', intent, err: String(err) });
+            throw err;
         }
     }
 
@@ -1158,14 +1384,41 @@ export class MineflayerBody {
             // 报一个自己给不了的能力，等于凭空多一次必然为 null 的调用。
             observations: [
                 'live-state',
-                'inventory-slots',
                 ...(this.vision_interpreter?.captureBase64 != null ? ['screenshot'] : []),
             ],
         };
     }
 
-    getInventorySlots(): ({ name: string; count: number } | null)[] {
+    /**
+     * 一次动作跑完，扣掉一次"按次数"额度（危险操作授权 / 保命抑制）。
+     *
+     * **这件事本来就该在身体侧做，而且理由比"状态在身体里"更直接**：
+     * 计数的单位就是"身体执行了一次动作"，而唯一知道这件事的地方正是这里。
+     * 以前是大脑在每次工具调用后专门发一条 `consumeCall` 指令来通知——
+     * 一条为了同步一份身体已经知道的事实而存在的协议指令。
+     *
+     * 三条豁免与大脑侧原来保持一致：
+     *   - 申请额度的三个控制工具本身不消耗（申请 3 次却只剩 2 次，模型算不清）；
+     *   - **只读查询不消耗**：配额的是"危险操作"，查背包不该烧额度
+     *     （Feedback #4：模型"只调了 allowDangerousOps"，额度却从 2 变 1）。
+     */
+    private consumePermitFor(toolName: string): void {
+        const name = stripBang(toolName);
+        if (CONTROL_TOOL_NAMES.has(name)) return;
+        const declaration = toolDeclarations().find((d) => d.name === name);
+        if (declaration?.kind === 'query') return;
         try {
+            const permitSpent = permits.consumeCall(Date.now());
+            const guardSpent = safeguards.consumeCall(Date.now());
+            if (permitSpent || guardSpent) {
+                this.log.with('safety').info({ note: '次数额度用尽，闸门/保命恢复默认', tool: name });
+            }
+        } catch {
+            // 扣不动就算了：最坏是额度比模型以为的多用一次，不该让动作本身失败。
+        }
+    }
+
+    getInventorySlots(): ({ name: string; count: number } | null)[] {        try {
             const slots = (this.bot.inventory?.slots ?? []) as Array<{ name?: string; count?: number } | null>;
             return slots.map((slot) =>
                 slot == null ? null : { name: String(slot.name ?? ''), count: Number(slot.count ?? 0) },
@@ -1180,8 +1433,6 @@ export class MineflayerBody {
         switch (request.op) {
             case 'hello':
                 return { ok: true, op: 'hello', capabilities: this.capabilities() };
-            case 'ping':
-                return { ok: true, op: 'ping', ts: Date.now() };
             case 'sample':
                 return { ok: true, op: 'sample', state: sampleLiveState(this.sampleContext()) };
             case 'image': {
@@ -1197,8 +1448,12 @@ export class MineflayerBody {
                 const { name, args } = request.request;
                 try {
                     const text = await executeToolCall(this, name, args);
+                    this.consumePermitFor(name);
                     return { ok: true, op: 'action', result: { ok: true, text, code: 'OK' } };
                 } catch (err: unknown) {
+                    // **失败也要消耗**——这是"按次数授权"的全部意义：模型申请 3 次，
+                    // 第 2 次寻路失败，额度当场用完，闸门立刻回到默认禁止。
+                    this.consumePermitFor(name);
                     const message = err instanceof Error ? err.message : String(err);
                     return {
                         ok: true,
@@ -1217,71 +1472,8 @@ export class MineflayerBody {
             case 'stop':
                 await this.actions.stop();
                 return { ok: true, op: 'stop' };
-            case 'rescue': {
-                const result = await this.rescue();
-                return { ok: true, op: 'rescue', triggered: result.triggered, text: result.text };
-            }
             case 'fullState':
                 return { ok: true, op: 'fullState', state: getFullState(this as never) };
-            case 'inventory.slots':
-                return { ok: true, op: 'inventory.slots', slots: this.getInventorySlots() };
-            case 'players': {
-                try {
-                    const players = (this.bot.players ?? {}) as Record<string, unknown>;
-                    return { ok: true, op: 'players', names: Object.keys(players).filter((n) => n !== this.name) };
-                } catch {
-                    return { ok: true, op: 'players', names: [] };
-                }
-            }
-            case 'position': {
-                try {
-                    const p = this.bot.entity.position;
-                    return { ok: true, op: 'position', x: p.x, y: p.y, z: p.z };
-                } catch {
-                    return { ok: true, op: 'position', x: 0, y: 0, z: 0 };
-                }
-            }
-            case 'setGoal':
-                this.goal = request.goal;
-                return { ok: true, op: 'setGoal' };
-            case 'pickupTarget': {
-                // **能力**：只回答"附近有什么"，"要不要去捡"是大��的事。
-                // `nearestDropWithin` 必须跑在身体里——它读 `bot.entities`，
-                // 而且"刚被自己扔掉的先别捡"那份状态（`markDiscarded`）也在身体里。
-                const target = nearestDropWithin(this.bot, request.radius);
-                return { ok: true, op: 'pickupTarget', target: target ?? null };
-            }
-            case 'walkTo': {
-                this.externalWalk = true;
-                try {
-                    await goToPosition(this.bot, request.x, request.y, request.z, request.closeness);
-                    return { ok: true, op: 'walkTo', arrived: true };
-                } catch {
-                    // 走不到（被 stopMovement 打断 / 找不到路）不是异常，是结果。
-                    return { ok: true, op: 'walkTo', arrived: false };
-                } finally {
-                    this.externalWalk = false;
-                }
-            }
-            case 'stopMovement':
-                try {
-                    this.bot.pathfinder?.stop?.();
-                    this.bot.clearControlStates?.();
-                } catch {
-                    // 停不下来也要把状态放开，否则身体会永远"以为自己在走"。
-                }
-                return { ok: true, op: 'stopMovement' };
-            case 'consumeCall': {
-                // 授权与保命抑制的**读取点都在身体**（skills.ts / live_state.ts），
-                // 所以额度也必须在这里扣。见 `BrainRequest['consumeCall']`。
-                const now = Date.now();
-                return {
-                    ok: true,
-                    op: 'consumeCall',
-                    permitSpent: permits.consumeCall(now),
-                    guardSpent: safeguards.consumeCall(now),
-                };
-            }
             case 'shutdown':
                 this.shuttingDown = true;
                 setTimeout(() => process.exit(0), 50);

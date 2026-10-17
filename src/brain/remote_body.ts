@@ -17,7 +17,6 @@ import type {
     BodyEvent,
     BodyPush,
     BodyResponse,
-    ChatPush,
 } from '../shared/protocol/types.js';
 import { ERR } from '../shared/protocol/types.js';
 import type { Body } from '../shared/body.js';
@@ -30,16 +29,11 @@ function fail(op: string, response: BodyResponse): never {
 export class RemoteBody implements Body {
     private client: BrainClient;
     private handlers: ((event: BodyEvent) => void)[] = [];
-    private chatHandlers: ((chat: ChatPush) => void)[] = [];
 
     private constructor(client: BrainClient) {
         this.client = client;
         client.onPush((push: BodyPush) => {
-            if (push.push === 'event') {
-                for (const handler of this.handlers) handler(push.event);
-            } else if (push.push === 'chat') {
-                for (const handler of this.chatHandlers) handler(push.chat);
-            }
+            for (const handler of this.handlers) handler(push.event);
         });
     }
 
@@ -131,68 +125,10 @@ export class RemoteBody implements Body {
         if (!response.ok) fail('stop', response);
     }
 
-    async rescue(): Promise<{ triggered: boolean; text: string }> {
-        const response = await this.client.request({ op: 'rescue' }, DEFAULT_TIMEOUT_MS);
-        if (!response.ok || response.op !== 'rescue') {
-            return { triggered: false, text: '' };
-        }
-        return { triggered: response.triggered, text: response.text };
-    }
-
     async fullState(): Promise<unknown> {
         const response = await this.client.request({ op: 'fullState' });
         if (!response.ok || response.op !== 'fullState') return null;
         return response.state;
-    }
-
-    async setGoal(goal: string | null): Promise<void> {
-        // 同步失败不抛：目标同步是"锦上添花"，边沿检测器拿不到就按没有目标判。
-        await this.client.request({ op: 'setGoal', goal }, 20_000);
-    }
-
-    async inventorySlots(): Promise<({ name: string; count: number } | null)[]> {
-        const response = await this.client.request({ op: 'inventory.slots' }, 20_000);
-        if (!response.ok || response.op !== 'inventory.slots') return [];
-        return response.slots;
-    }
-
-    async consumeCall(): Promise<{ permitSpent: boolean; guardSpent: boolean }> {
-        const response = await this.client.request({ op: 'consumeCall' }, 20_000);
-        if (!response.ok || response.op !== 'consumeCall') return { permitSpent: false, guardSpent: false };
-        return { permitSpent: response.permitSpent, guardSpent: response.guardSpent };
-    }
-
-    async pickupTarget(radius: number): Promise<{ id: number; name: string; x: number; y: number; z: number; distance: number } | null> {
-        const response = await this.client.request({ op: 'pickupTarget', radius }, 20_000);
-        if (!response.ok || response.op !== 'pickupTarget') return null;
-        return response.target;
-    }
-
-    /**
-     * 走过去的超时**给但不致命**：正常由 `stopMovement` 或身体自己走完来结束。
-     * 给 3 分钟是兜底——一个真的卡住的寻路不该让大脑永久挂住（那正是
-     * "终端说失败、机器人还在走"的另一面）。
-     */
-    async walkTo(x: number, y: number, z: number, closeness: number): Promise<boolean> {
-        const response = await this.client.request({ op: 'walkTo', x, y, z, closeness }, 3 * 60 * 1000);
-        if (!response.ok || response.op !== 'walkTo') return false;
-        return response.arrived;
-    }
-
-    async stopMovement(): Promise<void> {
-        await this.client.request({ op: 'stopMovement' }, 20_000);
-    }
-
-    async players(): Promise<string[]> {
-        const response = await this.client.request({ op: 'players' }, 20_000);
-        if (!response.ok || response.op !== 'players') return [];
-        return response.names;
-    }
-
-    async position(): Promise<{ x: number; y: number; z: number } | null> {
-        const response = await this.client.request({ op: 'position' }, 20_000);
-        if (!response.ok || response.op !== 'position') return null;
-        return { x: response.x, y: response.y, z: response.z };
     }
 
     onClose(handler: (info: CloseInfo) => void): void {
@@ -204,14 +140,6 @@ export class RemoteBody implements Body {
         return () => {
             const index = this.handlers.indexOf(handler);
             if (index >= 0) this.handlers.splice(index, 1);
-        };
-    }
-
-    onChat(handler: (chat: ChatPush) => void): () => void {
-        this.chatHandlers.push(handler);
-        return () => {
-            const index = this.chatHandlers.indexOf(handler);
-            if (index >= 0) this.chatHandlers.splice(index, 1);
         };
     }
 

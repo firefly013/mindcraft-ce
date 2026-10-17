@@ -3,7 +3,7 @@
  *
  * 两条"不该在这里"的都要钉住：
  * - `## 事件`：事件本身就是消息（L1/L2 write、L3 steer），再渲染一遍是重复喂
- * - `## 记忆摘要`：记忆就是压仓摘要，作为历史第一条随整份历史发出，再发一遍也是重复喂
+ * - `## 记忆摘要`：记忆就是上下文压缩摘要，作为历史第一条随整份历史发出，再发一遍也是重复喂
  */
 import { describe, expect, it } from 'vitest';
 import { composeLiveTail } from '../src/body/live_state.js';
@@ -49,7 +49,7 @@ describe('composeLiveTail（接真实感知层）', () => {
     expect(composeLiveTail({ bot: {} })).not.toContain('## 事件');
   });
 
-  it('不含记忆段（记忆是压仓摘要，随历史发出）', () => {
+  it('不含记忆段（记忆是上下文压缩摘要，随历史发出）', () => {
     expect(composeLiveTail({ bot: {} })).not.toContain('## 记忆摘要');
   });
 });

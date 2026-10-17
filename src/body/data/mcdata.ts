@@ -117,7 +117,7 @@ export function initBot(username: string): any {
     } = {
         username: username,
         host: settings.host,
-        port: settings.port,
+        port: settings.port ?? -1,
         auth: settings.auth,
         version: mc_version,
         checkTimeoutInterval: 60000,  // 60s keep-alive check (default 30s) — reduces disconnects on slow servers

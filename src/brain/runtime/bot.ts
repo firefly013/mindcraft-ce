@@ -9,13 +9,14 @@
  *         └─compactionPolicyFromProfile──▶ CompactionPolicy
  * openBotRuntime(...) ─▶ BotRuntime（SQLite + 工具 + 尾巴注入）
  * createStateAccess(...) ─▶ 记忆 / 地点 / 计划文档
- * EventIntake(...) ─▶ L1–L5 → 原生原语（write / steer / abort+submit / abort+rescue）
+ * EventIntake(...) ─▶ 事件 → 处理（write / steer / abort+submit / 锁通道 + 反射）
  * ```
  */
 import type { EntryDraft, Extension, ToolRegistration } from '@earendil-works/pi-durable';
 import { defineExtension } from '@earendil-works/pi-durable';
 import { compactionPolicyFromProfile } from './compaction.js';
-import { EventIntake, type GameEvent } from './events.js';
+import { EventIntake, type EventAction, type GameEvent } from './events.js';
+import { createHandlerLookup, type EventHandler } from './handlers.js';
 import { intakeLifecycleHook } from './log_hooks.js';
 import { resolveProvider, type ResolvedProvider } from './provider.js';
 import { openBotRuntime, type BotRuntime } from './runtime.js';
@@ -24,7 +25,7 @@ import { createStateAccess, type BotStateAccess } from './state_access.js';
 export interface BotWiringOptions {
   /** bot 名（profile.name），决定 `bots/<name>/`。 */
   name: string;
-  /** profile 原文：供应商、压仓参数都从它读。 */
+  /** profile 原文：供应商、上下文压缩参数都从它读。 */
   profile: unknown;
   /**
    * 已解析的供应商。给了就跳过 `resolveProvider(profile)`——测试注入 faux 用，
@@ -47,8 +48,19 @@ export interface BotWiringOptions {
   extensions?: readonly Extension[];
   /** Say 通道出口（游戏内聊天 / 前端）。 */
   onSay?: (text: string) => void;
-  /** L5 的保命反射，绕过模型。 */
-  rescue: () => Promise<void>;
+  /**
+   * 事件类型 → 处理（`brain-reflex`）。
+   *
+   * **只有大脑侧的反射登记在这里**：身体侧的反射由身体在事件里自己声明
+   * （`event.reflex`），模型的处理是默认（查不到就是交给模型）。
+   */
+  handlers?: readonly EventHandler[];
+  /**
+   * 动作通道锁：L5 事件的反射开始时锁上，最后一个反射报告完成时解开。
+   * 不接就是"没有锁"（单测常用）。
+   */
+  beginEmergency?: () => void;
+  endEmergency?: () => void;
   /**
    * 已有的接入层。给了就把运行时**接**上去，而不是新建。
    *
@@ -56,8 +68,8 @@ export interface BotWiringOptions {
    * `attach`——连接建立到就绪之间的事件因此不会丢（见 `EventIntake.attach`）。
    */
   intake?: EventIntake;
-  /** 事件落点观测：每个事件实际走了 write / steer / preempt / emergency。 */
-  onEvent?: (event: GameEvent, action: 'write' | 'steer' | 'preempt' | 'emergency') => void;
+  /** 事件落点观测：每个事件实际走了 write / steer / preempt / emergency / reflex。 */
+  onEvent?: (event: GameEvent, action: EventAction) => void;
   /** 落盘根目录，默认 `./bots/<name>`。 */
   baseDir?: string;
   /** 实例区分后缀，避免同名多开撞同一个库。 */
@@ -71,7 +83,7 @@ export interface BotWiringOptions {
 
 export interface BotWiring {
   runtime: BotRuntime;
-  /** L1–L5 事件接入。 */
+  /** 事件接入：**事件 → 处理**的唯一入口。 */
   intake: EventIntake;
   /** 记忆 / 地点 / 计划的读写门面。 */
   state: BotStateAccess;
@@ -83,18 +95,28 @@ export interface BotWiring {
 }
 
 /**
- * 把一个事件写成**模型可见**的被动 entry。
+ * 把一批事件写成**模型可见**的被动 entry。
  *
  * 必须带 `model`：只有 `data` 的 entry 是给视图/记账用的，模型看不到。
  * 事件用 `user` 角色承载——pi-ai 的 `Message` 联合只有 system/user/assistant/
  * toolResult，没有自定义角色；用 `system` 会被当成提示词更新重放，所以只能用
- * `user`，靠 `data.level` 区分它是个事件。
+ * `user`，靠 `data` 区分它是个事件。
+ *
+ * 一批写成**一条** entry（同一拍里攒下的事件合并）：事件在发生的那一刻就进
+ * 上下文，但不必为此把 transcript 撑成一行一条。
  */
-export function eventEntryDraft(event: GameEvent): EntryDraft {
+export function eventEntryDraft(events: readonly GameEvent[]): EntryDraft {
   return {
     kind: 'mc.event',
-    model: [{ role: 'user', content: event.text, timestamp: Date.now() }],
-    data: { level: event.level },
+    model: events.map((event) => ({ role: 'user' as const, content: event.text, timestamp: event.ts })),
+    data: {
+      events: events.map((event) => ({
+        type: event.type,
+        level: event.level,
+        ts: event.ts,
+        ...(event.reflex != null ? { reflex: event.reflex } : {}),
+      })),
+    },
   };
 }
 
@@ -130,10 +152,18 @@ export async function openBotWiring(options: BotWiringOptions): Promise<BotWirin
 
   // 接入层可以接一个**早就建好的** intake（Agent 就是这么用的——运行时还没
   // 就绪时收到的事件会被暂存，attach 时按顺序补投）。
+  const lookup = createHandlerLookup(options.handlers ?? []);
   intake.attach({
     submit: (text, whenBusy) => runtime.submit(text, { whenBusy }),
+    // 只记录、不唤醒：落成 durable entry。**这就是"事件在发生那一刻进上下文"**，
+    // 旧实现把它们放在内存缓冲区里等顺风车，没有下一次唤醒就永远进不去。
+    write: async (events) => {
+      await runtime.write(eventEntryDraft(events));
+    },
     abort: () => runtime.abort(),
-    rescue: options.rescue,
+    lookup,
+    ...(options.beginEmergency != null ? { beginEmergency: options.beginEmergency } : {}),
+    ...(options.endEmergency != null ? { endEmergency: options.endEmergency } : {}),
     ...(options.onEvent != null ? { onEvent: options.onEvent } : {}),
   });
 

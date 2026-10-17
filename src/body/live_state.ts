@@ -168,6 +168,7 @@ export function sampleLiveState(ctx: SampleContext): LiveState {
     todos: ctx.todos ?? [],
     dangerousOps: '（还没采样）',
     safeguards: '（还没采样）',
+    players: [],
     meta: { gamemode: null, openScreen: null, currentAction: ctx.currentAction ?? null, posture: null },
   };
 
@@ -250,6 +251,12 @@ export function sampleLiveState(ctx: SampleContext): LiveState {
       ...lightOf(bot, feet),
       day: num(bot.time?.day),
     };
+
+    // 在线玩家（不含自己）。**只是数据，不渲染**——见 `LiveState.players`。
+    const selfName = str(bot.username);
+    empty.players = Object.keys((bot.players ?? {}) as Record<string, unknown>).filter(
+      (name) => name !== selfName,
+    );
 
     const seen = sampleEntities(bot, feet);
     empty.entities = budgetedList(seen, PERCEPTION_LIMIT, PERCEPTION_BUDGET_TOKENS, entityCost);

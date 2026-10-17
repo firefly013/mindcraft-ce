@@ -296,16 +296,16 @@ describe('event shape: delta plus action context, no Live State repeat', () => {
     const [e] = w.poll({
       entities: [ent(1, 10)],
       currentAction: 'action:collectBlocks',
-      goal: 'gather wood',
       position: '10,64,-3',
       dimension: 'overworld',
     });
     expect(e?.type).toBe('entity.hostile_nearby');
     // key 是**类型**（同类只报一次），不是实体 id
     expect(e?.key).toBe('zombie');
+    // 行动处境里有位置、维度、当时的动作——**没有 goal**：
+    // 目标是大知识，身体不知道也不该知道（以前靠一条 setGoal 镜像进来）。
     expect(e?.actionContext).toEqual({
       currentAction: 'action:collectBlocks',
-      goal: 'gather wood',
       position: '10,64,-3',
       dimension: 'overworld',
     });

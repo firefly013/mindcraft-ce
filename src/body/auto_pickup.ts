@@ -8,13 +8,13 @@
  * 这个文件只管**身体这一半**：
  *   - `nearestDropWithin`：半径内最近的掉落物（读 mineflayer 实体表）；
  *   - `markDiscarded` / 丢弃免疫表：刚扔出去的东西别马上捡回来。
- * "该不该试、多久试一次"的判据在大脑侧的轮询循环里，用的是
- * `shared/auto_pickup.ts` 里的同一组常量——两边不许各写一份数字。
+ * "该不该试、多久试一次"的判据在大脑侧**那条事件的处理**里（`Agent.reflexAutoPickup`），
+ * 用的是 `shared/auto_pickup.ts` 里的同一组常量——两边不许各写一份数字。
  */
 
 import { DISCARD_IGNORE_MS, type PickupTarget } from '../shared/auto_pickup.js';
 
-export { AUTO_PICKUP_ID, PICKUP_RADIUS, PICKUP_INTERVAL_MS, PICKUP_TIMEOUT_MS } from '../shared/auto_pickup.js';
+export { PICKUP_RADIUS, PICKUP_INTERVAL_MS, PICKUP_TIMEOUT_MS } from '../shared/auto_pickup.js';
 export type { PickupGate, PickupTarget } from '../shared/auto_pickup.js';
 
 /**

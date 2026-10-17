@@ -1,0 +1,214 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "./schemas/providers.schema.json",
+  "$comment": "This file is generated from TypeScript source. Do not edit it manually; run npm run generate:schemas.",
+  "type": "object",
+  "required": [
+    "providers"
+  ],
+  "properties": {
+    "$schema": {
+      "type": "string"
+    },
+    "providers": {
+      "type": "object",
+      "patternProperties": {
+        "^.*$": {
+          "type": "object",
+          "properties": {
+            "name": {
+              "type": "string",
+              "minLength": 1
+            },
+            "baseUrl": {
+              "type": "string",
+              "minLength": 1,
+              "description": "端点地址。"
+            },
+            "api": {
+              "type": "string",
+              "minLength": 1
+            },
+            "headers": {
+              "type": "object",
+              "patternProperties": {
+                "^.*$": {
+                  "type": "string"
+                }
+              }
+            },
+            "models": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "required": [
+                  "id"
+                ],
+                "properties": {
+                  "id": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "name": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "api": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "pi-ai 的 api 名，默认 openai-completions。"
+                  },
+                  "baseUrl": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "reasoning": {
+                    "type": "boolean"
+                  },
+                  "contextWindow": {
+                    "type": "number",
+                    "exclusiveMinimum": 0,
+                    "description": "Token 数，必须为正。"
+                  },
+                  "maxTokens": {
+                    "type": "number",
+                    "exclusiveMinimum": 0,
+                    "description": "Token 数，必须为正。"
+                  },
+                  "input": {
+                    "type": "array",
+                    "items": {
+                      "anyOf": [
+                        {
+                          "type": "string",
+                          "const": "text"
+                        },
+                        {
+                          "type": "string",
+                          "const": "image"
+                        }
+                      ]
+                    }
+                  },
+                  "samplingParams": {
+                    "type": "object",
+                    "patternProperties": {
+                      "^.*$": {}
+                    },
+                    "description": "原样进请求体的采样参数（temperature、thinking…）。"
+                  },
+                  "samplingParamsByThinkingLevel": {
+                    "type": "object",
+                    "patternProperties": {
+                      "^.*$": {
+                        "type": "object",
+                        "patternProperties": {
+                          "^.*$": {}
+                        },
+                        "description": "原样进请求体的采样参数（temperature、thinking…）。"
+                      }
+                    }
+                  },
+                  "headers": {
+                    "type": "object",
+                    "patternProperties": {
+                      "^.*$": {
+                        "type": "string"
+                      }
+                    }
+                  }
+                },
+                "additionalProperties": false,
+                "description": "端点上的一个模型。"
+              }
+            },
+            "modelOverrides": {
+              "type": "object",
+              "patternProperties": {
+                "^.*$": {
+                  "type": "object",
+                  "properties": {
+                    "name": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "api": {
+                      "type": "string",
+                      "minLength": 1,
+                      "description": "pi-ai 的 api 名，默认 openai-completions。"
+                    },
+                    "baseUrl": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "reasoning": {
+                      "type": "boolean"
+                    },
+                    "contextWindow": {
+                      "type": "number",
+                      "exclusiveMinimum": 0,
+                      "description": "Token 数，必须为正。"
+                    },
+                    "maxTokens": {
+                      "type": "number",
+                      "exclusiveMinimum": 0,
+                      "description": "Token 数，必须为正。"
+                    },
+                    "input": {
+                      "type": "array",
+                      "items": {
+                        "anyOf": [
+                          {
+                            "type": "string",
+                            "const": "text"
+                          },
+                          {
+                            "type": "string",
+                            "const": "image"
+                          }
+                        ]
+                      }
+                    },
+                    "samplingParams": {
+                      "type": "object",
+                      "patternProperties": {
+                        "^.*$": {}
+                      },
+                      "description": "原样进请求体的采样参数（temperature、thinking…）。"
+                    },
+                    "samplingParamsByThinkingLevel": {
+                      "type": "object",
+                      "patternProperties": {
+                        "^.*$": {
+                          "type": "object",
+                          "patternProperties": {
+                            "^.*$": {}
+                          },
+                          "description": "原样进请求体的采样参数（temperature、thinking…）。"
+                        }
+                      }
+                    },
+                    "headers": {
+                      "type": "object",
+                      "patternProperties": {
+                        "^.*$": {
+                          "type": "string"
+                        }
+                      }
+                    }
+                  },
+                  "additionalProperties": false,
+                  "description": "按 id 覆写内置目录里的模型。"
+                }
+              }
+            }
+          },
+          "additionalProperties": false,
+          "description": "一个 OpenAI 兼容端点（或 pi-ai 内置供应商）的配置。"
+        }
+      },
+      "description": "providerId → 供应商配置。"
+    }
+  },
+  "additionalProperties": false
+}

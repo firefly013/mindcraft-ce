@@ -1,5 +1,6 @@
 import { readFileSync, writeFileSync, existsSync } from 'node:fs';
 import { MESSAGES } from '../../shared/prompts.js';
+import type { LiveState } from '../../shared/live_state.js';
 
 const PROGRESS_FILE = './hells_kitchen_progress.json';
 
@@ -218,7 +219,7 @@ function checkItemForSingleAgent(data: TaskData, agent: any): ItemCheckResult {
 
   // Count items in inventory
   const inventoryCount: Record<string, number> = {};
-  // **走大脑的槽位缓存**（每 300ms 由 `Agent.refreshInventorySlots` 从身体刷一次）：
+  // **走大脑的槽位缓存**（由 `inventory.changed` 事件喂，身体在变化的那一刻报）：
   // 分层之后背包在另一个进程，`bot.inventory` 在大脑里根本不存在。
   agent.inventorySlots().forEach((slot: { name: string; count: number } | null) => {
     if (slot) {
@@ -487,9 +488,11 @@ export class Task {
       return Math.floor(Math.random() * (range * 2 + 1)) - range;
     }
 
-    // Finding if there is a human player on the server
-    // 玩家列表从身体问（分层之后大脑手里没有 mineflayer 的 `bot.players`）。
-    const onlineNames = await this.agent.body?.players() ?? [];
+    // 在线玩家与坐标都从**世界快照**取——身体本来就在采它，不必为此多开两条
+    // 专用协议指令（`players` / `position` 已删）。快照里这两个字段不渲染，
+    // 所以提示词一个字都没变。
+    const state = (await this.agent.body?.sample()) as LiveState | null | undefined;
+    const onlineNames = state?.players ?? [];
     let human_player_name: string | null = null;
     for (const playerName of onlineNames) {
       if (playerName === this.name) continue;
@@ -508,7 +511,11 @@ export class Task {
 
     // now all bots are teleport on top of each other (which kinda looks ugly)
     // Thus, we need to teleport them to random distances to make it look better
-    const pos = await this.agent.body?.position() ?? { x: 0, y: 0, z: 0 };
+    const pos = {
+      x: state?.position.x ?? 0,
+      y: state?.position.y ?? 0,
+      z: state?.position.z ?? 0,
+    };
     const xOffset = getRandomOffset(5);
     const zOffset = getRandomOffset(5);
     await this.agent.body?.say(`/tp ${this.name} ${Math.floor(pos.x + xOffset)} ${pos.y + 3} ${Math.floor(pos.z + zOffset)}`);

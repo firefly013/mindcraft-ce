@@ -3,9 +3,10 @@
  *
  * 旧实现 `resolveContextWindow()` 读不到 `profile.context_window` 就回退
  * `128_000`，触发线成了 `115_200`；而 OpenCode Go 的 `deepseek-v4.1-flash`
- * 真实窗口是 `1_000_000`。这里把它钉死。
+ * 真实窗口是 `1_000_000`。这里把它钉死：**窗口只来自模型定义**（内置目录或
+ * `providers.json`），profile 顶层的 `context_window` 已经不存在了。
  */
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -19,7 +20,7 @@ import {
   compactionPolicyFromProfile,
   compactionTriggerTokens,
 } from '../src/brain/runtime/compaction.js';
-import { readProfileModel, resolveProvider } from '../src/brain/runtime/provider.js';
+import { readModelReference, resolveProvider } from '../src/brain/runtime/provider.js';
 import type { ResolvedProvider } from '../src/brain/runtime/provider.js';
 import { openBotRuntime } from '../src/brain/runtime/runtime.js';
 
@@ -44,19 +45,31 @@ afterEach(() => {
   }
 });
 
-/** 生产 profile 的形状（主线给 opencode.json 加的那三个字段）。 */
+/**
+ * 生产 profile 的形状。
+ *
+ * 窗口不再写在 profile 里：`opencode-go/deepseek-v4.1-flash` 的 1_000_000
+ * 来自 pi-ai 的内置目录；自建端点则来自 `providers.json` 的模型定义。
+ */
 const PRODUCTION_PROFILE = {
   name: 'opencode',
-  context_window: 1_000_000,
-  reserve_tokens: 16_384,
-  keep_recent_tokens: 20_000,
-  model: {
-    api: 'openai',
-    model: 'deepseek-v4.1-flash',
-    url: 'https://opencode.ai/zen/go/v1',
-    params: { api_key_env: 'OPENCODE_API_KEY' },
-  },
+  model: 'opencode-go/deepseek-v4.1-flash',
+  compaction: { reserveTokens: 16_384, keepRecentTokens: 20_000 },
 };
+
+/** 写一份临时 providers.json + auth.json：内置 provider 也要有 key 才能解析。 */
+function configPaths(): { providersPath: string; authPath: string } {
+  const dir = tempDir();
+  const providersPath = join(dir, 'providers.json');
+  const authPath = join(dir, 'auth.json');
+  writeFileSync(
+    providersPath,
+    JSON.stringify({ providers: { 'opencode-go': { baseUrl: 'https://opencode.ai/zen/go/v1' } } }),
+    'utf8',
+  );
+  writeFileSync(authPath, JSON.stringify({ 'opencode-go': { type: 'api_key', key: 'sk-test' } }), 'utf8');
+  return { providersPath, authPath };
+}
 
 describe('profile → CompactionPolicy', () => {
   it('空 profile 落回 pi-durable 的内置默认', () => {
@@ -78,12 +91,14 @@ describe('profile → CompactionPolicy', () => {
     });
   });
 
-  it('非法值落回默认；compaction_enabled:false 关掉自动压仓', () => {
+  it('非法值落回默认；compaction.enabled:false 关掉自动上下文压缩', () => {
     const policy = compactionPolicyFromProfile({
-      reserve_tokens: -1,
-      keep_recent_tokens: 'nope',
-      background_tokens: Number.NaN,
-      compaction_enabled: false,
+      compaction: {
+        reserveTokens: -1,
+        keepRecentTokens: 'nope',
+        backgroundTokens: Number.NaN,
+        enabled: false,
+      },
     });
     expect(policy.enabled).toBe(false);
     expect(policy.reserveTokens).toBe(DEFAULT_RESERVE_TOKENS);
@@ -93,8 +108,8 @@ describe('profile → CompactionPolicy', () => {
 });
 
 describe('8.7 倍阈值 bug', () => {
-  it('触发线用**模型目录**的窗口，不是 profile 的回退值', () => {
-    const resolved = resolveProvider(PRODUCTION_PROFILE);
+  it('触发线用**模型目录**的窗口，不是回退值', () => {
+    const resolved = resolveProvider(PRODUCTION_PROFILE, configPaths());
     // 内置目录给出真实窗口
     expect(resolved.contextWindow).toBe(1_000_000);
 
@@ -112,30 +127,40 @@ describe('8.7 倍阈值 bug', () => {
   });
 });
 
-describe('自定义端点的窗口声明', () => {
-  it('profile 顶层的 context_window 会被读到（主线写在顶层）', () => {
-    expect(readProfileModel(PRODUCTION_PROFILE).contextWindow).toBe(1_000_000);
+describe('模型的窗口从哪来', () => {
+  it('引用形式：窗口由 provider 侧决定，profile 不再有 context_window', () => {
+    expect(readModelReference(PRODUCTION_PROFILE).modelId).toBe('deepseek-v4.1-flash');
+    expect(PRODUCTION_PROFILE).not.toHaveProperty('context_window');
   });
 
-  it('model 内层与 params 里也认', () => {
-    expect(readProfileModel({ model: { model: 'x', context_window: 4096 } }).contextWindow).toBe(4096);
-    expect(
-      readProfileModel({ model: { model: 'x', params: { context_window: 8192 } } }).contextWindow,
-    ).toBe(8192);
+  it('对象形式只读 provider/model，不覆写窗口', () => {
+    const reference = readModelReference({ model: { provider: 'x', model: 'x' } });
+    expect(reference).toEqual({ providerId: 'x', modelId: 'x' });
   });
 
-  it('自定义端点据此合成模型窗口，而不是永远回退 128_000', () => {
-    const resolved = resolveProvider({
-      model: { model: 'local-model', url: 'http://127.0.0.1:1/v1', params: { api_key_env: 'MISSING' } },
-      context_window: 32_000,
-    });
-    expect(resolved.providerId).toBe('custom');
+  it('自建端点的窗口来自 providers.json 的模型定义', () => {
+    const dir = tempDir();
+    const providersPath = join(dir, 'providers.json');
+    const authPath = join(dir, 'auth.json');
+    writeFileSync(
+      providersPath,
+      JSON.stringify({
+        providers: {
+          local: { baseUrl: 'http://127.0.0.1:1/v1', models: [{ id: 'local-model', contextWindow: 32_000 }] },
+        },
+      }),
+      'utf8',
+    );
+    writeFileSync(authPath, '{}', 'utf8');
+
+    const resolved = resolveProvider({ model: 'local/local-model' }, { providersPath, authPath });
+    expect(resolved.providerId).toBe('local');
     expect(resolved.contextWindow).toBe(32_000);
   });
 });
 
-describe('真集成：小窗口 + 长对话 → 压仓触发', () => {
-  it('超过 contextWindow - reserveTokens 后出现压仓 entry', async () => {
+describe('真集成：小窗口 + 长对话 → 上下文压缩触发', () => {
+  it('超过 contextWindow - reserveTokens 后出现上下文压缩 entry', async () => {
     const faux = fauxProvider({ models: [{ id: 'mc-test', contextWindow: 300 }] });
     const models = createModels();
     models.setProvider(faux.provider);
@@ -146,6 +171,7 @@ describe('真集成：小窗口 + 长对话 → 压仓触发', () => {
       providerId: faux.provider.id,
       apiKey: undefined,
       headers: null,
+      params: {},
       contextWindow: model.contextWindow,
     };
     expect(provider.contextWindow).toBe(300);
@@ -171,7 +197,7 @@ describe('真集成：小窗口 + 长对话 → 压仓触发', () => {
       },
     });
 
-    const long = '这是一段很长的上下文填充文本用来把估算 token 推过压仓触发线。'.repeat(8);
+    const long = '这是一段很长的上下文填充文本用来把估算 token 推过上下文压缩触发线。'.repeat(8);
     for (let i = 0; i < 3; i++) {
       await (await runtime.submit(`${long} 第${i}条`)).wait(ctx);
     }
@@ -179,7 +205,7 @@ describe('真集成：小窗口 + 长对话 → 压仓触发', () => {
     const page = await runtime.conversation.entries({}, 100, undefined, ctx);
     const kinds = page.items.map((entry) => entry.kind);
 
-    // 压仓 entry 的 kind 是 pi.compaction；每次压仓会额外打一次模型做总结，
+    // 上下文压缩 entry 的 kind 是 pi.compaction；每次上下文压缩会额外打一次模型做总结，
     // 所以模型调用次数会多于提交次数。
     expect(kinds.some((kind) => kind.includes('compaction'))).toBe(true);
     expect(faux.state.callCount).toBeGreaterThan(3);

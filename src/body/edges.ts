@@ -75,7 +75,6 @@ export interface EdgeSnapshot {
   nextIsLava?: boolean | null;
   moving?: boolean | null;
   currentAction?: string | null;
-  goal?: string | null;
   position?: string | null;
 }
 
@@ -85,9 +84,16 @@ export interface EdgeEvent {
   level: number;
   key: string | number | null;
   delta: Record<string, unknown>;
+  /**
+   * 事发当时的处境（给模型做判断用）。
+   *
+   * **没有 `goal`**：目标是大知识（`PlanStore` 在大脑），身体不知道也不该知道。
+   * 以前靠一条 `setGoal` 把大脑的状态镜像进身体，只为往这里塞一个字段——
+   * 那是"同一份事实两个持有者"。现在身体只报客观发生的事，
+   * 要挂"当时的目标"就由大脑在记录事件时自己补。
+   */
   actionContext: {
     currentAction: string | null;
-    goal: string | null;
     position: string | null;
     dimension: string | null;
   } | null;
@@ -511,7 +517,6 @@ export function createEdgeWatcher({ detectors = DETECTORS }: { detectors?: reado
       delta: deltaFor(detector, key, snapshot),
       actionContext: {
         currentAction: snapshot.currentAction ?? null,
-        goal: snapshot.goal ?? null,
         position: snapshot.position ?? null,
         dimension: snapshot.dimension ?? null,
       },
@@ -662,7 +667,6 @@ function deltaFor(detector: Detector, key: string | number | null, snapshot: Edg
 
 export interface SnapshotExtra {
   currentAction?: string | null;
-  goal?: string | null;
   foodNames?: string[];
 }
 
@@ -929,7 +933,6 @@ export function snapshotFromBot(bot: unknown, extra: SnapshotExtra = {}): EdgeSn
     if (list.length > 0) snap.entities = list;
 
     snap.currentAction = extra.currentAction ?? null;
-    snap.goal = extra.goal ?? null;
     snap.position = `${feet.x},${feet.y},${feet.z}`;
     snap.dimension = snap.dimension ?? strOf((b['game'] as { dimension?: unknown } | undefined)?.dimension) ?? null;
   } catch {

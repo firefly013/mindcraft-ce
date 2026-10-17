@@ -184,6 +184,38 @@ export interface EmergencyResult {
 }
 
 /**
+ * 这次保命**要处理的具体处境**。
+ *
+ * 为什么必须由调用方给：处理属于**事件类型**，不属于"等级 5"。旧实现把所有
+ * L5 事件都丢进同一个循环，让循环进去以后再自己看一遍世界猜"我该浮还是该跑"
+ * ——那样事件类型的信息在到达处理的那一刻就丢了，也没法给某一类事件换处理。
+ *
+ *   - `surface`：头在水里 → 只上浮，浮出来就结束。
+ *   - `flee`：有威胁/危险 → 逃开、顺手吃一口，安全了结束。
+ */
+export type EmergencyIntent = 'surface' | 'flee';
+
+/** 溺水：只要头还在水里就往上浮，浮出来就算处理完了。 */
+async function runSurface(
+  bot: EmergencyBot,
+  io: { tickMs: number; sleep: (ms: number) => Promise<void> },
+): Promise<EmergencyResult> {
+  bot.stopAll();
+  // **保命被关掉就不碰身体**：模型明确表示这几步自己负责，别抢方向盘。
+  if (bot.safeguardsOff?.() === true) {
+    return { escaped: false, reason: 'safe', position: bot.feet(), health: bot.health };
+  }
+  for (;;) {
+    if (bot.health <= 0) return { escaped: false, reason: 'died' };
+    if (bot.submerged?.() !== true) {
+      return { escaped: true, reason: 'safe', position: bot.feet(), health: bot.health };
+    }
+    bot.swimUp?.();
+    await io.sleep(io.tickMs);
+  }
+}
+
+/**
  * 跑一次逃亡到安全为止。时间与等待可注入，单测用假时钟。
  * 吃东西只吃一口（escape 期间就一次），吃是顺手，人跑路是正事。
  */
@@ -193,12 +225,17 @@ export async function runEmergency(
     tickMs?: number;
     sleep?: (ms: number) => Promise<void>;
     now?: () => number;
+    /** 要处理的处境。不给 = 旧行为（先看溺水再看威胁），只为兼容旧调用点。 */
+    intent?: EmergencyIntent;
   } = {},
 ): Promise<EmergencyResult> {
   if (bot == null) return { escaped: false, reason: 'no-bot' };
   const tickMs = opts.tickMs ?? 1000;
   const sleep = opts.sleep ?? ((ms: number) => new Promise((r) => setTimeout(r, ms)));
   const now = opts.now ?? Date.now;
+
+  // 处理是**按事件类型**选定的：溺水归溺水，威胁归威胁，不互相代劳。
+  if (opts.intent === 'surface') return runSurface(bot, { tickMs, sleep });
 
   bot.stopAll();
 
@@ -225,7 +262,9 @@ export async function runEmergency(
     //
     // 顺带这也保证了不会误判成"安全"——跳过 `escaped` 那道判断，必须真的把头
     // 露出来才会回到正常流程。
-    if (bot.submerged?.() === true) {
+    // **只有"没指定处境"时才在这里兜溺水**：溺水有自己的事件类型和
+    // 自己的处理（`intent: 'surface'`），不该由逃跑循环顺手代劳。
+    if (opts.intent !== 'flee' && bot.submerged?.() === true) {
       // **保命被关掉就不碰身体** —— 模型明确表示这几步自己负责，别抢方向盘。
       // 放在这里而不是外面，是为了保住"关了保命也照样跑别的保命（ fleeTo / 吃）"
       // 这种语义：关掉的只是**这条**上浮反射，不是整个 emergency。

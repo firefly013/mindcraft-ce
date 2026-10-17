@@ -167,6 +167,7 @@ describe('UpdatePlan 走真实 ToolTask（证明 prepareArguments 被调用）',
       providerId: faux.provider.id,
       apiKey: undefined,
       headers: null,
+      params: {},
       contextWindow: model.contextWindow,
     };
 

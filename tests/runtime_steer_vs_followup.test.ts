@@ -75,6 +75,7 @@ async function measure(mode: 'steer' | 'followUp'): Promise<Measured> {
     providerId: faux.provider.id,
     apiKey: undefined,
     headers: null,
+    params: {},
     contextWindow: model.contextWindow,
   };
 

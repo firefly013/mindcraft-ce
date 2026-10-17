@@ -136,6 +136,15 @@ export interface LiveState {
   dangerousOps: string;
   /** 保命程序开关现状（正常 / 已关闭 + 剩多少）。和危险操作许可是**两件事**。 */
   safeguards: string;
+  /**
+   * 在线玩家名（不含自己）。
+   *
+   * **不渲染**——`LIVE_SECTION_KEYS` 里没有它，所以它不进提示词、不动 prompt cache。
+   * 它的用途是任务布置（`teleportBots` 要把 bot 传送到人类玩家身边）：
+   * 那是"问身体要一个事实"，而世界快照本来就是大脑要事实的地方——
+   * 不必为此多开一条协议指令。
+   */
+  players: string[];
   meta: LiveMeta;
 }
 

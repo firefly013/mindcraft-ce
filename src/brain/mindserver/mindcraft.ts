@@ -4,6 +4,8 @@ import { getServer } from './mcserver.js';
 import open from 'open';
 import type { Server as HttpServer } from 'http';
 import type { Settings } from '../../shared/types/common.js';
+import { ConfigError, validateProfile } from '../../shared/config/load.js';
+import { resolveProvider } from '../runtime/provider.js';
 
 export interface CreateAgentResult {
     success: boolean;
@@ -39,6 +41,18 @@ export function init(
 }
 
 export async function createAgent(incomingSettings: Settings): Promise<CreateAgentResult> {
+    // 网页上传的 profile 不经过 main.ts 的启动校验，所以这里再校验一次；
+    // 顺带把端点/模型/凭据解析一遍——配置错了要在**起进程之前**报出来，
+    // 否则 agent 进程起来就死，只剩重启循环。
+    try {
+        validateProfile(incomingSettings.profile);
+        resolveProvider(incomingSettings.profile);
+    } catch (error: unknown) {
+        const message = error instanceof ConfigError || error instanceof Error ? error.message : String(error);
+        // 调用方负责显示：网页端把 error 回给浏览器，CLI 端打印后退出。
+        return { success: false, error: message };
+    }
+
     if (!incomingSettings.profile?.name) {
         console.error('Agent name is required in profile');
         return {
@@ -56,9 +70,11 @@ export async function createAgent(incomingSettings: Settings): Promise<CreateAge
 
     try {
         try {
+            const configuredPort = Number(settings.port);
+            const portForLookup = Number.isInteger(configuredPort) ? configuredPort : -1;
             const server = await getServer(
                 settings.host as string,
-                settings.port as number,
+                portForLookup,
                 settings.minecraft_version as string,
             );
             settings.host = server.host;

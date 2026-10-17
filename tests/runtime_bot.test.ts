@@ -18,6 +18,7 @@ import { defineTool } from '@earendil-works/pi-durable';
 import { openBotWiring, type BotWiring } from '../src/brain/runtime/bot.js';
 import { SayEntry } from '../src/brain/runtime/entries.js';
 import { EventIntake } from '../src/brain/runtime/events.js';
+import type { GameEvent } from '../src/brain/runtime/events.js';
 import type { ResolvedProvider } from '../src/brain/runtime/provider.js';
 
 const ctx = BACKGROUND_CONTEXT;
@@ -52,9 +53,13 @@ interface Harness {
   wiring: BotWiring;
   faux: ReturnType<typeof fauxProvider>;
   said: string[];
-  rescues: () => number;
   /** 每次模型请求看到的完整消息列。 */
   seen: Array<Array<Record<string, unknown>>>;
+}
+
+/** 一条事件。等级只是它的属性——处理由事件类型决定。 */
+function ev(type: string, level: number, text: string): GameEvent {
+  return { type, kind: 'World', level: level as GameEvent['level'], payload: {}, text, ts: Date.now(), reflex: null, completes: null };
 }
 
 async function openHarness(intake?: EventIntake): Promise<Harness> {
@@ -68,6 +73,7 @@ async function openHarness(intake?: EventIntake): Promise<Harness> {
     providerId: faux.provider.id,
     apiKey: undefined,
     headers: null,
+    params: {},
     contextWindow: model.contextWindow,
   };
 
@@ -79,7 +85,6 @@ async function openHarness(intake?: EventIntake): Promise<Harness> {
   faux.setResponses([step, step, step, step, step, step]);
 
   const said: string[] = [];
-  let rescueCount = 0;
 
   const wiring = await openBotWiring({
     name: 'tester',
@@ -96,14 +101,10 @@ async function openHarness(intake?: EventIntake): Promise<Harness> {
     }),
     tools: [Look],
     onSay: (text) => said.push(text),
-    rescue: () => {
-      rescueCount += 1;
-      return Promise.resolve();
-    },
     ...(intake != null ? { intake } : {}),
   });
 
-  return { wiring, faux, said, rescues: () => rescueCount, seen };
+  return { wiring, faux, said, seen };
 }
 
 /** 某次请求里所有 user 消息的正文。 */
@@ -153,7 +154,7 @@ describe('装配层全栈', () => {
     await h.wiring.close();
   });
 
-  it('记忆**不进**尾巴——它是压仓摘要，随历史一起发', async () => {
+  it('记忆**不进**尾巴——它是上下文压缩摘要，随历史一起发', async () => {
     const h = await openHarness();
     await h.wiring.state.setMemory('家在北边');
     await (await h.wiring.runtime.submit('看看我')).wait(ctx);
@@ -167,17 +168,16 @@ describe('装配层全栈', () => {
     await h.wiring.close();
   });
 
-  it('L2 事件：不唤醒模型，但搭下一次请求的车', async () => {
+  it('L2 事件：不唤醒模型，但**当场**进上下文', async () => {
     const h = await openHarness();
-    h.wiring.intake.notify({ level: 2 as never, text: '背包里多了一块木头' });
+    h.wiring.intake.notify(ev('bot.hurt', 2, '背包里多了一块木头'));
     await h.wiring.intake.settle();
-    // L2 不标记"需要请求"，所以拉不起 run
+    // L2 是 write（记录，不唤醒），所以拉不起 run
     expect(h.faux.state.callCount).toBe(0);
 
-    // 下一条 L3 把它一起带走——**同一批**，一次请求
-    h.wiring.intake.notify({ level: 3 as never, text: '有玩家在叫我' });
+    // 下一条 L3 唤醒时，那条 L2 已经在 transcript 里了——不靠"搭车"
+    h.wiring.intake.notify(ev('user.message', 3, '有玩家在叫我'));
     await until(() => h.faux.state.callCount > 0);
-    // 两条合成**一批**（一条消息），这就是整流
     const texts = userTexts(h.seen[0]).join('\n');
     expect(texts).toContain('背包里多了一块木头');
     expect(texts).toContain('有玩家在叫我');
@@ -186,7 +186,7 @@ describe('装配层全栈', () => {
 
   it('L3 事件走 steer：出现在同一次请求里', async () => {
     const h = await openHarness();
-    h.wiring.intake.notify({ level: 3 as never, text: '有玩家在叫我' });
+    h.wiring.intake.notify(ev('user.message', 3, '有玩家在叫我'));
     await h.wiring.intake.settle();
     // 空闲时 steer 也会把 run 拉起来（submit 只保证已记录，run 异步跑）
     await until(() => h.faux.state.callCount > 0);
@@ -195,17 +195,15 @@ describe('装配层全栈', () => {
     await h.wiring.close();
   });
 
-  it('L5 事件：abort + 保命反射，且不喂给模型', async () => {
+  it('L5 事件：中断在途请求，而且**模型必须知道**（事件与处理都进上下文）', async () => {
     const h = await openHarness();
     await (await h.wiring.runtime.submit('干点活')).wait(ctx);
-    const callsBefore = h.faux.state.callCount;
 
-    h.wiring.intake.notify({ level: 5 as never, text: '脚下是岩浆' });
-    await h.wiring.intake.settle();
+    h.wiring.intake.notify(ev('world.lava.contact', 5, '脚下是岩浆'));
+    await until(() => userTexts(h.seen[h.seen.length - 1]).some((t) => t.includes('脚下是岩浆')));
 
-    expect(h.rescues()).toBe(1);
-    // 紧急事件由反射消化，不再拉起模型
-    expect(h.faux.state.callCount).toBe(callsBefore);
+    const texts = userTexts(h.seen[h.seen.length - 1]).join('\n');
+    expect(texts).toContain('脚下是岩浆');
     await h.wiring.close();
   });
 
@@ -241,7 +239,7 @@ describe('装配层全栈', () => {
   it('运行时就绪前的事件被补投，一个都不丢', async () => {
     // Agent 的用法：先建 intake、注册事件监听，等 SQLite 打开后再接运行时。
     const intake = new EventIntake();
-    intake.notify({ level: 2 as never, text: '连接期间的噪声' });
+    intake.notify(ev('bot.hurt', 2, '连接期间的噪声'));
     expect(intake.attached).toBe(false);
     expect(intake.waitingCount).toBe(1);
 
@@ -250,9 +248,9 @@ describe('装配层全栈', () => {
     expect(intake.attached).toBe(true);
     expect(intake.waitingCount).toBe(0);
 
-    // L2 不唤醒模型，但会搭下一次请求的车
+    // L2 不唤醒模型，但它已经作为 entry 落进上下文了
     expect(h.faux.state.callCount).toBe(0);
-    intake.notify({ level: 3 as never, text: '连接后的事' });
+    intake.notify(ev('user.message', 3, '连接后的事'));
     await until(() => h.faux.state.callCount > 0);
     expect(userTexts(h.seen[0]).join('\n')).toContain('连接期间的噪声');
     await h.wiring.close();
@@ -278,12 +276,12 @@ describe('装配层全栈', () => {
         providerId: faux2.provider.id,
         apiKey: undefined,
         headers: null,
+        params: {},
         contextWindow: model2.contextWindow,
       },
       baseDir,
       systemPrompt: () => 'SYS',
       liveTail: () => composeLiveTail({ bot: {} }),
-      rescue: () => Promise.resolve(),
     });
 
     expect(reopened.runtime.conversation.id).toBe(id);

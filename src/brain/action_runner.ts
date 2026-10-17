@@ -16,7 +16,6 @@
 
 import { Scheduler } from './scheduler.js';
 import { MESSAGES } from '../shared/prompts.js';
-import { AUTO_PICKUP_ID } from '../shared/auto_pickup.js';
 import type { ToolCatalog } from './tools/catalog.js';
 import { isActionTool, validateToolCall } from './tools/validate.js';
 import type { ToolOutcome } from './tools/tools.js';
@@ -89,14 +88,7 @@ export class ActionRunner {
       await this.record(data, name, args);
       return { status: 'completed', data };
     }
-    let claim = this.scheduler.startAction(name, args);
-    if (!claim.accepted) {
-      // 自动拾取是**后台房客**：模型要用身体，它立刻让位，不让模型吃到忙音。
-      // 只有"占通道的正好是它"才抢——模型自己的动作之间仍然照旧走幂等/报忙。
-      if (claim.code === 'ACTION_BUSY' && this.scheduler.preempt(AUTO_PICKUP_ID)) {
-        claim = this.scheduler.startAction(name, args);
-      }
-    }
+    const claim = this.scheduler.startAction(name, args);
     if (!claim.accepted) {
       const running = this.scheduler.currentAction();
       // 幂等：被拒的这次**就是**正在跑的那个动作。

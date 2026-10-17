@@ -60,7 +60,7 @@ const USAGE = `用法：cli --agent <名字> [选项] <命令> [参数...]
 
 选项：
   --agent <名字>   机器人名字（必填）
-  --port <端口>    MindServer 端口，默认 8099
+  --port <端口>    MindServer 端口，默认读取 settings.ts 的 mindserver_port
   --wait           长命令提交后顺带等到结束（省得再跑一次 wait）
   --force          先停掉机器人正在做的动作再跑这条命令
   --all            忽略本地进度，把积攒的事件全部打印
@@ -85,9 +85,9 @@ const JOB_OPS: Record<string, CliOp> = {
   jobs: 'list',
 };
 
-export function parseCliArgs(argv: readonly string[]): CliOptions {
+export function parseCliArgs(argv: readonly string[], defaultPort = 8080): CliOptions {
   let agent = '';
-  let port = 8099;
+  let port = defaultPort;
   let asyncMode = false;
   let waitMode = false;
   let force = false;

@@ -87,10 +87,14 @@ describe('parseCliArgs', () => {
     expect(o.force).toBe(false);
   });
 
-  it('默认值：端口 8099、超时 120 秒', () => {
+  it('默认值：端口 8080、超时 120 秒', () => {
     const o = parseCliArgs(['--agent', 'pia', 'stats']);
-    expect(o.port).toBe(8099);
+    expect(o.port).toBe(8080);
     expect(o.timeoutMs).toBe(120_000);
+  });
+
+  it('默认端口可由调用方指定', () => {
+    expect(parseCliArgs(['--agent', 'pia', 'stats'], 9000).port).toBe(9000);
   });
 
   it('-h / --help 要用法文本', () => {
@@ -106,7 +110,7 @@ describe('parseCliArgs', () => {
   });
 
   it('端口给垃圾就退回默认，不炸', () => {
-    expect(parseCliArgs(['--agent', 'pia', '--port', 'abc', 'stats']).port).toBe(8099);
+    expect(parseCliArgs(['--agent', 'pia', '--port', 'abc', 'stats']).port).toBe(8080);
   });
 });
 

@@ -65,6 +65,7 @@ function resolveFaux(faux: ReturnType<typeof fauxProvider>): ResolvedProvider {
     providerId: faux.provider.id,
     apiKey: undefined,
     headers: null,
+    params: {},
     contextWindow: model.contextWindow,
   };
 }

@@ -10,6 +10,7 @@ scratch.js
 bots/
 bots/**/action-code/**
 keys.json
+auth.json
 tmp/
 server_data/*
 server_data*

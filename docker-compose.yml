@@ -6,7 +6,8 @@ services:
         {"auto_open_ui": false}
     volumes:
       - ./settings.ts:/app/settings.ts
-      - ./keys.json:/app/keys.json
+      - ./providers.json:/app/providers.json
+      - ./auth.json:/app/auth.json
       - ./profiles:/app/profiles
       - ./bots:/app/bots
     ports:

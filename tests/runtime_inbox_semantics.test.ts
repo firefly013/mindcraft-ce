@@ -70,6 +70,7 @@ async function openProbe(): Promise<Probe> {
     providerId: faux.provider.id,
     apiKey: undefined,
     headers: null,
+    params: {},
     contextWindow: model.contextWindow,
   };
 

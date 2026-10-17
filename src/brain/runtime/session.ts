@@ -54,7 +54,7 @@ export interface BotSessionOptions<Tool extends ToolRegistration = ToolRegistrat
    */
   model?: ModelRef;
   /**
-   * 压仓策略。不给就用 pi-durable 的内置默认。
+   * 上下文压缩策略。不给就用 pi-durable 的内置默认。
    *
    * 触发线是 `model.contextWindow - reserveTokens`——**窗口取自 pi-ai 目录**
    * （OpenCode Go 的 `deepseek-v4.1-flash` = 1_000_000），不是 profile 里的

@@ -1,0 +1,18 @@
+{
+    // 凭据文件：providerId → 一条凭据。复制成 auth.json 后填自己的 key。
+    //
+    // key 支持三种写法：
+    //   "$DEEPSEEK_API_KEY"                        取环境变量
+    //   "sk-..."                                   字面量
+    //   "!security find-generic-password -w -s x"  执行命令取 stdout
+    //
+    // 也支持 env：某些供应商要额外的非密钥配置（账号 ID 之类）。
+    "deepseek": {
+        "type": "api_key",
+        "key": "$DEEPSEEK_API_KEY"
+    },
+    "openai": {
+        "type": "api_key",
+        "key": "$OPENAI_API_KEY"
+    }
+}

@@ -325,13 +325,14 @@ export const MESSAGES = {
   exiting: '退出中。',
 };
 
-/** 按 profile 选提示词集：profile.prompt_set 指定任务变体，同名键可覆盖 */
+/** 按 profile 选提示词集：`promptSet` 指定任务变体，`prompts.*` 逐条覆盖 */
 export function resolvePromptSet(profile: AgentProfile = {} as AgentProfile): PromptSet {
-  const setKey = typeof profile.prompt_set === 'string' ? profile.prompt_set : undefined;
+  const setKey = typeof profile.promptSet === 'string' ? profile.promptSet : undefined;
   const base: Record<string, string> = (setKey && PROMPT_SETS[setKey]) || {};
   const merged = { ...PROMPT_SETS.default, ...base } as PromptSet;
+  const overrides = profile.prompts ?? {};
   for (const key of ['conversing', 'saving_memory', 'saving_memory_update', 'summary_system'] as const) {
-    const override = profile[key];
+    const override = overrides[key];
     if (typeof override === 'string') merged[key] = override;
   }
   return merged;

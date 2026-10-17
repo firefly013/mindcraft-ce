@@ -29,7 +29,7 @@ export interface ChatMessage {
   /** 写入时间戳（ms），World 条目过期用。 */
   at?: number;
   /**
-   * 本条 assistant 回复的真实 token 用量。压仓用它当锚点：
+   * 本条 assistant 回复的真实 token 用量。上下文压缩用它当锚点：
    * 这条之后新增的消息才需要估算，之前的量是 provider 报的实数。
    */
   usage?: TokenUsage;
@@ -60,7 +60,7 @@ export interface ToolResponse {
   usage?: TokenUsage;
   /**
    * 请求因上下文超限被拒（`context_length_exceeded` / `stopReason: length`）。
-   * 上层据此压缩后重试一次——这是压仓触发线之外的兜底。
+   * 上层据此压缩后重试一次——这是上下文压缩触发线之外的兜底。
    */
   overflow?: boolean;
 }
@@ -87,29 +87,24 @@ export interface AIModel {
   ): Promise<ToolResponse>;
 }
 
-/** Profile JSON shape (profile JSON merged with defaults). */
-export interface AgentProfile {
-  name: string;
-  model: string;
-  api?: string;
-  url?: string;
-  params?: Record<string, unknown>;
-  max_tokens?: number;
-  skin?: { model: string; path: string };
-  goal_setting?: string;
-  [key: string]: unknown;
-}
+/**
+ * Profile 的形状：真源是 `src/shared/config/schema.ts` 的 TypeBox 定义，
+ * 这里只是给老调用方留的别名（校验在 `shared/config/load.ts`）。
+ */
+import type { Profile } from '../config/schema.js';
+
+export type { Profile as AgentProfile } from '../config/schema.js';
 
 /** Global settings object (settings.ts). */
 export interface Settings {
   minecraft_version: string;
   host: string;
-  port: number | string;
+  port?: number | string;
   auth: string;
   mindserver_port: number | string;
   auto_open_ui: boolean;
   profiles: string[];
-  profile?: AgentProfile;
+  profile?: Profile;
   load_memory: boolean;
   init_message: string;
   only_chat_with: string[];

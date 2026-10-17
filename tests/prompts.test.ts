@@ -74,21 +74,21 @@ describe('resolvePromptSet', () => {
   });
 
   it('merges a task variant over defaults', () => {
-    const set = resolvePromptSet(profile({ prompt_set: 'cooking' }));
+    const set = resolvePromptSet(profile({ promptSet: 'cooking' }));
     // 变体已删，只剩 default：未知 variant 名直接回落整套 default。
     expect(set).toEqual(PROMPT_SETS.default);
   });
 
   it('ignores unknown variant names', () => {
-    expect(resolvePromptSet(profile({ prompt_set: 'nope' }))).toEqual(PROMPT_SETS.default);
+    expect(resolvePromptSet(profile({ promptSet: 'nope' }))).toEqual(PROMPT_SETS.default);
   });
 
-  it('ignores non-string prompt_set', () => {
-    expect(resolvePromptSet(profile({ prompt_set: 42 }))).toEqual(PROMPT_SETS.default);
+  it('ignores non-string promptSet', () => {
+    expect(resolvePromptSet(profile({ promptSet: 42 }))).toEqual(PROMPT_SETS.default);
   });
 
   it('lets profiles override individual keys', () => {
-    const set = resolvePromptSet(profile({ conversing: 'custom', saving_memory: 42 }));
+    const set = resolvePromptSet(profile({ prompts: { conversing: 'custom', saving_memory: 42 } }));
     expect(set.conversing).toBe('custom');
     expect(set.saving_memory).toBe(PROMPT_SETS.default.saving_memory);
   });

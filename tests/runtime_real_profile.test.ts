@@ -3,15 +3,15 @@
  *
  * 前面的装配测试都用 `profile = {}`，那是简化过的。这里读盘上的
  * `profiles/opencode.json`（生产 profile），只把供应商换成 faux，其余全部走
- * 真实路径：真实提示词集、真实压仓参数、真实工具表、真实 SQLite。
+ * 真实路径：真实提示词集、真实上下文压缩参数、真实工具表、真实 SQLite。
  *
  * 覆盖的契约：
  *   - 系统提示词 = 真实提示词集渲染出来的静态文本（不含任何占位符）
- *   - 压仓参数来自 profile 的 context_window / reserve_tokens / keep_recent_tokens
+ *   - 上下文压缩参数来自 profile 的 compaction.reserveTokens / keepRecentTokens
  *   - 工具表 = 真实命令表 + 4 个控制工具 + Say
  *   - 一轮真的跑得起来，且尾巴带世界快照、不落 transcript
  */
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync } from 'node:fs';
 import { composeLiveTail } from '../src/body/live_state.js';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -23,6 +23,7 @@ import { openBotWiring } from '../src/brain/runtime/bot.js';
 import { compactionPolicyFromProfile } from '../src/brain/runtime/compaction.js';
 import { buildGameTools } from '../src/brain/tools/game_tools.js';
 import { toolDeclarations } from '../src/body/commands/registry.js';
+import { loadProfile } from '../src/shared/config/load.js';
 import type { ResolvedProvider } from '../src/brain/runtime/provider.js';
 
 const ctx = BACKGROUND_CONTEXT;
@@ -46,10 +47,9 @@ afterEach(() => {
   }
 });
 
-/** 读生产 profile（与 `settings.profile` 同源的那份文件）。 */
+/** 读生产 profile（与 `settings.profile` 同源的那份文件，走真实的校验路径）。 */
 function readProductionProfile(): Record<string, unknown> {
-  const raw = readFileSync(join(process.cwd(), 'profiles', 'opencode.json'), 'utf8');
-  return JSON.parse(raw) as Record<string, unknown>;
+  return loadProfile(join(process.cwd(), 'profiles', 'opencode.json')) as unknown as Record<string, unknown>;
 }
 
 function fauxProviderFor(): { provider: ResolvedProvider; faux: ReturnType<typeof fauxProvider> } {
@@ -65,6 +65,7 @@ function fauxProviderFor(): { provider: ResolvedProvider; faux: ReturnType<typeo
       providerId: faux.provider.id,
       apiKey: undefined,
       headers: null,
+      params: {},
       contextWindow: model.contextWindow,
     },
   };
@@ -75,12 +76,13 @@ describe('真实 profile 装配', () => {
 
   it('profile 形状符合预期（这几个字段是接线要读的）', () => {
     expect(profile['name']).toBe('opencode');
-    expect(profile['context_window']).toBe(1_000_000);
-    expect(profile['reserve_tokens']).toBe(16_384);
-    expect(profile['keep_recent_tokens']).toBe(20_000);
+    expect(profile['model']).toBe('opencode-go/deepseek-v4.1-flash');
+    // 窗口不再写在 profile 里：它由内置目录或 providers.json 的模型定义决定。
+    expect(profile).not.toHaveProperty('context_window');
+    expect(profile['compaction']).toEqual({ reserveTokens: 16_384, keepRecentTokens: 20_000 });
   });
 
-  it('压仓参数来自 profile', () => {
+  it('上下文压缩参数来自 profile', () => {
     expect(compactionPolicyFromProfile(profile)).toEqual({
       enabled: true,
       reserveTokens: 16_384,
@@ -113,7 +115,6 @@ describe('真实 profile 装配', () => {
         },
       }),
       tools: buildGameTools({ declarations: toolDeclarations(), execute: () => 'ok' }),
-      rescue: () => Promise.resolve(),
     });
 
     await (await wiring.runtime.submit('看看周围')).wait(ctx);

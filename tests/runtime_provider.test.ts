@@ -1,94 +1,114 @@
 /**
- * P1 等价性：pi-ai 供应商层（`src/runtime/`）vs 旧手写 `GPT` 适配器。
+ * 模型解析：profile 的引用 → pi-ai 的 `Models` / `Model`。
  *
- * 两组验证：
- *  1. 端点解析：OpenCode Go 的 profile 必须命中 pi-ai 内置目录，从而拿到真实的
- *     1_000_000 上下文窗口与 `thinkingFormat: "deepseek"` 等 compat。
- *  2. payload 等价：同一组输入下，新路径经 pi-ai 组出的请求体与旧适配器一致。
+ * 这一层的规矩：
+ *   - 端点、模型窗口、采样参数来自 `providers.json`（内置目录里的 provider 直接用目录）；
+ *   - 凭据按 `auth.json` → 环境变量 → 自建端点占位 的顺序解析；
+ *   - 解析不到**抛错**，不再"退回该 provider 的第一个模型"。
  *
- * 全程**不联网**：fetch 注入成必失败函数，payload 由 `onPayload` 在发送前截获；
- * 旧适配器走注入的 stub client。
+ * 全程不联网：用临时目录里的 providers.json / auth.json。
  */
-import { beforeAll, describe, expect, it } from 'vitest';
-import { PiModel } from '../src/brain/runtime/model.js';
-import { resolveProvider } from '../src/brain/runtime/provider.js';
-import type { ChatMessage, OpenAITool } from '../src/shared/types/common.js';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { afterEach, describe, expect, it } from 'vitest';
+import {
+  providerApiKeyEnvName,
+  readModelReference,
+  resolveProvider,
+} from '../src/brain/runtime/provider.js';
+import { clearConfigValueCache } from '../src/shared/config/value.js';
 
-const OFFLINE_URL = 'http://127.0.0.1:1/v1';
-const MISSING_KEY = 'DEFINITELY_MISSING_KEY_FOR_TEST';
+const tempDirs: string[] = [];
+const tempEnvNames: string[] = [];
+const OPENCODE_BASE_URL = 'https://opencode.ai/zen/go/v1';
 
-/**
- * 调用模型的测试显式抬高超时。
- *
- * pi-ai 的 `openai-completions` 适配器是**惰性 import** 的：首次调用要冷加载
- * OpenAI SDK。机器一有负载（例如刚跑完 `npm ci`），这一步就会逼近甚至越过
- * vitest 默认的 5s 单测超时。这里既预热（`beforeAll`）又留足上限，让断言跑在
- * 稳定的耗时上，而不是赌冷启动够快。
- */
-const MODEL_CALL_TIMEOUT_MS = 30_000;
+afterEach(() => {
+  clearConfigValueCache();
+  for (const name of tempEnvNames.splice(0)) Reflect.deleteProperty(process.env, name);
+  while (tempDirs.length > 0) {
+    const dir = tempDirs.pop();
+    if (dir == null) continue;
+    try {
+      rmSync(dir, { recursive: true, force: true });
+    } catch {
+      /* Windows 句柄 */
+    }
+  }
+});
 
-/** 必失败的 fetch：请求发不出去，但 `onPayload` 已在发送前触发。 */
-const offlineFetch = (() =>
-  Promise.reject(new Error('offline'))) as unknown as typeof globalThis.fetch;
-
-/** 取第一条捕获结果；没有就抛，避免用非空断言。 */
-function first<T>(items: T[]): T {
-  const value = items[0];
-  if (value === undefined) throw new Error('expected at least one captured payload');
-  return value;
+interface Fixture {
+  models: Record<string, unknown>;
+  auth?: Record<string, unknown>;
+  env?: Record<string, string>;
 }
 
-const TOOLS: OpenAITool[] = [
-  {
-    type: 'function',
-    function: {
-      name: 'Look',
-      description: 'Look around',
-      parameters: { type: 'object', properties: {}, additionalProperties: false },
-    },
-  },
-];
-
-/** 本地兼容端点 profile（走 custom provider，不需要真 key）。 */
-const LOCAL_PROFILE = {
-  model: { model: 'gpt-5.4', url: OFFLINE_URL, params: { api_key_env: MISSING_KEY } },
-};
-
-function capturingPi(profile: unknown): {
-  model: PiModel;
-  payloads: Record<string, unknown>[];
-} {
-  const payloads: Record<string, unknown>[] = [];
-  const model = new PiModel(profile, {
-    fetch: offlineFetch,
-    maxRetries: 0,
-    onPayload: (payload) => {
-      payloads.push(payload as Record<string, unknown>);
-      return undefined;
-    },
-  });
-  return { model, payloads };
+/** 把 providers.json / auth.json 写到临时目录，返回 resolveProvider 用的路径。 */
+function fixture(files: Fixture): { providersPath: string; authPath: string } {
+  const dir = mkdtempSync(join(tmpdir(), 'mc-provider-'));
+  tempDirs.push(dir);
+  const providersPath = join(dir, 'providers.json');
+  const authPath = join(dir, 'auth.json');
+  writeFileSync(providersPath, JSON.stringify({ providers: files.models }, null, 2), 'utf8');
+  if (files.auth != null) writeFileSync(authPath, JSON.stringify(files.auth, null, 2), 'utf8');
+  for (const [name, value] of Object.entries(files.env ?? {})) {
+    tempEnvNames.push(name);
+    process.env[name] = value;
+  }
+  return { providersPath, authPath };
 }
 
-describe('resolveProvider 端点分派', () => {
-  it('OpenCode Go profile 命中内置目录：真实 1M 窗口 + deepseek thinking 格式', () => {
-    const profile = {
-      name: 'opencode',
-      model: {
-        api: 'openai',
-        model: 'deepseek-v4.1-flash',
-        url: 'https://opencode.ai/zen/go/v1',
-        params: {
-          api_key_env: 'OPENCODE_API_KEY',
-          headers: { 'x-opencode-session': '${OPENCODE_SESSION_ID}' },
-        },
+/** opencode-go 端点：providers.json 只补 header，key 放 auth.json。 */
+function opencodeFixture(extra: Record<string, unknown> = {}): { providersPath: string; authPath: string } {
+  return fixture({
+    models: {
+      'opencode-go': {
+        baseUrl: OPENCODE_BASE_URL,
+        headers: { 'x-opencode-session': '$MC_TEST_SESSION_ID' },
+        ...extra,
       },
-    };
-    const resolved = resolveProvider(profile);
+    },
+    auth: { 'opencode-go': { type: 'api_key', key: 'sk-from-auth-json' } },
+    env: { MC_TEST_SESSION_ID: 'session-abc' },
+  });
+}
+
+describe('readModelReference', () => {
+  it('"provider/model" 拆成两半', () => {
+    expect(readModelReference({ model: 'opencode-go/deepseek-v4.1-flash' })).toEqual({
+      providerId: 'opencode-go',
+      modelId: 'deepseek-v4.1-flash',
+    });
+  });
+
+  it('裸模型名没有 provider', () => {
+    expect(readModelReference({ model: 'gpt-5.4' })).toEqual({ modelId: 'gpt-5.4' });
+  });
+
+  it('`openai/` 前缀会被剥掉（旧适配器的老规矩）', () => {
+    expect(readModelReference({ model: 'openai/gpt-5.4' }).modelId).toBe('gpt-5.4');
+  });
+
+  it('对象形式只读 provider 和 model', () => {
+    const reference = readModelReference({
+      model: { provider: 'local', model: 'm' },
+    });
+    expect(reference).toEqual({ providerId: 'local', modelId: 'm' });
+  });
+
+  it('对象形式缺模型名 → 报错', () => {
+    expect(() => readModelReference({ model: { provider: 'local' } })).toThrow(/模型名/);
+  });
+});
+
+describe('内置供应商', () => {
+  it('opencode-go：窗口、compat 都来自内置目录', () => {
+    const paths = opencodeFixture();
+    const resolved = resolveProvider({ name: 'opencode', model: 'opencode-go/deepseek-v4.1-flash' }, paths);
+
     expect(resolved.providerId).toBe('opencode-go');
     expect(resolved.model.id).toBe('deepseek-v4.1-flash');
-    expect(resolved.model.baseUrl).toBe('https://opencode.ai/zen/go/v1');
-    // 这就是现有代码 128_000 回退所丢掉的那个数。
+    expect(resolved.model.baseUrl).toBe(OPENCODE_BASE_URL);
     expect(resolved.contextWindow).toBe(1_000_000);
     expect(resolved.model.input).toContain('image');
     expect(resolved.model.compat).toMatchObject({
@@ -96,75 +116,180 @@ describe('resolveProvider 端点分派', () => {
       supportsStrictMode: true,
       maxTokensField: 'max_tokens',
     });
-    expect(resolved.headers).not.toBeNull();
-    expect(resolved.headers?.['x-opencode-session']).toBeTruthy();
   });
 
-  it('Zen 端点不会被 Go 抢走（Go 是 Zen 的子路径，匹配顺序敏感）', () => {
-    const resolved = resolveProvider({
-      model: { model: 'deepseek-v4.1-flash', url: 'https://opencode.ai/zen/v1' },
+  it('providers.json 的 header 经 $ENV 解析后进请求', () => {
+    const paths = opencodeFixture();
+    const resolved = resolveProvider({ model: 'opencode-go/deepseek-v4.1-flash' }, paths);
+    expect(resolved.headers?.['x-opencode-session']).toBe('session-abc');
+  });
+
+  it('opencode 与 opencode-go 是两个端点', () => {
+    const paths = fixture({
+      models: { opencode: { baseUrl: 'https://opencode.ai/zen/v1' } },
+      auth: { opencode: { type: 'api_key', key: 'sk-zen' } },
     });
+    const resolved = resolveProvider({ model: 'opencode/deepseek-v4.1-flash' }, paths);
     expect(resolved.providerId).toBe('opencode');
     expect(resolved.model.baseUrl).toBe('https://opencode.ai/zen/v1');
   });
 
-  it('本地端点缺 key → 占位 not-needed，且不因目录缺失而崩', () => {
-    const resolved = resolveProvider(LOCAL_PROFILE);
-    expect(resolved.providerId).toBe('custom');
-    expect(resolved.apiKey).toBe('not-needed');
-    expect(resolved.contextWindow).toBe(128_000);
-  });
-
-  it('无 url 且无 key → 抛，保留旧 getKey 的明确报错', () => {
-    expect(() =>
-      resolveProvider({ model: 'gpt-5.4', params: { api_key_env: MISSING_KEY } }),
-    ).toThrow(/not found in keys.json/);
-  });
-
-  it('裸字符串 profile 与 `openai/` 前缀都能归一', () => {
-    expect(resolveProvider({ model: 'openai/gpt-5.4', url: OFFLINE_URL }).model.id).toBe('gpt-5.4');
-    expect(resolveProvider({ model: 'gpt-5.4', url: OFFLINE_URL }).model.id).toBe('gpt-5.4');
+  it('openai：模型名照目录解析', () => {
+    const paths = fixture({
+      models: { openai: {} },
+      auth: { openai: { type: 'api_key', key: 'sk-openai' } },
+    });
+    const resolved = resolveProvider({ model: 'openai/gpt-5.4' }, paths);
+    expect(resolved.providerId).toBe('openai');
+    expect(resolved.model.id).toBe('gpt-5.4');
   });
 });
 
-/**
- * 真机冒烟抓到的 bug：**key 从来没交给 pi-ai**。
- *
- * 内置 provider 的 auth 是 `envApiKeyAuth(name, [ENV])`，它只认**已存凭据**或
- * **环境变量**。而本项目的 key 在 `keys.json` 里（`getKey`），既不进环境也不进
- * pi-ai 的凭据库——于是每个请求都失败：`Provider is not configured: opencode-go`，
- * assistant 条目是 `stopReason: "error"`、usage 全 0，模型一个字都答不出来。
- *
- * 单测全都手动 `setProvider(faux)`，不需要鉴权，所以只有真机才暴露。
- * 这条断言用 `getAuth()`（pi-ai 自己的鉴权解析入口）当预言机，不需要联网。
- */
-describe('凭据真的交给了 pi-ai', () => {
-  it('resolveProvider 之后 getAuth 能解析出 key', async () => {
-    process.env['PI_TEST_API_KEY'] = 'sk-test-12345';
-    try {
-      const resolved = resolveProvider({
-        model: {
-          model: 'deepseek-v4.1-flash',
-          url: 'https://opencode.ai/zen/go/v1',
-          params: { api_key_env: 'PI_TEST_API_KEY' },
+describe('providers.json 声明的端点和模型', () => {
+  it('自建端点：占位 key + 声明里的窗口', () => {
+    const paths = fixture({
+      models: {
+        local: {
+          baseUrl: 'http://127.0.0.1:1234/v1',
+          models: [{ id: 'qwen2.5-coder-7b', contextWindow: 32768, maxTokens: 4096 }],
         },
-      });
-      expect(resolved.providerId).toBe('opencode-go');
-      const auth = await resolved.models.getAuth(resolved.model);
-      expect(auth).toBeDefined();
-      expect(auth?.auth.apiKey).toBe('sk-test-12345');
-    } finally {
-      delete process.env['PI_TEST_API_KEY'];
+      },
+    });
+    const resolved = resolveProvider({ model: 'local/qwen2.5-coder-7b' }, paths);
+    expect(resolved.providerId).toBe('local');
+    expect(resolved.apiKey).toBe('not-needed');
+    expect(resolved.contextWindow).toBe(32768);
+    expect(resolved.model.maxTokens).toBe(4096);
+  });
+
+  it('不写 provider 时按模型 id 找声明它的 provider', () => {
+    const paths = fixture({
+      models: { local: { baseUrl: 'http://127.0.0.1:1234/v1', models: [{ id: 'm1' }] } },
+    });
+    expect(resolveProvider({ model: 'm1' }, paths).providerId).toBe('local');
+  });
+
+  it('modelOverrides 覆写内置目录的字段', () => {
+    const paths = opencodeFixture({
+      modelOverrides: { 'deepseek-v4.1-flash': { contextWindow: 500_000, maxTokens: 1234 } },
+    });
+    const resolved = resolveProvider({ model: 'opencode-go/deepseek-v4.1-flash' }, paths);
+    expect(resolved.contextWindow).toBe(500_000);
+    expect(resolved.model.maxTokens).toBe(1234);
+  });
+
+  it('模型定义里的 samplingParams 直接进入请求', () => {
+    const paths = opencodeFixture({
+      models: [{ id: 'deepseek-v4.1-flash', samplingParams: { thinking: { type: 'disabled' }, topP: 0.9 } }],
+    });
+    const resolved = resolveProvider({ model: 'opencode-go/deepseek-v4.1-flash' }, paths);
+    expect(resolved.params).toEqual({ thinking: { type: 'disabled' }, topP: 0.9 });
+  });
+});
+
+describe('解析失败一律抛错', () => {
+  it('模型不在目录里，也不是声明的模型 → 报错并列出已知模型', () => {
+    const paths = opencodeFixture();
+    try {
+      resolveProvider({ model: 'opencode-go/definitely-not-a-model' }, paths);
+      expect.unreachable('应当抛错');
+    } catch (error: unknown) {
+      const message = error instanceof Error ? error.message : String(error);
+      expect(message).toContain('definitely-not-a-model');
+      expect(message).toContain('deepseek-v4.1-flash');
     }
   });
 
-  it('本地端点用占位 key，也能解析出来（LM Studio / vLLM 那类不校验）', async () => {
-    const resolved = resolveProvider({
-      model: { model: 'local-model', url: OFFLINE_URL, params: { api_key_env: MISSING_KEY } },
+  it('写了 provider 但它既不是内置也没声明 → 报错', () => {
+    const paths = fixture({ models: {} });
+    expect(() => resolveProvider({ model: 'nobody/knows-this' }, paths)).toThrow(/未知 provider "nobody"/);
+  });
+
+  it('没写 provider 且 providers.json 里没有该模型 → 报错', () => {
+    const paths = fixture({ models: { local: { baseUrl: 'http://127.0.0.1:1/v1', models: [{ id: 'm1' }] } } });
+    try {
+      resolveProvider({ model: 'knows-this' }, paths);
+      expect.unreachable('应当抛错');
+    } catch (error: unknown) {
+      const message = error instanceof Error ? error.message : String(error);
+      expect(message).toContain('找不到');
+      expect(message).toContain('m1');
+    }
+  });
+
+  it('非内置 provider 没有 baseUrl → 报错', () => {
+    const paths = fixture({ models: { weird: {} } });
+    expect(() => resolveProvider({ model: 'weird/m' }, paths)).toThrow(/baseUrl/);
+  });
+
+  it('没有凭据 → 报错，消息里列出 auth.json 和环境变量', () => {
+    const paths = fixture({ models: { openai: {} } });
+    try {
+      resolveProvider({ model: 'openai/gpt-5.4' }, paths);
+      expect.unreachable('应当抛错');
+    } catch (error: unknown) {
+      const message = error instanceof Error ? error.message : String(error);
+      expect(message).toContain('auth.json');
+      expect(message).toContain(providerApiKeyEnvName('openai'));
+    }
+  });
+
+  it('内置 provider 即使声明了 baseUrl，缺 key 也报错（不给占位 key）', () => {
+    // 占位 key 只对自建端点有意义：内置的是已知云服务，拿 "not-needed" 去请求
+    // 只会在网关那边变成一个看不懂的 401。
+    const paths = fixture({ models: { openai: { baseUrl: 'https://api.openai.com/v1' } } });
+    try {
+      resolveProvider({ model: 'openai/gpt-5.4' }, paths);
+      expect.unreachable('应当抛错');
+    } catch (error: unknown) {
+      expect((error as Error).message).toContain('没有可用凭据');
+    }
+  });
+});
+
+describe('凭据解析顺序', () => {
+  it('auth.json 提供凭据', () => {
+    const paths = fixture({
+      models: { openai: {} },
+      auth: { openai: { type: 'api_key', key: 'sk-from-auth-json' } },
     });
+    const resolved = resolveProvider({ model: 'openai/gpt-5.4' }, paths);
+    expect(resolved.apiKey).toBe('sk-from-auth-json');
+  });
+
+  it('都没有时用 <PROVIDER>_API_KEY 环境变量', () => {
+    const envName = providerApiKeyEnvName('some-custom');
+    expect(envName).toBe('SOME_CUSTOM_API_KEY');
+    process.env[envName] = 'sk-from-provider-env';
+    const paths = fixture({ models: { 'some-custom': { baseUrl: 'http://127.0.0.1:1/v1', models: [{ id: 'm' }] } } });
+    try {
+      expect(resolveProvider({ model: 'some-custom/m' }, paths).apiKey).toBe('sk-from-provider-env');
+    } finally {
+      Reflect.deleteProperty(process.env, envName);
+    }
+  });
+
+  it('auth.json 引用缺失的环境变量 → 报错（不是静默用占位）', () => {
+    const paths = fixture({
+      models: { openai: {} },
+      auth: { openai: { type: 'api_key', key: '$MC_TEST_MISSING_OPENAI_KEY' } },
+    });
+    expect(() => resolveProvider({ model: 'openai/gpt-5.4' }, paths)).toThrow(/MC_TEST_MISSING_OPENAI_KEY/);
+  });
+
+  it('凭据真的交给了 pi-ai：getAuth 能解析出 key', async () => {
+    const paths = opencodeFixture();
+    const resolved = resolveProvider({ model: 'opencode-go/deepseek-v4.1-flash' }, paths);
+    const auth = await resolved.models.getAuth(resolved.model);
+    expect(auth?.auth.apiKey).toBe('sk-from-auth-json');
+  });
+
+  it('自建端点的占位 key 也能被 pi-ai 解析出来', async () => {
+    const paths = fixture({
+      models: { local: { baseUrl: 'http://127.0.0.1:1/v1', models: [{ id: 'm' }] } },
+    });
+    const resolved = resolveProvider({ model: 'local/m' }, paths);
     const auth = await resolved.models.getAuth(resolved.model);
     expect(auth?.auth.apiKey).toBe('not-needed');
   });
 });
-
-

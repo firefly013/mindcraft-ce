@@ -68,6 +68,40 @@ export function serverInfo(
     });
 }
 
+/** 扫描范围。TCP 端口最大 65535，不能写到 99999。 */
+export const SCAN_MIN_PORT = 10_000;
+export const SCAN_MAX_PORT = 65_535;
+/** 观察到的 LAN 端口多集中在 5 万上下，从这里向两边扫。 */
+export const SCAN_CENTER_PORT = 50_000;
+/** 同时最多扫多少个端口。 */
+export const SCAN_CONCURRENCY = 64;
+
+/** 从中心向两侧生成候选端口，不重复、不越界。 */
+export function* scanPorts(
+    start = SCAN_MIN_PORT,
+    end = SCAN_MAX_PORT,
+    center = SCAN_CENTER_PORT,
+): Generator<number> {
+    const lo = Math.max(1, Math.min(start, end));
+    const hi = Math.min(65_535, Math.max(start, end));
+    const c = Math.min(hi, Math.max(lo, center));
+    yield c;
+    for (let distance = 1; ; distance++) {
+        const up = c + distance;
+        const down = c - distance;
+        let yielded = false;
+        if (up <= hi) {
+            yield up;
+            yielded = true;
+        }
+        if (down >= lo) {
+            yield down;
+            yielded = true;
+        }
+        if (!yielded) return;
+    }
+}
+
 /**
  * Scans the IP address for Minecraft LAN servers and collects their info.
  */
@@ -77,8 +111,8 @@ export async function findServers(
     timeout = 100,
 ): Promise<MCServerInfo[]> {
     const servers: MCServerInfo[] = [];
-    const startPort = 49000;
-    const endPort = 65000;
+    const ports = scanPorts();
+    let stopped = false;
 
     const checkPort = (port: number): Promise<number | null> => {
         return new Promise((resolve) => {
@@ -100,21 +134,31 @@ export async function findServers(
     const originalConsoleLog = console.log;
     console.log = () => { };
 
-    for (let port = startPort; port <= endPort; port++) {
-        const openPort = await checkPort(port);
-        if (openPort) {
+    const worker = async (): Promise<void> => {
+        while (!stopped) {
+            const next = ports.next();
+            if (next.done) return;
+            const port = next.value;
+            const openPort = await checkPort(port);
+            if (openPort == null) continue;
             const server = await serverInfo(ip, port, 200, false);
             if (server) {
                 servers.push(server);
-
-                if (earlyExit) break;
+                if (earlyExit) {
+                    stopped = true;
+                    return;
+                }
             }
         }
+    };
+
+    try {
+        await Promise.all(Array.from({ length: SCAN_CONCURRENCY }, () => worker()));
+    } finally {
+        console.log = originalConsoleLog;
     }
 
-    // Restore console output
-    console.log = originalConsoleLog;
-
+    servers.sort((a, b) => a.port - b.port);
     return servers;
 }
 
@@ -146,7 +190,7 @@ export async function getServer(
 
     // Server not found
     if (server == null)
-        throw new Error(`MC server not found. (Host: ${host}, Port: ${port}) Check the host and port in settings.ts, and ensure the server is running and open to public or LAN.`);
+        throw new Error(`MC server not found. (Host: ${host}, Port: ${port}) Check --mc-host / --mc-port, and ensure the server is running and open to public or LAN.`);
 
     const serverString = `(Host: ${server.host}, Port: ${server.port}, Version: ${server.version})`;
 

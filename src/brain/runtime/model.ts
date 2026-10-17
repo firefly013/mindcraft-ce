@@ -7,8 +7,8 @@
  * 语义保持的三个要点：
  *   1. `liveTail` / 截图作为**最后一条 user 消息**原样发出，标题由拼装方负责，
  *      这里不加壳（否则"## 事件"会挂到"## 当前世界快照"标题底下）。
- *   2. profile 的 `params` 去掉 `headers`/`api_key_env` 后经 pi-ai 的
- *      `samplingParams` **原样进请求体**（`thinking` 等自定义字段照旧生效）。
+ *   2. 采样参数（模型定义里的 `samplingParams`）经
+ *      pi-ai 的 `samplingParams` **原样进请求体**（`thinking` 等自定义字段照旧生效）。
  *   3. `stop` 走请求体字段，不追加到消息里；模型名含 o1/o3/5 时删掉——复刻旧
  *      URL 分支的行为。
  */
@@ -25,7 +25,7 @@ import {
   type TSchema,
 } from '@earendil-works/pi-ai';
 import type { AIModel, ChatMessage, OpenAITool, ToolResponse } from '../../shared/types/common.js';
-import { readProfileModel, resolveProvider, type ResolvedProvider } from './provider.js';
+import { resolveProvider, type ResolvedProvider } from './provider.js';
 
 /** 重放历史里的 assistant 消息不携带真实用量，用零值占位。 */
 const ZERO_USAGE: AssistantMessage['usage'] = {
@@ -93,7 +93,7 @@ export class PiModel implements AIModel {
 
   constructor(profile: unknown, options: PiModelOptions = {}) {
     this.resolved = resolveProvider(profile);
-    this.params = readProfileModel(profile).params;
+    this.params = this.resolved.params;
     this.options = options;
   }
 
@@ -106,12 +106,9 @@ export class PiModel implements AIModel {
     };
   }
 
-  /** profile 的 `params` 去掉接线字段，其余原样进请求体（旧 `bodyParams()`）。 */
+  /** 要带进请求体的采样参数（已由 provider 层合并好）。 */
   private bodyParams(): Record<string, unknown> {
-    const body: Record<string, unknown> = { ...this.params };
-    delete body['headers'];
-    delete body['api_key_env'];
-    return body;
+    return { ...this.params };
   }
 
   /** 逐请求选项：apiKey / headers 用既有语义，其余经 `samplingParams` 原样进体。 */

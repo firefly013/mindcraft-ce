@@ -1,27 +1,50 @@
 /**
- * 事件接入层：L1–L5 → 原生原语。
+ * 事件接入层：**事件 → 处理，一一对应**。
  *
- * 用假依赖（可控落定），重点钉住那条唯一需要自己写的逻辑：
- * **`abort()` 会撤回排队中的输入，所以中断前要把未落定的事件缓冲一份、
- * 中断后重新提交**——否则 L3 排队中的事件会被 L4/L5 悄悄吃掉。
+ * 这个文件钉住三件事：
+ *
+ * 1. **等级只管"用多大力气把模型叫来看一眼"**，不决定谁来处理；
+ * 2. **每个事件恰好进上下文一次**——L2 走 `write`（记录，不唤醒），L3+ 走
+ *    `submit`（记录并唤醒），两者互斥；
+ * 3. **处理也要进上下文**：反射报告完成的 `completes` 事件同样被记录下来，
+ *    并且负责解开 L5 的动作通道锁。
+ *
+ * `abort()` 会撤回排队中的输入，所以中断前要把未落定的一批缓冲一份、
+ * 中断后重新提交——否则 L3 排队中的事件会被 L4/L5 悄悄吃掉。
  */
 import { describe, expect, it } from 'vitest';
 import type { Submission } from '@earendil-works/pi-durable';
-import { LEVEL } from '../src/brain/scheduler.js';
+import { LEVEL } from '../src/shared/events.js';
+import type { Kind, Level } from '../src/shared/events.js';
 import { EventIntake, type GameEvent } from '../src/brain/runtime/events.js';
+import type { EventHandler } from '../src/brain/runtime/handlers.js';
 
 interface Submitted {
   text: string;
   whenBusy: string;
 }
 
-function makeIntake() {
+function event(type: string, level: number, text = type, extra: Partial<GameEvent> = {}): GameEvent {
+  return {
+    type,
+    kind: 'World' as Kind,
+    level: level as Level,
+    payload: { type },
+    text,
+    ts: 0,
+    reflex: null,
+    completes: null,
+    ...extra,
+  };
+}
+
+function makeIntake(handlers: readonly EventHandler[] = []) {
   const submits: Submitted[] = [];
-  const writes: GameEvent[] = [];
+  const writes: GameEvent[][] = [];
   const aborts: number[] = [];
-  const rescues: number[] = [];
   const actions: string[] = [];
   const errors: unknown[] = [];
+  const locks: string[] = [];
 
   /** 手动放行的假 submission：不主动落定，便于观察 outstanding。 */
   const releasers: Array<() => void> = [];
@@ -39,20 +62,27 @@ function makeIntake() {
     } as Submission;
   };
 
+  const byType = new Map<string, EventHandler>();
+  for (const handler of handlers) for (const type of handler.types) byType.set(type, handler);
+
   const intake = new EventIntake({
     submit: (text, whenBusy) => {
       submits.push({ text, whenBusy });
       return Promise.resolve(fakeSubmission());
     },
+    write: (_events, text) => {
+      writes.push([..._events]);
+      void text;
+      return Promise.resolve();
+    },
     abort: () => {
       aborts.push(submits.length);
       return Promise.resolve();
     },
-    rescue: () => {
-      rescues.push(1);
-      return Promise.resolve();
-    },
-    onEvent: (event, action) => actions.push(`${event.text}:${action}`),
+    lookup: (type) => byType.get(type),
+    beginEmergency: () => locks.push('begin'),
+    endEmergency: () => locks.push('end'),
+    onEvent: (e, action) => actions.push(`${e.text}:${action}`),
     onError: (error) => errors.push(error),
   });
 
@@ -61,9 +91,9 @@ function makeIntake() {
     submits,
     writes,
     aborts,
-    rescues,
     actions,
     errors,
+    locks,
     /** 放行所有假 submission，让它们落定。 */
     releaseAll: () => {
       for (const release of releasers) release();
@@ -71,46 +101,56 @@ function makeIntake() {
   };
 }
 
-function event(text: string, level: number): GameEvent {
-  return { text, level: level as GameEvent['level'] };
-}
-
-describe('L1/L2：只进缓冲区，不唤醒', () => {
-  it('进"下一次要发的内容"，不 submit、不标记需要请求', async () => {
+describe('等级 1 是保留空位：出现即非法', () => {
+  it('收到就报错，不写、不发、不当作 2', async () => {
     const h = makeIntake();
-    h.intake.notify(event('L1', LEVEL.UNUSED));
-    h.intake.notify(event('L2', LEVEL.STATE));
+    h.intake.notify(event('不该存在的事件', LEVEL.UNUSED));
+    await h.intake.settle();
+
+    expect(h.errors).toHaveLength(1);
+    expect(String(h.errors[0])).toContain('保留空位');
+    expect(h.submits).toHaveLength(0);
+    expect(h.writes).toHaveLength(0);
+    expect(h.intake.pendingCount).toBe(0);
+  });
+});
+
+describe('L2：记录，不唤醒（write）', () => {
+  it('立刻写进上下文，不 submit', async () => {
+    const h = makeIntake();
+    h.intake.notify(event('bot.hurt', LEVEL.STATE, '挨了一下'));
     await h.intake.settle();
 
     expect(h.submits).toHaveLength(0);
-    expect(h.intake.pendingCount).toBe(2);
-    expect(h.actions).toEqual(['L1:write', 'L2:write']);
+    expect(h.writes).toHaveLength(1);
+    expect(h.writes[0]?.map((e) => e.text)).toEqual(['挨了一下']);
+    expect(h.actions).toEqual(['挨了一下:written']);
   });
 
-  it('只有 L2 攒着时，请求结束也不发（搭下一次请求的车）', async () => {
+  it('同一拍里的多条合成一条 entry（不必一行一条）', async () => {
     const h = makeIntake();
-    h.intake.notify(event('L2', LEVEL.STATE));
+    h.intake.notify(event('a', LEVEL.STATE, 'A'));
+    h.intake.notify(event('b', LEVEL.STATE, 'B'));
     await h.intake.settle();
-    // 请求结束会检查"需要请求"标志——L2 没标记，所以什么都不发
-    h.intake.requestFinished();
+
+    expect(h.writes).toHaveLength(1);
+    expect(h.writes[0]?.map((e) => e.text)).toEqual(['A', 'B']);
+  });
+
+  it('请求在飞也不影响记录：记录没有"等下一次"这回事', async () => {
+    const h = makeIntake();
+    h.intake.requestStarted();
+    h.intake.notify(event('a', LEVEL.STATE, 'A'));
     await h.intake.settle();
+    expect(h.writes).toHaveLength(1);
     expect(h.submits).toHaveLength(0);
-    expect(h.intake.pendingCount).toBe(1);
-  });
-
-  it('L2 搭 L3 的车：一起进同一批', async () => {
-    const h = makeIntake();
-    h.intake.notify(event('L2', LEVEL.STATE));
-    h.intake.notify(event('L3', LEVEL.WAKE));
-    await h.intake.settle();
-    expect(h.submits).toEqual([{ text: 'L2\n\nL3', whenBusy: 'steer' }]);
   });
 });
 
 describe('L3：整流——一次请求带走一整批', () => {
-  it('5 条 L3 只 submit **一次**（原来是一条一次，真机上掉 8 次血 = 8 次请求）', async () => {
+  it('5 条 L3 只 submit 一次', async () => {
     const h = makeIntake();
-    for (let i = 1; i <= 5; i++) h.intake.notify(event(`L3-${i}`, LEVEL.WAKE));
+    for (let i = 1; i <= 5; i++) h.intake.notify(event(`e${i}`, LEVEL.WAKE, `L3-${i}`));
     await h.intake.settle();
 
     expect(h.submits).toHaveLength(1);
@@ -121,93 +161,156 @@ describe('L3：整流——一次请求带走一整批', () => {
   it('请求在飞的时候只攒不发；请求结束才发一次', async () => {
     const h = makeIntake();
     h.intake.requestStarted();
-    for (let i = 1; i <= 3; i++) h.intake.notify(event(`L3-${i}`, LEVEL.WAKE));
+    for (let i = 1; i <= 3; i++) h.intake.notify(event(`e${i}`, LEVEL.WAKE, `L3-${i}`));
     await h.intake.settle();
-    // 模型正在生成，这时发过去它也看不见——攒着零成本
     expect(h.submits).toHaveLength(0);
-    expect(h.intake.pendingCount).toBe(3);
 
     h.intake.requestFinished();
     await h.intake.settle();
-    expect(h.submits).toHaveLength(1);
-    expect(h.submits[0]?.text).toBe('L3-1\n\nL3-2\n\nL3-3');
+    expect(h.submits.map((s) => s.text)).toEqual(['L3-1\n\nL3-2\n\nL3-3']);
   });
 
   it('落定后从 outstanding 移除', async () => {
     const h = makeIntake();
-    h.intake.notify(event('L3', LEVEL.WAKE));
+    h.intake.notify(event('e', LEVEL.WAKE, 'L3'));
     await h.intake.settle();
     expect(h.intake.outstandingEvents.map((e) => e.text)).toEqual(['L3']);
     h.releaseAll();
-    // 等 forget 的微任务跑完
     await new Promise((resolve) => setTimeout(resolve, 0));
     expect(h.intake.outstandingEvents).toHaveLength(0);
   });
 });
 
 describe('L4：中断（abort + 把整批发出去）', () => {
-  it('L4 把在途的 L3 退回缓冲区，和它一起作为**一次**提交发出去', async () => {
+  it('把在途的 L3 退回缓冲区，和它一起作为一次提交发出去', async () => {
     const h = makeIntake();
-    h.intake.notify(event('L3', LEVEL.WAKE));
+    h.intake.notify(event('a', LEVEL.WAKE, 'L3'));
     await h.intake.settle();
     expect(h.submits.map((s) => s.text)).toEqual(['L3']);
 
-    h.intake.notify(event('L4', LEVEL.PREEMPT));
+    h.intake.notify(event('b', LEVEL.PREEMPT, 'L4'));
     await h.intake.settle();
 
     expect(h.aborts).toHaveLength(1);
-    // 在途的 L3 先退回，再和 L4 一起走一次提交——顺序不乱、一条不丢
     expect(h.submits.map((s) => s.text)).toEqual(['L3', 'L3\n\nL4']);
-    expect(h.submits.every((s) => s.whenBusy === 'steer')).toBe(true);
     expect(h.actions).toEqual(['L3:steer', 'L4:preempt']);
   });
 
   it('没有攒下东西时只提交自己', async () => {
     const h = makeIntake();
-    h.intake.notify(event('L4', LEVEL.PREEMPT));
+    h.intake.notify(event('b', LEVEL.PREEMPT, 'L4'));
     await h.intake.settle();
     expect(h.aborts).toHaveLength(1);
     expect(h.submits.map((s) => s.text)).toEqual(['L4']);
   });
 });
 
-describe('L5：冻住 → 保命 → 接着干', () => {
-  it('abort + 保命，**保命跑完**才把整批提交出去', async () => {
+describe('L5：中断 + 锁通道；处理（反射）自己报告结果', () => {
+  it('没有声明反射：只 abort + 提交，不加锁', async () => {
     const h = makeIntake();
-    h.intake.notify(event('L3', LEVEL.WAKE));
+    h.intake.notify(event('world.fall.lethal', LEVEL.EMERGENCY, '掉进虚空'));
     await h.intake.settle();
-
-    h.intake.notify(event('L5', LEVEL.EMERGENCY));
-    await h.intake.settle();
-
     expect(h.aborts).toHaveLength(1);
-    expect(h.rescues).toHaveLength(1);
-    // 保命要跑好几秒，先提交的话模型会对着过时的世界做判断——所以提交在后
-    expect(h.submits.map((s) => s.text)).toEqual(['L3', 'L3\n\nL5']);
-    expect(h.actions).toEqual(['L3:steer', 'L5:emergency']);
+    expect(h.locks).toEqual([]);
+    expect(h.submits.map((s) => s.text)).toEqual(['掉进虚空']);
+    expect(h.actions).toEqual(['掉进虚空:emergency']);
   });
 
-  it('空闲时 L5 也能触发（abort + 保命）', async () => {
+  it('声明了反射：上锁；处理报告完成才解锁，而且报告也进上下文', async () => {
     const h = makeIntake();
-    h.intake.notify(event('L5', LEVEL.EMERGENCY));
+    h.intake.notify(
+      event('world.water.drowning', LEVEL.EMERGENCY, '头在水里', { reflex: 'surface' }),
+    );
     await h.intake.settle();
-    expect(h.aborts).toHaveLength(1);
-    expect(h.rescues).toHaveLength(1);
-    expect(h.submits.map((s) => s.text)).toEqual(['L5']);
+
+    expect(h.locks).toEqual(['begin']);
+    expect(h.submits.map((s) => s.text)).toEqual(['头在水里']);
+    expect(h.intake.runningReflexes).toEqual(['surface']);
+
+    h.intake.notify(
+      event('reflex.done', LEVEL.STATE, '浮上来了', { completes: 'surface' }),
+    );
+    await h.intake.settle();
+
+    expect(h.locks).toEqual(['begin', 'end']);
+    expect(h.intake.runningReflexes).toEqual([]);
+    // 处理的结果是记录（write），不是又一次唤醒
+    expect(h.writes.flat().map((e) => e.text)).toEqual(['浮上来了']);
+    expect(h.submits).toHaveLength(1);
+  });
+
+  it('两个反射都在跑，只有最后一个报告完成才解锁', async () => {
+    const h = makeIntake();
+    h.intake.notify(event('a', LEVEL.EMERGENCY, 'A', { reflex: 'r1' }));
+    h.intake.notify(event('b', LEVEL.EMERGENCY, 'B', { reflex: 'r2' }));
+    await h.intake.settle();
+    expect(h.locks).toEqual(['begin']);
+
+    h.intake.notify(event('d1', LEVEL.STATE, 'D1', { completes: 'r1' }));
+    await h.intake.settle();
+    expect(h.locks).toEqual(['begin']);
+
+    h.intake.notify(event('d2', LEVEL.STATE, 'D2', { completes: 'r2' }));
+    await h.intake.settle();
+    expect(h.locks).toEqual(['begin', 'end']);
+  });
+});
+
+describe('处理由事件类型决定（不是等级）', () => {
+  it('登记了反射的事件不会被投给模型，而是执行处理体', async () => {
+    const ran: string[] = [];
+    const handler: EventHandler = {
+      types: ['item.drop.nearby'],
+      executor: 'reflex',
+      note: '测试用',
+      run: (e, ctx) => {
+        ran.push(e.text);
+        ctx.emit(event('reflex.done', LEVEL.STATE, '捡完了', { completes: 'auto-pickup' }));
+        return Promise.resolve();
+      },
+    };
+    const h = makeIntake([handler]);
+    h.intake.notify(event('item.drop.nearby', LEVEL.STATE, '地上有个苹果'));
+    await h.intake.settle();
+    // 反射不 await（它可能跑好几秒），但要开始跑
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(ran).toEqual(['地上有个苹果']);
+    expect(h.submits).toHaveLength(0);
+    expect(h.writes.flat().map((e) => e.text)).toEqual(['捡完了']);
+    expect(h.actions).toEqual(['地上有个苹果:reflex', '捡完了:written']);
+  });
+
+  it('等级高也一样按类型走反射（等级不改处理，只改投递）', async () => {
+    const ran: string[] = [];
+    const handler: EventHandler = {
+      types: ['x'],
+      executor: 'reflex',
+      run: () => {
+        ran.push('x');
+        return Promise.resolve();
+      },
+    };
+    const h = makeIntake([handler]);
+    h.intake.notify(event('x', LEVEL.EMERGENCY, 'X'));
+    await h.intake.settle();
+    expect(h.submits).toHaveLength(0);
+    expect(ran).toEqual(['x']);
   });
 });
 
 describe('同步返回 / 异常隔离', () => {
   it('notify 同步返回，异步动作还没跑', async () => {
     const h = makeIntake();
-    h.intake.notify(event('L3', LEVEL.WAKE));
+    h.intake.notify(event('e', LEVEL.WAKE, 'L3'));
     expect(h.submits).toHaveLength(0);
     await h.intake.settle();
     expect(h.submits).toHaveLength(1);
   });
 
   it('提交抛错：整批退回缓冲区不丢，后续事件照样处理', async () => {
-    const h = makeIntake();
+    const errors: unknown[] = [];
+    const submits: Submitted[] = [];
     let first = true;
     const intake = new EventIntake({
       submit: (text, whenBusy) => {
@@ -215,7 +318,7 @@ describe('同步返回 / 异常隔离', () => {
           first = false;
           return Promise.reject(new Error('boom'));
         }
-        h.submits.push({ text, whenBusy });
+        submits.push({ text, whenBusy });
         return Promise.resolve({
           id: 'sub' as never,
           status: () => Promise.resolve({} as never),
@@ -223,23 +326,20 @@ describe('同步返回 / 异常隔离', () => {
           abort: () => Promise.resolve('settled' as const),
         } as never);
       },
+      write: () => Promise.resolve(),
       abort: () => Promise.resolve(),
-      rescue: () => Promise.resolve(),
-      onError: (error) => h.errors.push(error),
+      onError: (error) => errors.push(error),
     });
 
-    intake.notify(event('bad', LEVEL.WAKE));
+    intake.notify(event('bad', LEVEL.WAKE, 'bad'));
     await intake.settle();
-
-    expect(h.errors).toHaveLength(1);
-    // 抛错不能把事件凭空吃掉——整批退回缓冲区等下次重试
-    expect(h.submits).toHaveLength(0);
+    expect(errors).toHaveLength(1);
+    expect(submits).toHaveLength(0);
     expect(intake.pendingCount).toBe(1);
 
-    // 后续事件照样处理，并且和退回的那条合成一批发出去
-    intake.notify(event('good', LEVEL.WAKE));
+    intake.notify(event('good', LEVEL.WAKE, 'good'));
     await intake.settle();
-    expect(h.submits.map((s) => s.text)).toEqual(['bad\n\ngood']);
+    expect(submits.map((s) => s.text)).toEqual(['bad\n\ngood']);
   });
 
   it('中断本身抛错也不让泵停摆', async () => {
@@ -252,16 +352,14 @@ describe('同步返回 / 异常隔离', () => {
           wait: () => Promise.resolve({ status: 'done' } as never),
           abort: () => Promise.resolve('settled' as const),
         } as never),
+      write: () => Promise.resolve(),
       abort: () => Promise.reject(new Error('abort boom')),
-      rescue: () => Promise.resolve(),
       onError: (error) => errors.push(error),
     });
 
-    intake.notify(event('L4', LEVEL.PREEMPT));
+    intake.notify(event('x', LEVEL.PREEMPT, 'L4'));
     await intake.settle();
-    // 一条事件处理失败只记一笔，泵继续跑（后面还排着几十条）
     expect(errors).toHaveLength(1);
-    // 它的文本没丢，还在缓冲区里等下一次顺风车
     expect(intake.pendingCount).toBe(1);
   });
 });
@@ -269,124 +367,174 @@ describe('同步返回 / 异常隔离', () => {
 /**
  * 运行时就绪前的事件。
  *
- * SQLite 打开要几毫秒，而 edges 的轮询和 bot.on(...) 在连接建立后**立刻**
- * 就开始产生事件了。没有这个缓冲，连接后到就绪之间的事件会真丢——而
+ * SQLite 打开要几毫秒，而边沿检测和 `bot.on(...)` 在连接建立后**立刻**就
+ * 开始产生事件了。没有这个缓冲，连接后到就绪之间的事件会真丢——而
  * "丢一个事件就是丢一份工作"。
  */
 describe('运行时就绪前的事件不丢', () => {
-  function makeDeferredIntake() {
+  it('attach 之前的事件被暂存，不进链、不触发动作', () => {
+    const h = makeIntake();
+    // 用一个没有 attach 的干净实例观察暂存
+    const pending = new EventIntake();
+    pending.notify(event('a', LEVEL.WAKE, 'L3'));
+    pending.notify(event('b', LEVEL.STATE, 'L2'));
+
+    expect(pending.attached).toBe(false);
+    expect(pending.waitingCount).toBe(2);
+    expect(pending.pendingCount).toBe(0);
+
+    void h;
+  });
+
+  it('attach 后按顺序补投，一个都不丢', async () => {
     const submits: Submitted[] = [];
-    const writes: GameEvent[] = [];
-    const actions: string[] = [];
-    const releasers: Array<() => void> = [];
-    const fakeSubmission = (): Submission => {
-      let release!: () => void;
-      const settled = new Promise<void>((resolve) => {
-        release = resolve;
-      });
-      releasers.push(release);
-      return {
-        id: 'sub' as unknown as Submission['id'],
-        status: () => Promise.resolve({} as never),
-        wait: () => settled.then(() => ({ status: 'done' }) as never),
-        abort: () => Promise.resolve('aborted' as const),
-      } as Submission;
-    };
-    const deps = {
-      submit: (text: string, whenBusy: string) => {
+    const writes: string[] = [];
+    const intake = new EventIntake();
+    intake.notify(event('a', LEVEL.WAKE, '先'));
+    intake.notify(event('b', LEVEL.WAKE, '后'));
+    intake.attach({
+      submit: (text, whenBusy) => {
         submits.push({ text, whenBusy });
-        return Promise.resolve(fakeSubmission());
+        return Promise.resolve({
+          id: 'sub' as never,
+          status: () => Promise.resolve({} as never),
+          wait: () => Promise.resolve({ status: 'done' } as never),
+          abort: () => Promise.resolve('settled' as const),
+        } as never);
+      },
+      write: (_events, text) => {
+        writes.push(text);
+        return Promise.resolve();
       },
       abort: () => Promise.resolve(),
-      rescue: () => Promise.resolve(),
-      onEvent: (event: GameEvent, action: string) => actions.push(`${event.text}:${action}`),
-    };
-    return { intake: new EventIntake(), deps, submits, writes, actions };
-  }
+    });
+    await intake.settle();
 
-  it('attach 之前的事件被暂存，不进链、不触发动作', () => {
-    const h = makeDeferredIntake();
-    h.intake.notify(event('L3', LEVEL.WAKE));
-    h.intake.notify(event('L2', LEVEL.STATE));
-
-    expect(h.intake.attached).toBe(false);
-    expect(h.intake.waitingCount).toBe(2);
-    expect(h.submits).toHaveLength(0);
-    expect(h.intake.pendingCount).toBe(0);
-  });
-
-  it('attach 后**按顺序**补投，一个都不丢', async () => {
-    const h = makeDeferredIntake();
-    h.intake.notify(event('先', LEVEL.WAKE));
-    h.intake.notify(event('后', LEVEL.WAKE));
-    h.intake.attach(h.deps);
-    await h.intake.settle();
-
-    expect(h.intake.attached).toBe(true);
-    expect(h.intake.waitingCount).toBe(0);
-    // 两条 L3 补投后合成**一批**发出去，顺序不变
-    expect(h.submits.map((s) => s.text)).toEqual(['先\n\n后']);
-    expect(h.actions).toEqual(['先:steer', '后:steer']);
-  });
-
-  it('attach 后新来的事件直接进缓冲区', async () => {
-    const h = makeDeferredIntake();
-    h.intake.attach(h.deps);
-    h.intake.notify(event('L2', LEVEL.STATE));
-    await h.intake.settle();
-    expect(h.intake.waitingCount).toBe(0);
-    expect(h.intake.pendingCount).toBe(1);
-    expect(h.submits).toHaveLength(0);
+    expect(intake.attached).toBe(true);
+    expect(intake.waitingCount).toBe(0);
+    expect(submits.map((s) => s.text)).toEqual(['先\n\n后']);
   });
 
   it('重复 attach 抛错（不许悄悄换掉运行时）', () => {
-    const h = makeDeferredIntake();
-    h.intake.attach(h.deps);
-    expect(() => h.intake.attach(h.deps)).toThrow();
-  });
-
-  it('先缓冲的 L5 补投时照样走 abort + 保命', async () => {
-    const h = makeDeferredIntake();
-    h.intake.notify(event('紧急', LEVEL.EMERGENCY));
-    h.intake.attach(h.deps);
-    await h.intake.settle();
-    expect(h.actions).toEqual(['紧急:emergency']);
-    // 按"所有事件都立刻进消息"的统一规则，L5 的文本也会跟着这一批过去
-    expect(h.submits.map((s) => s.text)).toEqual(['紧急']);
+    const intake = new EventIntake();
+    const deps = {
+      submit: () => Promise.reject(new Error('unused')),
+      write: () => Promise.resolve(),
+      abort: () => Promise.resolve(),
+    };
+    intake.attach(deps);
+    expect(() => intake.attach(deps)).toThrow();
   });
 });
 
-/**
- * L4 的"打断立刻插入"。
- *
- * 原来是一条 FIFO promise 链，等级只决定**做什么**、不决定**什么时候做**，
- * 于是这条设计意图根本没实现。真机日志：pia 被骷髅射死，死亡事件
- * 12:32:38 入队、12:32:57 才落地——**排在 30 条 L3 后面干等了 19 秒**，
- * 最后还连同被 abort 的那一轮一起丢了。模型全程不知道自己死了。
- */
+describe('异常路径：反射与记录都不能让泵停摆', () => {
+  it('反射登记了却没有执行体 → 报错', async () => {
+    const errors: unknown[] = [];
+    const intake = new EventIntake({
+      submit: () => Promise.reject(new Error('unused')),
+      write: () => Promise.resolve(),
+      abort: () => Promise.resolve(),
+      lookup: () => ({ types: ['x'], executor: 'reflex', note: '没有执行体' }),
+      onError: (e) => errors.push(e),
+    });
+    intake.notify(event('x', LEVEL.STATE, 'X'));
+    await intake.settle();
+    expect(String(errors[0])).toContain('没有执行体');
+  });
+
+  it('反射抛错 → onError 记一笔，别的照常', async () => {
+    const h = makeIntake([
+      {
+        types: ['boom'],
+        executor: 'reflex',
+        run: () => Promise.reject(new Error('反射炸了')),
+      },
+    ]);
+    h.intake.notify(event('boom', LEVEL.STATE, 'B'));
+    h.intake.notify(event('quiet', LEVEL.STATE, 'Q'));
+    await h.intake.settle();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(h.errors).toHaveLength(1);
+    expect(h.writes.flat().map((e) => e.text)).toEqual(['Q']);
+  });
+
+  it('同名反射跑了两次 → 计数配对，最后一个报告完成才解锁', async () => {
+    const h = makeIntake();
+    h.intake.notify(event('a', LEVEL.EMERGENCY, 'A', { reflex: 'escape' }));
+    h.intake.notify(event('b', LEVEL.EMERGENCY, 'B', { reflex: 'escape' }));
+    await h.intake.settle();
+    expect(h.intake.runningReflexes).toEqual(['escape']);
+    expect(h.locks).toEqual(['begin']);
+
+    h.intake.notify(event('d1', LEVEL.STATE, 'D1', { completes: 'escape' }));
+    await h.intake.settle();
+    expect(h.intake.runningReflexes).toEqual(['escape']);
+    expect(h.locks).toEqual(['begin']);
+
+    h.intake.notify(event('d2', LEVEL.STATE, 'D2', { completes: 'escape' }));
+    await h.intake.settle();
+    expect(h.intake.runningReflexes).toEqual([]);
+    expect(h.locks).toEqual(['begin', 'end']);
+  });
+
+  it('记录写不进去 → 退回队列，下次连同新事件一起重试（不丢）', async () => {
+    const errors: unknown[] = [];
+    const writes: string[] = [];
+    let fail = true;
+    const intake = new EventIntake({
+      submit: () => Promise.reject(new Error('unused')),
+      write: (_events, text) => {
+        if (fail) {
+          fail = false;
+          return Promise.reject(new Error('写盘炸了'));
+        }
+        writes.push(text);
+        return Promise.resolve();
+      },
+      abort: () => Promise.resolve(),
+      onError: (e) => errors.push(e),
+    });
+
+    intake.notify(event('a', LEVEL.STATE, 'A'));
+    await intake.settle();
+    expect(errors).toHaveLength(1);
+    expect(writes).toEqual([]);
+    expect(intake.pendingCount).toBe(1);
+
+    intake.notify(event('b', LEVEL.STATE, 'B'));
+    await intake.settle();
+    expect(writes).toEqual(['A\n\nB']);
+  });
+
+  it('运行时还没接上时 requestFinished 是空操作', () => {
+    const intake = new EventIntake();
+    intake.requestStarted();
+    intake.requestFinished();
+    expect(intake.attached).toBe(false);
+    expect(intake.waitingCount).toBe(0);
+  });
+});
+
 describe('L4 插队：打断立刻插入', () => {
   it('L4 插到普通队列前面，不排在几十条 L3 后面', async () => {
     const h = makeIntake();
-    // 模拟真机那场骷髅战：链路里已经堆了一批 L3
-    for (let i = 1; i <= 5; i++) h.intake.notify(event(`L3-${i}`, LEVEL.WAKE));
-    // 死亡事件是 L4
-    h.intake.notify(event('L4-death', LEVEL.PREEMPT));
+    for (let i = 1; i <= 5; i++) h.intake.notify(event(`e${i}`, LEVEL.WAKE, `L3-${i}`));
+    h.intake.notify(event('death', LEVEL.PREEMPT, 'L4-death'));
     await h.intake.settle();
 
     const order = h.actions.map((a) => a.split(':')[0] ?? '');
     expect(order.indexOf('L4-death')).toBeGreaterThanOrEqual(0);
-    // 关键：它必须插到**后面那几条** L3 前面
     expect(order.indexOf('L4-death')).toBeLessThan(order.indexOf('L3-3'));
     expect(order.indexOf('L4-death')).toBeLessThan(order.indexOf('L3-5'));
   });
 
   it('插队不破坏各自的先后：L4 之间有序，L3 之间也有序', async () => {
     const h = makeIntake();
-    h.intake.notify(event('L3-a', LEVEL.WAKE));
-    h.intake.notify(event('L3-b', LEVEL.WAKE));
-    h.intake.notify(event('L4-1', LEVEL.PREEMPT));
-    h.intake.notify(event('L3-c', LEVEL.WAKE));
-    h.intake.notify(event('L4-2', LEVEL.PREEMPT));
+    h.intake.notify(event('a', LEVEL.WAKE, 'L3-a'));
+    h.intake.notify(event('b', LEVEL.WAKE, 'L3-b'));
+    h.intake.notify(event('c', LEVEL.PREEMPT, 'L4-1'));
+    h.intake.notify(event('d', LEVEL.WAKE, 'L3-c'));
+    h.intake.notify(event('e', LEVEL.PREEMPT, 'L4-2'));
     await h.intake.settle();
 
     const order = h.actions.map((a) => a.split(':')[0] ?? '');
@@ -397,8 +545,8 @@ describe('L4 插队：打断立刻插入', () => {
 
   it('L5（紧急）同样走优先通道', async () => {
     const h = makeIntake();
-    for (let i = 1; i <= 4; i++) h.intake.notify(event(`L3-${i}`, LEVEL.WAKE));
-    h.intake.notify(event('L5-emergency', LEVEL.EMERGENCY));
+    for (let i = 1; i <= 4; i++) h.intake.notify(event(`e${i}`, LEVEL.WAKE, `L3-${i}`));
+    h.intake.notify(event('lava', LEVEL.EMERGENCY, 'L5-emergency'));
     await h.intake.settle();
 
     const order = h.actions.map((a) => a.split(':')[0] ?? '');

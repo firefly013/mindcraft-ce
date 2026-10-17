@@ -51,9 +51,9 @@ describe('systemPromptFromProfile', () => {
     expect(systemPromptFromProfile({}, 'X')).toBe(expected);
   });
 
-  it('未知的 prompt_set 回退到默认集，不抛', () => {
+  it('未知的 promptSet 回退到默认集，不抛', () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
-    const text = systemPromptFromProfile({ prompt_set: '不存在的集' }, 'X');
+    const text = systemPromptFromProfile({ promptSet: '不存在的集' }, 'X');
     expect(text).toBe(staticSystemPrompt(REAL, 'X'));
     expect(warn).not.toHaveBeenCalled();
   });

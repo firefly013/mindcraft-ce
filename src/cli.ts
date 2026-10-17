@@ -34,6 +34,7 @@
 
 import { io } from 'socket.io-client';
 import { readFileSync, writeFileSync } from 'node:fs';
+import settings from '../settings.js';
 import { parseCliArgs } from './cli/args.js';
 import type { ToolDeclaration } from './shared/tools.js';
 
@@ -141,8 +142,15 @@ function renderJob(job: JobView, id: string): string {
   return `${head}\n${job.output ?? '(no output)'}`;
 }
 
+function defaultMindserverPort(): number {
+  const env = Number(process.env.MINDSERVER_PORT);
+  if (Number.isInteger(env) && env > 0) return env;
+  const configured = Number(settings.mindserver_port);
+  return Number.isInteger(configured) && configured > 0 ? configured : 8080;
+}
+
 async function main(): Promise<void> {
-  const opts = parseCliArgs(process.argv.slice(2));
+  const opts = parseCliArgs(process.argv.slice(2), defaultMindserverPort());
 
   // 只打用法的那种 help 不需要连机器人。
   const helpTarget = typeof opts.args['0'] === 'string' ? String(opts.args['0']) : null;

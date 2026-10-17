@@ -1,14 +1,14 @@
 /**
  * 请求日志：**一个文件 = 一代上下文**。
  *
- * 主线那套是「每次请求覆盖写，压仓时翻页 `request-001` → `002`」。
+ * 主线那套是「每次请求覆盖写，上下文压缩时翻页 `request-001` → `002`」。
  * pi-durable 没有这个概念——它有 `conversation.entries()` 和 `pi.usage`，
  * 是事件流而不是请求快照。所以这里用两个 hook 把同一组语义搭出来：
  *
  * | hook | 干什么 |
  * |---|---|
  * | `GenerationTask.beforeRequest` | 把**这次真正发出去的消息列**覆盖写进当前页 |
- * | `CompactionTask.beforeCompact` | 翻页（压仓 = 新一代上下文） |
+ * | `CompactionTask.beforeCompact` | 翻页（上下文压缩 = 新一代上下文） |
  *
  * ## 为什么是覆盖写、不是追加
  *
@@ -74,7 +74,7 @@ export interface RequestLogOptions {
 export interface RequestLogSink {
   /** 写一代上下文（**覆盖写**当前页）。 */
   writeRequest(messages: readonly Message[]): void;
-  /** 翻页：压仓发生，下一代上下文开始。 */
+  /** 翻页：上下文压缩发生，下一代上下文开始。 */
   nextPage(): void;
   /** 当前页号（从 1 开始）。 */
   readonly page: number;
@@ -132,7 +132,7 @@ export function requestLogHook(sink: RequestLogSink): HookRegistration {
 }
 
 /**
- * 翻页的 hook。**返回 `undefined`**：不拒绝、不提供摘要，用框架默认的压仓。
+ * 翻页的 hook。**返回 `undefined`**：不拒绝、不提供摘要，用框架默认的上下文压缩。
  */
 export function compactionPageHook(sink: RequestLogSink): HookRegistration {
   return hook(CompactionTask, {
