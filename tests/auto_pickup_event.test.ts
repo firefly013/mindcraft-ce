@@ -127,14 +127,33 @@ describe('expectedItemNameFromEntity', () => {
   });
 });
 describe('模型动作抢占 autoPickup', () => {
-  it('模型动作一到就标记取消并立即放行，不等拾取收尾', async () => {
+  it('模型动作一到就调 pickupCancel，并等 pickup 收手后放行', async () => {
     const body: any = Object.create(MineflayerBody.prototype);
     body.pickingUp = true;
     body.requestInterrupt = vi.fn();
+    body.pickupCancel = vi.fn(() => {
+      body.pickingUp = false;
+    });
     await body.yieldAutoPickupToModel();
     expect(body.pickupAbortRequested).toBe(true);
     expect(body.requestInterrupt).toHaveBeenCalledTimes(1);
-    expect(body.pickingUp).toBe(true);
+    expect(body.pickupCancel).toHaveBeenCalledTimes(1);
+    expect(body.pickingUp).toBe(false);
+  });
+
+  it('gotoPickupInterruptibly 注册 pickupCancel，调用后立即 stop 并释放', async () => {
+    const body: any = Object.create(MineflayerBody.prototype);
+    body.bot = {
+      interrupt_code: false,
+      pathfinder: { goto: vi.fn(() => new Promise<never>(() => {})), stop: vi.fn() },
+    };
+    body.pickupAbortRequested = false;
+    const pending = body.gotoPickupInterruptibly({}, 12_000);
+    expect(typeof body.pickupCancel).toBe('function');
+    body.pickupCancel();
+    await expect(pending).resolves.toBe(false);
+    expect(body.bot.pathfinder.stop).toHaveBeenCalled();
+    expect(body.pickupCancel).toBeNull();
   });
 
   it('pickupAbortRequested 时 50ms 内 stop pathfinder 并返回 false', async () => {
