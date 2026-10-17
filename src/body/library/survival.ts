@@ -786,7 +786,7 @@ export interface DrySpot { x: number; y: number; z: number; distance: number; wa
  *   1) 先找同一层（dy=0）最近的干岸；
  *   2) 没有再看上方 dy=1..6，越近 / 越低（别一下冲到高处）的优先。
  */
-export function findNearestDrySpot(bot: any, radius = 16): DrySpot | null {
+export function findNearestDrySpot(bot: any, radius = 48): DrySpot | null {
     const p = bot?.entity?.position;
     if (p == null || typeof bot?.blockAt !== 'function') return null;
     const bx = Math.floor(p.x);
@@ -820,6 +820,35 @@ export function findNearestDrySpot(bot: any, radius = 16): DrySpot | null {
         if (above != null) return above;
     }
     return null;
+}
+
+/** 附近最近的实心方块（水底/岸边）；没有就 null。作为无干岸时手动游的目标。 */
+export function findNearestSolidAhead(
+    bot: any,
+    radius = 48,
+): { x: number; y: number; z: number; distance: number } | null {
+    const p = bot?.entity?.position;
+    if (p == null || typeof bot?.blockAt !== 'function') return null;
+    const bx = Math.floor(p.x);
+    const by = Math.floor(p.y);
+    const bz = Math.floor(p.z);
+    let best: { x: number; y: number; z: number; distance: number } | null = null;
+    for (let r = 1; r <= radius; r++) {
+        for (let dx = -r; dx <= r; dx++) {
+            for (let dz = -r; dz <= r; dz++) {
+                if (Math.max(Math.abs(dx), Math.abs(dz)) !== r) continue;
+                for (let dy = -3; dy <= 3; dy++) {
+                    const name = blockNameAtSafe(bot, bx + dx, by + dy, bz + dz);
+                    if (name == null || isAirBlockName(name) || isWaterBlockName(name)) continue;
+                    const distance = Math.round(Math.hypot(dx, dz) * 10) / 10;
+                    if (best == null || distance < best.distance) {
+                        best = { x: bx + dx, y: by + dy, z: bz + dz, distance };
+                    }
+                }
+            }
+        }
+    }
+    return best;
 }
 
 function posText(bot: any): string {
@@ -1027,7 +1056,7 @@ export async function escapeWaterSkill(bot: any, deps: EscapeWaterDeps = {}): Pr
         return `已真正脱险（硬校验：脚/头不在水 + 脚下实心 + 连续 ${needed} 次确认）：${how}，起点 ${start} → ${posText(bot)}，水位变化 y ${riseText}。`;
     };
 
-    const spot = findNearestDrySpot(bot, 16);
+    const spot = findNearestDrySpot(bot, 48);
     let pathError = '';
     if (spot != null) {
         try {
@@ -1041,6 +1070,27 @@ export async function escapeWaterSkill(bot: any, deps: EscapeWaterDeps = {}): Pr
         const swim = await swimToward(bot, spot, { sleep, now, maxMs, mineUp, confirmTicks: needed, startY });
         if (swim.escaped) {
             return logLine(bot, receipt(`寻路${pathError === '' ? '没走通' : `失败（${pathError}）`}后手动游/跳，${swim.reason}`));
+        }
+    }
+
+    // 48 格内没有干岸：朝最近实心方块（水底/岸边）持续 forward+jump，先离开水坑中心。
+    const solidAhead = findNearestSolidAhead(bot, 48);
+    if (solidAhead != null) {
+        const swimSolid = await swimToward(bot, solidAhead, { sleep, now, maxMs, mineUp, confirmTicks: needed, startY });
+        if (swimSolid.escaped) {
+            return logLine(bot, receipt(`无干岸，朝最近实心方块 (${solidAhead.x},${solidAhead.y},${solidAhead.z}) 游/跳，${swimSolid.reason}`));
+        }
+    }
+
+    // 水底有实心：尝试在脚下垫台阶（pillarUp 会自己检查头顶方块/材料）。
+    if (hasSupport(bot)) {
+        try {
+            const climbed = await skills.pillarUp(bot, 1);
+            if (climbed && (await confirmDryGround(bot, { sleep, startY, needed }))) {
+                return logLine(bot, receipt('水底有实心，垫台阶后脱险'));
+            }
+        } catch {
+            // 垫台阶失败继续走后面的上浮兜底。
         }
     }
 
@@ -1061,9 +1111,13 @@ export async function escapeWaterSkill(bot: any, deps: EscapeWaterDeps = {}): Pr
     const riseText = delta == null ? '未知' : `${delta >= 0 ? '+' : ''}${delta}（${delta > 0 ? '上浮' : delta < 0 ? '下沉' : '未变'}）`;
     return logLine(
         bot,
-        `没能脱险：${spot == null ? '16 格内没找到"脚/头空气、脚下实心"的干岸' : `最近干岸 (${spot.x},${spot.y},${spot.z}) 到不了`}；` +
-            `向上挖/上浮也没找到空气（${float.reason}）。起点 ${start}，现在 ${posText(bot)}，水位变化 y ${riseText}；` +
-            '硬校验仍未上岸（脚/头仍在水里或脚下没有实心）。**继续向上挖 / 贴墙 placeBlock 垫脚，不要往下游**；也可以朝岸边再试一次 escapeWater。',
+        `浅水坑困死：48 格内` +
+            (spot == null ? '没找到可站立干岸' : `最近干岸 (${spot.x},${spot.y},${spot.z}) 到不了`) +
+            (solidAhead == null ? '，也没有可作目标的实心方块；' : `，朝 (${solidAhead.x},${solidAhead.y},${solidAhead.z}) 游/跳也没能上岸；`) +
+            `向上挖/上浮也没找到空气（${float.reason}）；水底${hasSupport(bot) ? '有实心但垫台阶失败' : '没有可垫脚的实心'}。` +
+            `起点 ${start}，现在 ${posText(bot)}，水位变化 y ${riseText}；` +
+            '硬校验仍未上岸（脚/头仍在水里或脚下没有实心）。下一步建议：检查背包有没有可放置方块，朝岸边再试 escapeWater；' +
+            '如果有材料，先 placeHere/pillarUp 垫高，再 goToCoordinates 到最近干岸；不要往下游。',
     );
 }
 

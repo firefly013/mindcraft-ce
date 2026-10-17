@@ -38,8 +38,9 @@ export const SURVIVAL_TOOL_TEXT: Record<string, { description: string; params: R
     escapeWater: {
         description:
             '水中脱困：脚泡在水里、placeBlock 没有相邻支撑、placeHere 报 NoPath、digDown 又被水挡住时用它。' +
-            '先找 16 格内最近的干燥可站立点（脚/头是空气、脚下实心）并尝试寻路过去；寻路失败就朝那个方向手动游/跳（forward + jump），' +
-            '直到离开水面、脚下踩到支撑。回执会写清起点、目标点、寻路为什么失败、最后到底上没上岸。',
+            '先找 48 格内最近的干燥可站立点（脚/头是空气、脚下实心）并尝试寻路过去；寻路失败就朝那个方向手动游/跳（forward + jump）；' +
+            '没有干岸时朝最近实心方块游/跳，水底有实心会尝试垫台阶，最后向上挖/上浮。' +
+            '全部失败会明确报「浅水坑困死」，附坐标、水位变化和下一步建议。',
         params: {},
     },
     findFluidSource: {

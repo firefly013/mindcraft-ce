@@ -626,7 +626,7 @@ describe('escapeWaterSkill：不再越逃越深 / 不再误报', () => {
             sleep: () => Promise.resolve(),
             maxMs: 200,
         });
-        expect(text).toContain('没能脱险');
+        expect(text).toContain('浅水坑困死');
         expect(text).toContain('水位变化');
         expect(text).not.toContain('已真正脱险');
         expect(text).toContain('不要往下游');
