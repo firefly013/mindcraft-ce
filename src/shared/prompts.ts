@@ -269,6 +269,7 @@ export const TOOL_TEXT: Record<string, { description: string; params: Record<str
       '找不到现成装水位时会尝试用背包圆石垫脚或挖开遮挡，并在回执里给建议坐标和最近岩浆源。' +
       '找不到安全岩浆操作位时会自己用圆石垫脚或挖开遮挡，倒水前硬校验脚/头/脚下，并给具体 xyz；不让模型猜位置。' +
       '挖取阶段会拒绝挖脚下/承重块，每块后检查支撑和附近岩浆；危险立即停手/后撤，并报告安全坐标和下一块候选。' +
+      '选址/寻路限制在目标岩浆水平 ±2、水平 ≤6；倒水后 10 秒内 searchForBlock(obsidian,16) 没确认生成就停手，不重复倒。' +
       '倒水受危险操作闸门保护：先调用 allowDangerousOps(ops="pour_water", calls=1) 再调本工具。',
     params: {},
   },

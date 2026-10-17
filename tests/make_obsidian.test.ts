@@ -18,7 +18,9 @@ import {
   formatPoint,
   isSafeGroundAt,
   isUnderfootOrSupport,
+  isWithinOperationBox,
   nearestLavaDistance,
+  selectNearbyLavaCandidates,
   nearestLavaInfo,
   planLavaStand,
   planWaterStand,
@@ -342,5 +344,31 @@ describe('task-30 挖取阶段防坠岩浆', () => {
       expect(isSafeGroundAt(mapProbe(entries), retreat)).toBe(true);
       expect(Math.hypot(retreat.x - 0, retreat.y - 60, retreat.z - 0)).toBeGreaterThanOrEqual(2);
     }
+  });
+});
+
+describe('task-38 禁止远距离乱走', () => {
+  it('操作盒：水平 <=6、垂直 ±2 才算近', () => {
+    const origin: Point = { x: 0, y: 60, z: 0 };
+    expect(isWithinOperationBox({ x: 3, y: 62, z: 4 }, origin, 6, 2)).toBe(true);
+    expect(isWithinOperationBox({ x: 7, y: 60, z: 0 }, origin, 6, 2)).toBe(false);
+    expect(isWithinOperationBox({ x: 0, y: 63, z: 0 }, origin, 6, 2)).toBe(false);
+    expect(isWithinOperationBox({ x: 5, y: 58, z: 0 }, origin, 6, 2)).toBe(true);
+  });
+
+  it('岩浆候选先按操作盒过滤：远、深、浅的都不选', () => {
+    const origin: Point = { x: 0, y: 60, z: 0 };
+    const lavas: Point[] = [
+      { x: 0, y: 60, z: 0 },
+      { x: 7, y: 60, z: 0 },
+      { x: 0, y: 63, z: 0 },
+      { x: 5, y: 62, z: 0 },
+      { x: 0, y: 45, z: 0 },
+    ];
+    const nearby = selectNearbyLavaCandidates(lavas, origin, 6, 2);
+    expect(nearby).toEqual([
+      { x: 0, y: 60, z: 0 },
+      { x: 5, y: 62, z: 0 },
+    ]);
   });
 });

@@ -397,21 +397,27 @@ async function makeObsidianInner(bot: any): Promise<MakeObsidianResult> {
     })();
     const probe = makeProbe(bot);
 
-    const lavaCandidates = findLiquidSources(bot, 'lava');
-    if (lavaCandidates.length === 0) {
+    const allLavaCandidates = findLiquidSources(bot, 'lava');
+    const nearbyLavaCandidates = selectNearbyLavaCandidates(allLavaCandidates, origin, 6, 2);
+    if (nearbyLavaCandidates.length === 0) {
+      const nearest = [...allLavaCandidates].sort((a, b) => distanceBetween(a, origin) - distanceBetween(b, origin))[0] as Point;
+      const plan = planLavaStand(nearest, probe);
+      const suggested = plan.stand ?? plan.floor ?? plan.suggestedStand ?? plan.suggestedFloor;
+      const lines = [
+        '阶段：选址限制。当前位置水平 6 格、垂直 ±2 格内没有岩浆源；工具不再大范围漫游或向下钻。',
+        nearestLavaInfo(allLavaCandidates, origin),
+        suggested == null ? '' : '手动建议安全坐标：' + formatPoint(suggested) + '。',
+      ].filter((line) => line !== '' );
+      const manual = suggested == null
+        ? '先 goToCoordinates 到 ' + formatPoint(nearest) + ' 附近干燥处，再用 placeBlock/useOn/searchForBlock/mineBlock 手动走一遍。'
+        : '先 goToCoordinates' + formatPoint(suggested) + '，再 placeBlock 垫脚，然后 useOn(water_bucket, lava)，searchForBlock(obsidian, 16)，最后 mineBlock。';
       return {
         ok: false,
         produced: 0,
-        message: failureReceipt(
-          before,
-          0,
-          [],
-          [],
-          '阶段：寻找岩浆源。附近 ' + String(LIQUID_SEARCH_RADIUS) + ' 格内没有找到岩浆源。',
-          '先 goToCoordinates 到有岩浆的地方（例如地下岩浆湖/熔岩层），再重试 makeObsidian。',
-        ),
+        message: failureReceipt(before, 0, [], [], lines.join('\n'), manual),
       };
     }
+    const lavaCandidates = nearbyLavaCandidates;
     const lavaTargets = chooseSafeLavaTargets(lavaCandidates, origin, probe);
     if (lavaTargets.length === 0) {
       const recoveryReasons: string[] = [];
@@ -536,6 +542,19 @@ async function makeObsidianInner(bot: any): Promise<MakeObsidianResult> {
         failures.push('到不了岩浆岸边 ' + formatPoint(target.stand) + '（目标岩浆 ' + formatPoint(target.liquid) + '）。');
         continue;
       }
+      const posAfterWalk = (() => {
+        try {
+          const p: any = world.getPosition(bot);
+          return { x: Number(p?.x ?? origin.x), y: Number(p?.y ?? origin.y), z: Number(p?.z ?? origin.z) };
+        } catch {
+          return origin;
+        }
+      })();
+      if (!isWithinOperationBox(posAfterWalk, origin, 6, 2)) {
+        failures.push('寻路越界：目标岩浆 ' + formatPoint(target.liquid) + ' 的安全位在 ' + formatPoint(target.stand) + '，但你被带到 ' + formatPoint(posAfterWalk) + '（超出水平 6/垂直 ±2 限制）。已停手，下一步：goToCoordinates' + formatPoint(target.stand) + ' 后重试 makeObsidian。');
+        dangerStop = true;
+        break;
+      }
       if (!isStandingSafelyAt(bot, target)) {
         failures.push('站位硬校验失败：寻路后没停在安全操作位 ' + formatPoint(target.stand) + '（岩浆 ' + formatPoint(target.liquid) + '）。下一步：goToCoordinates' + formatPoint(target.stand) + ' 后重试 makeObsidian。');
         continue;
@@ -578,13 +597,19 @@ async function makeObsidianInner(bot: any): Promise<MakeObsidianResult> {
       const becameObsidian = await skills.waitFor(
         bot,
         () => blockNameAt(bot, target.liquid) === 'obsidian',
-        2_000,
+        10_000,
       );
       if (!becameObsidian) {
-        failures.push('在 ' + formatPoint(target.liquid) + ' 倒水后没变成 obsidian（读到 ' + String(blockNameAt(bot, target.liquid) ?? '未知') + '）。');
-        continue;
+        let nearbyObsidian: any = null;
+        try {
+          nearbyObsidian = world.getNearestBlock(bot, 'obsidian', 16);
+        } catch {
+          nearbyObsidian = null;
+        }
+        failures.push('倒水后 10 秒内 searchForBlock(obsidian,16) 没确认目标 ' + formatPoint(target.liquid) + ' 生成（读到 ' + String(blockNameAt(bot, target.liquid) ?? '未知') + '）。' + (nearbyObsidian == null ? '16 格内也没找到 obsidian。' : '附近其他 obsidian：' + formatPoint({ x: Math.floor(nearbyObsidian.position.x), y: Math.floor(nearbyObsidian.position.y), z: Math.floor(nearbyObsidian.position.z) }) + '。') + '已停手，不重复倒水。下一步：goToCoordinates' + formatPoint(target.stand) + ' 后手动 useOn(water_bucket, lava)，再用 searchForBlock(obsidian,16) 和 mineBlock 核对。');
+        dangerStop = true;
+        break;
       }
-
       const feetBeforeMine = (() => {
         try {
           const p: any = world.getPosition(bot);
@@ -1318,4 +1343,24 @@ export function findRetreatStand(probe: BlockProbe, origin: Point, radius: numbe
   }
   candidates.sort((a, b) => a.distance - b.distance);
   return candidates.length > 0 ? candidates[0].stand : null;
+}
+
+export function isWithinOperationBox(
+  point: Point,
+  origin: Point,
+  maxHorizontal: number = 6,
+  maxVertical: number = 2,
+): boolean {
+  const horizontal = Math.hypot(point.x - origin.x, point.z - origin.z);
+  const vertical = Math.abs(point.y - origin.y);
+  return horizontal <= maxHorizontal && vertical <= maxVertical;
+}
+
+export function selectNearbyLavaCandidates(
+  lavas: Point[],
+  origin: Point,
+  maxHorizontal: number = 6,
+  maxVertical: number = 2,
+): Point[] {
+  return lavas.filter((lava) => isWithinOperationBox(lava, origin, maxHorizontal, maxVertical));
 }
