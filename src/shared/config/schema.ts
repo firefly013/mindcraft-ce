@@ -130,13 +130,26 @@ const PromptOverridesSchema = Type.Object(
   { additionalProperties: false, description: '逐条覆写提示词模板。' },
 );
 
+/**
+ * Minecraft Java 版用户名的合法形状：3-16 位字母、数字、下划线。
+ *
+ * 对 bot 来说它不只是显示名：这个名字还会直接变成 `bots/<name>/` 目录名。
+ * 所以形状必须在最外层 schema 就卡死，调用方（CLI 启动、网页上传 profile）
+ * 都走同一个校验。
+ */
+export const PROFILE_NAME_PATTERN = '^[a-zA-Z0-9_]{3,16}$';
+
+export const PROFILE_NAME_DESCRIPTION =
+  'bot 名：3-16 位字母、数字或下划线；同时会作为 Minecraft 用户名和 bots/<name>/ 目录名。';
+
 export const ProfileSchema = Type.Object(
   {
     $schema: Type.Optional(Type.String()),
     name: Type.String({
-      minLength: 1,
-      pattern: '^[A-Za-z0-9_-]+$',
-      description: 'bot 名，同时是 bots/<name>/ 的目录名。',
+      minLength: 3,
+      maxLength: 16,
+      pattern: PROFILE_NAME_PATTERN,
+      description: PROFILE_NAME_DESCRIPTION,
     }),
     model: ModelReferenceSchema,
     compaction: Type.Optional(CompactionSchema),

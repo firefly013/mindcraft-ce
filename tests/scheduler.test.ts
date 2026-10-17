@@ -33,6 +33,16 @@ describe('动作通道：一次一个', () => {
     expect(s.currentAction()).toBeNull();
     expect(s.isCurrent(gen)).toBe(true);
   });
+
+  it('Stop 与保命急停记录不同的失效原因', () => {
+    const s = new Scheduler();
+    s.startAction('a');
+    s.stopAll();
+    expect(s.lastInvalidationReason()).toBe('stop');
+    s.startAction('b');
+    s.beginEmergency();
+    expect(s.lastInvalidationReason()).toBe('emergency');
+  });
 });
 
 describe('紧急锁（L5 的反射）', () => {

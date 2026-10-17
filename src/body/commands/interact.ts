@@ -36,6 +36,8 @@
  * 同样的流程，摊开就不再是黑盒。
  */
 import * as skills from '../library/skills.js';
+import * as world from '../library/world.js';
+import * as mc from '../data/mcdata.js';
 import Vec3 from 'vec3';
 import { td, tp } from '../../shared/prompts.js';
 import type { AgentCommand } from './actions.js';
@@ -117,6 +119,44 @@ export function countInInventory(bot: unknown, name: string): number | null {
   }
 }
 
+/** 结算客户端背包：等几拍，让 window_items / set_slot 包落地。 */
+export async function settleInventory(bot: unknown, rounds = 3, waitMs = 50): Promise<void> {
+  const b = bot as { waitForTicks?: (n: number) => Promise<unknown> | unknown };
+  for (let i = 0; i < rounds; i++) {
+    try {
+      if (typeof b?.waitForTicks === 'function') {
+        await b.waitForTicks(1);
+        continue;
+      }
+    } catch {
+      // 等 tick 失败就退到定时等待。
+    }
+    await new Promise<void>((resolve) => setTimeout(resolve, waitMs));
+  }
+}
+
+/**
+ * 合成/加工前读数量：如果本地背包暂时看不到材料，先等几拍让它同步，再读一次。
+ *
+ * 真机故障：craft iron_leggings 连续报缺材料，重启才同步。客户端背包是
+ * 服务端 packet 推下来的，包在飞的时候直接读会读到旧值；这里最多等
+ * `maxWaitMs`，把"有材料却报缺"压到最小。
+ */
+export async function countInInventoryWithSync(
+  bot: unknown,
+  name: string,
+  wantedMin = 1,
+  maxWaitMs = 800,
+): Promise<number | null> {
+  const started = Date.now();
+  let count = countInInventory(bot, name);
+  while ((count == null || count < wantedMin) && Date.now() - started < maxWaitMs) {
+    await settleInventory(bot, 1, 50);
+    count = countInInventory(bot, name);
+  }
+  return count;
+}
+
 /**
  * 够得着的最近一个 `type` 方块；没有就 null。
  *
@@ -129,34 +169,271 @@ export function nearestReachableBlock(
 ): { x: number; y: number; z: number } | null {
   const b = bot as {
     entity?: { position?: { x?: number; y?: number; z?: number } };
-    findBlocks?: (opts: Record<string, unknown>) => Array<{ x: number; y: number; z: number }> | null;
+    blockAt?: (p: unknown) => { name?: unknown } | null;
   };
   const pos = b.entity?.position;
-  if (pos == null || typeof b.findBlocks !== 'function') return null;
-  let found: Array<{ x: number; y: number; z: number }> | null;
-  try {
-    found = b.findBlocks({
-      matching: (block: { name?: unknown }) => block?.name === type,
-      maxDistance,
-      count: 8,
-    });
-  } catch {
-    return null;
-  }
-  if (found == null || found.length === 0) return null;
-  const sx = pos.x ?? 0;
-  const sy = pos.y ?? 0;
-  const sz = pos.z ?? 0;
+  if (pos == null || typeof b.blockAt !== 'function') return null;
+  const px = Number(pos.x);
+  const py = Number(pos.y);
+  const pz = Number(pos.z);
+  if (!Number.isFinite(px) || !Number.isFinite(py) || !Number.isFinite(pz)) return null;
+  // task-9：**故意不用 `bot.findBlocks`**——它只在自己维护的世界视图里翻，刚放下的方块、
+  // 就在脚边 1 格的方块都会漏（模型真机：工作台在 1 米外、快照也写着，useBlock 却报
+  // "身边 4 格内没有够得着的 crafting_table"）。改成以 `blockAt` 逐格扫一个小立方体，
+  // 读到什么算什么，和 Live State 的方块感知同一口径。
+  const cx = Math.floor(px);
+  const cy = Math.floor(py);
+  const cz = Math.floor(pz);
+  const r = Math.max(1, Math.min(8, Math.ceil(maxDistance)));
   let best: { x: number; y: number; z: number } | null = null;
   let bestD = Number.POSITIVE_INFINITY;
-  for (const candidate of found) {
-    const d = Math.hypot(candidate.x - sx, candidate.y - sy, candidate.z - sz);
-    if (d < bestD) {
-      bestD = d;
-      best = candidate;
+  for (let dx = -r; dx <= r; dx++) {
+    for (let dy = -r; dy <= r; dy++) {
+      for (let dz = -r; dz <= r; dz++) {
+        const x = cx + dx;
+        const y = cy + dy;
+        const z = cz + dz;
+        let block: { name?: unknown } | null;
+        try {
+          block = b.blockAt(new Vec3(x, y, z));
+        } catch {
+          continue;
+        }
+        if (block == null || block.name !== type) continue;
+        const d = Math.hypot(x - px, y - py, z - pz);
+        if (d > maxDistance + 0.5) continue;
+        if (d < bestD) {
+          bestD = d;
+          best = { x, y, z };
+        }
+      }
     }
   }
   return best;
+}
+
+/**
+ * task-9：燃料的跨堆统计与预投料。
+ *
+ * 真机 bug：`skills.smeltItem` 用 `mc.getSmeltingFuel(bot)` 只拿到**第一个**燃料堆，
+ * 再拿 `fuel.count`（单堆数量）去比 `put_fuel`。模型背包 14 个煤分散成几堆时，
+ * 第一堆也许只有 2 个，于是回执写「you need 2 coal」——明明全背包合计够。
+ * skills.ts / mcdata.ts 不在本任务改动范围，所以这层修在交互层：调 smeltItem 之前
+ * 先按**全背包求和**把燃料投进熔炉，让它进到 `if (!furnace.fuelItem())` 的 false
+ * 分支，绕开那段单堆判断。
+ */
+export interface FuelPlan {
+  name: string;
+  unitOutput: number;
+  needed: number;
+  available: number;
+  stacks: number;
+  ok: boolean;
+}
+
+/** 燃料优先级：优质燃料(煤/木炭/烈焰棒) → 木头 → 煤块/岩浆桶。数字越小越优先。 */
+export function fuelTier(name: string): number {
+  if (name === 'coal' || name === 'charcoal' || name === 'blaze_rod') return 0;
+  if (name.includes('log') || name.includes('planks')) return 1;
+  if (name === 'coal_block' || name === 'lava_bucket') return 2;
+  return 3;
+}
+
+/**
+ * 按全背包求和挑一种燃料，并算清"要几个、现在有几个（分几堆）、够不够"。
+ * 优先挑总量够烧的燃料；都够就按优先级；都不够就挑覆盖率最高的报清楚。
+ * 完全没有燃料返回 null。
+ */
+export function planAggregateFuel(bot: unknown, smeltCount: number): FuelPlan | null {
+  const b = bot as { inventory?: { items?: () => Array<{ name?: unknown; count?: unknown }> } };
+  let items: Array<{ name?: unknown; count?: unknown }>;
+  try {
+    items = b.inventory?.items?.() ?? [];
+  } catch {
+    return null;
+  }
+  const totals = new Map<string, { count: number; stacks: number }>();
+  for (const item of items) {
+    if (typeof item?.name !== 'string') continue;
+    const count = typeof item.count === 'number' ? item.count : 1;
+    const entry = totals.get(item.name) ?? { count: 0, stacks: 0 };
+    entry.count += count;
+    entry.stacks += 1;
+    totals.set(item.name, entry);
+  }
+  const plans: FuelPlan[] = [];
+  for (const [name, entry] of totals) {
+    const unitOutput = mc.getFuelSmeltOutput(name);
+    if (!(unitOutput > 0) || entry.count <= 0) continue;
+    const needed = Math.max(1, Math.ceil(smeltCount / unitOutput));
+    plans.push({ name, unitOutput, needed, available: entry.count, stacks: entry.stacks, ok: entry.count >= needed });
+  }
+  if (plans.length === 0) return null;
+  plans.sort((a, b2) => {
+    if (a.ok !== b2.ok) return a.ok ? -1 : 1;
+    const ta = fuelTier(a.name);
+    const tb = fuelTier(b2.name);
+    if (ta !== tb) return ta - tb;
+    const ca = a.available / a.needed;
+    const cb = b2.available / b2.needed;
+    if (cb !== ca) return cb - ca;
+    return b2.available - a.available || a.name.localeCompare(b2.name);
+  });
+  return plans[0] ?? null;
+}
+
+/** 一种燃料 × 个数的可烧数量（考虑木板 1.5 这种小数）。 */
+function fuelCapacity(name: string, count: number): number {
+  return mc.getFuelSmeltOutput(name) * count;
+}
+
+/**
+ * 调 smeltItem 之前，按全背包求和把燃料准备好。返回 ok=false 时调用方**不要**再
+ * 调 smeltItem，否则又会被它的单堆判断误报。
+ */
+export async function ensureAggregateFuel(
+  bot: any,
+  smeltCount: number,
+  // useBlock 已经定位到的熔炉坐标。**优先用它**：`world.getNearestBlock` 走
+  // `findBlocks`，真机上刚放下/就在 1 格外的方块都可能漏（和 nearestReachableBlock
+  // 是同一个坑），不能让它把这个 bug 从后门带回来。
+  furnaceAt: { x: number; y: number; z: number } | null = null,
+): Promise<{ ok: boolean; detail: string }> {
+  let furnaceBlock: any = null;
+  if (furnaceAt != null && typeof bot?.blockAt === 'function') {
+    try {
+      furnaceBlock = bot.blockAt(new Vec3(furnaceAt.x, furnaceAt.y, furnaceAt.z));
+    } catch {
+      furnaceBlock = null;
+    }
+  }
+  if (furnaceBlock == null) furnaceBlock = world.getNearestBlock(bot, 'furnace', 16);
+  if (furnaceBlock == null) {
+    const hasFurnace = Number(world.getInventoryCounts(bot)['furnace'] ?? 0) > 0;
+    if (!hasFurnace) {
+      return { ok: false, detail: '附近 16 格没有熔炉，背包里也没有熔炉——先做一个（8 个圆石）或找到一个熔炉。' };
+    }
+    const free = world.getNearestFreeSpace(bot, 1, 16);
+    if (free == null) return { ok: false, detail: '想放熔炉，但附近找不到合适的空地。' };
+    await skills.placeBlock(bot, 'furnace', free.x, free.y, free.z);
+    furnaceBlock = world.getNearestBlock(bot, 'furnace', 16);
+    if (furnaceBlock == null) return { ok: false, detail: '放了熔炉却读不回来——区块可能没加载，稍后再试。' };
+  }
+  if (bot.entity.position.distanceTo(furnaceBlock.position) > 4) {
+    await skills.goToNearestBlock(bot, 'furnace', 4, 16);
+  }
+  let furnace: any = null;
+  try {
+    furnace = await bot.openFurnace(furnaceBlock);
+    const existing = furnace?.fuelItem?.() as { name?: string; count?: number } | null | undefined;
+    if (existing != null && Number(existing.count ?? 0) > 0 && typeof existing.name === 'string') {
+      const capacity = fuelCapacity(existing.name, Number(existing.count ?? 0));
+      if (capacity >= smeltCount) {
+        return { ok: true, detail: `熔炉里已有 ${existing.name}×${existing.count}（够烧约 ${Math.floor(capacity)} 个），直接烧。` };
+      }
+      const have = countInInventory(bot, existing.name) ?? 0;
+      if (have > 0 && capacity + fuelCapacity(existing.name, have) >= smeltCount) {
+        const more = Math.max(1, Math.ceil((smeltCount - capacity) / mc.getFuelSmeltOutput(existing.name)));
+        await furnace.putFuel(mc.getItemId(existing.name), null, more);
+        return { ok: true, detail: `熔炉里有 ${existing.name}×${existing.count}，再从背包补投 ${more} 个（合计够烧 ${smeltCount} 个）。` };
+      }
+      const plan2 = planAggregateFuel(bot, smeltCount);
+      return {
+        ok: false,
+        detail:
+          `熔炉里的 ${existing.name}×${existing.count} 不够烧 ${smeltCount} 个，背包里也不够同种续投。` +
+          (plan2 != null ? `背包跨堆合计：${plan2.name} 有 ${plan2.available} 个（需要 ${plan2.needed}）。` : '背包里没有任何燃料。'),
+      };
+    }
+    const plan = planAggregateFuel(bot, smeltCount);
+    if (plan == null) {
+      return { ok: false, detail: '没有燃料：需要煤 / 木炭 / 木头（原木或木板）——放进背包再来。' };
+    }
+    if (!plan.ok) {
+      return {
+        ok: false,
+        detail:
+          `燃料不够：烧 ${smeltCount} 个需要 ${plan.needed} 个 ${plan.name}，` +
+          `背包里只有 ${plan.available} 个（分散在 ${plan.stacks} 堆，**已按全背包合计**）。` +
+          '先补燃料，或减少要烧的数量。',
+      };
+    }
+    await furnace.putFuel(mc.getItemId(plan.name), null, plan.needed);
+    return {
+      ok: true,
+      detail:
+        `燃料就绪：${plan.name} 跨 ${plan.stacks} 堆共 ${plan.available} 个，` +
+        `已投 ${plan.needed} 个（够烧 ${smeltCount} 个）。` +
+        '（这一步按全背包求和算，不会再出现"有 14 个却说 need 2"。）',
+    };
+  } catch (error: unknown) {
+    return { ok: false, detail: `预处理燃料失败：${error instanceof Error ? error.message : String(error)}` };
+  } finally {
+    try {
+      if (furnace != null) await bot.closeWindow(furnace);
+    } catch {
+      /* 关不上就算了，别把好端端的加工流程带崩 */
+    }
+  }
+}
+
+/** 到目标方块的直线距离；读不到位置返回 null。 */
+export function distanceToBlock(bot: unknown, x: number, y: number, z: number): number | null {
+  const pos = (bot as { entity?: { position?: { x?: unknown; y?: unknown; z?: number } } })?.entity?.position;
+  const px = Number(pos?.x);
+  const py = Number(pos?.y);
+  const pz = Number(pos?.z);
+  if (!Number.isFinite(px) || !Number.isFinite(py) || !Number.isFinite(pz)) return null;
+  return Math.hypot(px - x, py - y, pz - z);
+}
+
+function passableBlock(block: { name?: unknown; boundingBox?: unknown } | null | undefined): boolean {
+  if (block == null) return false;
+  if (block.boundingBox === 'empty') return true;
+  return block.name === 'air' || block.name === 'cave_air' || block.name === 'void_air';
+}
+
+function solidBlock(block: { name?: unknown; boundingBox?: unknown } | null | undefined): boolean {
+  if (block == null) return false;
+  if (block.boundingBox === 'empty') return false;
+  return block.name !== 'air' && block.name !== 'cave_air' && block.name !== 'void_air'
+    && block.name !== 'water' && block.name !== 'lava';
+}
+
+/**
+ * 目标方块本身不能站立（熔炉/工作台/箱子）时，找出它周围可以站人的格子。
+ *
+ * 真机反馈：人就在熔炉旁 0.7 格，`useBlock` 却反复报「路径被堵或到不了」。
+ * 根因是拿方块自身坐标当寻路终点。交互只需要「够得着」，所以先试相邻可
+ * 站立的格子，别把不可站立的方块当成目的地。
+ */
+export function findAdjacentStandable(
+  bot: unknown,
+  x: number,
+  y: number,
+  z: number,
+): Array<{ x: number; y: number; z: number }> {
+  const b = bot as { blockAt?: (p: unknown) => { name?: unknown; boundingBox?: unknown } | null };
+  if (typeof b.blockAt !== 'function') return [];
+  const offsets: Array<[number, number, number]> = [
+    [1, 0, 0], [-1, 0, 0], [0, 0, 1], [0, 0, -1],
+    [1, 1, 0], [-1, 1, 0], [0, 1, 1], [0, 1, -1],
+  ];
+  const spots: Array<{ x: number; y: number; z: number }> = [];
+  for (const [dx, dy, dz] of offsets) {
+    const feet = new Vec3(x + dx, y + dy, z + dz);
+    const head = feet.offset(0, 1, 0);
+    const below = feet.offset(0, -1, 0);
+    try {
+      if (!passableBlock(b.blockAt(feet))) continue;
+      if (!passableBlock(b.blockAt(head))) continue;
+      if (!solidBlock(b.blockAt(below))) continue;
+      spots.push({ x: feet.x, y: feet.y, z: feet.z });
+    } catch {
+      continue;
+    }
+  }
+  return spots;
 }
 
 /** 坐标上那个方块的名字（读不到返回 null）。 */
@@ -246,13 +523,87 @@ async function moveOne(bot: any, container: any, src: number, dest: number, coun
  * 这里改成**自己扫全部背包槽**再 `moveSlotItem`，失败时把扫了哪些槽、每格是什么
  * 一并报出来——模型说光看 `[27 - 63]` 它完全没法自查。
  */
+/** 容器转移的可核对账目；early failure 时字段可以缺省。 */
+export interface TransferDetail {
+  ok: boolean;
+  detail: string;
+  containerReadable?: boolean;
+  containerBefore?: number | null;
+  containerAfter?: number | null;
+  containerDelta?: number | null;
+  localMoved?: number;
+}
+
+function backpackCountLine(name: string, before: number | null, after: number | null): string {
+  if (before == null || after == null) return '背包：' + name + ' 读不到（不代表背包是空的）';
+  const delta = after - before;
+  const sign = delta >= 0 ? '+' : '';
+  return '背包：' + name + ' ' + before + ' → ' + after + '（' + sign + delta + '）';
+}
+
+/**
+ * 取物/存物回执的统一口径。
+ *
+ * 真机故障：回执先写「取出 iron_ingot×1」（请求量），又写「真的取出了×15」
+ * （容器减少量），模型无法判断到底拿到几个；客户端背包又可能延迟十几轮
+ * 才看到铁锭。这里拆成三行：请求 / 容器实际变化 / 背包 before→after，
+ * 并明确不一致时以哪份账为准、同步延迟不要判定物品蒸发。
+ */
+export function formatTransferReceipt(
+  name: string,
+  requested: number,
+  direction: 'deposit' | 'withdraw',
+  result: TransferDetail,
+  backpackBefore: number | null,
+  backpackAfter: number | null,
+): string {
+  const bpLine = backpackCountLine(name, backpackBefore, backpackAfter);
+  if (
+    result.containerBefore === undefined &&
+    result.containerAfter === undefined &&
+    result.containerDelta === undefined
+  ) {
+    return result.detail + '\n    ' + bpLine;
+  }
+  if (result.containerReadable === false || result.containerDelta == null) {
+    const local = result.localMoved ?? 0;
+    return (
+      '容器读取不可用（重开失败或客户端同步延迟），不能据此判断容器是空还是满；' +
+      (local > 0 ? '本地账记录挪了 ' + local + ' 个。' : '本地账没记到明确的挪动。') +
+      '\n    ' + bpLine + '。以 stats 为准，稍后再核对。\n    ' + result.detail
+    );
+  }
+  const delta = result.containerDelta;
+  const directionLabel = direction === 'deposit' ? (delta >= 0 ? '增加' : '减少') : (delta >= 0 ? '减少' : '增加');
+  const containerText =
+    result.containerBefore != null && result.containerAfter != null
+      ? '容器：' + name + ' ' + result.containerBefore + ' → ' + result.containerAfter + '（' + directionLabel + ' ' + Math.abs(delta) + '）'
+      : '容器：' + name + ' 实际变化 ' + delta + '（明细读不到）';
+  const lines = [containerText, bpLine];
+  const backpackDelta = backpackBefore != null && backpackAfter != null ? backpackAfter - backpackBefore : null;
+  if (direction === 'withdraw' && delta > 0 && (backpackDelta == null || backpackDelta <= 0)) {
+    lines.push(
+      '注意：容器已经少了，但客户端背包暂时没看到增加——这是已知的客户端背包同步延迟（真机里铁锭十几轮后才出现）。不要判定物品蒸发，以 stats 为准，稍后再核对，别重复挖/重复取。',
+    );
+  }
+  if (requested !== Math.abs(delta)) {
+    lines.push(
+      '口径说明：你请求' + (direction === 'deposit' ? '放入' : '取出') + ' ' + requested + ' 个，服务端容器实际' + directionLabel + ' ' + Math.abs(delta) + ' 个；差值可能包含客户端窗口同步误差，若与 stats 不一致以 stats 为准。',
+    );
+  } else if (direction === 'withdraw' && backpackDelta != null && backpackDelta > 0) {
+    lines.push('核对一致：容器少了 ' + Math.abs(delta) + '，本次进包 ' + backpackDelta + '。');
+  }
+  if (Math.abs(delta) === 0 && (result.localMoved ?? 0) > 0) lines.push(result.detail);
+  return lines.join('\n    ');
+}
+
 async function transferWithContainer(
   bot: any,
   chestBlock: { x: number; y: number; z: number },
   name: string,
   count: number,
   direction: 'deposit' | 'withdraw',
-): Promise<{ ok: boolean; detail: string }> {
+): Promise<TransferDetail> {
   let container: any;
   try {
     const ok = await skills.goToPosition(bot, chestBlock.x, chestBlock.y, chestBlock.z, 2);
@@ -290,14 +641,27 @@ async function transferWithContainer(
       if (slots[i]?.name === name) source.push(i);
     }
     if (source.length === 0) {
+      // **读不到 ≠ 空**：槽位表本身为空/读不到时，不能写「容器是空的」——
+      // 真机上客户端窗口包延迟时就是这样误导模型的。
+      const slotList = slots
+        .map((slot, i) => (slot?.name != null ? `${i}:${slot.name}×${slot.count ?? 1}` : null))
+        .filter((slot) => slot != null)
+        .slice(0, 24)
+        .join(' ');
+      if (slots.length === 0) {
+        return {
+          ok: false,
+          detail:
+            `容器槽位表读不到（数组为空）：**不能据此判断容器是空的**。` +
+            '可能是客户端窗口同步延迟，稍后重开容器或用 stats 核对，再决定要不要重试。',
+        };
+      }
       return {
         ok: false,
-        detail: `扫了源槽 [${from.s},${from.e}) 没找到 ${name}。手上/背包现有：` +
-          slots
-            .map((s, i) => (s?.name != null ? `${i}:${s.name}×${s.count ?? 1}` : null))
-            .filter((s) => s != null)
-            .slice(0, 24)
-            .join(' '),
+        detail:
+          `容器里没找到 ${name}（扫了源槽 [${from.s},${from.e})）。当前容器内容：` +
+          (slotList === '' ? '读不到物品名，不能判断是否为空' : slotList) +
+          '。如果刚放入/刚取出，可能是客户端同步延迟，稍后 stats 再核对。',
       };
     }
 
@@ -426,6 +790,7 @@ async function transferWithContainer(
     //
     // 所以搬完**关掉箱子重开一次**，用服务端返回的新窗口内容做判定。
     let fresh: any = container;
+    let freshReadable = false;
     try {
       await container.close?.();
       await new Promise((resolve) => setTimeout(resolve, 250));
@@ -433,15 +798,22 @@ async function transferWithContainer(
         bot,
         bot.blockAt?.(new Vec3(chestBlock.x, chestBlock.y, chestBlock.z)),
       );
+      freshReadable = Array.isArray(fresh?.slots);
     } catch {
       fresh = container; // 重开失败就退回本地镜像，但下面会说明
+      freshReadable = Array.isArray(fresh?.slots);
     }
     const freshSlots: Array<{ name?: string; count?: number } | null> = fresh?.slots ?? [];
     for (let i = boxStart; i < Math.min(boxEnd, freshSlots.length); i++) {
       const it = freshSlots[i];
       if (it?.name != null) boxNow.push(`${it.name}×${it.count ?? 1}`);
     }
-    const boxText = boxNow.length > 0 ? boxNow.join('、') : '（空）';
+    // **读不到 ≠ 空**：重开失败时不要写「（空）」——模型会以为东西没了。
+    const boxText = !freshReadable
+      ? '读不到（重开容器失败，不能据此判断箱子为空）'
+      : boxNow.length > 0
+        ? boxNow.join('、')
+        : '（重开后服务端返回空；如果刚放入/取出，可能是客户端同步延迟，稍后 stats 再核对）';
     // **成败由服务端说了算**：重开后箱子里这个物品比之前多了多少，才是真正搬进去
     // 的数量。"我点了几个槽"（moved）只是本地账——模型真机报过"挪了 114、箱子没变"，
     // 就是本地账在撒谎（箱子其实满了，服务端拒收）。
@@ -456,37 +828,37 @@ async function transferWithContainer(
     // 甚至丢掉真的东西。
     //
     // 所以按方向取符号：存入看箱子**增加**，取出看箱子**减少**。
-    const landed = direction === 'deposit' ? boxAfter - boxBefore : boxBefore - boxAfter;
-    const verdict =
-      landed > 0
+    const containerDelta = freshReadable
+      ? (direction === 'deposit' ? boxAfter - boxBefore : boxBefore - boxAfter)
+      : null;
+    const verdict = containerDelta == null
+      ? '容器读取不可用（重开失败或客户端同步延迟）；本地账记录挪了 ' + moved + ' 个，不能据此判断容器是空还是满。'
+      : containerDelta > 0
         ? direction === 'deposit'
-          ? `真的进了 ${name}×${landed}`
-          : `真的取出了 ${name}×${landed}（箱子里少了这么多）`
-        : // **不许断言"东西是假的"。** 重开窗口读不到变化，可能只是这次没读准
-          // （延迟、窗口没刷新、物品被合并到别的堆里）——而"幽灵物品"这种措辞会让
-          // 模型把真的物品当假的扔掉。说"没看出变化、请复查"，把判断权还给它。
-          `${name}：箱子里没看出变化（${direction === 'deposit' ? '没多出来' : '没少下去'}）` +
+          ? `容器里 ${name} 增加 ${containerDelta}`
+          : `容器里 ${name} 减少 ${containerDelta}`
+        : `${name}：容器里没看出变化（${direction === 'deposit' ? '没多出来' : '没少下去'}）` +
           (moved > 0
-            ? `；本地账记了挪 ${moved}，但以重开箱子看到的服务端口径为准——**结果存疑，请以世界状态复查**，不要当成"东西凭空消失了"`
+            ? '；本地账记了挪 ' + moved + '，但以重开容器看到的服务端口径为准——结果存疑，请以世界状态复查，不要当成东西凭空消失了'
             : '；一步都没挪动（源槽可能已经空了）') +
-          // **满箱是最常见的"存入静默失败"原因**：shift-click 服务端拒收、本地镜像
-          // 却照记。prober 实测：gravel/coal 能堆进已有堆所以成功，iron_ingot 需要
-          // 新格子就被拒。空格数直接给模型，它自己就能决定"先清箱还是换箱子"。
           (direction === 'deposit'
             ? (() => {
                 const boxSlots = freshSlots.slice(0, Math.min(boxEnd, freshSlots.length));
                 const empty = boxSlots.filter((it: { name?: string } | null | undefined) => it?.name == null).length;
                 return empty === 0
-                  ? `；**箱子满了**（${boxSlots.length} 格全有东西），要放新物品得先取走一些或换个箱子`
-                  : `；箱子还有 ${empty} 格空位`;
+                  ? '；箱子满了（' + boxSlots.length + ' 格全有东西），要放新物品得先取走一些或换个箱子'
+                  : '；箱子还有 ' + empty + ' 格空位';
               })()
             : '');
     return {
-      ok: landed > 0,
-      // **不把窗口几何（slots= / inventoryStart= / [0,27) 之类）写进回执**——
-      // 那是内部实现细节，模型要的是"这次到底成没成、箱子里现在有什么"。
-      // 它两次点名说这些数字没意义（Feedback #20/#21）。调试要看的话在日志里。
-      detail: `${verdict}；重开箱子看到的（服务端口径）：${boxText}`,
+      ok: containerDelta != null ? containerDelta > 0 : moved > 0,
+      // *不把窗口几何写进回执*：模型要的是这次到底成没成、容器里现在有什么。
+      detail: verdict + '；重开容器看到的（服务端口径）：' + boxText,
+      containerReadable: freshReadable,
+      containerBefore: boxBefore,
+      containerAfter: freshReadable ? boxAfter : null,
+      containerDelta,
+      localMoved: moved,
     };
   } catch (error: unknown) {
     return { ok: false, detail: `挪物品时出错：${error instanceof Error ? error.message : String(error)}` };
@@ -529,8 +901,22 @@ function withTimeout<T>(work: Promise<T>, ms: number, onTimeout: T): Promise<T> 
 /** 单次 useBlock/useEntity/craft 最多跑多久（毫秒）。 */
 const TOOL_TIMEOUT_MS = 45_000;
 
-/** 把一个容器槽描述成一行（空槽也说出来，别让人猜）。 */
+/** 「这一槽读不到」的哨兵。它和 null（真的空槽）不是一回事。 */
+const SLOT_UNREADABLE: unique symbol = Symbol('slot-unreadable');
+
+/** 读容器槽；方法不存在或抛错都归为读不到，不伪装成空槽。 */
+function readSlot(container: any, method: string): unknown {
+  try {
+    if (typeof container?.[method] !== 'function') return SLOT_UNREADABLE;
+    return container[method]();
+  } catch {
+    return SLOT_UNREADABLE;
+  }
+}
+
+/** 把一个容器槽描述成一行（空槽也说出来，读不到也说出来，别让人猜）。 */
 function slotLine(slot: unknown, label: string): string {
+  if (slot === SLOT_UNREADABLE) return label + '：读不到（不代表这一槽是空的）';
   const s2 = slot as { name?: unknown; count?: unknown } | null | undefined;
   const name = typeof s2?.name === 'string' ? s2.name : null;
   if (name == null) return label + '：空';
@@ -619,6 +1005,8 @@ function itemText(items: readonly ItemSpec[]): string {
 
 /** 加工类方块（有 input 也有 output 时走这条）。 */
 const PROCESSING_BLOCKS = new Set(['crafting_table', 'furnace', 'blast_furnace', 'smoker', 'anvil']);
+/** 熔炉族：既能加工，也能只给 output 把成品取出来。 */
+const FURNACE_BLOCKS = new Set(['furnace', 'blast_furnace', 'smoker']);
 /** 容器类方块（只存或只取）。 */
 const CONTAINER_BLOCKS = new Set(['chest', 'trapped_chest', 'barrel', 'ender_chest', 'shulker_box']);
 
@@ -649,12 +1037,28 @@ export function planUseBlock(
   }
   if (hasInput) {
     if (CONTAINER_BLOCKS.has(type)) return { kind: 'deposit' };
+    if (PROCESSING_BLOCKS.has(type)) {
+      return {
+        kind: 'unsupported',
+        reason:
+          `${type} 加工必须同时给 input（原料）和 output（期望产物）；只给 input 不是加工。` +
+          `正确例子：useBlock(type="${type}", input="8 raw_iron", output="8 iron_ingot")。`,
+      };
+    }
     return { kind: 'unsupported', reason: `${type} 不能只"存进去"——那是容器（箱子/桶）才有的用法。` };
   }
   if (hasOutput) {
     if (CONTAINER_BLOCKS.has(type)) return { kind: 'withdraw' };
-    // 熔炉取成品：output 单独给就是"把烤好的拿出来"
-    if (PROCESSING_BLOCKS.has(type)) return { kind: 'withdraw' };
+    // 熔炉取成品：output 单独给就是"把烤好的拿出来"。
+    if (FURNACE_BLOCKS.has(type)) return { kind: 'withdraw' };
+    if (PROCESSING_BLOCKS.has(type)) {
+      return {
+        kind: 'unsupported',
+        reason:
+          `${type} 要加工必须同时给 input 和 output；只给 output 不是加工，也没有可取的成品槽。` +
+          `正确例子：useBlock(type="${type}", input="3 stone", output="1 stone_pickaxe")。`,
+      };
+    }
     return { kind: 'unsupported', reason: `${type} 不能只"取出来"——箱子或熔炉才行。` };
   }
   return { kind: 'interact' };
@@ -666,7 +1070,74 @@ export function renderReport(lines: readonly string[], tail?: string): string {
   return tail == null ? body : `${body}\n${tail}`;
 }
 
-export const interactList: AgentCommand[] = [
+const ACTION_TIMEOUT = Symbol('interact-timeout');
+
+/**
+ * 交互类工具统一走身体通道。
+ *
+ * 为什么必须包一层：useBlock/useEntity/craft 以前是裸 async，不设置
+ * `actions.executing`，于是自动拾取可以在它们跑的时候抢走身体（快照里 Meta
+ * 变成 autoPickup，模型以为自己的动作根本没跑），Stop 也停不掉它们。
+ *
+ * 同时给每次调用一个明确的结局：完成 / 失败 / 超时 / 被中断，绝不再出现
+ * 「只回一个 action_id 然后静默消失」。
+ */
+export async function runInteractiveAction(
+  agent: any,
+  label: string,
+  work: () => Promise<string> | string,
+): Promise<string> {
+  let result: string | typeof ACTION_TIMEOUT = ACTION_TIMEOUT;
+  let error: unknown = null;
+  const actionFn = async (): Promise<void> => {
+    try {
+      result = await withTimeout(Promise.resolve().then(work), TOOL_TIMEOUT_MS + 5000, ACTION_TIMEOUT);
+    } catch (err: unknown) {
+      error = err;
+    }
+  };
+  let outcome: { interrupted?: boolean; timedout?: boolean } | null = null;
+  if (typeof agent?.actions?.runAction === 'function') {
+    outcome = (await agent.actions.runAction(`action:${label}`, actionFn, { timeout: 2 })) as {
+      interrupted?: boolean;
+      timedout?: boolean;
+    } | null;
+  } else {
+    await actionFn();
+  }
+  if (error != null) {
+    return `${label} 执行出错：${error instanceof Error ? error.message : String(error)}`;
+  }
+  if (outcome?.interrupted === true && outcome.timedout !== true) {
+    return (
+      `${label} 被中断（Stop / 保命反射 / autoPickup 抢走了身体），本次没有完整结果。` +
+      '不要盲目重发；先用 stats 看当前位置和背包，再决定继续还是换路。'
+    );
+  }
+  if (outcome?.timedout === true || result === ACTION_TIMEOUT) {
+    return (
+      `${label} 超时（${TOOL_TIMEOUT_MS / 1000} 秒没返回），已释放身体通道。` +
+      '注意：超时 ≠ 没做成——异步动作可能已经生效，先核对背包/容器状态再决定要不要重试。'
+    );
+  }
+  const text = String(result).trim();
+  if (text === '') {
+    return `${label} 执行结束，但身体没有返回具体结果（可能被中断）。请用 stats 核对当前状态。`;
+  }
+  return text;
+}
+
+function wrapInteractiveCommand(command: AgentCommand): AgentCommand {
+  const label = command.name.replace(/^!/, '');
+  const original = command.perform;
+  const perform = (async function (agent: any, ...args: any[]): Promise<string> {
+    return await runInteractiveAction(agent, label, () => Promise.resolve(original(agent, ...args)) as Promise<string>);
+  }) as AgentCommand['perform'];
+  (perform as { longRunning?: boolean }).longRunning = true;
+  return { ...command, perform };
+}
+
+const interactCommands: AgentCommand[] = [
   {
     name: '!useBlock',
     description: td('useBlock'),
@@ -704,11 +1175,37 @@ export const interactList: AgentCommand[] = [
         if (actual != null && actual !== type) {
           return `useBlock 用不了：(${x},${y},${z}) 是 ${actual}，不是 ${type}。`;
         }
-        lines.push(step(`走过去 (${x},${y},${z})`));
-        const ok = await skills.goToPosition(agent.bot, x, y, z, 2);
-        if (!ok) {
-          return renderReport(lines, `走到 (${x},${y},${z}) 失败：路径被堵或到不了。可以先 goToCoordinates，或者换一个方块。`);
+        const startDistance = distanceToBlock(agent.bot, x, y, z);
+        if (startDistance != null && startDistance <= 4.5) {
+          // 人已经够得着就别再寻路：交互只需要够得着，寻路到方块自身坐标
+          // 反而会因为方块不可站立而失败（真机：人离熔炉 0.7 格仍报路径被堵）。
+          lines.push(step(`已经在 (${x},${y},${z}) 的 ${type} 旁边（${startDistance.toFixed(1)} 格），不用再走。`));
+        } else {
+          lines.push(step(`走过去 (${x},${y},${z})`));
+          let ok = await skills.goToPosition(agent.bot, x, y, z, 2);
+          if (!ok) {
+            // 目标方块本身不可站立：改试相邻可站立格，而不是反复报同一句。
+            const spots = findAdjacentStandable(agent.bot, x, y, z);
+            for (const spot of spots.slice(0, 4)) {
+              const reached = await skills.goToPosition(agent.bot, spot.x, spot.y, spot.z, 0);
+              if (reached) {
+                lines.push(step(`目标格不可站立，改走到相邻格 (${spot.x},${spot.y},${spot.z})。`));
+                ok = true;
+                break;
+              }
+            }
+          }
+          if (!ok) {
+            const nowDistance = distanceToBlock(agent.bot, x, y, z);
+            return renderReport(
+              lines,
+              `走到 (${x},${y},${z}) 失败：路径被堵或到不了（当前离目标 ${nowDistance == null ? '未知' : nowDistance.toFixed(1)} 格，` +
+                '相邻可站立格也走不过去）。可以先 goToCoordinates，或者换一个方块。',
+            );
+          }
         }
+        const finalDistance = distanceToBlock(agent.bot, x, y, z);
+        lines.push(step(`离目标 ${finalDistance == null ? '未知' : finalDistance.toFixed(1)} 格。`));
         located = { x, y, z };
       } else {
         const nearby = nearestReachableBlock(agent.bot, type);
@@ -723,6 +1220,14 @@ export const interactList: AgentCommand[] = [
       if (plan.kind === 'interact') {
         if (type === 'chest' || type === 'trapped_chest' || type === 'barrel') {
           await runSkill(agent.bot, lines, () => skills.viewChest(agent.bot), '打开看了里面的东西', '打开失败');
+          // **读不到 ≠ 空**：客户端窗口包延迟时 skills.viewChest 会报 The chest is empty，
+          // 真机上这会让模型以为东西丢了。补一句延迟说明，并指向 stats。
+          lines.push(
+            step(
+              '如果这里显示空、但你明明刚放进去过，可能是客户端容器同步延迟——' +
+                '重开一次容器或以 stats 为准，不要判定物品蒸发。',
+            ),
+          );
           return renderReport(lines);
         }
         if (type === 'bed') {
@@ -750,16 +1255,21 @@ export const interactList: AgentCommand[] = [
               lines.push(step(`读不到 (${located.x},${located.y},${located.z}) 那一格——区块可能没加载，或者坐标偏了。`));
               return renderReport(lines);
             }
-            const container: any = await skills.openBlockUi(agent.bot, furnaceBlock);
+            const container: any = await withTimeout(skills.openBlockUi(agent.bot, furnaceBlock), TOOL_TIMEOUT_MS, null);
+            if (container == null) {
+              lines.push(step(`打开熔炉超时（${TOOL_TIMEOUT_MS / 1000} 秒没返回），本次没读到内容。`));
+              return renderReport(lines);
+            }
 
             lines.push(step('打开看了炉子里面'));
 
-            lines.push('    ' + slotLine(container.inputItem?.(), '原料槽'));
+            lines.push('    ' + slotLine(readSlot(container, 'inputItem'), '原料槽'));
 
-            lines.push('    ' + slotLine(container.fuelItem?.(), '燃料槽'));
+            lines.push('    ' + slotLine(readSlot(container, 'fuelItem'), '燃料槽'));
 
-            lines.push('    ' + slotLine(container.outputItem?.(), '产物槽'));
+            lines.push('    ' + slotLine(readSlot(container, 'outputItem'), '产物槽'));
 
+            lines.push('    （如果刚投料/取物，槽位读数可能还没同步；以 stats 或重开容器为准）');
             lines.push('    （想清空某一槽就用 useBlock(type=furnace, output="…") 把东西取出来）');
 
             await container.close?.();
@@ -782,9 +1292,13 @@ export const interactList: AgentCommand[] = [
       if (plan.kind === 'deposit') {
         if (located == null) return renderReport(lines, '定位不到容器。');
         for (const item of parsedIn.items) {
+          await settleInventory(agent.bot, 2, 50);
+          const beforeCount = countInInventory(agent.bot, item.name);
           const result = await transferWithContainer(agent.bot, located, item.name, item.count, 'deposit');
-          lines.push(step(result.ok ? `放入 ${item.name}×${item.count}` : `放入 ${item.name} 失败`));
-          lines.push(`    ${result.detail}`);
+          await settleInventory(agent.bot, 3, 50);
+          const afterCount = countInInventory(agent.bot, item.name);
+          lines.push(step(`放入 ${item.name}：请求 ${item.count}${result.ok ? '' : '（操作未完成）'}`));
+          lines.push('    ' + formatTransferReceipt(item.name, item.count, 'deposit', result, beforeCount, afterCount));
         }
         return renderReport(lines);
       }
@@ -792,9 +1306,13 @@ export const interactList: AgentCommand[] = [
       if (plan.kind === 'withdraw') {
         if (located == null) return renderReport(lines, '定位不到容器。');
         for (const item of parsedOut.items) {
+          await settleInventory(agent.bot, 2, 50);
+          const beforeCount = countInInventory(agent.bot, item.name);
           const result = await transferWithContainer(agent.bot, located, item.name, item.count, 'withdraw');
-          lines.push(step(result.ok ? `取出 ${item.name}×${item.count}` : `取出 ${item.name} 失败`));
-          lines.push(`    ${result.detail}`);
+          await settleInventory(agent.bot, 3, 50);
+          const afterCount = countInInventory(agent.bot, item.name);
+          lines.push(step(`取出 ${item.name}：请求 ${item.count}${result.ok ? '' : '（操作未完成）'}`));
+          lines.push('    ' + formatTransferReceipt(item.name, item.count, 'withdraw', result, beforeCount, afterCount));
         }
         return renderReport(lines);
       }
@@ -814,43 +1332,115 @@ export const interactList: AgentCommand[] = [
               '燃料不用你操心，熔炉会自己从背包里找煤/木炭/木头。',
           );
         }
+        // task-9：先按全背包求和把燃料投好，绕开 smeltItem 的单堆燃料判断（14 煤报 need 2）。
+        // 先让客户端背包包落地，再按全背包求和投燃料；避免「有 14 煤却说 need 2」。
+        await settleInventory(agent.bot, 3, 50);
+        const fuelPrep = await ensureAggregateFuel(agent.bot, raw.count, located);
+        lines.push('- ' + fuelPrep.detail);
+        if (!fuelPrep.ok) {
+          return renderReport(lines, '燃料这一步没过，链路还没启动，熔炉里不会留下半成品；按上面说的补齐再试。');
+        }
+        const rawBefore = await countInInventoryWithSync(agent.bot, raw.name, raw.count, 800);
+        if (rawBefore != null && rawBefore < raw.count) {
+          return renderReport(
+            lines,
+            `背包里 ${raw.name} 只有 ${rawBefore} 个（要烧 ${raw.count}）。` +
+              '如果 stats 里其实够，可能是客户端背包同步延迟——先 stats 核对，别急着重挖；如果确实不够，补够再试。',
+          );
+        }
+        if (rawBefore == null) {
+          lines.push('- 背包数量读不到，不能确认原料够不够；仍尝试调用，失败以 stats 为准。');
+        }
+        const outBefore = countInInventory(agent.bot, wanted.name);
         const ok = await runSkill(
           agent.bot,
           lines,
           () => skills.smeltItem(agent.bot, raw.name, raw.count),
-          `已点火，开始烧 ${raw.name}×${raw.count}`,
+          `已烧完 ${raw.name}×${raw.count}`,
           `烧不了 ${raw.name}`,
         );
-        // **不阻塞**：只把估计时间写进返回，取成品是另一次 useBlock（output 单独给）。
-        // **失败时不写这句**——模型反馈过它很误导（"failed 还附 10 秒后来取"）。
+        // 烧完后再等包落地，别让产物还没同步就被误判成失败或丢失。
+        await settleInventory(agent.bot, 4, 60);
+        const rawAfter = await countInInventoryWithSync(agent.bot, raw.name, 0, 500);
+        const outAfter = await countInInventoryWithSync(agent.bot, wanted.name, 1, 800);
+        lines.push(
+          step(
+            `背包账目：${raw.name} ${rawBefore ?? '?'} → ${rawAfter ?? '?'}；` +
+              `${wanted.name} ${outBefore ?? '?'} → ${outAfter ?? '?'}。`,
+          ),
+        );
+        if (ok && outBefore != null && outAfter != null && outAfter - outBefore <= 0) {
+          lines.push(
+            step(
+              '注意：烧炼技能报成功，但客户端背包暂时没看到产物增加——可能背包同步延迟' +
+                '（真机里铁锭十几轮后才出现）。不要判定物品蒸发，以 stats 为准，稍后再核对。',
+            ),
+          );
+        }
+        // **失败时不写「稍后来取」**——模型反馈过它很误导（"failed 还附 10 秒后来取"）。
         if (!ok) {
           return renderReport(lines, '上面那几行是熔炉自己报的原因；照着改（缺燃料就带煤/木炭，炉子里有别的东西就先取出来）。');
         }
         const expected = parsedOut.items[0];
         return renderReport(
           lines,
-          `熔炉是异步的：约 10 秒一件，到点了再用 useBlock(type=furnace, output="${expected?.name ?? raw.name}") 来取。`,
+          `这次等到了产物；如果产物没全进包，可能还在熔炉里，用 useBlock(type=furnace, output="${expected?.name ?? raw.name}") 核对/取出。`,
         );
       }
       // 工作台 / 铁砧
-      const have = countInInventory(agent.bot, wanted.name) ?? 0;
-      const crafted = await runSkill(
+      // 合成前先结算客户端背包，再读数量：有材料却报缺，多半是 window_items 包还在飞。
+      await settleInventory(agent.bot, 3, 50);
+      await settleInventory(agent.bot, 2, 40);
+      const have = countInInventory(agent.bot, wanted.name);
+      let crafted = await runSkill(
         agent.bot,
         lines,
         () => skills.craftRecipe(agent.bot, wanted.name, wanted.count),
-        // 先不写死"产出 X×N"——真正进包多少，等这一步回来按实际账目写。
+        // 先不写死产出 X×N——真正进包多少，等这一步回来按实际账目写。
         `合成 ${wanted.name}`,
         `做不出 ${wanted.name}`,
       );
+      if (!crafted) {
+        // 真机：有材料但连续报缺，重启才同步。再给背包一次同步机会后重试一次；
+        // 仍然失败才把原因写清，并明确提示以 stats 为准，避免重复挖/丢材料。
+        await settleInventory(agent.bot, 5, 80);
+        crafted = await runSkill(
+          agent.bot,
+          lines,
+          () => skills.craftRecipe(agent.bot, wanted.name, wanted.count),
+          `刷新背包后合成 ${wanted.name}`,
+          `刷新背包后仍做不出 ${wanted.name}`,
+        );
+      }
+      await settleInventory(agent.bot, 3, 50);
+      const now = await countInInventoryWithSync(agent.bot, wanted.name, 1, 800);
       if (crafted) {
-        const now = countInInventory(agent.bot, wanted.name) ?? 0;
-        lines.push(step(`实际进包 ${wanted.name}：+${now - have}（现在 ${now} 个）`));
+        if (have != null && now != null) {
+          lines.push(step(`实际进包 ${wanted.name}：+${now - have}（现在 ${now} 个）`));
+          if (now - have <= 0) {
+            lines.push(
+              step(
+                '注意：合成技能报成功，但客户端背包暂时没看到产出增加——可能背包同步延迟，' +
+                  '以 stats 为准，稍后再核对，不要判定材料/产物蒸发。',
+              ),
+            );
+          }
+        } else {
+          lines.push(step(`合成技能报成功，但背包计数读不到；以 stats 为准。`));
+        }
         return renderReport(lines);
+      }
+      if (have == null) {
+        return renderReport(
+          lines,
+          '背包读不到，不能判断材料够不够；先把 stats 打出来核对，再决定怎么做。',
+        );
       }
       return renderReport(
         lines,
         `检查一下 input（现在给的是 ${itemText(parsedIn.items) || '空'}）够不够、配方对不对。` +
-          (have != null ? `背包里现有 ${wanted.name}×${have}。` : ''),
+          `背包里现有 ${wanted.name}×${have}。` +
+          '如果 stats 里其实有材料，说明是客户端背包同步延迟——不要重复挖/丢材料，稍后用 stats 再核对一次；必要时重启 agent 后再试。',
       );
     },
   },
@@ -938,22 +1528,49 @@ export const interactList: AgentCommand[] = [
       const want = parsedOut.items[0];
       if (want == null) return 'craft 参数不对：要给出 output（期望产出什么）。';
 
-      const have = countInInventory(agent.bot, want.name) ?? 0;
-      const ok = await skills.craftRecipe(agent.bot, want.name, want.count);
-      // 回执报**实际进包多少**，不报"我请求了多少"——模型明确要求过
-      // "把消耗和产出都列出来"（它当时从 ×4 的异常里自己反推出了 4 倍）。
-      const now = countInInventory(agent.bot, want.name) ?? 0;
+      // 合成前先结算客户端背包；有材料却报缺，多半是 window_items 包还在飞。
+      await settleInventory(agent.bot, 3, 50);
+      await settleInventory(agent.bot, 2, 40);
+      const have = countInInventory(agent.bot, want.name);
+      let ok = await skills.craftRecipe(agent.bot, want.name, want.count);
+      if (!ok) {
+        // 真机：有材料却连续报缺，重启才同步。再给背包一次同步机会后重试一次。
+        await settleInventory(agent.bot, 5, 80);
+        ok = await skills.craftRecipe(agent.bot, want.name, want.count);
+      }
+      await settleInventory(agent.bot, 3, 50);
+      // 回执报实际进包多少，不报请求了多少；读不到就说读不到，不猜。
+      const now = await countInInventoryWithSync(agent.bot, want.name, 1, 800);
       if (ok) {
-        return renderReport([step(`合成 ${want.name}：+${now - have}（现在 ${now} 个）`)]);
+        if (have != null && now != null) {
+          const lines = [step(`合成 ${want.name}：+${now - have}（现在 ${now} 个）`)];
+          if (now - have <= 0) {
+            lines.push(
+              step(
+                '注意：合成技能报成功，但客户端背包暂时没看到产出增加——可能背包同步延迟，' +
+                  '以 stats 为准，稍后再核对，不要判定材料/产物蒸发。',
+              ),
+            );
+          }
+          return renderReport(lines);
+        }
+        return '合成技能报成功，但背包计数读不到；以 stats 为准。';
+      }
+      if (have == null) {
+        return '背包读不到，不能判断材料够不够；先把 stats 打出来核对，再决定怎么做。';
       }
       return renderReport(
         [step(`做不出 ${want.name}×${want.count}`)],
         `检查材料（现在给的是 ${itemText(parsedIn.items) || '空'}）够不够；` +
+          '如果 stats 里其实有材料，说明是客户端背包同步延迟——不要重复挖/丢材料，稍后用 stats 再核对一次；必要时重启 agent 后再试。' +
           `想知道这个物品怎么做、缺哪些材料，用 getCraftingPlan(targetItem="…")；只有 3×3 的配方才需要工作台（那时用 useBlock(type=crafting_table, …)）。` +
-          (have != null ? `背包里现有 ${want.name}×${have}。` : ''),
+          `背包里现有 ${want.name}×${have}。`,
       );
     },
   },
 ];
 
-export default { interactList, planUseBlock, parseItems };
+/** 三个交互工具都统一包上身体通道和超时回执；内部实现保持原样。 */
+export const interactList: AgentCommand[] = interactCommands.map(wrapInteractiveCommand);
+
+export default { interactList, planUseBlock, parseItems, runInteractiveAction };

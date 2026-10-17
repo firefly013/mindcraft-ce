@@ -13,9 +13,10 @@
     },
     "name": {
       "type": "string",
-      "minLength": 1,
-      "pattern": "^[A-Za-z0-9_-]+$",
-      "description": "bot 名，同时是 bots/<name>/ 的目录名。"
+      "minLength": 3,
+      "maxLength": 16,
+      "pattern": "^[a-zA-Z0-9_]{3,16}$",
+      "description": "bot 名：3-16 位字母、数字或下划线；同时会作为 Minecraft 用户名和 bots/<name>/ 目录名。"
     },
     "model": {
       "anyOf": [

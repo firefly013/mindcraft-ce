@@ -63,21 +63,77 @@ export class ActionManager {
     }
 
     /**
-     * 停掉正在跑的动作：不断请求打断，直到动作函数真的返回。
+     * 身体侧硬中断：取消寻路、停止挖掘/收集、清控制状态，再置 interrupt 标志。
+     *
+     * 这是 Stop 的第一手段，不是等到 10 秒超时才做的事。真实故障里
+     * digDown 撞水后 `stop()` 只反复调 `requestInterrupt`，而 mineshaft/
+     * pathfinder 仍握着方向盘，于是 10 秒后被 cleanKill 杀进程、整晚回出生点。
+     * 这里把「身体实际能收手的地方」一次全碰一遍。
+     */
+    hardInterrupt(): void {
+        try {
+            this.agent?.requestInterrupt?.();
+        } catch {
+            // 某一条底层调用坏掉不能阻止其他中断手段。
+        }
+        const bot = this.agent?.bot;
+        try {
+            bot?.clearControlStates?.();
+        } catch {
+            // 同上：逐条兜底，不让一个异常吞掉后面的清场。
+        }
+        try {
+            bot?.pathfinder?.stop?.();
+        } catch {
+            // 同上。
+        }
+        try {
+            bot?.stopDigging?.();
+        } catch {
+            // 同上。
+        }
+        if (bot != null) bot.interrupt_code = true;
+    }
+
+    /**
+     * 释放当前动作标记，唤醒任何在看 `executing` 的等待者。
+     *
+     * 只在 stop 已经确认「硬中断也停不下来」、准备走 cleanKill 最后一条路时
+     * 调用：它让 stop 循环本身不再无限挂起，也让上层知道通道已让出。
+     */
+    releaseCurrentAction(): void {
+        this.executing = false;
+        this.currentActionFn = null;
+    }
+
+    /**
+     * 停掉正在跑的动作：先硬中断，再等动作函数真的返回。
      *
      * 必须**等**：先释放通道再让身体继续动，就是"Stop 了但还在挖"。
-     * 超过 `STOP_WAIT_MS` 还没停下来才认输杀掉进程——这是最后的保险丝，
-     * 正常路径永远走不到。
+     * 只有硬中断 + `STOP_WAIT_MS` 仍然停不下来，才认输杀进程；杀之前
+     * 报出具体卡住的动作名——静默 cleanKill 会让整晚的问题查不出来。
      */
     async stop(): Promise<void> {
         if (!this.executing) return;
+        const stuckLabel = this.currentActionLabel === '' ? '(unknown action)' : this.currentActionLabel;
         const timeout = setTimeout(() => {
-            this.agent.cleanKill('Action refused stop after 10 seconds. Killing process.');
+            this.hardInterrupt();
+            if (this.executing) {
+                // 先释放动作标记、唤醒等待者；动作函数仍不返回才杀进程。
+                this.releaseCurrentAction();
+                this.agent.cleanKill(
+                    'Action "' + stuckLabel + '" refused stop after ' + (STOP_WAIT_MS / 1000) +
+                    ' seconds of hard interrupts. Killing process.',
+                );
+            }
         }, STOP_WAIT_MS);
+
+        // 第一下就硬中断，不等 300ms。
+        this.hardInterrupt();
         while (this.executing) {
-            this.agent.requestInterrupt();
-            console.log('waiting for action to finish executing...');
+            console.log('waiting for action "' + stuckLabel + '" to finish executing...');
             await new Promise<void>(resolve => setTimeout(resolve, 300));
+            this.hardInterrupt();
         }
         clearTimeout(timeout);
     }

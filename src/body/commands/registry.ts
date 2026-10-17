@@ -11,9 +11,20 @@ import { stripBang, type ToolDeclaration, type ToolKind } from '../../shared/too
 import { actionsList } from './actions.js';
 import type { AgentCommand } from './actions.js';
 import { queryList } from './queries.js';
+import { survivalActionList, survivalQueryList } from './survival.js';
+import { endgameActionList, endgameQueryList } from './endgame.js';
+import { makeObsidianActionList } from './make_obsidian.js';
 
 /** 与旧 `to_openai_tools.ts` 的 `commandList` 同一个来源、同一个顺序。 */
-export const GAME_COMMANDS: AgentCommand[] = queryList.concat(actionsList);
+export const GAME_COMMANDS: AgentCommand[] = [
+    ...queryList,
+    ...survivalQueryList,
+    ...endgameQueryList,
+    ...actionsList,
+    ...survivalActionList,
+    ...endgameActionList,
+    ...makeObsidianActionList,
+];
 
 const commandMap: Record<string, AgentCommand> = {};
 for (const command of GAME_COMMANDS) {
@@ -50,7 +61,12 @@ function declarationOf(command: AgentCommand, kind: ToolKind): ToolDeclaration {
 export function toolDeclarations(): ToolDeclaration[] {
     return [
         ...queryList.map((command) => declarationOf(command, 'query')),
+        ...survivalQueryList.map((command) => declarationOf(command, 'query')),
+        ...endgameQueryList.map((command) => declarationOf(command, 'query')),
         ...actionsList.map((command) => declarationOf(command, 'action')),
+        ...survivalActionList.map((command) => declarationOf(command, 'action')),
+        ...endgameActionList.map((command) => declarationOf(command, 'action')),
+        ...makeObsidianActionList.map((command) => declarationOf(command, 'action')),
     ];
 }
 

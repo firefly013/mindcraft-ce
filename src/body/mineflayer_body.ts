@@ -175,6 +175,134 @@ export function readableWindowTitle(raw: unknown): string {
 }
 
 
+/**
+ * 背包相对上一次快照的增量。
+ *
+ * 第一次观察和「真的没变化」都必须返回 `text: ''` 并标记原因；调用方
+ * **不要**再把这些情况写成「背包没变化，可能捡的是已经被合并的堆」这类
+ * 占位文案——模型真机把它误读成「背包是空的」。没有可识别的增量就省略事件。
+ */
+export interface InventoryGainSummary {
+    text: string;
+    gained: Record<string, number>;
+    firstObservation: boolean;
+    noChange: boolean;
+}
+
+export function summarizeInventoryGain(
+    previous: Record<string, number> | null,
+    current: Record<string, number>,
+): InventoryGainSummary {
+    if (previous == null) {
+        return { text: '', gained: {}, firstObservation: true, noChange: false };
+    }
+    const gained: Record<string, number> = {};
+    for (const [name, count] of Object.entries(current)) {
+        const delta = count - (previous[name] ?? 0);
+        if (delta > 0) gained[name] = delta;
+    }
+    const parts = Object.entries(gained).map(([name, count]) => `${name}×${count}`);
+    if (parts.length === 0) {
+        return { text: '', gained, firstObservation: false, noChange: true };
+    }
+    return { text: parts.join('、'), gained, firstObservation: false, noChange: false };
+}
+
+/**
+ * 附近另一个玩家的名字（没有就 null）。自动拾取提示用。
+ *
+ * 不判断掉落物的真正归属（客户端拿不到可靠的 owner），但至少能在
+ * 「旁边站着队友」时提醒模型：这件东西可能是队友挖出来的。
+ */
+export function nearestOtherPlayerName(bot: unknown, radius: number = 8): string | null {
+    const b = bot as {
+        entity?: { id?: unknown; position?: { x?: number; y?: number; z?: number } };
+        entities?: Record<string, unknown>;
+    } | null | undefined;
+    const self = b?.entity;
+    const selfPos = self?.position;
+    if (self == null || selfPos == null || typeof selfPos.x !== 'number' || typeof selfPos.y !== 'number' || typeof selfPos.z !== 'number') {
+        return null;
+    }
+    let best: { name: string; distance: number } | null = null;
+    for (const raw of Object.values(b?.entities ?? {})) {
+        if (raw == null) continue;
+        const e = raw as {
+            id?: unknown;
+            name?: unknown;
+            username?: unknown;
+            type?: unknown;
+            position?: { x?: unknown; y?: unknown; z?: unknown };
+        };
+        if (e.id === self.id) continue;
+        const isPlayer = typeof e.username === 'string' || e.type === 'player' || e.name === 'player';
+        if (!isPlayer) continue;
+        const x = Number(e.position?.x);
+        const y = Number(e.position?.y);
+        const z = Number(e.position?.z);
+        if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(z)) continue;
+        const distance = Math.hypot(x - selfPos.x, y - selfPos.y, z - selfPos.z);
+        if (distance > radius) continue;
+        const name = typeof e.username === 'string' ? e.username : typeof e.name === 'string' ? e.name : 'player';
+        if (best == null || distance < best.distance) best = { name, distance };
+    }
+    return best?.name ?? null;
+}
+
+/**
+ * 保命时的身体硬中断：取消寻路/挖掘/控制状态，并置 interrupt_code。
+ *
+ * 真机 Feedback #24：长寻路中敌人贴脸连射，保命反射只是排队，没有先把
+ * 正在跑的模型动作打断，bot 被带走后淹死。威胁超过阈值时先调这里。
+ */
+export function forceStopBody(agent: any): void {
+    try {
+        agent?.requestInterrupt?.();
+    } catch {
+        // 继续尝试其余停法。
+    }
+    try {
+        agent?.bot?.clearControlStates?.();
+    } catch {
+        // 同上。
+    }
+    try {
+        agent?.bot?.pathfinder?.stop?.();
+    } catch {
+        // 同上。
+    }
+    try {
+        agent?.bot?.stopDigging?.();
+    } catch {
+        // 同上。
+    }
+    if (agent?.bot != null) agent.bot.interrupt_code = true;
+}
+
+export interface ThreatEmergencyInput {
+    threat: { name?: string; distance?: number } | null;
+    health: number;
+    damage: number;
+    msSinceLastEmergency: number;
+    cooldownMs?: number;
+    maxDistance?: number;
+    lowHealth?: number;
+}
+
+/**
+ * 威胁是否已经到该主动中断当前动作的程度。
+ *
+ * 判定故意**不依赖挨打事件是否被 debounce 掉**：连续小伤害（骷髅连射）可能
+ * 每一发都进不了 `bot.hurt` 的节流窗口，但威胁本身仍在，必须能触发保命。
+ */
+export function shouldThreatEmergency(input: ThreatEmergencyInput): boolean {
+    const distance = Number(input.threat?.distance);
+    if (input.threat == null || !Number.isFinite(distance)) return false;
+    if (distance > (input.maxDistance ?? 16)) return false;
+    if (input.msSinceLastEmergency < (input.cooldownMs ?? 10_000)) return false;
+    return input.damage > 0 || input.health <= (input.lowHealth ?? 12);
+}
+
 /** 相机的最小接口。
  *
  * **故意不 import `VisionInterpreter` 的具体类型**：那条导入链会把
@@ -292,6 +420,7 @@ export class MineflayerBody {
      * 晚一点握手比连上一个还没出生的身体要好。
      */
     async start(): Promise<void> {
+        this.installProcessGuards();
         const nameCheck = validateNameFormat(this.name);
         if (!nameCheck.success) {
             log(this.name, nameCheck.msg);
@@ -311,8 +440,13 @@ export class MineflayerBody {
             void event;
             if (this._disconnectHandled) return;
             this._disconnectHandled = true;
-            const { type } = handleDisconnection(this.name, reason);
-            void type;
+            const { type, msg } = handleDisconnection(this.name, reason);
+            try {
+                this.log.with('lifecycle').error({ event: 'exit', msg, type, code: 1 });
+            } catch {
+                // 同上：退出原因优先上屏。
+            }
+            console.error(this.name, msg);
             process.exit(1);
         };
 
@@ -459,6 +593,25 @@ export class MineflayerBody {
         stopPvp(this.bot);
     }
 
+    /**
+     * 模型的动作要开始时，先把自动拾取（如果正在跑）让出来。
+     *
+     * 自动拾取是身体的自主反射，只该在模型空闲时用身体。以前这里没有让位：
+     * useBlock 这类裸 async 工具不会设置 `actions.executing`，于是自动拾取可以
+     * 一边走一边和模型的动作抢方向盘，快照里 Meta 显示 autoPickup，模型却
+     * 以为自己的动作根本没跑。
+     */
+    private async yieldAutoPickupToModel(): Promise<void> {
+        if (!this.pickingUp) return;
+        this.requestInterrupt();
+        const deadline = Date.now() + 2000;
+        while (this.pickingUp && Date.now() < deadline) {
+            await new Promise<void>((resolve) => setTimeout(resolve, 20));
+        }
+        // 还在跑就再发一次打断；随后模型动作入口会清掉 interrupt_code。
+        if (this.pickingUp) this.requestInterrupt();
+    }
+
     clearBotLogs(): void {
         this.bot.output = '';
         this.bot.interrupt_code = false;
@@ -467,10 +620,46 @@ export class MineflayerBody {
     cleanKill(msg = 'Killing agent process...', code = 1): void {
         // **同步写盘**：紧接着就是 process.exit，异步日志会连同缓冲区一起丢——
         // 而"退出前最后一行"恰恰是排错最需要的（静默死亡最难查）。
-        this.log.with('lifecycle').error({ event: 'exit', msg, code });
+        try {
+            this.log.with('lifecycle').error({ event: 'exit', msg, code });
+        } catch {
+            // 日志失败不能阻止退出原因上屏。
+        }
         console.log(this.name, msg);
-        this.bot.chat(code > 1 ? MESSAGES.restarting : MESSAGES.exiting);
+        try {
+            this.bot?.chat?.(code > 1 ? MESSAGES.restarting : MESSAGES.exiting);
+        } catch {
+            // 还没登录/连接已断时 chat 会抛；但这里是退出路径，不能再被它带崩。
+        }
         process.exit(code);
+    }
+
+    /**
+     * 进程级兜底：未捕获异常/未处理 rejection 至少要留下 exit 原因和当时的动作名。
+     *
+     * 真机 body-lost #4：stay 之后 body 静默退出，没有 cleanKill 记录，只能从外部
+     * 猜。装了这个之后，fatal 原因、当前 action、报错文本都会写进日志。
+     */
+    private installProcessGuards(): void {
+        const fatal = (kind: string, err: unknown): void => {
+            const msg = err instanceof Error ? err.message : String(err);
+            const action = ((): string => {
+                try {
+                    return this.currentActionName() ?? this.actions?.currentActionLabel ?? 'none';
+                } catch {
+                    return 'none';
+                }
+            })();
+            try {
+                this.log.with('lifecycle').error({ event: 'fatal', kind, action, err: msg });
+            } catch {
+                // 日志失败也不能阻止退出原因上屏。
+            }
+            console.error(this.name + ' fatal ' + kind + ' while action ' + action + ': ' + msg);
+            this.cleanKill('fatal ' + kind + ' while action "' + action + '": ' + msg, 1);
+        };
+        process.on('uncaughtException', (err) => fatal('uncaughtException', err));
+        process.on('unhandledRejection', (reason) => fatal('unhandledRejection', reason));
     }
 
     // ── 观察 → 事件 ────────────────────────────────────────────────────────
@@ -526,6 +715,10 @@ export class MineflayerBody {
      * 不是等级 5 的属性，也不需要大脑隔着一趟协议来点名调用。
      */
     private emergency(type: string, payload: unknown, reflex: string, intent: EmergencyIntent): void {
+        // **先硬中断正在跑的模型动作**，再通知/排队保命：
+        // 真机 Feedback #24 长寻路遇敌时，反射只是排队，身体还在被寻路带走，
+        // 等 rescue 跑到 stopAll 时人已经在水里了。
+        forceStopBody(this);
         this.notify(type, KIND.WORLD, LEVEL.EMERGENCY, payload, { reflex });
         this.reflexQueue.push({ reflex, intent });
         void this.drainReflexes();
@@ -685,28 +878,38 @@ export class MineflayerBody {
                     // 10 → 5 → 死亡，10 还没到线，轮到 5 时下一次攻击已经把它带走了
                     // （"全程没有反击、没有逃跑、也没有中断动作"）。被怪打本身就是
                     // "危险正在发生"，不需要血线确认。10 秒防抖：连续挨打不刷屏。
-                    const threat = (() => {
-                        try {
-                            const p = this.bot.entity.position;
-                            return this.threatNear({ x: p.x, y: p.y, z: p.z }, 16);
-                        } catch {
-                            return null;
-                        }
-                    })();
-                    if (threat != null && Date.now() - this.lastThreatEmergencyAt > 10_000) {
-                        this.lastThreatEmergencyAt = Date.now();
-                        this.emergency(
-                            'bot.attacked',
-                            {
-                                health: this.bot.health,
-                                damage: hurt.damage,
-                                by: threat.name,
-                                threatMeters: threat.distance,
-                            },
-                            'escape',
-                            'flee',
-                        );
+                }
+                // **威胁保命独立于 hurt 的节流**：骷髅连射可能被 debounce 掉，
+                // 但敌人还贴着脸，必须立刻中断当前动作（Feedback #24）。
+                const threat = (() => {
+                    try {
+                        const p = this.bot.entity.position;
+                        return this.threatNear({ x: p.x, y: p.y, z: p.z }, 16);
+                    } catch {
+                        return null;
                     }
+                })();
+                const threatDamage = Math.max(0, Math.round((prev_health - this.bot.health) * 100) / 100);
+                if (
+                    shouldThreatEmergency({
+                        threat,
+                        health: this.bot.health,
+                        damage: threatDamage,
+                        msSinceLastEmergency: Date.now() - this.lastThreatEmergencyAt,
+                    })
+                ) {
+                    this.lastThreatEmergencyAt = Date.now();
+                    this.emergency(
+                        'bot.attacked',
+                        {
+                            health: this.bot.health,
+                            damage: threatDamage,
+                            by: threat?.name,
+                            threatMeters: threat?.distance,
+                        },
+                        'escape',
+                        'flee',
+                    );
                 }
             }
             prev_health = this.bot.health;
@@ -798,11 +1001,33 @@ export class MineflayerBody {
         this.bot.on('playerCollect', (collector: any) => {
             try {
                 if (!collector || collector.id !== this.bot?.entity?.id) return;
-                const now = Date.now();
-                if (now - this.lastCollectEmitAt < 2000) return;
-                this.lastCollectEmitAt = now;
-                const picked = this.inventoryDelta();
-                this.notify('inventory.collected', KIND.WORLD, LEVEL.WAKE, { item: picked.text, gained: picked.gained });
+                // **等一拍再读背包**：玩家拾取事件常常先于客户端背包更新，
+                // 立刻读会得到「没变化」——旧实现把这个占位文案写进了事件，
+                // 模型据此误判背包是空的（真机 Feedback）。
+                setTimeout(() => {
+                    try {
+                        const picked = this.inventoryDelta();
+                        // 没有可识别的增量就**省略事件**，不写占位文案。
+                        if (Object.keys(picked.gained).length === 0) return;
+                        const now = Date.now();
+                        if (now - this.lastCollectEmitAt < 2000) return;
+                        this.lastCollectEmitAt = now;
+                        const nearby = nearestOtherPlayerName(this.bot, PICKUP_RADIUS);
+                        const hint =
+                            nearby != null
+                                ? `自动拾取：捡到了 ${picked.text}。附近有玩家 ${nearby}，这件可能是队友挖出的掉落物；需要的话和对方确认。`
+                                : `自动拾取：捡到了 ${picked.text}。如果附近有队友挖出的掉落物，可能被自动拾取抢走了；需要时和队友确认。`;
+                        this.notify('inventory.collected', KIND.WORLD, LEVEL.WAKE, {
+                            item: picked.text,
+                            gained: picked.gained,
+                            auto_pickup: true,
+                            nearby_player: nearby,
+                            hint,
+                        });
+                    } catch (err: unknown) {
+                        console.error('collect event failed:', err instanceof Error ? err.message : String(err));
+                    }
+                }, 100);
             } catch (err: unknown) {
                 console.error('collect event failed:', err instanceof Error ? err.message : String(err));
             }
@@ -956,7 +1181,7 @@ export class MineflayerBody {
      * 第一次调用只建立快照（没有可比对象），此时如实说"还没记下上一次的背包"，
      * 而不是编一个物品名出来。
      */
-    private inventoryDelta(): { text: string; gained: Record<string, number> } {
+    private inventoryDelta(): InventoryGainSummary {
         const current: Record<string, number> = {};
         try {
             for (const item of (this.bot?.inventory?.items?.() ?? []) as Array<{ name?: string; count?: number }>) {
@@ -965,19 +1190,11 @@ export class MineflayerBody {
                 current[name] = (current[name] ?? 0) + Number(item?.count ?? 0);
             }
         } catch {
-            return { text: '背包读不出来', gained: {} };
+            return { text: '', gained: {}, firstObservation: false, noChange: true };
         }
         const previous = this.lastInventory;
         this.lastInventory = current;
-        if (previous == null) return { text: '（第一次记录背包，这一件没记下名字）', gained: {} };
-        const gained: Record<string, number> = {};
-        for (const [name, count] of Object.entries(current)) {
-            const delta = count - (previous[name] ?? 0);
-            if (delta > 0) gained[name] = delta;
-        }
-        const parts = Object.entries(gained).map(([name, count]) => `${name}×${count}`);
-        if (parts.length === 0) return { text: '（背包没变化，可能捡的是已经被合并的堆）', gained };
-        return { text: parts.join('、'), gained };
+        return summarizeInventoryGain(previous, current);
     }
 
     /**
@@ -1446,6 +1663,8 @@ export class MineflayerBody {
             }
             case 'action': {
                 const { name, args } = request.request;
+                // 模型的动作优先于自动拾取：先让拾取停下来，再跑工具。
+                await this.yieldAutoPickupToModel();
                 try {
                     const text = await executeToolCall(this, name, args);
                     this.consumePermitFor(name);

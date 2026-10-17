@@ -781,14 +781,14 @@ export async function defendSelf(bot: any, range: number = 9): Promise<boolean> 
         if (bot.entity.position.distanceTo(enemy.position) >= 4 && enemy.name !== 'creeper' && enemy.name !== 'phantom') {
             try {
                 bot.pathfinder.setMovements(movementsFor(bot));
-                await bot.pathfinder.goto(new (pf as any).goals.GoalFollow(enemy, 3.5), true);
+                await runPathfindingInterruptibly(bot, new (pf as any).goals.GoalFollow(enemy, 3.5));
             } catch (err: unknown) {/* might error if entity dies, ignore */}
         }
         if (bot.entity.position.distanceTo(enemy.position) <= 2) {
             try {
                 bot.pathfinder.setMovements(movementsFor(bot));
                 const inverted_goal: any = new (pf as any).goals.GoalInvert(new (pf as any).goals.GoalFollow(enemy, 2));
-                await bot.pathfinder.goto(inverted_goal, true);
+                await runPathfindingInterruptibly(bot, inverted_goal);
             } catch (err: unknown) {/* might error if entity dies, ignore */}
         }
         if (bot.heldItem?.name) {
@@ -1261,7 +1261,7 @@ export async function placeBlock(bot: any, blockType: string, x: number, y: numb
         const goal: any = new (pf as any).goals.GoalNear(targetBlock.position.x, targetBlock.position.y, targetBlock.position.z, 2);
         const inverted_goal: any = new (pf as any).goals.GoalInvert(goal);
         bot.pathfinder.setMovements(movementsFor(bot));
-        await bot.pathfinder.goto(inverted_goal);
+        if (!(await runPathfindingInterruptibly(bot, inverted_goal))) return false;
     }
     if (bot.entity.position.distanceTo(targetBlock.position) > 4.5) {
         // too far
@@ -1588,6 +1588,59 @@ export async function giveToPlayer(bot: any, itemType: string, username: string,
  */
 export const SEGMENT_THRESHOLD = 48;
 
+/** 可中断寻路的轮询间隔（毫秒）。 */
+export const PATHFIND_INTERRUPT_POLL_MS = 200;
+
+/**
+ * 可中断的 `pathfinder.goto`。
+ *
+ * `bot.pathfinder.goto(goal)` 在计算/走路时**不认** `bot.interrupt_code`：
+ * Stop 之后 `pathfinder.stop()` 可能只让它换个目标继续卡，于是 ActionManager.stop
+ * 等 10 秒只能 cleanKill 杀 body（真机 13 分钟 3 次 goToCoordinates）。这里每
+ * PATHFIND_INTERRUPT_POLL_MS 轮询一次 interrupt_code，一旦置位立刻 `pathfinder.stop()`
+ * 并 resolve(false)，把控制权还给调用方，不再靠杀进程。
+ */
+export function runPathfindingInterruptibly(bot: any, goal: any): Promise<boolean> {
+    if (bot?.interrupt_code) {
+        try {
+            bot.pathfinder?.stop?.();
+        } catch {
+            // 停不下来也要按中断返回。
+        }
+        return Promise.resolve(false);
+    }
+    return new Promise<boolean>((resolve, reject) => {
+        let settled = false;
+        const settle = (fn: () => void): void => {
+            if (settled) return;
+            settled = true;
+            clearInterval(timer);
+            fn();
+        };
+        const timer: ReturnType<typeof setInterval> = setInterval(() => {
+            if (bot?.interrupt_code) {
+                try {
+                    bot.pathfinder?.stop?.();
+                } catch {
+                    // 忽略底层 stop 异常。
+                }
+                settle(() => resolve(false));
+            }
+        }, PATHFIND_INTERRUPT_POLL_MS);
+        let gotoPromise: Promise<unknown>;
+        try {
+            gotoPromise = Promise.resolve(bot.pathfinder.goto(goal));
+        } catch (err: unknown) {
+            settle(() => reject(err));
+            return;
+        }
+        gotoPromise.then(
+            () => settle(() => resolve(true)),
+            (err: unknown) => settle(() => reject(err)),
+        );
+    });
+}
+
 export async function goToGoal(bot: any, goal: any, _persist?: boolean): Promise<boolean> {
     /**
      * Navigate to the given goal. Use doors and attempt minimally destructive movements.
@@ -1669,9 +1722,9 @@ export async function goToGoal(bot: any, goal: any, _persist?: boolean): Promise
 
     bot.pathfinder.setMovements(final_movements);
     try {
-        await bot.pathfinder.goto(goal);
+        const arrived = await runPathfindingInterruptibly(bot, goal);
         clearInterval(doorCheckInterval);
-        return true;
+        return arrived;
     } catch (err: unknown) {
         clearInterval(doorCheckInterval);
         // we need to catch so we can clean up the door check interval, then rethrow the error
@@ -1867,6 +1920,11 @@ export async function goToPosition(bot: any, x: number | null, y: number | null,
     try {
         await goToGoal(bot, new (pf as any).goals.GoalNear(x, y, z, min_distance));
         clearInterval(progressInterval);
+        // 中断优先于距离够近就算到了：Stop/急停之后不能报成功。
+        if (bot.interrupt_code) {
+            log(bot, `Navigation interrupted before reaching (${x},${y},${z}).`);
+            return false;
+        }
         const distance: number = bot.entity.position.distanceTo(new (Vec3 as any)(x, y, z));
         if (distance <= min_distance+1) {
             // **不许再说"已到达"就完事。** 寻路器的"到了"是"进了 min_distance
@@ -1983,17 +2041,33 @@ export async function goToNearestBlock(bot: any, blockType: string, min_distance
     // action_id 之后彻底静默"，只能靠 Stop（Feedback #16 原话）。
     // 先报一句，它至少知道是在搜、而不是卡死。
     log(bot, `Searching for ${blockType} within ${range} blocks...`);
+    if (bot.interrupt_code) {
+        log(bot, `Search interrupted before scanning ${blockType} (Stop/保命打断).`);
+        return false;
+    }
     let block: any;
     if (blockType === 'water' || blockType === 'lava') {
         let blocks: any[] = world.getNearestBlocksWhere(bot, (block: any) => block.name === blockType && block.metadata === 0, range, 1);
+        if (bot.interrupt_code) {
+            log(bot, `Search interrupted while looking for ${blockType} (Stop/保命打断).`);
+            return false;
+        }
         if (blocks.length === 0) {
             log(bot, `Could not find any source ${blockType} in ${range} blocks, looking for uncollectable flowing instead...`);
             blocks = world.getNearestBlocksWhere(bot, (b: any) => b.name === blockType, range, 1);
+            if (bot.interrupt_code) {
+                log(bot, `Search interrupted while looking for flowing ${blockType} (Stop/保命打断).`);
+                return false;
+            }
         }
         block = blocks[0];
     }
     else {
         block = world.getNearestBlock(bot, blockType, range);
+        if (bot.interrupt_code) {
+            log(bot, `Search interrupted before navigation (Stop/保命打断).`);
+            return false;
+        }
     }
     if (!block) {
         // 找不到也要**给结论**——模型明确要求过：不管找没找到都要有回执，
@@ -2017,7 +2091,13 @@ export async function goToNearestBlock(bot: any, blockType: string, min_distance
     const arrived = await goToBlockFace(bot, block.position);
     // **把结果如实返回**：原来无条件 return true;，路径不可达时工具照样报成功——
     // 模型反馈过"找不到目标时静默"，其实不是找不到，是找到了但走不过去，结果被吞了。
-    if (!arrived) log(bot, `Found ${block.name} at ${block.position} but could not reach it (path blocked or too far).`);
+    if (!arrived) {
+        if (bot.interrupt_code) {
+            log(bot, `Found ${block.name} at ${block.position} but navigation was interrupted (Stop/保命打断).`);
+        } else {
+            log(bot, `Found ${block.name} at ${block.position} but could not reach it (path blocked or too far).`);
+        }
+    }
     return arrived;
 }
 
@@ -2156,10 +2236,10 @@ export async function moveAway(bot: any, distance: number): Promise<boolean> {
         }
     }
 
-    await goToGoal(bot, inverted_goal);
+    const moved = await goToGoal(bot, inverted_goal);
     const new_pos: any = bot.entity.position;
     log(bot, `Moved away from ${pos.floored()} to ${new_pos.floored()}.`);
-    return true;
+    return moved;
 }
 
 export async function moveAwayFromEntity(bot: any, entity: any, distance: number = 16): Promise<boolean> {
@@ -2173,8 +2253,7 @@ export async function moveAwayFromEntity(bot: any, entity: any, distance: number
     const goal: any = new (pf as any).goals.GoalFollow(entity, distance);
     const inverted_goal: any = new (pf as any).goals.GoalInvert(goal);
     bot.pathfinder.setMovements(movementsFor(bot));
-    await bot.pathfinder.goto(inverted_goal);
-    return true;
+    return await runPathfindingInterruptibly(bot, inverted_goal);
 }
 
 export async function avoidEnemies(bot: any, distance: number = 16): Promise<boolean> {
@@ -2252,6 +2331,10 @@ export async function useDoor(bot: any, door_pos: any = null): Promise<boolean> 
     bot.pathfinder.setGoal(new (pf as any).goals.GoalNear(door_pos.x, door_pos.y, door_pos.z, 1));
     await new Promise((resolve) => setTimeout(resolve, 1000));
     while (bot.pathfinder.isMoving()) {
+        if (bot.interrupt_code) {
+            bot.pathfinder.stop();
+            return false;
+        }
         await new Promise((resolve) => setTimeout(resolve, 100));
     }
 
@@ -2675,6 +2758,78 @@ export async function mineBlockAt(bot: any, x: number, y: number, z: number): Pr
     }
 }
 
+/**
+ * digDown 单步的判据结果。
+ *
+ * 抽成纯函数是为了能单测「水/岩浆/落差会不会提前停」——以前这些判定散在
+ * 循环里，只能靠真机撞事故。
+ */
+export type DigStepVerdict =
+    | { kind: 'stop'; reason: string }
+    | { kind: 'skip_air'; target: { x: number; y: number; z: number } }
+    | { kind: 'dig'; target: { x: number; y: number; z: number } };
+
+const DIG_HAZARD_NAMES = new Set(['water', 'lava']);
+const DIG_AIR_NAMES = new Set(['air', 'cave_air', 'void_air']);
+
+/** 连续挖下去最多容忍几格空气；达到这个数就按「落差 >=4」提前停。 */
+export const MAX_DIG_FALL_BLOCKS = 4;
+
+function isDigHazard(name: string | undefined | null): boolean {
+    return name != null && DIG_HAZARD_NAMES.has(name);
+}
+
+/**
+ * 判断 digDown 第 depth 格（depth=1 就是正下方那一格）能不能挖。
+ *
+ * 每轮都必须同时看：机器人当前所在方块、头顶、正下方、目标格、目标格
+ * 下方。只查目标格会漏掉「脚下/身侧其实已经进水」「挖穿后会掉进岩浆或深井」
+ * 这些真实停不下来的场景。
+ */
+export function classifyDigDownStep(
+    blockAt: (x: number, y: number, z: number) => { name?: string } | null,
+    feet: { x: number; y: number; z: number },
+    depth: number,
+): DigStepVerdict {
+    const fx = Math.floor(feet.x);
+    const fy = Math.floor(feet.y);
+    const fz = Math.floor(feet.z);
+    const nameAt = (x: number, y: number, z: number): string | null => blockAt(x, y, z)?.name ?? null;
+
+    const atFeet = nameAt(fx, fy, fz);
+    if (isDigHazard(atFeet)) return { kind: 'stop', reason: 'current block is ' + String(atFeet) };
+    const atHead = nameAt(fx, fy + 1, fz);
+    if (isDigHazard(atHead)) return { kind: 'stop', reason: 'head is in ' + String(atHead) };
+
+    const targetY = fy - depth;
+    const target = blockAt(fx, targetY, fz);
+    if (!target) return { kind: 'stop', reason: 'reached the end of the world' };
+    // 目标格是水/岩浆要先报：不能在下方读不到时伪装成 end of world。
+    if (isDigHazard(target.name)) return { kind: 'stop', reason: 'reached ' + String(target.name) + ' (not digging into it)' };
+
+    const below = blockAt(fx, targetY - 1, fz);
+    if (!below) return { kind: 'stop', reason: 'reached the end of the world' };
+    if (isDigHazard(below.name)) return { kind: 'stop', reason: String(below.name) + ' is directly below the target' };
+
+    // 连续空气 = 挖掉目标后会往下掉的落差。达到 4 格就停，绝不冒险。
+    let fall = 0;
+    let probeY = targetY - 1;
+    let probe: { name?: string } | null = below;
+    while (probe != null && DIG_AIR_NAMES.has(probe.name ?? '') && fall < MAX_DIG_FALL_BLOCKS) {
+        fall++;
+        probeY--;
+        probe = blockAt(fx, probeY, fz);
+    }
+    if (fall >= MAX_DIG_FALL_BLOCKS) {
+        return { kind: 'stop', reason: 'a drop of ' + String(fall) + '+ blocks below the target' };
+    }
+
+    if (DIG_AIR_NAMES.has(target.name ?? '')) {
+        return { kind: 'skip_air', target: { x: fx, y: targetY, z: fz } };
+    }
+    return { kind: 'dig', target: { x: fx, y: targetY, z: fz } };
+}
+
 export async function digDown(bot: any, distance: number = 10): Promise<boolean> {
     /**
      * Digs down a specified distance. Will stop if it reaches lava, water, or a fall of >=4 blocks below the bot.
@@ -2684,67 +2839,41 @@ export async function digDown(bot: any, distance: number = 10): Promise<boolean>
      * @example
      * await skills.digDown(bot, 10);
      **/
+    const blockAt = (x: number, y: number, z: number): { name?: string } | null =>
+        bot.blockAt(new Vec3(x, y, z));
 
-    // **每一轮都从机器人"现在"的位置重新取列**。
-    //
-    // 原来只在开头取一次 `start_block_pos`，之后一律用 `start - i`。可是机器人挖下去会
-    // **横向漂移**：模型真机那次 digDown 从 x=35.6 出发，最后人在 x=33.5（漂了 1.5 格），
-    // 于是它检查的竖列**已经不是机器人所在的竖列**了——**脚下的岩浆从来没被检查过**，
-    // 这就是"遇到岩浆不停止"。真机日志里 digDown 停过 14 次"drop below"、10 次"water"，
-    // **从没报过 lava**，也印证了这一点。
     for (let i = 1; i <= distance; i++) {
-        const here: any = bot.blockAt(bot.entity.position);
-        if (here == null) {
-            log(bot, `Dug down ${i - 1} blocks, but lost track of where I am (chunk unloaded?).`);
-            return false;
-        }
-        // 从当前脚下方块往下数第 i 格（i=1 就是正下方那一格）
-        const targetBlock: any = bot.blockAt(here.position.offset(0, -i, 0));
-        let belowBlock: any = bot.blockAt(here.position.offset(0, -i - 1, 0));
-
-        if (!targetBlock || !belowBlock) {
-            log(bot, `Dug down ${i-1} blocks, but reached the end of the world.`);
-            return true;
-        }
-
-        // Check for lava, water
-        if (targetBlock.name === 'lava' || targetBlock.name === 'water' ||
-            belowBlock.name === 'lava' || belowBlock.name === 'water') {
-            const hazard: string = targetBlock.name === 'lava' || targetBlock.name === 'water' ? targetBlock.name : belowBlock.name;
-            log(bot, `Dug down ${i-1} blocks, but reached ${hazard} (stopping before digging into it).`);
+        // Stop / 保命打断要先于下一铲：不然 ActionManager.stop 只能等 10 秒
+        // 再杀进程，整晚反复回出生点。
+        if (bot.interrupt_code) {
+            log(bot, 'Dug down ' + (i - 1) + ' blocks, but Stop was requested (stopping before digging further).');
             return false;
         }
 
-        const MAX_FALL_BLOCKS = 2;
-        let num_fall_blocks = 0;
-        for (let j = 0; j <= MAX_FALL_BLOCKS; j++) {
-            if (!belowBlock || (belowBlock.name !== 'air' && belowBlock.name !== 'cave_air')) {
-                break;
-            }
-            num_fall_blocks++;
-            belowBlock = bot.blockAt(belowBlock.position.offset(0, -1, 0));
-        }
-        if (num_fall_blocks > MAX_FALL_BLOCKS) {
-            log(bot, `Dug down ${i-1} blocks, but reached a drop below the next block.`);
+        // 每一轮都从机器人「现在」的位置重新取列——挖下去会横向漂移，不能
+        // 拿起点那一列去检查脚下的岩浆。
+        const feet = { x: bot.entity.position.x, y: bot.entity.position.y, z: bot.entity.position.z };
+        const verdict = classifyDigDownStep(blockAt, feet, i);
+
+        if (verdict.kind === 'stop') {
+            log(bot, 'Dug down ' + (i - 1) + ' blocks, but stopped: ' + verdict.reason + '.');
             return false;
         }
-
-        if (targetBlock.name === 'air' || targetBlock.name === 'cave_air') {
-            log(bot, 'Skipping air block');
-            console.log(targetBlock.position);
+        if (verdict.kind === 'skip_air') {
+            log(bot, 'Skipping air block at (' + verdict.target.x + ',' + verdict.target.y + ',' + verdict.target.z + ').');
             continue;
         }
 
-        const dug: boolean = await breakBlockAt(bot, targetBlock.position.x, targetBlock.position.y, targetBlock.position.z);
+        const dug: boolean = await breakBlockAt(bot, verdict.target.x, verdict.target.y, verdict.target.z);
         if (!dug) {
-            log(bot, 'Failed to dig block at position:' + targetBlock.position);
+            log(bot, 'Dug down ' + (i - 1) + ' blocks, failed to dig block at (' + verdict.target.x + ',' + verdict.target.y + ',' + verdict.target.z + ').');
             return false;
         }
+        log(bot, 'Dug down ' + i + '/' + distance + ' blocks (broke (' + verdict.target.x + ',' + verdict.target.y + ',' + verdict.target.z + ')).');
     }
-    log(bot, `Dug down ${distance} blocks.`);
+    log(bot, 'Dug down ' + distance + ' blocks.');
     return true;
 }
-
 export async function goToSurface(bot: any): Promise<boolean> {
     /**
      * Navigate to the surface (highest non-air block at current x,z).

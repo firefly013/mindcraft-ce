@@ -2,10 +2,11 @@
  * 动作执行器：占用身体通道的工具调用即时返回，结果以后报。
  *
  * 两类工具，两种时间观：
- *   - 动作类（占身体）：认领通道 → 后台跑 → 立刻回 accepted；
- *     跑完（或炸了）检查 generation：过期了就地丢弃（Stop/急停
- *     已经让它失效），没过期才记结果、放通道、以 Tool 事件
- *     注入调度唤醒下一轮。
+ *   - 动作类（占身体）：认领通道 → 后台跑 → 立刻回 accepted，带本次调用的
+ *     call_id/generation；跑完（或炸了）检查 generation：过期了就只报一条
+ *     「被中断、没有结果」（Stop/急停已经让它失效），没过期才记结果、放通道、
+ *     以 Tool 事件注入调度唤醒下一轮。两条回执都带同一个 call_id，模型才能
+ *     在结果乱序/延迟时认出是哪一次调用交出来的。
  *   - 查询类（只读）：阻塞执行，直接回内容——本来就是瞬间的事，
  *     整成异步事件没有意义。
  *
@@ -34,6 +35,23 @@ export type ActionTrace =
   | { kind: 'done'; name: string; actionId: string }
   | { kind: 'stale_discarded'; name: string };
 
+/**
+ * 一次动作完成的回执载荷。
+ *
+ * `call_id` 是这一次调用的唯一标识，`generation` 是调度器那一代。
+ * 两者一起放进事件里，模型才能在回执乱序/延迟时认出「这条结果是哪一次调用交出来的」。
+ */
+export interface ActionNotice {
+  call: string;
+  action_id: string;
+  call_id: string;
+  generation: number;
+  result: ToolOutcome;
+}
+
+/** 动作跑太久没有任何结果时，主动发一条进度回执的间隔（毫秒）。 */
+export const ACTION_PROGRESS_NOTICE_MS = 60_000;
+
 export interface ActionRunnerDeps {
   scheduler: Scheduler;
   /**
@@ -48,7 +66,7 @@ export interface ActionRunnerDeps {
   /** 工具执行体（查询直调，动作后台跑）。 */
   execute: (name: string, args: Record<string, unknown>) => Promise<string>;
   /** 执行完上报：进调度等下一轮。 */
-  notify: (payload: { call: string; result: ToolOutcome }) => void;
+  notify: (payload: ActionNotice) => void;
   /** 可选：通道观测。缺省什么都不做。 */
   trace?: (event: ActionTrace) => void;
 }
@@ -59,8 +77,13 @@ export class ActionRunner {
   private record: (outcome: string, name: string, args: unknown) => Promise<void>;
   private speak: (text: string) => void;
   private execute: (name: string, args: Record<string, unknown>) => Promise<string>;
-  private notify: (payload: { call: string; result: ToolOutcome }) => void;
+  private notify: (payload: ActionNotice) => void;
   private trace: (event: ActionTrace) => void;
+  /** 只用于生成 `call_id`；不参与调度，也不影响 generation 的失效语义。 */
+  private callSeq = 0;
+  /** 当前认领通道的那次调用的标识；用于同动作幂等回执。 */
+  private activeCallId: string | null = null;
+  private activeGeneration = 0;
 
   constructor(deps: ActionRunnerDeps) {
     this.scheduler = deps.scheduler;
@@ -99,7 +122,16 @@ export class ActionRunner {
         this.trace({ kind: 'busy_same', name, actionId: running.id });
         const reason = `${name} 已经在跑了，不用重发，也不用 Stop——它跑完会自己报结果。`;
         await this.record(`already running: ${reason}`, name, args);
-        return { status: 'accepted', data: { already_running: true, action_id: running.id, reason } };
+        return {
+          status: 'accepted',
+          data: {
+            already_running: true,
+            action_id: running.id,
+            call_id: this.activeCallId ?? running.id,
+            generation: this.activeGeneration,
+            reason,
+          },
+        };
       }
       // 确实是另一个动作：报清楚谁在跑、跑了多久，并把"要不要打断"
       // 交还给模型，而不是命令它先 Stop。
@@ -119,11 +151,23 @@ export class ActionRunner {
       return { status: 'rejected', code: claim.code ?? 'ACTION_BUSY', reason };
     }
     const generation = claim.generation ?? 0;
+    const callId = `${name}#${++this.callSeq}`;
+    this.activeCallId = callId;
+    this.activeGeneration = generation;
     this.trace({ kind: 'claim', name, actionId: claim.actionId ?? name, generation });
     this.speak(MESSAGES.usedMarker(name));
     // 后台跑，不等：这一轮的推理到此结束，结果以后报。
-    void this.finish(name, args as Record<string, unknown>, generation);
-    return { status: 'accepted', data: { action_id: claim.actionId, generation } };
+    void this.finish(name, args as Record<string, unknown>, generation, callId);
+    return {
+      status: 'accepted',
+      data: {
+        action_id: claim.actionId,
+        call_id: callId,
+        generation,
+        // 明确告诉模型：这不是最终结果，真正的回执会带同一个 call_id 回来。
+        note: `动作已开始；结束/失败/被中断时会以 Tool 事件回报，事件里带同一个 call_id=${callId}。`,
+      },
+    };
   }
 
   /**
@@ -131,12 +175,38 @@ export class ActionRunner {
    * 就地丢弃，不记账、不放行、不上报；没过期才记结果、
    * 放通道、注入事件。
    */
-  private async finish(name: string, args: Record<string, unknown>, generation: number): Promise<void> {
+  private async finish(
+    name: string,
+    args: Record<string, unknown>,
+    generation: number,
+    callId: string,
+  ): Promise<void> {
+    const startedAt = Date.now();
+    // 大范围搜索/长距离移动可能几分钟才返回：身体还在跑，但模型此前只能看到
+    // accepted 后的一片沉默。大脑侧每 60 秒发一条「还在跑」的进度回执，保证任何
+    // 路径至少有一个明确交代；动作真正结束/失败时下面照旧会覆盖报结果。
+    const progressTimer = setInterval(() => {
+      const seconds = Math.round((Date.now() - startedAt) / 1000);
+      this.notify({
+        call: name,
+        action_id: name,
+        call_id: callId,
+        generation,
+        result: {
+          status: 'accepted',
+          data:
+            `[${callId} · generation ${generation}] ${name} 还在跑（已 ${seconds} 秒，尚未返回结果）。` +
+            '如果它在做大范围搜索或长距离移动，可以继续等；如果要改做别的，可以 Stop。',
+        },
+      });
+    }, ACTION_PROGRESS_NOTICE_MS);
     let data: string;
     try {
       data = await this.execute(name, args);
     } catch (err: unknown) {
       data = `Tool ${name} failed: ${err instanceof Error ? err.message : String(err)}`;
+    } finally {
+      clearInterval(progressTimer);
     }
     // 过期（被 Stop / 急停作废）：就地丢弃，不记账、不放行。
     // **但仍然报一条**：动作没了、通道空了，模型却看不到任何交代，只能反复拍
@@ -144,20 +214,87 @@ export class ActionRunner {
     // 我不知道它是成功、失败还是被中断"）。报的是"被中断、没有结果"，
     // 不假装成功。
     if (!this.scheduler.isCurrent(generation)) {
+      const why = this.scheduler.lastInvalidationReason();
       this.trace({ kind: 'stale_discarded', name });
+      this.clearActiveCall(callId);
+      // **保命反射不是 Stop**：Feedback #22 里模型从未调 Stop，却读到 Stop 字样。
+      // 而且保命反射有时只是在旁边响了，身体其实已经把搜索跑完了——这种情况下
+      // 把结果丢掉等于让普通动作被无关急停误伤。保命原因 + 有结果时保留结果并注明。
+      if (why === 'emergency' && data.trim() !== '') {
+        await this.record(data, name, args);
+        this.notify({
+          call: name,
+          action_id: name,
+          call_id: callId,
+          generation,
+          result: {
+            status: 'completed',
+            data:
+              `[${callId} · generation ${generation}] 动作期间发生了保命反射（不是你调用的 Stop），` +
+              `但身体仍返回了结果，供参考：${data}`,
+          },
+        });
+        return;
+      }
+      const reasonText =
+        why === 'emergency'
+          ? '保命反射/急停抢走了身体（不是你调用的 Stop）'
+          : why === 'stop'
+            ? 'Stop 停掉了它'
+            : 'generation 失效（可能被 Stop/急停/新动作作废）';
       this.notify({
         call: name,
+        action_id: name,
+        call_id: callId,
+        generation,
         result: {
           status: 'completed',
-          data: `动作 ${name} 被中断（Stop / 急停作废了它），没有结果。`,
+          data: `动作 ${name}（${callId}）被中断：${reasonText}，没有结果。` +
+            '通道已经释放，可以开始下一个动作。',
         },
       });
       return;
     }
-    await this.record(data, name, args);
+    const text = this.completionText(name, callId, generation, data);
+    await this.record(text, name, args);
     this.scheduler.releaseAction();
+    this.clearActiveCall(callId);
     this.trace({ kind: 'done', name, actionId: name });
-    this.notify({ call: name, result: { status: 'completed', data } });
+    this.notify({
+      call: name,
+      action_id: name,
+      call_id: callId,
+      generation,
+      result: { status: 'completed', data: text },
+    });
+  }
+
+  /** 该次调用已经结束，别再把它当成正在跑的那一次。 */
+  private clearActiveCall(callId: string): void {
+    if (this.activeCallId === callId) {
+      this.activeCallId = null;
+      this.activeGeneration = 0;
+    }
+  }
+
+  /**
+   * 动作完成回执的统一渲染。
+   *
+   * 身体返回空串并不等于什么都没发生（成功但没写日志、被中断、被自动拾取
+   * 抢走身体都会这样）。这里必须把空结果翻成一句模型能行动的话，不能把
+   * (no output) 或空事件丢回去让它继续猜。
+   */
+  private completionText(name: string, callId: string, generation: number, data: unknown): string {
+    const raw = typeof data === 'string' ? data.trim() : data == null ? '' : String(data);
+    const header = `[${callId} · generation ${generation}]`;
+    if (raw !== '' && raw !== '(no output)') return `${header} ${raw}`;
+    const hint =
+      name === 'searchForBlock'
+        ? 'searchForBlock 没有得到明确结果，不能确认是否找到目标（可能被中断）。' +
+          '请用 stats 看当前位置和背包，再决定是否重试。'
+        : `${name} 已经结束，但身体没有返回具体结果（可能动作已完成但没写日志，或被 autoPickup / Stop 打断了）。` +
+          '请用 stats 核对当前位置与背包后再决定是否重试。';
+    return `${header} ${hint}`;
   }
 }
 

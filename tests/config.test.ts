@@ -143,7 +143,7 @@ describe('profile 校验', () => {
 
   it('嵌套字段缺失时，报错路径带上级（model.model）', () => {
     try {
-      validateProfile({ name: 'a', model: {} });
+      validateProfile({ name: 'abc', model: {} });
       expect.unreachable('应当抛错');
     } catch (error: unknown) {
       expect((error as ConfigError).issues.join('\n')).toContain('model.model');
@@ -153,6 +153,27 @@ describe('profile 校验', () => {
   it('name 里有斜杠/空格报错（它同时是目录名）', () => {
     expect(() => validateProfile({ ...VALID, name: 'a/b' })).toThrow(ConfigError);
     expect(() => validateProfile({ ...VALID, name: 'a b' })).toThrow(ConfigError);
+  });
+
+  it('name 必须是合法 Minecraft 用户名：3-16 位字母/数字/下划线', () => {
+    for (const name of ['abc', 'Player_123', 'A_1_b_2_c_3_d_4']) {
+      expect(validateProfile({ ...VALID, name }).name).toBe(name);
+    }
+    for (const name of ['ab', 'a'.repeat(17), 'a-b', 'a.b', '中文名', 'a b', 'a/b', '']) {
+      expect(() => validateProfile({ ...VALID, name })).toThrow(ConfigError);
+    }
+  });
+
+  it('name 报错要说清会同时作为 Minecraft 用户名和 bots/<name>/ 目录名', () => {
+    try {
+      validateProfile({ ...VALID, name: 'bad-name' });
+      expect.unreachable('应当抛错');
+    } catch (error: unknown) {
+      const issues = (error as ConfigError).issues.join('\n');
+      expect(issues).toContain('Minecraft 用户名');
+      expect(issues).toContain('bots/<name>/');
+      expect(issues).toContain('^[a-zA-Z0-9_]{3,16}$');
+    }
   });
 
   it('model 既不是字符串也不是对象 → 报错', () => {
@@ -185,8 +206,8 @@ describe('profile 校验', () => {
   });
 
   it('profile 文件可以用注释', () => {
-    const path = writeTemp('p.json', '{\n  // bot 名\n  "name": "a",\n  "model": "openai/gpt-5.4"\n}');
-    expect(loadProfile(path).name).toBe('a');
+    const path = writeTemp('p.json', '{\n  // bot 名\n  "name": "abc",\n  "model": "openai/gpt-5.4"\n}');
+    expect(loadProfile(path).name).toBe('abc');
   });
 });
 
@@ -379,6 +400,20 @@ describe('仓库里真实提交的配置', () => {
     const profile = loadProfile('./profiles/deepseek.json');
     expect(profile.name).toBe('deepseek');
     expect(JSON.stringify(profile.model).length).toBeGreaterThan(0);
+  });
+
+  it('生成的 profile.schema.json 与 schema.ts 同步（给编辑器补全）', () => {
+    const schema = JSON.parse(readFileSync('./schemas/profile.schema.json', 'utf8')) as {
+      properties: {
+        name: { pattern?: string; minLength?: number; maxLength?: number; description?: string };
+      };
+    };
+    const name = schema.properties.name;
+    expect(name.pattern).toBe('^[a-zA-Z0-9_]{3,16}$');
+    expect(name.minLength).toBe(3);
+    expect(name.maxLength).toBe(16);
+    expect(name.description).toContain('Minecraft 用户名');
+    expect(name.description).toContain('bots/<name>/');
   });
 
   it('auth.example.json 也能被读（示例必须是合法形状）', () => {

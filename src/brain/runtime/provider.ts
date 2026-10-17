@@ -44,6 +44,28 @@ const FALLBACK_CONTEXT_WINDOW = 128_000;
 /** 没有声明的 maxTokens 的回退值。 */
 const FALLBACK_MAX_TOKENS = 4096;
 
+/** 模型请求瞬时失败时，默认重试次数（不含首次请求）。 */
+export const DEFAULT_MODEL_RETRIES = 2;
+
+/** 覆盖默认模型重试次数的环境变量；0 表示关闭重试。 */
+export const MODEL_RETRIES_ENV = 'MINDCRAFT_MODEL_RETRIES';
+
+/**
+ * 读取 MINDCRAFT_MODEL_RETRIES。
+ *
+ * 只接受非负整数；空串、负数、小数、非数字都回退到默认值（默认 2）。
+ * 解析放在 provider 层是因为这里已经集中处理环境变量与默认值。
+ */
+export function resolveModelRetries(
+  env: NodeJS.ProcessEnv = process.env,
+  fallback = DEFAULT_MODEL_RETRIES,
+): number {
+  const raw = env[MODEL_RETRIES_ENV];
+  if (raw == null || raw.trim() === '') return fallback;
+  const parsed = Number(raw);
+  return Number.isInteger(parsed) && parsed >= 0 ? parsed : fallback;
+}
+
 /** profile.model 归一后的结果。 */
 export interface ModelReference {
   /** `provider/model` 里的 provider；对象形式里没写就是 undefined，稍后按模型 id 找。 */

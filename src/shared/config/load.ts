@@ -17,8 +17,10 @@ import type { TLocalizedValidationError } from 'typebox/error';
 import { stripBom, stripJsonComments } from './json.js';
 import {
   CREDENTIAL_VALIDATOR,
-  PROVIDERS_VALIDATOR,
+  PROFILE_NAME_DESCRIPTION,
+  PROFILE_NAME_PATTERN,
   PROFILE_VALIDATOR,
+  PROVIDERS_VALIDATOR,
   type AuthConfig,
   type Credential,
   type ProvidersConfig,
@@ -56,8 +58,22 @@ function formatValidationPath(error: TLocalizedValidationError): string {
 }
 
 /** 校验错误 → 一行一条：`字段路径: 原因`。 */
+function formatIssue(error: TLocalizedValidationError): string {
+  const path = formatValidationPath(error);
+  // profile.name 不只是显示名，还必须是合法的 Minecraft 用户名和目录名。
+  // TypeBox 默认只会说 "must match pattern ..."，这里换成一句能直接照做的
+  // 启动报错，避免用户去猜正则和后果。
+  if (
+    path === 'name' &&
+    (error.keyword === 'pattern' || error.keyword === 'minLength' || error.keyword === 'maxLength')
+  ) {
+    return `name: ${PROFILE_NAME_DESCRIPTION}（合法形状：${PROFILE_NAME_PATTERN}）`;
+  }
+  return `${path}: ${error.message}`;
+}
+
 function formatIssues(errors: readonly TLocalizedValidationError[]): string[] {
-  return errors.map((error) => `${formatValidationPath(error)}: ${error.message}`);
+  return errors.map(formatIssue);
 }
 
 /**

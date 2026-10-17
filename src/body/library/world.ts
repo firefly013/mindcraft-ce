@@ -174,7 +174,36 @@ export function getNearestBlocksWhere(bot: any, predicate: any, distance: number
      * @example
      * let waterBlocks = world.getNearestBlocksWhere(bot, block => block.name === 'water', 16, 10);
      **/
-    const positions: any[] = bot.findBlocks({matching: predicate, maxDistance: distance, count: count});
+    // mineflayer 的 findBlocks 是同步大循环；保命把 interrupt_code 置位后，
+    // 这里在每次匹配时能立刻抛出去，让长搜索尽快收手，而不是扫完 512 格。
+    let interrupted = false;
+    const checkInterrupt = (): void => {
+        if (bot?.interrupt_code) {
+            interrupted = true;
+            throw new Error('INTERRUPTED');
+        }
+    };
+    // mineflayer 的 matching 既可能是函数，也可能是 block id 数组；不能改变原语义。
+    let matching: any;
+    if (typeof predicate === 'function') {
+        matching = (block: any): boolean => {
+            checkInterrupt();
+            return predicate(block);
+        };
+    } else {
+        const ids: any[] = Array.isArray(predicate) ? predicate : [predicate];
+        matching = (block: any): boolean => {
+            checkInterrupt();
+            return block != null && ids.indexOf(block.type) >= 0;
+        };
+    }
+    let positions: any[];
+    try {
+        positions = bot.findBlocks({matching, maxDistance: distance, count: count});
+    } catch (err: unknown) {
+        if (interrupted) return [];
+        throw err;
+    }
     const blocks: any[] = positions.map(position => bot.blockAt(position));
     return blocks;
 }

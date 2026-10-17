@@ -13,6 +13,8 @@ const COMMAND_FILES = [
   './src/body/commands/actions.ts',
   './src/body/commands/queries.ts',
   './src/body/commands/interact.ts',
+  './src/body/commands/make_obsidian.ts',
+  './src/body/commands/survival.ts',
 ];
 
 // 1. 命令文件引用完整性

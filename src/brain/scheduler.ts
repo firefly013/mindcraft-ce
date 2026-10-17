@@ -21,6 +21,9 @@ export interface CurrentAction {
   startedAt: number;
 }
 
+/** generation 失效的原因：Stop 还是保命急停。 */
+export type ActionInvalidationReason = 'stop' | 'emergency' | null;
+
 export interface StartActionVerdict {
   accepted: boolean;
   actionId?: string;
@@ -39,6 +42,7 @@ export class Scheduler {
   private action: CurrentAction | null = null;
   private generation = 0;
   private emergency = false;
+  private invalidationReason: ActionInvalidationReason = null;
 
   /**
    * 认领动作通道。动作跑着（`ACTION_BUSY`）或紧急锁住（`EMERGENCY_LOCKED`）
@@ -71,7 +75,19 @@ export class Scheduler {
     const actionId = this.action?.id ?? null;
     this.action = null;
     this.generation++;
+    this.invalidationReason = 'stop';
     return { generation: this.generation, hadAction, actionId };
+  }
+
+  /**
+   * 上一次 generation 为什么失效。
+   *
+   * ActionRunner 在途回调过期时据此区分「被 Stop 停掉」和「被保命反射抢走」，
+   * 不能把两者都写成模棱两可的「Stop / 急停作废」——Feedback #22 里模型
+   * 从未调 Stop，却读到 Stop 字样的回执。
+   */
+  lastInvalidationReason(): ActionInvalidationReason {
+    return this.invalidationReason;
   }
 
   /**
@@ -101,6 +117,7 @@ export class Scheduler {
     this.emergency = true;
     this.action = null;
     this.generation++;
+    this.invalidationReason = 'emergency';
   }
 
   /** 紧急锁解除：最后一个反射报告完成。没有锁的时候是空操作。 */
