@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   assessObsidianKit,
+  chooseLavaScaffoldMaterial,
   chooseSafeLavaTargets,
   chooseSafeWaterSources,
   evaluateLavaTarget,
@@ -36,7 +37,7 @@ function mapProbe(entries: Record<string, string>) {
 function validLavaWorld(lava: Point, floorName = 'stone'): Record<string, string> {
   const entries: Record<string, string> = {};
   entries[key(lava)] = 'lava';
-  for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]] as Array<[number, number]>) {
+  for (const [dx, dz] of [[2, 0], [-2, 0], [0, 2], [0, -2]] as Array<[number, number]>) {
     entries[key({ x: lava.x + dx, y: lava.y, z: lava.z + dz })] = floorName;
     entries[key({ x: lava.x + dx, y: lava.y + 1, z: lava.z + dz })] = 'air';
     entries[key({ x: lava.x + dx, y: lava.y + 2, z: lava.z + dz })] = 'air';
@@ -84,7 +85,7 @@ describe('安全岩浆/水源选址（纯函数）', () => {
     const result = evaluateLavaTarget(lava, mapProbe(validLavaWorld(lava)));
     expect(result.ok).toBe(true);
     expect(result.stand?.y).toBe(61);
-    expect(Math.abs(result.stand?.x ?? 0)).toBe(1);
+    expect(Math.abs(result.stand?.x ?? 0)).toBe(2);
     expect(result.stand?.z).toBe(0);
   });
 
@@ -112,7 +113,7 @@ describe('安全岩浆/水源选址（纯函数）', () => {
     const chosen = chooseSafeLavaTargets([nearBad, farGood], { x: 0, y: 60, z: 0 }, mapProbe(entries));
     expect(chosen).toHaveLength(1);
     expect(chosen[0]?.liquid).toEqual(farGood);
-    expect([{ x: 9, y: 61, z: 0 }, { x: 11, y: 61, z: 0 }, { x: 10, y: 61, z: -1 }, { x: 10, y: 61, z: 1 }]).toContainEqual(chosen[0]?.stand);
+    expect([{ x: 12, y: 61, z: 0 }, { x: 8, y: 61, z: 0 }, { x: 10, y: 61, z: -2 }, { x: 10, y: 61, z: 2 }]).toContainEqual(chosen[0]?.stand);
   });
 
   it('安全水源候选会过滤真的无岸边目标', () => {
@@ -282,4 +283,19 @@ describe('task-23 岩浆操作位自动创造与硬校验', () => {
     expect(isStandingSafelyAt(bot, target)).toBe(true);
     entries['2,60,0'] = 'air';
     expect(isStandingSafelyAt(bot, target)).toBe(false);
+
+    const closeEntries: Record<string, string> = { '1,61,0': 'air', '1,62,0': 'air', '1,60,0': 'stone' };
+    const closeBot: any = {
+      entity: { position: { x: 1.2, y: 61, z: 0.2 } },
+      blockAt: (p: any) => ({ name: closeEntries[key({ x: p.x, y: p.y, z: p.z })] ?? 'air' }),
+    };
+    const tooClose = { liquid: lava, stand: { x: 1, y: 61, z: 0 }, distance: 0 };
+    expect(isStandingSafelyAt(closeBot, tooClose)).toBe(false);
+  });
+
+  it('垫块材料优先 cobblestone，也接受深板岩', () => {
+    expect(chooseLavaScaffoldMaterial({ cobblestone: 1 })).toBe('cobblestone');
+    expect(chooseLavaScaffoldMaterial({ cobbled_deepslate: 1 })).toBe('cobbled_deepslate');
+    expect(chooseLavaScaffoldMaterial({ deepslate: 2 })).toBe('deepslate');
+    expect(chooseLavaScaffoldMaterial({})).toBeNull();
   });

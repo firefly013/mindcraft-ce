@@ -149,7 +149,7 @@ export function findLavaStandWithinReach(
     for (let dz = 4; dz >= -4; dz--) {
       if (dx === 0 && dz === 0) continue;
       const distance = Math.hypot(dx, 1, dz);
-      if (distance > reach) continue;
+      if (distance > reach || distance < 2) continue;
       const stand: Point = { x: lava.x + dx, y: lava.y + 1, z: lava.z + dz };
       const floor: Point = { x: stand.x, y: lava.y, z: stand.z };
       const head: Point = { x: stand.x, y: stand.y + 1, z: stand.z };
@@ -904,7 +904,7 @@ export function findLavaScaffoldStand(
     for (let dz = 4; dz >= -4; dz--) {
       if (dx === 0 && dz === 0) continue;
       const distance = Math.hypot(dx, 1, dz);
-      if (distance > reach) continue;
+      if (distance > reach || distance < 2) continue;
       const stand: Point = { x: lava.x + dx, y: lava.y + 1, z: lava.z + dz };
       const floor: Point = { x: stand.x, y: lava.y, z: stand.z };
       const head: Point = { x: stand.x, y: stand.y + 1, z: stand.z };
@@ -930,7 +930,7 @@ export function findLavaMineStand(
     for (let dz = 4; dz >= -4; dz--) {
       if (dx === 0 && dz === 0) continue;
       const distance = Math.hypot(dx, 1, dz);
-      if (distance > reach) continue;
+      if (distance > reach || distance < 2) continue;
       const stand: Point = { x: lava.x + dx, y: lava.y + 1, z: lava.z + dz };
       const floor: Point = { x: stand.x, y: lava.y, z: stand.z };
       const head: Point = { x: stand.x, y: stand.y + 1, z: stand.z };
@@ -954,7 +954,7 @@ function findLavaScaffoldHint(lava: Point, probe: BlockProbe): LavaScaffoldStand
     for (let dz = 4; dz >= -4; dz--) {
       if (dx === 0 && dz === 0) continue;
       const distance = Math.hypot(dx, 1, dz);
-      if (distance > 4.5) continue;
+      if (distance > 4.5 || distance < 2) continue;
       const stand: Point = { x: lava.x + dx, y: lava.y + 1, z: lava.z + dz };
       const floor: Point = { x: stand.x, y: lava.y, z: stand.z };
       const head: Point = { x: stand.x, y: stand.y + 1, z: stand.z };
@@ -1023,6 +1023,8 @@ export function isStandingSafelyAt(bot: any, target: SafeLiquidTarget): boolean 
     const dz = pos.z - target.stand.z;
     if (Math.abs(dy) > 0.6 || Math.hypot(dx, dz) > 1.2) return false;
     if (Math.abs(target.stand.y - target.liquid.y - 1) > 0.6) return false;
+    const horizontalFromLava = Math.hypot(target.stand.x - target.liquid.x, target.stand.z - target.liquid.z);
+    if (horizontalFromLava < 2) return false;
     const feet = blockNameAt(bot, { x: Math.floor(pos.x), y: Math.floor(pos.y), z: Math.floor(pos.z) });
     const head = blockNameAt(bot, { x: Math.floor(pos.x), y: Math.floor(pos.y) + 1, z: Math.floor(pos.z) });
     const floor = blockNameAt(bot, { x: target.stand.x, y: target.stand.y - 1, z: target.stand.z });
@@ -1047,29 +1049,30 @@ async function tryRecoverLavaStand(
   }
   if (plan.mode === 'scaffold' && plan.stand != null && plan.floor != null) {
     const counts = inventoryCounts(bot);
-    if ((counts['cobblestone'] ?? 0) <= 0) {
+    const material = chooseLavaScaffoldMaterial(counts);
+    if (material == null) {
       return {
-        reason: '岩浆源 ' + formatPoint(lava) + ' 需要先垫操作位：建议在 ' + formatPoint(plan.floor) + ' 放圆石，站到 ' + formatPoint(plan.stand) + '，但背包里没有 cobblestone。',
-        nextStep: '先 collectBlocks(type="cobblestone", num=1)，再 placeBlock(type="cobblestone", x=' + String(plan.floor.x) + ', y=' + String(plan.floor.y) + ', z=' + String(plan.floor.z) + ')，最后重试 makeObsidian。',
+        reason: '岩浆源 ' + formatPoint(lava) + ' 需要先垫操作位：建议在 ' + formatPoint(plan.floor) + ' 放圆石/深板岩，站到 ' + formatPoint(plan.stand) + '，但背包里没有可用垫块。',
+        nextStep: '先 collectBlocks(type=cobblestone, num=1)（或 cobbled_deepslate/deepslate），再 placeBlock(type=cobblestone, x=' + String(plan.floor.x) + ', y=' + String(plan.floor.y) + ', z=' + String(plan.floor.z) + ')，最后重试 makeObsidian。',
       };
     }
-    const placed = await skills.placeBlock(bot, 'cobblestone', plan.floor.x, plan.floor.y, plan.floor.z);
+    const placed = await skills.placeBlock(bot, material, plan.floor.x, plan.floor.y, plan.floor.z);
     if (!placed) {
       return {
-        reason: '尝试在岩浆源 ' + formatPoint(lava) + ' 旁垫圆石 ' + formatPoint(plan.floor) + ' 失败。',
-        nextStep: '先 goToCoordinates' + formatPoint(plan.stand) + ' 附近，再 placeBlock(type="cobblestone", x=' + String(plan.floor.x) + ', y=' + String(plan.floor.y) + ', z=' + String(plan.floor.z) + ')。',
+        reason: '尝试在岩浆源 ' + formatPoint(lava) + ' 旁垫 ' + material + ' 到 ' + formatPoint(plan.floor) + ' 失败。',
+        nextStep: '先 goToCoordinates' + formatPoint(plan.stand) + ' 附近，再 placeBlock(type=' + material + ', x=' + String(plan.floor.x) + ', y=' + String(plan.floor.y) + ', z=' + String(plan.floor.z) + ')。',
       };
     }
     const after = planLavaStand(lava, probe);
     if (after.mode === 'existing' && after.stand != null) {
       return {
         target: { liquid: lava, stand: after.stand, distance: 0 },
-        reason: '已用圆石垫出岩浆操作位 ' + formatPoint(after.stand) + '。',
+        reason: '已用 ' + material + ' 垫出岩浆操作位 ' + formatPoint(after.stand) + '。',
         nextStep: '重试 makeObsidian。',
       };
     }
     return {
-      reason: '圆石放下后仍没形成岩浆安全操作位（岩浆源 ' + formatPoint(lava) + '）。',
+      reason: '垫块放下后仍没形成岩浆安全操作位（岩浆源 ' + formatPoint(lava) + '）。',
       nextStep: '先 goToCoordinates' + formatPoint(plan.stand) + ' 检查现场，再 placeBlock 或 mineBlock。',
     };
   }
@@ -1120,4 +1123,14 @@ async function tryRecoverLavaStand(
         ? 'goToCoordinates' + formatPoint(lava) + ' 后用 placeBlock 在岩浆旁垫出高一格站位，再重试 makeObsidian。'
         : '建议操作位 ' + formatPoint(suggested) + '：先 goToCoordinates' + formatPoint(suggested) + '，再用 placeBlock 垫脚或 mineBlock 清位，最后重试 makeObsidian。',
   };
+}
+
+export function chooseLavaScaffoldMaterial(
+  counts: Record<string, number | undefined> | null | undefined,
+): string | null {
+  for (const material of ['cobblestone', 'cobbled_deepslate', 'deepslate', 'stone']) {
+    const raw = Number(counts?.[material] ?? 0);
+    if (Number.isFinite(raw) && Math.floor(raw) >= 1) return material;
+  }
+  return null;
 }
