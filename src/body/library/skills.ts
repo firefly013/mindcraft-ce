@@ -305,45 +305,52 @@ export async function craftRecipe(bot: any, itemName: string, num: number = 1): 
      **/
     let placedTable = false;
 
-    if ((mc as any).getItemCraftingRecipes(itemName).length == 0) {
-        log(bot, `${itemName} is either not an item, or it does not have a crafting recipe`);
+    // **配方表可能返回 null**（itemId 不存在 / 没有 recipes 条目）。直接 `.length`
+    // 会抛 `Cannot read properties of null (reading 'length')`——Feedback #31 的崩溃点。
+    const recipeInfos: any = (mc as any).getItemCraftingRecipes(itemName);
+    const itemId: any = (mc as any).getItemId(itemName);
+    if (itemId == null || recipeInfos == null || recipeInfos.length === 0) {
+        log(bot, `${itemName} is either not an item, or it does not have a crafting recipe.（金装备的注册名是 golden_*，例如 golden_boots）`);
         return false;
     }
 
-    // get recipes that don't require a crafting table
-    let recipes: any[] = bot.recipesFor((mc as any).getItemId(itemName), null, 1, null);
+    // 先找不需要工作台的配方；没有再看要不要 / 有没有工作台。
+    let recipes: any[] = ((bot.recipesFor(itemId, null, 1, null) as any[]) ?? []);
     let craftingTable: any = null;
     const craftingTableRange = 16;
-    placeTable: if (!recipes || recipes.length === 0) {
-        recipes = bot.recipesFor((mc as any).getItemId(itemName), null, 1, true);
-        if(!recipes || recipes.length === 0) break placeTable; //Don't bother going to the table if we don't have the required resources.
+    placeTable: if (recipes.length === 0) {
+        // `craftingTable=true` 只是让 mineflayer 假设有工作台来算材料够不够；
+        // 真去合成时还必须找到或放下一个真的工作台。
+        const tableRecipes: any[] = ((bot.recipesFor(itemId, null, 1, true) as any[]) ?? []);
+        if (tableRecipes.length === 0) break placeTable;
+        recipes = tableRecipes;
 
-        // Look for crafting table
         craftingTable = world.getNearestBlock(bot, 'crafting_table', craftingTableRange);
-        if (craftingTable === null){
-
-            // Try to place crafting table
-            const hasTable: boolean = world.getInventoryCounts(bot)['crafting_table'] > 0;
+        if (craftingTable === null) {
+            const hasTable: boolean = Number(world.getInventoryCounts(bot)['crafting_table'] ?? 0) > 0;
             if (hasTable) {
                 const pos: any = world.getNearestFreeSpace(bot, 1, 6);
                 await placeBlock(bot, 'crafting_table', pos.x, pos.y, pos.z);
                 craftingTable = world.getNearestBlock(bot, 'crafting_table', craftingTableRange);
                 if (craftingTable) {
-                    recipes = bot.recipesFor((mc as any).getItemId(itemName), null, 1, craftingTable);
+                    recipes = ((bot.recipesFor(itemId, null, 1, craftingTable) as any[]) ?? []);
                     placedTable = true;
                 }
-            }
-            else {
-                log(bot, `Crafting ${itemName} requires a crafting table.`);
+            } else {
+                log(bot, `Crafting ${itemName} requires a crafting table: there is none nearby and none in the inventory. 先 placeHere 放一个工作台再合成。`);
                 return false;
             }
-        }
-        else {
-            recipes = bot.recipesFor((mc as any).getItemId(itemName), null, 1, craftingTable);
+        } else {
+            recipes = ((bot.recipesFor(itemId, null, 1, craftingTable) as any[]) ?? []);
         }
     }
-    if (!recipes || recipes.length === 0) {
-        log(bot, `You do not have the resources to craft a ${itemName}. It requires: ${Object.entries((mc as any).getItemCraftingRecipes(itemName)[0][0] as Record<string, number>).map(([key, value]) => `${key}: ${value}`).join(', ')}.`);
+    if (recipes.length === 0) {
+        const firstRequired = recipeInfos[0]?.[0] as Record<string, number> | undefined;
+        const needText =
+            firstRequired != null
+                ? Object.entries(firstRequired).map(([key, value]) => `${key}: ${value}`).join(', ')
+                : 'unknown';
+        log(bot, `You do not have the resources to craft a ${itemName}. It requires: ${needText}.`);
         if (placedTable) {
             await collectBlock(bot, 'crafting_table', 1);
         }
@@ -363,7 +370,18 @@ export async function craftRecipe(bot: any, itemName: string, num: number = 1): 
 
     const { perCraft, runs } = craftsForRecipe(recipe, num);
     const craftsWanted = runs;
-    const crafts = Math.min(craftLimit.num, craftsWanted);
+    const limitNum = Number(craftLimit?.num);
+    const crafts = Math.max(0, Math.floor(Math.min(Number.isFinite(limitNum) ? limitNum : craftsWanted, craftsWanted)));
+    if (crafts <= 0) {
+        const needText = Object.entries(requiredIngredients).map(([key, value]) => `${key}×${value}`).join('、');
+        const haveText =
+            Object.keys(requiredIngredients)
+                .map((key) => `${key}×${Number(inventory[key] ?? 0)}`)
+                .join('、') || '0';
+        log(bot, `材料不够：做 ${num} 个 ${itemName} 需要 ${needText}；现有 ${haveText}。`);
+        if (placedTable) await collectBlock(bot, 'crafting_table', 1);
+        return false;
+    }
 
     await bot.craft(recipe, crafts, craftingTable);
     const got = world.getInventoryCounts(bot)[itemName];

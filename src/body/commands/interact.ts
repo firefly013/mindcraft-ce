@@ -1313,6 +1313,19 @@ export interface TagCraftOutcome {
  * 用同类混用真去合成：只处理 2×2（不需要工作台）的配方，交给 `bot.craft`。
  * 返回回执；调用方负责把 detail 写进 bot.output。
  */
+/** 把模型常用的错名映射到注册名（金装备是 golden_*，不是 gold_*）。 */
+export function resolveCraftItemName(raw: string): { name: string; aliasOf: string | null; valid: boolean } {
+  const name = String(raw ?? '').trim().toLowerCase();
+  if (name === '') return { name, aliasOf: null, valid: false };
+  if (mc.getItemId(name) != null) return { name, aliasOf: null, valid: true };
+  if (name.startsWith('gold_')) {
+    const golden = `golden_${name.slice('gold_'.length)}`;
+    if (mc.getItemId(golden) != null) return { name: golden, aliasOf: name, valid: true };
+  }
+  return { name, aliasOf: null, valid: false };
+}
+
+
 export async function craftRecipeWithTags(
   bot: any,
   itemName: string,
@@ -1382,18 +1395,29 @@ export async function craftSmartDetailed(
   itemName: string,
   num = 1,
 ): Promise<{ ok: boolean; detail: string }> {
+  const resolved = resolveCraftItemName(itemName);
+  if (!resolved.valid) {
+    return {
+      ok: false,
+      detail:
+        `没有 ${itemName} 这个物品（配方表里也没有）。金装备的注册名是 golden_*（如 golden_boots）；` +
+        '先用 getCraftingPlan / searchWiki 确认名字，再试。',
+    };
+  }
+  const targetName = resolved.name;
+  const aliasNote = resolved.aliasOf != null ? `（${resolved.aliasOf} 不是注册名，已按 ${targetName} 处理）` : '';
   try {
-    if (await skills.craftRecipe(bot, itemName, num)) {
-      return { ok: true, detail: `合成 ${itemName} 成功（原配方）。` };
+    if (await skills.craftRecipe(bot, targetName, num)) {
+      return { ok: true, detail: `${aliasNote}合成 ${targetName} 成功（原配方）。` };
     }
   } catch (error: unknown) {
     skills.log(bot, `craftRecipe 抛错：${error instanceof Error ? error.message : String(error)}`);
   }
-  const outcome = await craftRecipeWithTags(bot, itemName, num);
-  return { ok: outcome.ok, detail: outcome.detail };
+  const outcome = await craftRecipeWithTags(bot, targetName, num);
+  return { ok: outcome.ok, detail: `${aliasNote}${outcome.detail}` };
 }
 
-/** 布尔版：给 useBlock/runSkill 用（detail 写进 bot.output，runSkill 会带回）。 */
+
 export async function craftSmart(bot: any, itemName: string, num = 1): Promise<boolean> {
   const outcome = await craftSmartDetailed(bot, itemName, num);
   skills.log(bot, outcome.detail);
@@ -1583,6 +1607,12 @@ const interactCommands: AgentCommand[] = [
       // process：output 是断言。
       const wanted = parsedOut.items[0];
       if (wanted == null) return renderReport(lines, 'useBlock 用不了：加工要给出 output。');
+      const resolvedWanted = resolveCraftItemName(wanted.name);
+      if (!resolvedWanted.valid) {
+        return renderReport(lines, `useBlock 用不了：没有 ${wanted.name} 这个物品（配方表里也没有）。金装备的注册名是 golden_*（如 golden_boots）。`);
+      }
+      const aliasNote = resolvedWanted.aliasOf != null ? `（${resolvedWanted.aliasOf} → ${resolvedWanted.name}）` : '';
+      wanted.name = resolvedWanted.name;
       if (type === 'furnace' || type === 'blast_furnace' || type === 'smoker') {
         // **`smeltItem` 要的是原料，不是产物**——它自己去查"这个能不能烧"。
         // 真机上模型报过 `Cannot smelt iron_ingot`：我当时把 `output` 当输入传了，
@@ -1679,7 +1709,7 @@ const interactCommands: AgentCommand[] = [
       const now = await countInInventoryWithSync(agent.bot, wanted.name, 1, 800);
       if (crafted) {
         if (have != null && now != null) {
-          lines.push(step(`实际进包 ${wanted.name}：+${now - have}（现在 ${now} 个）`));
+          lines.push(step(`实际进包 ${wanted.name}：+${now - have}（现在 ${now} 个）${aliasNote}`));
           if (now - have <= 0) {
             lines.push(
               step(
@@ -1790,6 +1820,12 @@ const interactCommands: AgentCommand[] = [
       if (parsedOut.error != null) return `craft 参数不对：${parsedOut.error}`;
       const want = parsedOut.items[0];
       if (want == null) return 'craft 参数不对：要给出 output（期望产出什么）。';
+      const resolvedWant = resolveCraftItemName(want.name);
+      if (!resolvedWant.valid) {
+        return `craft 参数不对：没有 ${want.name} 这个物品（配方表里也没有）。金装备的注册名是 golden_*（如 golden_boots）。`;
+      }
+      const aliasNote = resolvedWant.aliasOf != null ? `（${resolvedWant.aliasOf} → ${resolvedWant.name}）` : '';
+      want.name = resolvedWant.name;
 
       // 合成前先结算客户端背包；有材料却报缺，多半是 window_items 包还在飞。
       await settleInventory(agent.bot, 3, 50);
@@ -1807,7 +1843,7 @@ const interactCommands: AgentCommand[] = [
       const now = await countInInventoryWithSync(agent.bot, want.name, 1, 800);
       if (ok) {
         if (have != null && now != null) {
-          const lines = [step(`合成 ${want.name}：+${now - have}（现在 ${now} 个）`)];
+          const lines = [step(`${aliasNote}合成 ${want.name}：+${now - have}（现在 ${now} 个）`)];
           if (now - have <= 0) {
             lines.push(
               step(
