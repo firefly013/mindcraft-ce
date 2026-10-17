@@ -765,6 +765,12 @@ export class MineflayerBody {
      * 不是等级 5 的属性，也不需要大脑隔着一趟协议来点名调用。
      */
     private emergency(type: string, payload: unknown, reflex: string, intent: EmergencyIntent): void {
+        // 记录真正触发的 event type：Feedback #47-49 靠它查是哪个 L5 打断的。
+        try {
+            this.log.with('reflex').info({ event: 'emergency-triggered', type, reflex, intent });
+        } catch {
+            // 日志失败不能阻止保命动作。
+        }
         // **先硬中断正在跑的模型动作**，再通知/排队保命：
         // 真机 Feedback #24 长寻路遇敌时，反射只是排队，身体还在被寻路带走，
         // 等 rescue 跑到 stopAll 时人已经在水里了。

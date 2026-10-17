@@ -58,3 +58,51 @@ describe('makeObsidian：标志生命周期', () => {
     expect(bot.controlledLavaOperation).toBe(false);
   });
 });
+
+describe('预测性 lava L5 全部豁免', () => {
+  it('受控安全作业时 about_to_enter 也不抢断', () => {
+    const bot = baseBot({ '0,-1,0': 'stone', '0,0,-2': 'lava' });
+    bot.entity.yaw = 0;
+    bot.entity.velocity = { x: 1, y: 0, z: 0 };
+    const snapshot = snapshotFromBot(bot, { controlledLavaOperation: true });
+    expect(snapshot.nextIsLava).toBe(true);
+    expect(snapshot.controlledLavaOperation).toBe(true);
+    const types = createEdgeWatcher().poll(snapshot).map((e) => e.type);
+    expect(types).not.toContain('world.lava.about_to_enter');
+    expect(types).not.toContain('world.lava.nearby');
+  });
+
+  it('没有 controlled 标志时 about_to_enter 照常发 L5', () => {
+    const bot = baseBot({ '0,-1,0': 'stone', '0,0,-2': 'lava' });
+    bot.entity.yaw = 0;
+    bot.entity.velocity = { x: 1, y: 0, z: 0 };
+    const snapshot = snapshotFromBot(bot, {});
+    const types = createEdgeWatcher().poll(snapshot).map((e) => e.type);
+    expect(types).toContain('world.lava.about_to_enter');
+  });
+});
+
+describe('formatMakeObsidianProgress', () => {
+  it('中断回执带进度/已挖坐标/剩余水桶/下一块', async () => {
+    const { formatMakeObsidianProgress } = await import('../src/body/commands/make_obsidian.js');
+    const text = formatMakeObsidianProgress(
+      {
+        ok: false,
+        produced: 3,
+        message: '',
+        mined: [{ x: 1, y: 2, z: 3 }, { x: 4, y: 5, z: 6 }],
+        remainingWaterBuckets: 2,
+        nextTarget: { liquid: { x: 7, y: 8, z: 9 }, stand: { x: 10, y: 11, z: 12 } },
+        dangerStop: false,
+      },
+      'makeObsidian 被 Stop/保命打断',
+    );
+    expect(text).toContain('进度 3/10');
+    expect(text).toContain('(1,2,3)');
+    expect(text).toContain('剩余水桶 2');
+    expect(text).toContain('下一块候选');
+    expect(text).toContain('(7,8,9)');
+    expect(text).toContain('(10,11,12)');
+  });
+});
+

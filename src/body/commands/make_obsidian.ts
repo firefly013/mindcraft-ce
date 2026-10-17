@@ -699,25 +699,46 @@ export async function makeObsidian(bot: any): Promise<MakeObsidianResult> {
   }
 }
 
+/** 把 makeObsidian 的进度字段渲染成一行可读回执（中断/超时也用）。 */
+export function formatMakeObsidianProgress(outcome: MakeObsidianResult | null, headline: string): string {
+  if (outcome == null) return headline + '：没有拿到本轮进度。';
+  const mined = (outcome.mined ?? []).map(formatPoint).join('、');
+  const next =
+    outcome.nextTarget == null
+      ? '下一块候选：没有'
+      : '下一块候选：岩浆 ' + formatPoint(outcome.nextTarget.liquid) + '，安全站位 ' + formatPoint(outcome.nextTarget.stand);
+  return (
+    headline + '：进度 ' + String(outcome.produced ?? 0) + '/10' +
+    (mined === '' ? '' : '；已挖坐标 ' + mined) +
+    '；剩余水桶 ' + String(outcome.remainingWaterBuckets ?? 0) +
+    '；' + next + '。'
+  );
+}
+
 function runMakeObsidianAction(timeoutMinutes: number): CommandPerform {
   const wrapped = async function (agent: any): Promise<string | null | undefined> {
+    let outcome: MakeObsidianResult | null = null;
     const result = await agent.actions.runAction(
       'action:makeObsidian',
       async () => {
-        const outcome = await makeObsidian(agent.bot);
+        outcome = await makeObsidian(agent.bot);
         skills.log(agent.bot, outcome.message);
       },
       { timeout: timeoutMinutes },
     );
-    if (result.interrupted && !result.timedout) return;
+    const finalOutcome = outcome as MakeObsidianResult | null;
+    if (result.interrupted && !result.timedout) {
+      return formatMakeObsidianProgress(finalOutcome, 'makeObsidian 被 Stop/保命打断');
+    }
     if (result.timedout) {
       const why = skills.describeStuck?.(agent.bot) ?? '';
       return (
         'makeObsidian：**超时**（' + String(timeoutMinutes) + ' 分钟没做完），已释放身体通道。现场保留。' +
+        '\n' + formatMakeObsidianProgress(finalOutcome, '超时进度') +
         (why === '' ? '' : '\n卡住时：' + why)
       );
     }
-    return result.message;
+    return finalOutcome?.message ?? result.message ?? '';
   };
   (wrapped as CommandPerform).longRunning = true;
   return wrapped as CommandPerform;

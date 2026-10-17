@@ -298,8 +298,9 @@ export const DETECTORS: readonly Detector[] = Object.freeze([
     fire: (s) => s.inWater === true },
   {
     type: 'world.lava.about_to_enter', level: 5, kind: 'all',
-    fire: (s) => s.nextIsLava === true && s.moving === true,
-    clear: (s) => s.nextIsLava !== true || s.moving !== true,
+    // 受控作业且站位安全时，预测性的前方岩浆不抢断；contact/真实入岩浆才中断。
+    fire: (s) => s.nextIsLava === true && s.moving === true && s.controlledLavaOperation !== true,
+    clear: (s) => s.nextIsLava !== true || s.moving !== true || s.controlledLavaOperation === true,
   },
   { type: 'world.void.falling', level: 5, kind: 'flag', flag: 'belowVoid' },
   { type: 'world.water.drowning', level: 5, kind: 'all',
