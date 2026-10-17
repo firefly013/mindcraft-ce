@@ -30,6 +30,91 @@ export const PICKUP_TIMEOUT_MS = 12_000;
 
 /** 刚被 `discard` 扔掉的东西，多久之内不要去捡。 */
 export const DISCARD_IGNORE_MS = 180_000;
+/**
+ * 拾取事件发生后，等多久再重读 player inventory 做核验。
+ *
+ * 真机 Feedback #62：playerCollect 先到、背包后到；而旧实现拿一份可能很旧的
+ * 快照做差，导致"捡到 porkchop×1"但背包里没有。200ms 是给客户端背包同步留的
+ * 窗口：既不能太短（读到的还是旧背包），也不能太长（把别处的变化算进来）。
+ */
+export const PICKUP_CONFIRM_DELAY_MS = 200;
+
+/** 背包账目：物品 id → 总数量。 */
+export type InventoryCounts = Record<string, number>;
+
+/**
+ * 归一化物品 id / 掉落物显示名，便于跨下划线、空格、连字符比较。
+ *
+ * 例：`"Oak Log"` / `"oak_log"` / `"oak-log"` → `"oak_log"`。
+ */
+export function normalizeItemName(name: string): string {
+  return name
+    .trim()
+    .toLowerCase()
+    .replace(/[\s_-]+/g, '_')
+    .replace(/^_+|_+$/g, '');
+}
+
+/**
+ * 宽松匹配物品 id 与掉落物显示名。
+ *
+ * 只做整段前缀/后缀/中间段匹配，避免 `"dirt"` 匹配到 `"dirt_block"` 以外的
+ * 无关物品。用于 `discard` 免疫表（记的是 `oak_log`，掉落物读的是 `Oak Log`）。
+ */
+export function itemNameMatches(expected: string, actual: string): boolean {
+  const a = normalizeItemName(expected);
+  const b = normalizeItemName(actual);
+  if (a === '' || b === '') return false;
+  if (a === b) return true;
+  const hasSegment = (long: string, short: string): boolean =>
+    long.startsWith(`${short}_`) || long.endsWith(`_${short}`) || long.includes(`_${short}_`);
+  return hasSegment(a, b) || hasSegment(b, a);
+}
+
+/**
+ * 当前背包相对 `before` 的正增量。
+ *
+ * 读不到任一侧时返回空表：宁可不报，也不能把"读失败"当成"没变化"再报 gained。
+ */
+export function positiveInventoryDelta(
+  before: InventoryCounts | null | undefined,
+  after: InventoryCounts | null | undefined,
+): InventoryCounts {
+  if (before == null || after == null) return {};
+  const gained: InventoryCounts = {};
+  for (const [name, count] of Object.entries(after)) {
+    const delta = count - (before[name] ?? 0);
+    if (delta > 0) gained[name] = delta;
+  }
+  return gained;
+}
+
+/**
+ * 拾取核验：只有 `after` 里确实比 `before` 多出来的才算 gained。
+ *
+ * 知道掉落物名（expectedItem）时只认这个物品，避免把同一窗口内背包里别的
+ * 变化算成"捡到了"；不知道时退回全部正增量。返回空对象 = 这次不报 gained。
+ */
+export function confirmedPickupGains(
+  before: InventoryCounts | null | undefined,
+  after: InventoryCounts | null | undefined,
+  expectedItem?: string | null,
+): InventoryCounts {
+  const gained = positiveInventoryDelta(before, after);
+  if (expectedItem == null || expectedItem.trim() === '') return gained;
+  const confirmed: InventoryCounts = {};
+  for (const [name, count] of Object.entries(gained)) {
+    if (itemNameMatches(expectedItem, name)) confirmed[name] = count;
+  }
+  return confirmed;
+}
+
+/** 把 gained 渲染成模型能读的 `porkchop×1、oak_log×2`。 */
+export function formatInventoryGains(gained: InventoryCounts): string {
+  return Object.entries(gained)
+    .map(([name, count]) => `${name}×${count}`)
+    .join('、');
+}
 
 export interface PickupTarget {
   id: number;

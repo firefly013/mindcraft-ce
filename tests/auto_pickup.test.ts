@@ -2,17 +2,22 @@
  * 自动拾取契约：只认地上的掉落物（`name === 'item'`）、只在半径内、
  * 只挑最近的；读不到实体表就安静地什么都不做。
  */
-import { describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it } from 'vitest';
 import {
   nearestDropWithin,
   markDiscarded,
   clearDiscards,
 } from '../src/body/auto_pickup.js';
 import {
+  confirmedPickupGains,
+  formatInventoryGains,
+  itemNameMatches,
   nextPickupBackoffMs,
+  positiveInventoryDelta,
   shouldAttemptPickup,
   DISCARD_IGNORE_MS,
   PICKUP_BACKOFF_MAX_MS,
+  PICKUP_CONFIRM_DELAY_MS,
   PICKUP_INTERVAL_MS,
   PICKUP_RADIUS,
 } from '../src/shared/auto_pickup.js';
@@ -30,6 +35,10 @@ const drop = (id: number, x: number, y: number, z: number, extra: Record<string,
   name: 'item',
   position: { x, y, z },
   ...extra,
+});
+
+beforeEach(() => {
+  clearDiscards();
 });
 
 describe('shouldAttemptPickup', () => {
@@ -131,5 +140,57 @@ describe('markDiscarded', () => {
     markDiscarded('dirt');
     const bot = botWith([drop(2, 1, 64, 0, { displayName: 'cobblestone' })]);
     expect(nearestDropWithin(bot, 8)?.id).toBe(2);
+  });
+});
+
+describe('拾取入包核验', () => {
+  it('确认 200ms 核验窗口常量', () => {
+    expect(PICKUP_CONFIRM_DELAY_MS).toBe(200);
+  });
+
+  it('after 相对 before 有正增量才算 gained', () => {
+    expect(positiveInventoryDelta({}, { porkchop: 1 })).toEqual({ porkchop: 1 });
+    expect(positiveInventoryDelta({ porkchop: 1 }, { porkchop: 1 })).toEqual({});
+    expect(positiveInventoryDelta({ porkchop: 1 }, { porkchop: 3, dirt: 1 })).toEqual({ porkchop: 2, dirt: 1 });
+  });
+
+  it('读不到任一侧时不报 gained', () => {
+    expect(positiveInventoryDelta(null, { porkchop: 1 })).toEqual({});
+    expect(positiveInventoryDelta({ porkchop: 1 }, null)).toEqual({});
+    expect(confirmedPickupGains(null, { porkchop: 1 }, 'porkchop')).toEqual({});
+  });
+
+  it('知道掉落物名时只认该物品，别处的增量不算捡到', () => {
+    expect(confirmedPickupGains({}, { porkchop: 1 }, 'Porkchop')).toEqual({ porkchop: 1 });
+    expect(confirmedPickupGains({}, { dirt: 1 }, 'Porkchop')).toEqual({});
+    expect(confirmedPickupGains({ porkchop: 1 }, { porkchop: 2, dirt: 1 }, 'Porkchop')).toEqual({
+      porkchop: 1,
+    });
+  });
+
+  it('显示名带空格也能匹配物品 id', () => {
+    expect(itemNameMatches('Oak Log', 'oak_log')).toBe(true);
+    expect(itemNameMatches('Dirt Block', 'dirt')).toBe(true);
+    expect(confirmedPickupGains({}, { oak_log: 1 }, 'Oak Log')).toEqual({ oak_log: 1 });
+    expect(confirmedPickupGains({}, { cobblestone: 1 }, 'Oak Log')).toEqual({});
+  });
+
+  it('gained 渲染成模型能读的文本', () => {
+    expect(formatInventoryGains({ porkchop: 1, oak_log: 2 })).toBe('porkchop×1、oak_log×2');
+    expect(formatInventoryGains({})).toBe('');
+  });
+});
+
+describe('丢弃免疫的命名归一化', () => {
+  it('oak_log 免疫能挡住 Oak Log 掉落物', () => {
+    const bot = botWith([drop(1, 1, 64, 0, { displayName: 'Oak Log' })]);
+    markDiscarded('oak_log');
+    expect(nearestDropWithin(bot, 8)).toBeNull();
+  });
+
+  it('dirt 免疫能挡住 Dirt Block 掉落物', () => {
+    const bot = botWith([drop(2, 1, 64, 0, { displayName: 'Dirt Block' })]);
+    markDiscarded('dirt');
+    expect(nearestDropWithin(bot, 8)).toBeNull();
   });
 });

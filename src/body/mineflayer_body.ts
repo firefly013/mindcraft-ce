@@ -50,7 +50,6 @@ import type { EmergencyIntent, EmergencyResult, ThreatEntity } from './safety/em
 import {
     consume,
     forceExitWater,
-    goToPosition,
     stopPvp,
 } from './library/skills.js';
 import { headInWater } from './safety/water_safety.js';
@@ -67,7 +66,15 @@ import {
 } from './edges.js';
 import { renderEventText } from '../shared/event_stream.js';
 import { nearestDropWithin, PICKUP_RADIUS, PICKUP_TIMEOUT_MS } from './auto_pickup.js';
-import { nextPickupBackoffMs, shouldAttemptPickup } from '../shared/auto_pickup.js';
+import {
+    confirmedPickupGains,
+    formatInventoryGains,
+    nextPickupBackoffMs,
+    positiveInventoryDelta,
+    PICKUP_CONFIRM_DELAY_MS,
+    shouldAttemptPickup,
+    type InventoryCounts,
+} from '../shared/auto_pickup.js';
 import type { PickupTarget } from '../shared/auto_pickup.js';
 import { stripBang } from '../shared/tools.js';
 import { getFullState } from './library/full_state.js';
@@ -198,25 +205,21 @@ export function summarizeInventoryGain(
     if (previous == null) {
         return { text: '', gained: {}, firstObservation: true, noChange: false };
     }
-    const gained: Record<string, number> = {};
-    for (const [name, count] of Object.entries(current)) {
-        const delta = count - (previous[name] ?? 0);
-        if (delta > 0) gained[name] = delta;
-    }
-    const parts = Object.entries(gained).map(([name, count]) => `${name}×${count}`);
-    if (parts.length === 0) {
+    const gained = positiveInventoryDelta(previous, current);
+    const text = formatInventoryGains(gained);
+    if (Object.keys(gained).length === 0) {
         return { text: '', gained, firstObservation: false, noChange: true };
     }
-    return { text: parts.join('、'), gained, firstObservation: false, noChange: false };
+    return { text, gained, firstObservation: false, noChange: false };
 }
 
 /**
- * 附近另一个玩家的名字（没有就 null）。自动拾取提示用。
+ * 附近其他玩家的名字列表（按距离从近到远，去重）。自动拾取提示用。
  *
  * 不判断掉落物的真正归属（客户端拿不到可靠的 owner），但至少能在
- * 「旁边站着队友」时提醒模型：这件东西可能是队友挖出来的。
+ * 「旁边站着队友」时提醒模型：这件东西可能是队友掉落或队友也想捡。
  */
-export function nearestOtherPlayerName(bot: unknown, radius: number = 8): string | null {
+export function nearbyOtherPlayerNames(bot: unknown, radius: number = 8): string[] {
     const b = bot as {
         entity?: { id?: unknown; position?: { x?: number; y?: number; z?: number } };
         entities?: Record<string, unknown>;
@@ -224,9 +227,9 @@ export function nearestOtherPlayerName(bot: unknown, radius: number = 8): string
     const self = b?.entity;
     const selfPos = self?.position;
     if (self == null || selfPos == null || typeof selfPos.x !== 'number' || typeof selfPos.y !== 'number' || typeof selfPos.z !== 'number') {
-        return null;
+        return [];
     }
-    let best: { name: string; distance: number } | null = null;
+    const found: Array<{ name: string; distance: number }> = [];
     for (const raw of Object.values(b?.entities ?? {})) {
         if (raw == null) continue;
         const e = raw as {
@@ -246,9 +249,34 @@ export function nearestOtherPlayerName(bot: unknown, radius: number = 8): string
         const distance = Math.hypot(x - selfPos.x, y - selfPos.y, z - selfPos.z);
         if (distance > radius) continue;
         const name = typeof e.username === 'string' ? e.username : typeof e.name === 'string' ? e.name : 'player';
-        if (best == null || distance < best.distance) best = { name, distance };
+        found.push({ name, distance });
     }
-    return best?.name ?? null;
+    found.sort((a, b) => a.distance - b.distance || a.name.localeCompare(b.name));
+    const names: string[] = [];
+    for (const item of found) {
+        if (!names.includes(item.name)) names.push(item.name);
+    }
+    return names;
+}
+
+/** 最近的那个玩家名（兼容旧调用；没有就 null）。 */
+export function nearestOtherPlayerName(bot: unknown, radius: number = 8): string | null {
+    return nearbyOtherPlayerNames(bot, radius)[0] ?? null;
+}
+
+/**
+ * 从 `playerCollect` 的第二个参数里尽力读出掉落物名。
+ *
+ * 真名在 displayName / metadata 上，版本相关；读不到就返回 null，
+ * 此时核验退回"全部正增量"，至少不会编造物品名。
+ */
+export function expectedItemNameFromEntity(collected: unknown): string | null {
+    const e = collected as { displayName?: unknown; name?: unknown } | null | undefined;
+    const displayName = typeof e?.displayName === 'string' ? e.displayName.trim() : '';
+    if (displayName !== '' && displayName.toLowerCase() !== 'item') return displayName;
+    const name = typeof e?.name === 'string' ? e.name.trim() : '';
+    if (name !== '' && name.toLowerCase() !== 'item' && name.toLowerCase() !== 'player') return name;
+    return null;
 }
 
 /**
@@ -474,6 +502,8 @@ export class MineflayerBody {
     /** 连续拾取失败次数与退避截止时间：失败后不许每 1.5 秒继续抢身体。 */
     private pickupFailures = 0;
     private pickupBackoffUntil = 0;
+    /** 模型动作已经请求时，拾取正在收手；期间不再启动新的拾取。 */
+    private pickupAbortRequested = false;
     /** 模型动作请求已经在路上时，禁止新的自动拾取抢身体。 */
     private modelActionRequested = false;
 
@@ -501,13 +531,6 @@ export class MineflayerBody {
     /** 开发者通道的读游标。逻辑在 `inbox.ts`（那边可单测）。 */
     private inbox: InboxCursor = EMPTY_CURSOR;
 
-    /**
-     * 上一次看到的背包账目（物品名 → 数量）。给"刚捡到什么"反推用。
-     *
-     * 为什么不用掉落物实体：那个实体的 `name` 就是字面量 `'item'`，读不出是什么。
-     * 而**背包的账目是服务端认的**，比猜实体元数据可靠。
-     */
-    private lastInventory: Record<string, number> | null = null;
     private exitingWater = false;
     private lastWaterCheckAt = 0;
     private waterExitFailures = 0;
@@ -754,14 +777,12 @@ export class MineflayerBody {
      */
     private async yieldAutoPickupToModel(): Promise<void> {
         if (!this.pickingUp) return;
-        // 模型动作优先：只给拾取 300ms 收手，不能把模型工具调用拖成 ACTION_BUSY。
+        // 模型动作优先：标记拾取取消并立刻放行，不等待拾取任务收尾。
+        // pickupAbortRequested 与 interrupt_code 不同：ActionManager.clearBotLogs
+        // 清掉 interrupt_code 也不会影响它；拾取自己的寻路循环每 50ms 会看到
+        // 并主动 pathfinder.stop()，不会和模型动作抢方向盘（Feedback #64）。
+        this.pickupAbortRequested = true;
         this.requestInterrupt();
-        const deadline = Date.now() + 300;
-        while (this.pickingUp && Date.now() < deadline) {
-            await new Promise<void>((resolve) => setTimeout(resolve, 20));
-        }
-        // 还在跑就再发一次打断；modelActionRequested 会阻止新的拾取抢身体。
-        if (this.pickingUp) this.requestInterrupt();
     }
 
     clearBotLogs(): void {
@@ -1187,38 +1208,11 @@ export class MineflayerBody {
         // 于是这条事件曾经报的是 `{"type":"inventory.collected","item":"item"}`——
         // 模型直接写了 Feedback：「这没告诉我任何东西」。
         // 真名要读实体元数据（版本相关、容易错），所以改成**用背包账目反推**：
-        // 与上一次快照比对，多出来的就是刚捡到的。这个口径也顺带把"捡了 2 个"
-        // 说清楚了（模型另外要求过带数量）。
-        this.bot.on('playerCollect', (collector: any) => {
+        // 事件发生那一刻先读 before，**200ms 后重读 player inventory**；只有 after
+        // 相对 before 确实多出来的才报 gained（知道掉落物名时只认这个物品）。
+        this.bot.on('playerCollect', (collector: any, collected: any) => {
             try {
-                if (!collector || collector.id !== this.bot?.entity?.id) return;
-                // **等一拍再读背包**：玩家拾取事件常常先于客户端背包更新，
-                // 立刻读会得到「没变化」——旧实现把这个占位文案写进了事件，
-                // 模型据此误判背包是空的（真机 Feedback）。
-                setTimeout(() => {
-                    try {
-                        const picked = this.inventoryDelta();
-                        // 没有可识别的增量就**省略事件**，不写占位文案。
-                        if (Object.keys(picked.gained).length === 0) return;
-                        const now = Date.now();
-                        if (now - this.lastCollectEmitAt < 2000) return;
-                        this.lastCollectEmitAt = now;
-                        const nearby = nearestOtherPlayerName(this.bot, PICKUP_RADIUS);
-                        const hint =
-                            nearby != null
-                                ? `自动拾取：捡到了 ${picked.text}。附近有玩家 ${nearby}，这件可能是队友挖出的掉落物；需要的话和对方确认。`
-                                : `自动拾取：捡到了 ${picked.text}。如果附近有队友挖出的掉落物，可能被自动拾取抢走了；需要时和队友确认。`;
-                        this.notify('inventory.collected', KIND.WORLD, LEVEL.WAKE, {
-                            item: picked.text,
-                            gained: picked.gained,
-                            auto_pickup: true,
-                            nearby_player: nearby,
-                            hint,
-                        });
-                    } catch (err: unknown) {
-                        console.error('collect event failed:', err instanceof Error ? err.message : String(err));
-                    }
-                }, 100);
+                this.handlePlayerCollect(collector, collected);
             } catch (err: unknown) {
                 console.error('collect event failed:', err instanceof Error ? err.message : String(err));
             }
@@ -1367,25 +1361,75 @@ export class MineflayerBody {
     }
 
     /**
-     * 背包相对上一次快照的增量。返回一句给人看的话 + 结构化数字。
+     * 读当前 player inventory 的完整账目。
      *
-     * 第一次调用只建立快照（没有可比对象），此时如实说"还没记下上一次的背包"，
-     * 而不是编一个物品名出来。
+     * 拾取核验必须拿**同一口径的两次读数**比：一次是 playerCollect 刚发生时，
+     * 一次是 200ms 后。读不到返回 null，调用方宁可不报也不能把"读失败"当"没变化"。
      */
-    private inventoryDelta(): InventoryGainSummary {
-        const current: Record<string, number> = {};
+    private readInventoryCounts(): InventoryCounts | null {
         try {
-            for (const item of (this.bot?.inventory?.items?.() ?? []) as Array<{ name?: string; count?: number }>) {
+            const items = (this.bot?.inventory?.items?.() ?? []) as Array<{ name?: string; count?: number }>;
+            const counts: InventoryCounts = {};
+            for (const item of items) {
                 const name = String(item?.name ?? '');
                 if (name === '') continue;
-                current[name] = (current[name] ?? 0) + Number(item?.count ?? 0);
+                counts[name] = (counts[name] ?? 0) + Number(item?.count ?? 0);
             }
+            return counts;
         } catch {
-            return { text: '', gained: {}, firstObservation: false, noChange: true };
+            return null;
         }
-        const previous = this.lastInventory;
-        this.lastInventory = current;
-        return summarizeInventoryGain(previous, current);
+    }
+
+    /**
+     * `playerCollect` 后的核验流程。
+     *
+     * 真机 Feedback #62：事件先报"捡到 porkchop×1"，但背包里没有——原因是
+     * 旧实现拿一份可能很旧的 `lastInventory` 做差，把别处的变化算到了这次拾取头上。
+     * 现在在事件发生那一刻先读一份 before，**200ms 后重读 player inventory**，
+     * 只有 after 相对 before 的正增量（知道物品名时还只认这个物品）才发事件。
+     */
+    private handlePlayerCollect(collector: unknown, collected: unknown): void {
+        const c = collector as { id?: unknown } | null | undefined;
+        if (!c || c.id !== this.bot?.entity?.id) return;
+        const before = this.readInventoryCounts();
+        const expectedItem = expectedItemNameFromEntity(collected);
+        setTimeout(() => {
+            try {
+                const after = this.readInventoryCounts();
+                const gained = confirmedPickupGains(before, after, expectedItem);
+                if (Object.keys(gained).length === 0) {
+                    this.log.with('pickup').info({
+                        event: 'not-confirmed',
+                        expected_item: expectedItem,
+                        entity_id: (collected as { id?: unknown } | null | undefined)?.id ?? null,
+                        before,
+                        after,
+                    });
+                    return;
+                }
+                const now = Date.now();
+                if (now - this.lastCollectEmitAt < 2000) return;
+                this.lastCollectEmitAt = now;
+                const nearbyPlayers = nearbyOtherPlayerNames(this.bot, PICKUP_RADIUS);
+                const text = formatInventoryGains(gained);
+                const hint =
+                    nearbyPlayers.length > 0
+                        ? `自动拾取：捡到了 ${text}。附近有玩家 ${nearbyPlayers.join('、')}，这件可能是队友掉落；需要的话和对方确认。`
+                        : `自动拾取：捡到了 ${text}。如果附近有队友掉落，可能被自动拾取捡走；需要时和队友确认。`;
+                this.notify('inventory.collected', KIND.WORLD, LEVEL.WAKE, {
+                    item: text,
+                    gained,
+                    auto_pickup: true,
+                    nearby_players: nearbyPlayers,
+                    nearby_player: nearbyPlayers[0] ?? null,
+                    expected_item: expectedItem,
+                    hint,
+                });
+            } catch (err: unknown) {
+                console.error('collect event failed:', err instanceof Error ? err.message : String(err));
+            }
+        }, PICKUP_CONFIRM_DELAY_MS);
     }
 
     /**
@@ -1571,6 +1615,68 @@ export class MineflayerBody {
     }
 
     /**
+     * 自动拾取专用寻路：直接走 pathfinder，不经过 goToGoal 的两次 1s 快速探测。
+     *
+     * goToGoal 的探测阶段不认 interrupt_code；模型动作来抢占时如果卡在探测里，
+     * ActionManager 会 clearBotLogs 把 interrupt_code 清掉，拾取继续跑并和模型
+     * 动作抢 pathfinder，把模型动作卡成 ACTION_BUSY（Feedback #64）。
+     */
+    private async walkToPickup(target: PickupTarget): Promise<boolean> {
+        try {
+            const movements = movementsFor(this.bot);
+            // 拾取只是走过去，别为了抄近路乱挖：和 goToGoal 的非破坏性配置对齐。
+            movements.digCost = 10;
+            movements.placeCost = 2;
+            this.bot.pathfinder.setMovements(movements);
+            return await this.gotoPickupInterruptibly(
+                new (pf as any).goals.GoalNear(target.x, target.y, target.z, 0),
+                PICKUP_TIMEOUT_MS,
+            );
+        } catch {
+            return false;
+        }
+    }
+
+    /**
+     * 拾取专用可中断 goto：同时认 interrupt_code 和 pickupAbortRequested。
+     *
+     * runPathfindingInterruptibly 只看 interrupt_code；模型动作一开始
+     * ActionManager.clearBotLogs 会把它清掉，所以拾取需要一个独立取消标志。
+     * 50ms 轮询足够快，模型动作不用等拾取超时。
+     */
+    private gotoPickupInterruptibly(goal: unknown, timeoutMs: number): Promise<boolean> {
+        return new Promise<boolean>((resolve) => {
+            const started = Date.now();
+            let settled = false;
+            const finish = (ok: boolean): void => {
+                if (settled) return;
+                settled = true;
+                clearInterval(timer);
+                resolve(ok);
+            };
+            const timer: ReturnType<typeof setInterval> = setInterval(() => {
+                const timedOut = Date.now() - started >= timeoutMs;
+                if (this.pickupAbortRequested || this.bot?.interrupt_code || timedOut) {
+                    try {
+                        this.bot.pathfinder?.stop?.();
+                    } catch {
+                        // 停不下来也要按取消/超时返回。
+                    }
+                    finish(false);
+                }
+            }, 50);
+            let gotoPromise: Promise<unknown>;
+            try {
+                gotoPromise = Promise.resolve(this.bot.pathfinder.goto(goal));
+            } catch {
+                finish(false);
+                return;
+            }
+            gotoPromise.then(() => finish(true), () => finish(false));
+        });
+    }
+
+    /**
      * 自动拾取的处理：走过去把掉落物踩进背包。
      *
      * 它是**最低优先级的房客**：身体正在给模型干活时（`actions.executing`）
@@ -1583,6 +1689,7 @@ export class MineflayerBody {
      */
     private schedulePickup(target: PickupTarget): void {
         const now = Date.now();
+        if (this.pickupAbortRequested) return;
         if (now < this.pickupBackoffUntil) return;
         const go = shouldAttemptPickup({
             busy: this.actions.executing || this.modelActionRequested,
@@ -1597,16 +1704,14 @@ export class MineflayerBody {
             const started = Date.now();
             let arrived: boolean;
             try {
-                arrived = await Promise.race([
-                    goToPosition(this.bot, target.x, target.y, target.z, 0),
-                    new Promise<boolean>((resolve) => {
-                        setTimeout(() => resolve(false), PICKUP_TIMEOUT_MS);
-                    }),
-                ]);
+                arrived = await this.walkToPickup(target);
             } catch {
                 arrived = false;
             } finally {
                 this.pickingUp = false;
+                // 模型动作的抢占标志由拾取任务收尾时清掉，确保它至少被本次
+                // walkToPickup/gotoPickupInterruptibly 看到一次。
+                this.pickupAbortRequested = false;
             }
             // 被模型动作抢占不算拾取失败：不累计退避，也不把通道算在拾取头上。
             const preempted = this.modelActionRequested || this.actions.executing;
@@ -1627,7 +1732,7 @@ export class MineflayerBody {
                     reflex: 'pickup',
                     outcome: arrived ? 'ok' : 'failed',
                     detail: arrived
-                        ? '走到了 ' + target.name + ' 的位置，掉落物会被踩进背包。'
+                        ? '走到了 ' + target.name + ' 的位置；是否入包由 playerCollect 核验后另行报告。'
                         : preempted
                             ? '拾取被模型动作抢占，已释放身体通道（模型优先，本次不额外退避）。'
                             : '没走到 ' + target.name + ' 的位置（超时）；' +

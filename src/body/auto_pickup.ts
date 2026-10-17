@@ -12,9 +12,19 @@
  * 用的是 `shared/auto_pickup.ts` 里的同一组常量——两边不许各写一份数字。
  */
 
-import { DISCARD_IGNORE_MS, type PickupTarget } from '../shared/auto_pickup.js';
+import { DISCARD_IGNORE_MS, itemNameMatches, type PickupTarget } from '../shared/auto_pickup.js';
 
-export { PICKUP_RADIUS, PICKUP_INTERVAL_MS, PICKUP_TIMEOUT_MS } from '../shared/auto_pickup.js';
+export {
+  PICKUP_RADIUS,
+  PICKUP_INTERVAL_MS,
+  PICKUP_TIMEOUT_MS,
+  PICKUP_CONFIRM_DELAY_MS,
+  confirmedPickupGains,
+  positiveInventoryDelta,
+  formatInventoryGains,
+  itemNameMatches,
+  normalizeItemName,
+} from '../shared/auto_pickup.js';
 export type { PickupGate, PickupTarget } from '../shared/auto_pickup.js';
 
 /**
@@ -26,7 +36,7 @@ export type { PickupGate, PickupTarget } from '../shared/auto_pickup.js';
  */
 const discardedAt = new Map<string, number>();
 
-/** 记下"刚扔了这个"。**统一存小写**——比较发生在实体 displayName 上（见下）。 */
+/** 记下"刚扔了这个"。统一存小写；比较时再做分隔符归一化（见 `itemNameMatches`）。 */
 export function markDiscarded(name: string): void {
   discardedAt.set(name.toLowerCase(), Date.now());
 }
@@ -40,12 +50,12 @@ export function clearDiscards(): void {
  * 这个掉落物是不是刚被自己扔掉的（且还在忽略窗口内）。
  *
  * ⚠️ **这里以前有个让免疫永远不生效的坑**：调用方传入的是掉落物的
- * `displayName`（"Dirt Block" 这类**显示名**），而 `markDiscarded` 记的是
- * `dirt` 这种**物品 id**——大小写、形式都不一样，严格相等永远 false，
+ * `displayName`（"Oak Log" 这类**显示名**），而 `markDiscarded` 记的是
+ * `oak_log` 这种**物品 id**——下划线/空格/大小写都不一样，严格相等永远 false，
  * 于是"扔了又自动捡回来"，回执的承诺成了空话（模型实测并报了账）。
  *
- * 所以比较前两边都归一化：displayName 转小写后**包含**物品 id 即算命中
- * （"dirt block" contains "dirt"）。宽松匹配的代价极小（最坏是多跳过一个
+ * 所以比较前两边都归一化：`"Oak Log"` / `"oak_log"` 会归到同一形式，
+ * `"Dirt Block"` 也能按整段 `"dirt"` 命中。宽松匹配的代价极小（最坏是多跳过一个
  * 恰好同名的掉落物几秒钟），收益是承诺真的成立。
  */
 function isJustDiscarded(displayName: string, now: number): boolean {
@@ -55,7 +65,7 @@ function isJustDiscarded(displayName: string, now: number): boolean {
       discardedAt.delete(name);
       continue;
     }
-    if (shown.includes(name)) return true;
+    if (itemNameMatches(name, shown)) return true;
   }
   return false;
 }
