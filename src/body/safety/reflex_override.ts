@@ -220,3 +220,66 @@ export function disableSafeguardsVerdict(facts: OverrideFacts): OverrideVerdict 
         text: `保命程序已关闭`,
     };
 }
+
+/** 进攻类工具：**重伤时一律拒**（其它动作不许被这条守卫挡住）。 */
+export const OFFENSIVE_TOOL_NAMES: ReadonlySet<string> = new Set(['attack', 'huntFor']);
+
+export interface CombatFacts {
+    health: number | null;
+    food: number | null;
+    /** 最近的敌对生物距离（米）；null = 读不到 / 周围没有。 */
+    hostileMeters: number | null;
+    keepInventory: boolean | null;
+    immediateRespawn: boolean | null;
+}
+
+const DISENGAGE_HEALTH = 4;
+const DISENGAGE_HEALTH_WITHOUT_FOOD = 6;
+const NO_FOOD = 6;
+
+/**
+ * **重伤撤退守卫**：血 ≤4（任何情况），或血 ≤6 且食物 ≤6（没有回血手段）时，
+ * 拒绝进攻类动作。
+ *
+ * 真机 2026-10-19（overnight_b，下界第 8 次死亡）：血 **1.53**、食物 4，模型正在
+ * `attack(target=357368)`——"attack 成功"的回执让它以为进展顺利，直到被打死。
+ * 反射只在挨打之后才接管；**它拦不住"在濒死时主动选择开打"这件事**。
+ *
+ * 这条守卫只做一件事：**别让模型把命押在一次进攻上**。它**不是锁**：
+ * 吃、`getFood`、`moveAway`、垫方块、逃生反射、以及"在这个存档里故意死一次"
+ * 全部照旧可用——而且回执要先把这些说出来，别等人类来告诉它。
+ */
+export function combatRefusalVerdict(facts: CombatFacts): { allowed: boolean; text: string } {
+    const health = facts.health;
+    if (health == null) return { allowed: true, text: '' };
+    const food = facts.food;
+    const noHeal = food != null && food <= NO_FOOD;
+    const critical = health <= DISENGAGE_HEALTH;
+    const lowAndNoHeal = health <= DISENGAGE_HEALTH_WITHOUT_FOOD && noHeal;
+    if (!critical && !lowAndNoHeal) return { allowed: true, text: '' };
+
+    const healthText = Math.round(health * 100) / 100;
+    const foodText = food == null ? '食物读不到' : `食物 ${Math.round(food)}`;
+    const threat =
+        facts.hostileMeters == null ? null : Math.round(facts.hostileMeters * 10) / 10;
+    const parts: string[] = [];
+    parts.push(
+        `**拒绝**：你只剩 ${healthText} 血、${foodText}` +
+            (threat != null ? `、${threat} 格外有敌对生物` : '') +
+            `——现在打怪是最快的死法（挨一下就没了，而你没有回血手段）。`,
+    );
+    if (threat != null) {
+        parts.push('先脱战：`moveAway(distance=16)` 把距离拉开，再吃食物回血；血回到 8 以上再谈进攻。');
+    } else {
+        parts.push('先回血：吃食物（`consume`）或 `getFood`；血回到 8 以上再谈进攻。');
+    }
+    parts.push('**逃跑、吃东西、垫方块、`escapeWater`、保命反射都不受这条限制**——它只拦进攻。');
+    parts.push(deathCostLine(facts));
+    parts.push('如果既没有食物也脱不了战，**在这个世界里故意死一次是合法选择**：一次重生、物品和经验都保留、立刻满血。');
+    parts.push(
+        threat != null
+            ? '下一步（照做即可）：`moveAway(distance=16)`，然后 `consume(item_name="…")` 或 `getFood()`。'
+            : '下一步（照做即可）：`getFood()` 或 `consume(item_name="…")`。',
+    );
+    return { allowed: false, text: parts.join('\n    ') };
+}

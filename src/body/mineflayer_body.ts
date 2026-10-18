@@ -82,6 +82,7 @@ import { stripBang } from '../shared/tools.js';
 import { getFullState } from './library/full_state.js';
 import { decodeCursor, EMPTY_CURSOR, encodeCursor, readInbox, type InboxCursor } from './inbox.js';
 import { safeguards } from './safety/safeguards.js';
+import { OFFENSIVE_TOOL_NAMES, combatRefusalVerdict } from './safety/reflex_override.js';
 import { permits } from './safety/permits.js';
 import { log, validateNameFormat, handleDisconnection } from './connection_handler.js';
 import { createLogger, type Logger } from '../shared/logger.js';
@@ -1451,6 +1452,59 @@ export class MineflayerBody {
             reason: left > 0 ? this.slottedContainerBlockedReason : null,
             msLeft: left,
         };
+    }
+
+    /**
+     * 重伤时拒掉**进攻类**动作（在身体动手之前），返回要退回给模型的文本；允许则 null。
+     *
+     * 真机 2026-10-19（overnight_b，下界第 8 次死亡）：血 **1.53**、食物 4，模型正在
+     * `attack`——"attack 成功"的回执让它以为一切正常。反射只在挨打之后才接管，
+     * **拦不住"濒死时主动开打"**这个选择。这条守卫只拦进攻：
+     * 逃跑/吃/垫方块/自救/保命反射一律放行（绝不让守卫削弱"跑得掉"的能力）。
+     */
+    criticalHealthRefusalFor(toolName: string): string | null {
+        try {
+            if (!OFFENSIVE_TOOL_NAMES.has(String(toolName ?? ''))) return null;
+            const bot = this.bot as { health?: unknown; food?: unknown } | null;
+            const health = Number(bot?.health);
+            const food = Number(bot?.food);
+            const gameplay = (settings as any)?.gameplay ?? {};
+            const keepInventory =
+                gameplay.keepInventoryOnDeath === true ? true : gameplay.keepInventoryOnDeath === false ? false : null;
+            const immediateRespawn =
+                gameplay.doImmediateRespawn === true ? true : gameplay.doImmediateRespawn === false ? false : null;
+            const verdict = combatRefusalVerdict({
+                health: Number.isFinite(health) ? health : null,
+                food: Number.isFinite(food) ? food : null,
+                // 只做"附近有没有威胁"的粗判：读不到就是 null（不拿它当理由）。
+                hostileMeters: this.nearestHostileMeters(),
+                keepInventory,
+                immediateRespawn,
+            });
+            return verdict.allowed ? null : verdict.text;
+        } catch {
+            // 守卫自己出错时**放行**（不能因为守卫坏了让模型动不了）。
+            return null;
+        }
+    }
+
+    /** 最近的敌对生物距离（米）；读不到 / 没有 = null。 */
+    private nearestHostileMeters(): number | null {
+        try {
+            const self = (this.bot as any)?.entity;
+            const pos = self?.position;
+            let best: number | null = null;
+            for (const raw of Object.values((this.bot as any)?.entities ?? {}) as any[]) {
+                if (raw == null || raw.id === self?.id) continue;
+                if (!isHostile(raw)) continue;
+                const p = raw.position ?? {};
+                const meters = Math.hypot(Number(p.x) - Number(pos?.x), Number(p.y) - Number(pos?.y), Number(p.z) - Number(pos?.z));
+                if (Number.isFinite(meters) && (best == null || meters < best)) best = meters;
+            }
+            return best;
+        } catch {
+            return null;
+        }
     }
 
     /** 背包数据到过一次了（服务端 window_items / heldItemChanged 触发）。 */
@@ -3546,6 +3600,17 @@ export class MineflayerBody {
                         this.survivalBusyClass = null;
                     }
                     let text: string;
+                    // **重伤不打架**：进攻类动作在这里被拒（在身体真的动手之前），
+                    // 但只拒进攻——逃跑/吃/垫方块/自救一律放行，绝不让这条守卫
+                    // 削弱"跑得掉"的能力。见 reflex_override.ts 的 combatRefusalVerdict。
+                    const combatRefusal = this.criticalHealthRefusalFor(baseName);
+                    if (combatRefusal != null) {
+                        return {
+                            ok: true,
+                            op: 'action',
+                            result: { ok: false, text: combatRefusal, code: 'REFUSED_CRITICAL_HEALTH' },
+                        };
+                    }
                     try {
                         text = await executeToolCall(this, name, args);
                     } catch (err: unknown) {
