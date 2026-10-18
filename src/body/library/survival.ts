@@ -20,7 +20,7 @@ import type { MoveDirection } from './skills.js';
 import * as world from './world.js';
 // 找水只留一份实现（`nearestWater` 在 progression 里，只扫已加载区块）：
 // progression 不 import survival，所以这条依赖不会成环。
-import { nearestWater } from './progression.js';
+import { capLines, capReceipt, nearestWater } from './progression.js';
 import { FOOD_VALUE, cookedCounterpartOf, foodValueOf, isHostile, pickBestFood } from '../safety/emergency.js';
 
 /** 与 edges / live_state 同一套夜晚阈值（12542 起怪物可刷，23460 天亮）。 */
@@ -1543,6 +1543,8 @@ export const FISH_BITE_VELOCITY = -0.05;
 export const FISH_BITE_DROP = 0.15;
 /** 竿耐久低到这个比例就在回执里提醒（快断了）。 */
 export const FISH_ROD_LOW_FRACTION = 0.85;
+/** 钓鱼回执里最多渲染几条警告（回执有硬长度上限，见 capReceipt）。 */
+export const HUNT_MAX_FISH_WARNINGS = 8;
 /** 钓上来的东西里哪些算"鱼"（垃圾/宝藏不参与"钓到几条"）。 */
 export const FISH_ITEMS = ['raw_cod', 'raw_salmon', 'raw_tropical_fish', 'raw_pufferfish'] as const;
 
@@ -1691,9 +1693,10 @@ export function fishReceipt(o: FishOutcome): string {
                 `useBlock(type="furnace", input="${first.count} ${first.name}", output="${first.count} ${cooked}")`,
         );
     }
-    for (const warning of o.warnings) lines.push(warning);
+    for (const warning of capLines(o.warnings, HUNT_MAX_FISH_WARNINGS, '警告')) lines.push(warning);
     lines.push(`下一步（照做即可）：${fishNextAction(o)}`);
-    return lines.join('\n');
+    // 同 huntReceipt：回执是循环里拼出来的，必须有硬长度上限（单条超长警告也要兜得住）。
+    return capReceipt(lines.join('\n'));
 }
 
 export interface FishDeps {

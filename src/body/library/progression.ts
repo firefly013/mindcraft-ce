@@ -55,6 +55,69 @@ export const HUNT_IDLE_POLLS = 4;
 export const HUNT_LOOT_BUDGET_MS = 6000;
 /** 血量低于这个值就不再主动刷怪（先把命保住，让模型去吃喝）。 */
 export const MIN_HEALTH_TO_HUNT = 6;
+
+/**
+ * 内部打怪的 `type`。**`attack` 只认 id / player / mob**，而这里要的是"按实体类型取最近的"。
+ *
+ * 真机事故（2026-10-18 19:19，overnight_a）：这里原来传的是 `'entity'`，于是每一次攻击都在
+ * `resolveAttackTarget` 里被拒（「type 必填，且只认id / player / mob（收到 "entity"）。」）。
+ * 配上当时"只按墙钟预算收口"的循环，5 分钟里空转 **315 万次**，每次 `log()` 都往
+ * `bot.output` 追加一行 → 回执 **1.35 亿字符**，把整段上下文打爆（F-21 的上游原因之一）。
+ *
+ * 所以：类型写成常量（能被"用真实 schema 校验"的测试钉住），循环有**次数上限 + 连续失败熔断**，
+ * 回执有**硬长度上限**。这三样缺一，同样的爆法就会再发生一次。
+ */
+export const HUNT_ATTACK_TYPE = 'mob';
+/** 同一个目标至少允许尝试打几次（按 want 放宽，见 `huntMaxAttempts`）。 */
+export const HUNT_MAX_ATTEMPTS = 12;
+export const HUNT_MAX_ATTEMPTS_CAP = 64;
+/** 连续失败这么多次 → 认定"内部动作坏了"，立刻停手（不再空转）。 */
+export const HUNT_MAX_CONSECUTIVE_FAILURES = 3;
+/** 打失败后的退避（随连续失败翻倍，封顶）。 */
+export const HUNT_ATTACK_BACKOFF_MS = 400;
+export const HUNT_ATTACK_BACKOFF_MAX_MS = 3_000;
+/**
+ * 回执硬上限（字符）。**循环里拼出来的字符串必须有天花板**——
+ * 不能指望下游的 clamp 兜：那只能掩盖爆炸，救不回已经烧掉的 315 万次迭代。
+ */
+export const HUNT_RECEIPT_MAX_CHARS = 12_000;
+/** 回执里最多渲染几条警告 / 进度。 */
+export const HUNT_MAX_WARNING_LINES = 8;
+export const HUNT_MAX_PROGRESS_LINES = 12;
+
+/**
+ * 这次最多尝试打几次：至少 `HUNT_MAX_ATTEMPTS`，按需求数放宽（每只要 2 次余量），封顶 64。
+ * 纯函数，方便单测钉住"不会无限重试"。
+ */
+export function huntMaxAttempts(want: number): number {
+    const safeWant = Number.isFinite(want) && want > 0 ? Math.floor(want) : 1;
+    return Math.max(HUNT_MAX_ATTEMPTS, Math.min(HUNT_MAX_ATTEMPTS_CAP, safeWant * 2));
+}
+
+/** 连续失败第 n 次后的退避（指数，封顶）。 */
+export function huntBackoffMs(consecutiveFailures: number): number {
+    const n = Number.isFinite(consecutiveFailures) && consecutiveFailures > 0 ? Math.floor(consecutiveFailures) : 1;
+    return Math.min(HUNT_ATTACK_BACKOFF_MS * 2 ** (n - 1), HUNT_ATTACK_BACKOFF_MAX_MS);
+}
+
+/**
+ * 通用"拼字符串前的天花板"：只留前 max 条，并**如实写明省略了多少条**。
+ * 回执里的每个列表（警告/进度/提示）都走它，谁也别想靠长度绕过。
+ */
+export function capLines(lines: readonly string[], max: number, label: string): string[] {
+    if (lines.length <= max) return [...lines];
+    return [...lines.slice(0, max), `…（还有 ${lines.length - max} 条${label}省略：回执有硬长度上限，这里只留前 ${max} 条）`];
+}
+
+/** 整段回执的硬上限：超了就保留**头部 + 尾部**（尾部带"下一步"），中间写明省略了多少字符。 */
+export function capReceipt(text: string, max: number = HUNT_RECEIPT_MAX_CHARS): string {
+    if (text.length <= max) return text;
+    const headBudget = Math.floor(max * 0.6);
+    const notice = `\n…（回执过长：中间省略 ${text.length - max} 字符）…\n`;
+    const tailBudget = Math.max(0, max - headBudget - notice.length);
+    return `${text.slice(0, headBudget)}${notice}${text.slice(text.length - tailBudget)}`;
+}
+
 /** 等区块加载后额外等的稳定时间。 */
 export const CHUNK_SETTLE_MS = 600;
 
@@ -624,9 +687,10 @@ export function exploreReceipt(o: ExploreOutcome): string {
                 `（参考：已探索过的下界区块里一块 nether_bricks 都没有。）`,
         );
     }
-    if (o.notes.length > 0) for (const note of o.notes) lines.push(note);
+    if (o.notes.length > 0) for (const note of capLines(o.notes, HUNT_MAX_WARNING_LINES, '提示')) lines.push(note);
     lines.push(`下一步（照做即可）：${exploreNextAction(o)}`);
-    return lines.join('\n');
+    // 同 huntReceipt：**拼出来的东西必须有天花板**（真机教训见 HUNT_RECEIPT_MAX_CHARS）。
+    return capReceipt(lines.join('\n'));
 }
 
 export interface HuntProgressLine {
@@ -650,10 +714,12 @@ export interface HuntOutcome {
     baseline: number;
     kills: number;
     attacks: number;
-    stopReason: 'reached' | 'budget' | 'no_target' | 'interrupted' | 'low_health' | 'danger' | 'gone';
+    stopReason: 'reached' | 'budget' | 'no_target' | 'interrupted' | 'low_health' | 'danger' | 'gone' | 'attack_failed' | 'attempts';
     elapsedMs: number;
     /** 在下界刷烈焰人（"没怪了"的下一步建议要用它）。 */
     netherBlaze: boolean;
+    /** 连续失败了几次（`attack_failed` 时用来把话说清楚）。 */
+    consecutiveFailures?: number;
     warnings: string[];
     progress: HuntProgressLine[];
 }
@@ -666,6 +732,8 @@ const STOP_REASON_TEXT: Record<HuntOutcome['stopReason'], string> = {
     low_health: '血量太低，先保命',
     danger: '脚下/身边有危险方块',
     gone: '目标跑掉/消失了',
+    attack_failed: '内部打怪动作连续失败，已熔断停手',
+    attempts: '尝试次数到上限了',
 };
 
 export function huntReceipt(o: HuntOutcome): string {
@@ -698,13 +766,22 @@ export function huntReceipt(o: HuntOutcome): string {
             );
         }
     }
-    for (const warning of o.warnings) lines.push(warning);
+    for (const warning of capLines(o.warnings, HUNT_MAX_WARNING_LINES, '警告')) lines.push(warning);
     if (o.progress.length > 0) {
         lines.push('进度：');
-        for (const line of o.progress) lines.push(`- #${line.attempt} ${line.text}`);
+        for (const line of capLines(o.progress.map((p) => `- #${p.attempt} ${p.text}`), HUNT_MAX_PROGRESS_LINES, '进度'))
+            lines.push(line);
+    }
+    if (o.stopReason === 'attack_failed') {
+        lines.push(
+            `**内部打怪动作连续失败 ${o.consecutiveFailures ?? '几'} 次，已熔断停手**——` +
+                `这不是"这一带没有 ${o.entity}"，而是**打怪这个动作本身没成功**（最近的错误见上面的警告）。` +
+                `已经停了，不会再原地重试；下一步给的是一条**直接调用**，用来定位到底是哪一步不对。`,
+        );
     }
     lines.push(`下一步（照做即可）：${huntNextAction(o)}`);
-    return lines.join('\n');
+    // **硬长度上限**：循环里拼出来的字符串必须有天花板（真机教训：1.35 亿字符把上下文打爆）。
+    return capReceipt(lines.join('\n'));
 }
 
 /** 和 `exploreNextAction` 同一条理由：只给**一条**能照抄的调用，别给菜单。 */
@@ -728,6 +805,11 @@ export function huntNextAction(o: HuntOutcome): string {
             return 'survivalCheck';
         case 'danger':
             return 'moveAway(distance=8)';
+        case 'attack_failed':
+            // **绝不把同一个会爆的调用原样丢回去**：给一条直接诊断内部动作的调用。
+            return `attack(type="${HUNT_ATTACK_TYPE}", target="${o.entity}")`;
+        case 'attempts':
+            return 'stats(type="entities")';
         default:
             return `huntFor(entity="${o.entity}", want=${remaining})`;
     }
@@ -1160,7 +1242,9 @@ export async function huntForSkill(
 
     const findEntity = deps.findEntity ?? defaultFindEntity;
     const findDrop = deps.findDrop ?? defaultFindDrop;
-    const attack = deps.attack ?? ((b: any, name: string) => skills.attackTarget(b, name, 'entity', true));
+    // **type 必须是 mob**（`attack` 只认 id / player / mob）：这里以前写成 'entity'，
+    // 于是每一次攻击都被拒、循环又只按墙钟收口 → 315 万次空转 + 1.35 亿字符回执。
+    const attack = deps.attack ?? ((b: any, name: string) => skills.attackTarget(b, name, HUNT_ATTACK_TYPE, true));
     const travel = deps.travel ?? ((b: any, x: number, y: number, z: number, closeness: number) => skills.goToPosition(b, x, y, z, closeness));
     const sleep = deps.sleep ?? sleepMs;
     const now = deps.now ?? Date.now;
@@ -1176,6 +1260,8 @@ export async function huntForSkill(
     let attempts = 0;
     let kills = 0;
     let idlePolls = 0;
+    let consecutiveFailures = 0;
+    const maxAttempts = huntMaxAttempts(want);
     let stopReason: HuntOutcome['stopReason'] = 'budget';
 
     if (dropSpec.note != null) warnings.push(`ℹ️ ${dropSpec.note}`);
@@ -1212,6 +1298,16 @@ export async function huntForSkill(
         }
         if (now() - startedAt > maxMs) {
             stopReason = 'budget';
+            break;
+        }
+        // **次数上限**：墙钟预算挡不住"失败一次只要几微秒"的空转（真机 315 万次就是这么来的）。
+        if (attempts >= maxAttempts) {
+            stopReason = 'attempts';
+            break;
+        }
+        // **连续失败熔断**：内部动作坏了（例如参数名写错）时立刻停手，而不是刷满整段时间。
+        if (consecutiveFailures >= HUNT_MAX_CONSECUTIVE_FAILURES) {
+            stopReason = 'attack_failed';
             break;
         }
         if (health(bot) <= MIN_HEALTH_TO_HUNT) {
@@ -1262,7 +1358,23 @@ export async function huntForSkill(
             attempt: attempts,
             text: `${killed ? '击杀' : '没打死'} ${entity}；捡到 ${looted.picked} 个掉落物；${counter}${delta > 0 ? '' : '（这次没涨）'}`,
         });
-        if (progress.length > 12) progress.splice(0, progress.length - 12);
+        if (progress.length > HUNT_MAX_PROGRESS_LINES) progress.splice(0, progress.length - HUNT_MAX_PROGRESS_LINES);
+
+        // 失败就**退避**（指数、封顶）：既不给服务端打热循环，也给"目标只是暂时打不动"留时间。
+        if (killed) {
+            consecutiveFailures = 0;
+        } else {
+            consecutiveFailures += 1;
+            if (consecutiveFailures >= HUNT_MAX_CONSECUTIVE_FAILURES) {
+                warnings.push(
+                    `⚠️ 连续 ${consecutiveFailures} 次攻击都没成功（最后一次 ${entity} 没打死、掉落也没涨）：` +
+                        `**内部打怪动作本身可能有问题**（参数/目标解析/服务端拒绝），熔断停手，不原地重试。`,
+                );
+                stopReason = 'attack_failed';
+                break;
+            }
+            await sleep(huntBackoffMs(consecutiveFailures));
+        }
     }
 
     const gained = currentGain(bot, items, baselineAtStart);
@@ -1285,6 +1397,7 @@ export async function huntForSkill(
         stopReason,
         elapsedMs: now() - startedAt,
         netherBlaze,
+        consecutiveFailures,
         warnings,
         progress,
     });
@@ -1571,9 +1684,10 @@ export function tunnelReceipt(o: TunnelOutcome): string {
               ? `镐：${o.toolName}（上限读不到，算不出还剩几次）`
               : `镐：${o.toolName} 还剩约 ${o.toolRemaining} 次（${o.toolMax ?? '?'} 上限）`;
     lines.push(toolText + '。');
-    for (const line of o.progress) lines.push(line);
+    for (const line of capLines(o.progress, HUNT_MAX_PROGRESS_LINES, '进度')) lines.push(line);
     lines.push(`下一步（照做即可）：${tunnelNextAction(o)}`);
-    return lines.join('\n');
+    // 同 huntReceipt：隧道很长时进度行也不能无限堆。
+    return capReceipt(lines.join('\n'));
 }
 
 export interface TunnelDeps {

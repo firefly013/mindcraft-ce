@@ -25,7 +25,15 @@ import {
     MAX_LEG_PER_SCAN_RATIO,
     MAX_TUNNEL_HEIGHT,
     MAX_TUNNEL_LENGTH,
+    HUNT_ATTACK_BACKOFF_MAX_MS,
+    HUNT_ATTACK_TYPE,
+    HUNT_MAX_ATTEMPTS,
+    HUNT_MAX_ATTEMPTS_CAP,
+    HUNT_MAX_CONSECUTIVE_FAILURES,
+    HUNT_RECEIPT_MAX_CHARS,
     blockNameAt,
+    capLines,
+    capReceipt,
     collectDrops,
     countItem,
     countTotalItems,
@@ -38,8 +46,11 @@ import {
     foodRoutePrimary,
     hasFireResistance,
     hazardHere,
+    huntBackoffMs,
     huntForSkill,
+    huntMaxAttempts,
     huntNextAction,
+    huntReceipt,
     isPassiveFoodAnimal,
     isUnsupportedFloorBlock,
     maxLegPerScan,
@@ -72,6 +83,7 @@ import {
 } from '../src/body/commands/progression.js';
 import { findCommand, toolDeclarations, toolNames } from '../src/body/commands/registry.js';
 import { clearDiscards, markDiscarded, noteDiscardedEntity } from '../src/body/auto_pickup.js';
+import { resolveAttackTarget } from '../src/body/library/skills.js';
 import { TOOL_TEXT } from '../src/shared/prompts.js';
 import { getOpenAITools } from '../src/brain/tools/advertise.js';
 
@@ -1433,5 +1445,215 @@ describe('blockAt 契约：参数必须是 Vec3（替身照真实 API 苛刻）'
         expect(dugOrder).toEqual(['-15,70,3', '-15,71,3', '-16,70,3', '-16,71,3', '-17,70,3', '-17,71,3']);
         expect(receipt).toContain('挖了 3/3 格');
         expect(receipt).not.toContain('读不到方块');
+    });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 真机事故回归（2026-10-18 19:19，overnight_a）：
+//   huntFor 内部 attack 传了 `'entity'`（真实只认 id / player / mob）→ 每次攻击都被拒，
+//   而循环只按墙钟收口 → **315 万次空转**、每次 log() 往 bot.output 追加一行 →
+//   **1.35 亿字符回执**，直接打爆整段上下文。
+// 这四条把病根逐条钉死：① 真实解析器校验 ② 有界熔断 ③ 下一步不是同一个调用 ④ 硬长度上限。
+// ─────────────────────────────────────────────────────────────────────────────
+describe('huntFor 失控回执：参数名 / 熔断 / 下一步 / 长度上限', () => {
+    /** 能过真实 `resolveAttackTarget` 的假 salmon（position 要有 distanceTo，getNearbyEntities 用它）。 */
+    const salmonEntity = (): any => ({
+        id: 7,
+        name: 'salmon',
+        position: { x: 1, y: 64, z: 0, distanceTo: () => 5 },
+    });
+    const lastLine = (text: string): string => text.trimEnd().split('\n').at(-1) ?? '';
+
+    it('① 内部 type 过**真实解析器**：\'entity\' 被拒、内部常量不会被拒（当时该红的就是这条）', () => {
+        // 真实 !attack 命令的 schema：params 只有 target + type（type 由 resolveAttackTarget 校验）
+        const command = findCommand('attack');
+        expect(command).toBeDefined();
+        expect(Object.keys(command?.params ?? {})).toEqual(['target', 'type']);
+
+        const bot = makeBot({ entities: { 7: salmonEntity() } });
+        // 真实解析器要用 positions.distanceTo 算距离：假身也必须是"真形状"
+        (bot.entity.position as any).distanceTo = () => 5;
+        // 写错的类型必须被真实解析器拒绝……
+        expect(resolveAttackTarget(bot, 'salmon', 'entity').message).toContain('只认');
+        expect(resolveAttackTarget(bot, 'salmon', 'entity').entity).toBeNull();
+        // ……内部用的常量必须过（HUNT_ATTACK_TYPE 就是喂给 skills.attackTarget 的第三个参数）
+        const ok = resolveAttackTarget(bot, 'salmon', HUNT_ATTACK_TYPE);
+        expect(ok.message).not.toContain('只认');
+        expect(ok.entity?.name).toBe('salmon');
+    });
+
+    it('①b **不注入假 attack**：走真实默认路径（含真实类型解析），bot.output 里不许出现"type 必填"', async () => {
+        const bot = makeBot({ entities: { 7: salmonEntity() } });
+        (bot.entity.position as any).distanceTo = () => 5;
+        bot.output = '';
+        bot.heldItem = null;
+        bot.equip = async (): Promise<void> => {};
+        const swung: any[] = [];
+        // 真实 skills.attackTarget(kill=true) 会走 swordpvp 并循环到目标消失；
+        // 这里记录一次挥击并把实体移出实体表（模拟"打死了"），否则那个 kill 循环会一直等。
+        bot.swordpvp = {
+            weaponOfChoice: '',
+            attack: async (entity: any): Promise<void> => {
+                swung.push(entity);
+                delete bot.entities[7];
+            },
+        };
+
+        await huntForSkill(bot, 'salmon', 1, 16, 20_000, {
+            findEntity: () => salmonEntity(),
+            // 注意：**不传 attack** —— 走 progression 里的默认实现（就是写错过 'entity' 的那行）
+            findDrop: () => null,
+            sleep: async (): Promise<void> => {},
+            now: () => Date.now(),
+        });
+
+        expect(swung.length).toBeGreaterThan(0); // 真的挥了手 = 类型解析过了
+        expect(bot.output).toContain('锁定');
+        expect(bot.output).not.toContain('type 必填');
+    });
+
+    it('② 攻击一直失败 + **时钟不前进** → 有界熔断（旧代码会在这里空转到超时）', async () => {
+        let attacks = 0;
+        const bot = makeBot({ health: 20 });
+        const receipt = await huntForSkill(bot, 'salmon', 2, 48, 300_000, {
+            findEntity: () => salmonEntity(),
+            attack: async () => {
+                attacks += 1;
+                return false;
+            },
+            findDrop: () => null,
+            sleep: async (): Promise<void> => {},
+            now: () => 0, // 墙钟永远不走：只有"次数上限/连续失败"能救它
+        });
+
+        expect(attacks).toBeLessThanOrEqual(HUNT_MAX_CONSECUTIVE_FAILURES);
+        expect(receipt).toContain('熔断');
+        expect(receipt).toContain('连续');
+        expect(receipt.length).toBeLessThan(2_000); // 旧代码这里是 1.35 亿
+    });
+
+    it('③ 熔断后"下一步"**不是**同一个会爆的调用，而是直接诊断', async () => {
+        const bot = makeBot({ health: 20 });
+        const receipt = await huntForSkill(bot, 'salmon', 2, 48, 300_000, {
+            findEntity: () => salmonEntity(),
+            attack: async () => false,
+            findDrop: () => null,
+            sleep: async (): Promise<void> => {},
+            now: () => 0,
+        });
+        const next = lastLine(receipt);
+        expect(next).toBe('下一步（照做即可）：attack(type="mob", target="salmon")');
+        expect(next).not.toContain('huntFor(');
+    });
+
+    it('②b 打得死但一直没进账：到**尝试次数上限**就停（不是无限打）', async () => {
+        let attacks = 0;
+        const bot = makeBot({ health: 20 });
+        const receipt = await huntForSkill(bot, 'salmon', 1, 48, 300_000, {
+            findEntity: () => salmonEntity(),
+            attack: async () => {
+                attacks += 1;
+                return true;
+            },
+            findDrop: () => null,
+            sleep: async (): Promise<void> => {},
+            now: () => 0,
+        });
+
+        expect(attacks).toBe(huntMaxAttempts(1));
+        expect(receipt).toContain('尝试次数到上限');
+        expect(lastLine(receipt)).toBe('下一步（照做即可）：stats(type="entities")');
+    });
+
+    it('④ 长度上限：列表级有天花板，单条超长也兜得住（尾部“下一步”必须还在）', () => {
+        const lines = Array.from({ length: 5_000 }, (_, i) => `⚠️ 第 ${i} 条`);
+        expect(capLines(lines, 8, '警告')).toHaveLength(9);
+        expect(capLines(lines, 8, '警告')[8]).toContain('还有 4992 条警告省略');
+
+        const base: HuntOutcome = {
+            entity: 'salmon',
+            want: 2,
+            items: ['raw_salmon'],
+            gained: 0,
+            baseline: 0,
+            kills: 0,
+            attacks: 3_156_982,
+            stopReason: 'attack_failed',
+            elapsedMs: 300_000,
+            netherBlaze: false,
+            consecutiveFailures: HUNT_MAX_CONSECUTIVE_FAILURES,
+            warnings: lines,
+            progress: lines.map((text, i) => ({ attempt: i + 1, text })),
+        };
+        // ① 列表级天花板：5000 条警告/进度 → 回执很短，且写明省略了多少
+        const listed = huntReceipt(base);
+        expect(listed.length).toBeLessThan(2_500);
+        expect(listed).toContain('省略');
+        expect(lastLine(listed)).toBe('下一步（照做即可）：attack(type="mob", target="salmon")');
+        // ② 字符级天花板：**单条**警告就有 5 万字符（列表级拦不住），必须靠硬上限兜
+        const oneHuge = huntReceipt({ ...base, warnings: [`⚠️ ${'x'.repeat(50_000)}`], progress: [] });
+        expect(oneHuge.length).toBeLessThanOrEqual(HUNT_RECEIPT_MAX_CHARS);
+        expect(oneHuge).toContain('回执过长');
+        expect(lastLine(oneHuge)).toBe('下一步（照做即可）：attack(type="mob", target="salmon")');
+        expect(capReceipt('x'.repeat(50_000)).length).toBeLessThanOrEqual(HUNT_RECEIPT_MAX_CHARS);
+    });
+
+    it('重试上限与退避是纯函数（不会随 want 无限放大）', () => {
+        expect(huntMaxAttempts(1)).toBe(HUNT_MAX_ATTEMPTS);
+        expect(huntMaxAttempts(7)).toBe(14);
+        expect(huntMaxAttempts(64)).toBe(HUNT_MAX_ATTEMPTS_CAP);
+        expect(huntMaxAttempts(0)).toBe(HUNT_MAX_ATTEMPTS);
+        expect(huntBackoffMs(1)).toBe(400);
+        expect(huntBackoffMs(2)).toBe(800);
+        expect(huntBackoffMs(99)).toBe(HUNT_ATTACK_BACKOFF_MAX_MS);
+    });
+
+    it('同类风险一起堵：exploreReceipt / tunnelReceipt 也有硬长度上限', () => {
+        const notes = Array.from({ length: 3_000 }, (_, i) => `提示 ${i}`);
+        const explored = exploreReceipt({
+            block: 'nether_bricks',
+            origin: { x: 0, y: 70, z: 0 },
+            here: { x: 384, y: 70, z: 0 },
+            scanRadius: 64,
+            maxSteps: 12,
+            requestedLegs: 12,
+            maxLeg: 48,
+            step: 32,
+            attemptedLegs: 12,
+            completedLegs: 12,
+            failedLegs: 0,
+            walkedBlocks: 384,
+            found: null,
+            foundDistance: null,
+            danger: null,
+            timedOut: false,
+            interrupted: false,
+            unknownBlock: false,
+            budgetMs: 270_000,
+            notes: [`⚠️ 单条超长：${'x'.repeat(50_000)}`, ...notes],
+        });
+        expect(explored.length).toBeLessThanOrEqual(HUNT_RECEIPT_MAX_CHARS);
+        expect(explored).toContain('回执过长');
+
+        const tunneled = tunnelReceipt({
+            dir: { label: '+x', fromYaw: false },
+            requested: 256,
+            dug: 256,
+            blocksDug: 512,
+            height: 2,
+            start: { x: 0, y: 70, z: 0 },
+            here: { x: 256, y: 70, z: 0 },
+            stop: 'done',
+            detail: '',
+            elapsedMs: 60_000,
+            progress: Array.from({ length: 3_000 }, (_, i) => `第 ${i} 格`),
+            toolName: 'diamond_pickaxe',
+            toolRemaining: 500,
+            toolMax: 1561,
+            handMining: false,
+            hintEquip: null,
+        } as any);
+        expect(tunneled.length).toBeLessThanOrEqual(HUNT_RECEIPT_MAX_CHARS);
+        expect(tunneled).toContain('省略');
     });
 });
