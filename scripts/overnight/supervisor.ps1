@@ -15,7 +15,7 @@
 [CmdletBinding()]
 param(
     [int]$PollSeconds = 15,
-    [double]$MaxHours = 12,
+    [double]$MaxHours = 72,   # 0 = 不设上限（见下方 max-hours 的注释：默认值曾是 12，正是"AI 把自己停了"的机制）
     [int]$PortDownRestartSeconds = 300,
     [switch]$Vision
 )
@@ -157,8 +157,12 @@ Start-Main
 Start-Watcher
 
 while (-not (Test-Path $stopFlag)) {
-    if (((Get-Date) - $script:startedAt).TotalHours -gt $MaxHours) {
-        Write-RunLog 'max-hours-reached'
+    # **时长上限是"AI 把自己停了"的机制，必须显式对待。**
+    # 真机事故（2026-10-19 05:06）：`-MaxHours 12` 到点后这里 `break`，supervisor 正常退出
+    # （exit code 0）、main 和 watcher 一起没了——用户第二天早上看到的就是"这个 AI 把自己停了"。
+    # 现在：默认 72 小时、`-MaxHours 0` 表示不设上限、到点时**先大声记录**再退出。
+    if ($MaxHours -gt 0 -and ((Get-Date) - $script:startedAt).TotalHours -gt $MaxHours) {
+        Write-RunLog 'max-hours-reached' @{ maxHours = $MaxHours; note = '时长上限到点自动收工——这正是"AI 把自己停了"的机制；要继续请重启 supervisor 或用 -MaxHours 0' }
         break
     }
 
