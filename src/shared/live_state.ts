@@ -28,6 +28,8 @@ export interface LiveBody {
 }
 
 export interface LiveHeld {
+  /** **背包数据是否已经同步过**：false = 刚重连、还没收到背包包，空/空手都不可信。 */
+  synced?: boolean;
   mainHand: string | null;
   offHand: string | null;
   armor: string[];
@@ -54,6 +56,8 @@ export interface LiveHeld {
 }
 
 export interface LiveBackpack {
+  /** 同 `LiveHeld.synced`：false = 还没同步，禁止把 items=[] 读成"背包空了"。 */
+  synced?: boolean;
   freeSlots: number | null;
   items: string[];
 }
@@ -369,12 +373,27 @@ const SECTION_RENDERERS: Record<LiveSectionKey, (s: LiveState) => string[]> = {
   ops: (s) => [`DangerousOps: ${s.dangerousOps}`, `Safeguards: ${s.safeguards}`],
   held: (s) => {
     const h = s.held;
+    // **"不知道"不许写成"空"**（真机 2026-10-18：进程重启后第一份快照读成
+    // `Held: main empty` / `Backpack: empty`，而物品其实一直在——玩家数据里
+    // dirt×11 好端端躺着，模型据此以为自己丢了全部家当，从零开始重新采集）。
+    if (h.synced === false) {
+      return [
+        'Held: main 还没同步上来（刚重连，**不是空的**，别据此判断手上没东西） ' +
+          'off 还没同步 armor 还没同步',
+      ];
+    }
     return [
       `Held: main ${h.mainHand ?? 'empty'}${heldDurabilitySuffix(h)} ` +
         `off ${h.offHand ?? 'empty'} armor ${h.armor.length > 0 ? h.armor.join('/') : 'none'}`,
     ];
   },
   backpack: (s) => {
+    if (s.backpack.synced === false) {
+      return [
+        'Backpack: **还没同步上来（刚重连，不是空的）**——物品还在，别据此重采/重做/判定丢东西；' +
+          '等一两秒再看 stats。',
+      ];
+    }
     const lines = [
       `Backpack (free ${s.backpack.freeSlots ?? UNKNOWN}): ${s.backpack.items.length > 0 ? s.backpack.items.join(', ') : 'empty'}`,
     ];

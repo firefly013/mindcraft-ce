@@ -105,7 +105,15 @@ export function parseItems(raw: unknown): { items: ItemSpec[]; error?: string } 
 
 /** 背包里某物品的数量。读不到就返回 null（宁可说"不知道"也不猜）。 */
 export function countInInventory(bot: unknown, name: string): number | null {
-  const b = bot as { inventory?: { items?: () => Array<{ name?: unknown; count?: unknown }> } };
+  const b = bot as {
+    inventory?: { items?: () => Array<{ name?: unknown; count?: unknown }> };
+    /** 身体在"登录后、背包第一次同步前"会把这里置 false（见 MineflayerBody）。 */
+    __inventorySynced?: boolean;
+  };
+  // **还没同步过就返回 null，不许返回 0**：刚重连时 `items()` 是空数组，
+  // 那是"还没到"不是"没有"。把它当 0 会让"我有几个 X?"的判断全部走成
+  // "一个都没有"，于是重采/重做/以为丢东西（真机 2026-10-18 事故）。
+  if (b?.__inventorySynced === false) return null;
   try {
     const items = b.inventory?.items?.() ?? [];
     let total = 0;

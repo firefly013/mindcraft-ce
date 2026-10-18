@@ -702,6 +702,15 @@ export class MineflayerBody {
     private modelActionRequested = false;
     /** 在途模型协议 action 数：查询/动作可能重叠，用计数而不是布尔。 */
     private modelActionsInFlight = 0;
+    /**
+     * **背包数据是否真的到过一次**（连接建立后服务端会发 `window_items`，windowId 0）。
+     *
+     * 真机 2026-10-18：进程重启（当晚第 3 次）后第一份快照读成
+     * `Held: main empty` / `Backpack (free 36): empty`，而玩家数据里 dirt×11
+     * 好端端躺着（Lead 解码 playerdata 核实）。模型据此以为丢了全部家当，
+     * 从零开始重新采集。**"还没同步"必须是可区分的状态，不能渲染成"空"。**
+     */
+    private inventorySynced = false;
 
     /** 上一次"被怪打触发保命"的时间（10 秒防抖，免得连续挨打刷屏）。 */
     private lastThreatEmergencyAt = 0;
@@ -764,6 +773,13 @@ export class MineflayerBody {
 
         console.log(this.name, 'logging into minecraft...');
         this.bot = initBot(this.name);
+        // 背包在登录后才会由服务端推下来；在此之前"空"是不可信的（见 inventorySynced）。
+        this.inventorySynced = false;
+        try {
+            (this.bot as { __inventorySynced?: boolean }).__inventorySynced = false;
+        } catch {
+            // 挂不上不影响身体自己的判断。
+        }
         // mineflayer 内部 health/death 会直接调 bot.stopDigging，先包一层吞掉 abort rejection。
         installSafeStopDigging(this.bot);
 
@@ -793,6 +809,29 @@ export class MineflayerBody {
 
         this.bot.on('login', () => {
             console.log(this.name, 'logged in');
+            // **登录后背包一律先标"未知"**：服务端随后才会发 window_items。
+            // 这段窗口里如果采样，必须报"还没同步"，绝不能报"空"（真机事故见
+            // `inventorySynced` 的注释）。
+            this.inventorySynced = false;
+            try {
+                (this.bot as { __inventorySynced?: boolean }).__inventorySynced = false;
+            } catch {
+                // 挂不上也不要紧：身体自己的字段才是权威。
+            }
+            // 包里没有任何物品时服务端也会发一次 window_items（空包同样算同步）；
+            // 但那之前 `heldItemChanged` 也可能先到，一并当作"到过一次"。
+            try {
+                (this.bot as any)._client?.on?.('window_items', (packet: any) => {
+                    if (Number(packet?.windowId) === 0) this.markInventorySynced();
+                });
+            } catch {
+                // 拿不到底层 client 就只靠 heldItemChanged/超时兜底。
+            }
+            try {
+                this.bot.on('heldItemChanged', () => this.markInventorySynced());
+            } catch {
+                // 同上。
+            }
             // **重连之后先把界面状态清干净。** 我们一晚上要重启十几次，旧进程
             // 来不及发 `close_window` 就没了，客户端/服务端都可能还记着一个窗口；
             // 这种状态下再开箱子，`windowOpen` 可能永远不来（真机 18:18：
@@ -963,7 +1002,42 @@ export class MineflayerBody {
             vision: this.vision_interpreter,
             todos: [],
             currentAction: this.currentActionName(),
+            // 裸 fixture（没有这个字段）按"已同步"兼容；真实 body 初始为 false。
+            inventorySynced: this.inventorySynced !== false,
         };
+    }
+
+    /** 背包数据到过一次了（服务端 window_items / heldItemChanged 触发）。 */
+    private markInventorySynced(): void {
+        if (this.inventorySynced) return;
+        this.inventorySynced = true;
+        try {
+            (this.bot as { __inventorySynced?: boolean }).__inventorySynced = true;
+        } catch {
+            // 挂不上不影响身体自己的判断。
+        }
+        try {
+            this.log.with('lifecycle').info({ event: 'inventory-synced' });
+        } catch {
+            // 日志失败不影响同步状态。
+        }
+    }
+
+    /**
+     * **等背包第一次同步**（有界）。
+     *
+     * 刚连上时立刻采样会读到"空包"——真机里模型据此以为丢了全部家当。
+     * 这里最多等 `ms`，等到就是真数据，等不到就让调用方如实报"还没同步"。
+     * 只在**报告**路径上用（sample）；动作路径不能因为等它而拖延。
+     */
+    async waitForInventorySync(ms = 1500): Promise<boolean> {
+        if (this.inventorySynced) return true;
+        const deadline = Date.now() + Math.max(0, ms);
+        while (Date.now() < deadline) {
+            if (this.inventorySynced) return true;
+            await new Promise<void>((resolve) => setTimeout(resolve, 50));
+        }
+        return this.inventorySynced;
     }
 
     isIdle(): boolean {
@@ -2057,8 +2131,13 @@ export class MineflayerBody {
      *
      * 拾取核验必须拿**同一口径的两次读数**比：一次是 playerCollect 刚发生时，
      * 一次是 200ms 后。读不到返回 null，调用方宁可不报也不能把"读失败"当"没变化"。
+     *
+     * **还没同步过背包时一律返回 null**：刚重连的 `inventory.items()` 是空数组，
+     * 但那不是"背包空了"，是"还没到"。把它当 0 会让拾取核验算出"没捡到"、
+     * 让回执写"背包 0 → 0"（真机 2026-10-18 就是这么把模型骗去重采的）。
      */
     private readInventoryCounts(): InventoryCounts | null {
+        if (this.inventorySynced === false) return null;
         try {
             const items = (this.bot?.inventory?.items?.() ?? []) as Array<{ name?: string; count?: number }>;
             const counts: InventoryCounts = {};
@@ -2396,6 +2475,9 @@ export class MineflayerBody {
     private schedulePickup(target: PickupTarget): void {
         const now = Date.now();
         if (this.pickupAbortRequested) return;
+        // 背包还没同步：拾取的"是否捡到"核验读不到数，硬捡会被算成失败
+        // （连续两次失败就 60 秒不再捡）。等一两秒同步完再动手。
+        if (this.inventorySynced === false) return;
         if (now < this.pickupBackoffUntil) return;
         // 保命抢占后的静默期：命保住了再谈捡东西。
         if (now < this.pickupSuppressedUntil) return;
@@ -2829,8 +2911,12 @@ export class MineflayerBody {
         switch (request.op) {
             case 'hello':
                 return { ok: true, op: 'hello', capabilities: this.capabilities() };
-            case 'sample':
+            case 'sample': {
+                // 报告路径上**有界等一次背包同步**：刚重连立刻读会读到空包，
+                // 而空包会被模型当成"家当没了"（真机事故见 inventorySynced）。
+                await this.waitForInventorySync();
                 return { ok: true, op: 'sample', state: sampleLiveState(this.sampleContext()) };
+            }
             case 'image': {
                 const vision = this.vision_interpreter;
                 if (vision?.captureBase64 == null) return { ok: true, op: 'image', data: null };

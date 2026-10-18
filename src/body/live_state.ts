@@ -157,6 +157,14 @@ export interface SampleContext {
   goal?: string | null;
   todos?: PlanTodo[];
   currentAction?: string | null;
+  /**
+   * 背包数据是否已经同步过（**默认 true**，兼容老调用方）。
+   *
+   * 真机 2026-10-18：进程重启后第一份快照读成 `Backpack: empty` / `Held: main empty`，
+   * 而玩家数据里 dirt×11 好端端躺着——模型据此以为自己丢了全部家当、从零重采。
+   * 这个字段为 false 时，渲染层必须写"还没同步上来（**不是空的**）"。
+   */
+  inventorySynced?: boolean;
   now?: () => number;
 }
 
@@ -240,7 +248,9 @@ export function sampleLiveState(ctx: SampleContext): LiveState {
     // 再回退 mcData 静态表；都拿不到就写 null，由渲染层如实说"算不出剩余"。
     const rawMax = num(heldItem?.maxDurability);
     const maxDurability = resolveMaxDurability(bot, heldItem);
+    const inventorySynced = ctx.inventorySynced !== false;
     empty.held = {
+      synced: inventorySynced,
       mainHand: heldItem ? `${str(heldItem.name) ?? 'unknown'}x${num(heldItem.count) ?? 1}` : null,
       offHand: slotName(45),
       armor: [slotName(8), slotName(7), slotName(6), slotName(5)].filter(
@@ -267,6 +277,7 @@ export function sampleLiveState(ctx: SampleContext): LiveState {
       else packItems.push(`${i === heldIndex ? '*' : ''}[${i}]${n}`);
     }
     empty.backpack = {
+      synced: inventorySynced,
       freeSlots: Array.isArray(bot.inventory?.slots) ? free : null,
       items: packItems,
     };

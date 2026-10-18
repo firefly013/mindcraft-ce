@@ -63,58 +63,21 @@ interface DiscardRecord {
     ids: Set<number>;
 }
 
-const discarded: DiscardRecord[] = [];
 /** 只保留最近这么多条 discard 记录，防止长跑进程里无限增长。 */
 const MAX_DISCARD_RECORDS = 20;
 
-/** 记下"刚扔了这个"。统一存小写；比较时再做分隔符归一化（见 `itemNameMatches`）。 */
-export function markDiscarded(name: string, drop?: { x?: unknown; y?: unknown; z?: unknown } | null): void {
-    discarded.push({
-        name: name.toLowerCase(),
-        at: Date.now(),
-        x: num(drop?.x),
-        y: num(drop?.y),
-        z: num(drop?.z),
-        ids: new Set<number>(),
-    });
-    if (discarded.length > MAX_DISCARD_RECORDS) discarded.shift();
-}
-
-/**
- * `itemDrop` 事件认领：把刚出现的掉落物实体挂到最近一次 discard 上。
- *
- * 只认 [0, DISCARD_CLAIM_WINDOW_MS] 内、且还没过期的那条；没有对应的 discard
- * 就返回 false（普通掉落物不该被免疫）。
- */
-export function noteDiscardedEntity(id: unknown): boolean {
-    const entityId = num(id);
-    if (entityId == null) return false;
-    const now = Date.now();
-    for (let i = discarded.length - 1; i >= 0; i--) {
-        const record = discarded[i] as DiscardRecord;
-        if (now - record.at > DISCARD_CLAIM_WINDOW_MS) break;
-        record.ids.add(entityId);
-        return true;
-    }
-    return false;
-}
-
-/** 清空免疫表。**给测试用**：它跟着模块走，跨用例会互相污染。 */
-export function clearDiscards(): void {
-    discarded.length = 0;
-}
-
-/** 丢掉过期记录；顺带把"哪条记录命中"的判断集中在一处。 */
-function matchedRecord(
+/** 丢掉过期记录；顺带把"哪条记录命中"的判断集中在一处（吃调用方自己的 records）。 */
+function matchedRecordIn(
+    records: DiscardRecord[],
     displayName: string,
     at: { x?: unknown; y?: unknown; z?: unknown } | null | undefined,
     id: unknown,
     now: number,
 ): DiscardRecord | null {
-    for (let i = discarded.length - 1; i >= 0; i--) {
-        const record = discarded[i] as DiscardRecord;
+    for (let i = records.length - 1; i >= 0; i--) {
+        const record = records[i] as DiscardRecord;
         if (now - record.at > DISCARD_IGNORE_MS) {
-            discarded.splice(i, 1);
+            records.splice(i, 1);
             continue;
         }
         const entityId = num(id);
@@ -131,35 +94,6 @@ function matchedRecord(
     }
     return null;
 }
-
-/**
- * 这个掉落物是不是刚被自己扔掉的（且还在忽略窗口内）。
- *
- * ⚠️ **这里以前有个让免疫永远不生效的坑**：调用方传入的是掉落物的
- * `displayName`（"Oak Log" 这类**显示名**），而 `markDiscarded` 记的是
- * `oak_log` 这种**物品 id**——下划线/空格/大小写都不一样，严格相等永远 false，
- * 于是"扔了又自动捡回来"，回执的承诺成了空话（模型实测并报了账）。
- *
- * 所以比较前两边都归一化：`"Oak Log"` / `"oak_log"` 会归到同一形式，
- * `"Dirt Block"` 也能按整段 `"dirt"` 命中。宽松匹配的代价极小（最坏是多跳过一个
- * 恰好同名的掉落物几秒钟），收益是承诺真的成立。
- *
- * `at` / `id` 是**另外两条**屏蔽路径：名字读不到时按落点，身份不确定时按实体 id。
- * 三条都不成立才放行。
- */
-export function isDiscardedDrop(
-    displayName: string,
-    at?: { x?: unknown; y?: unknown; z?: unknown } | null,
-    id?: unknown,
-): boolean {
-    return matchedRecord(displayName ?? '', at, id, Date.now()) != null;
-}
-
-/** 只按实体 id 判断（拾取走到一半时用：手上只有 id 和名字，位置可能已经过期）。 */
-export function isDiscardedDropById(id: unknown): boolean {
-    return matchedRecord('', null, id, Date.now()) != null;
-}
-
 /**
  * 半径内最近的掉落物；没有就是 null。
  *
@@ -167,7 +101,18 @@ export function isDiscardedDropById(id: unknown): boolean {
  * `displayName`/`metadata` 上，拾取不需要它）。**只认 item**：玩家、怪物、
  * 船、经验球都不该触发"走过去捡"。
  */
-export function nearestDropWithin(bot: unknown, radius: number): PickupTarget | null {
+export function nearestDropWithin(
+  bot: unknown,
+  radius: number,
+  /**
+   * 用哪份"自己扔的"免疫表（默认模块实例）。
+   *
+   * **必须是调用者自己的**：真机事故里 B 把 oak_log 扔在地上，A 站在 0.4 米处
+   * 5 分钟都没捡起来——免疫只能拦"扔东西的那个 bot"，拦到队友就等于
+   * "丢东西交接"永远不可能成功。每份 tracker 只记自己的 discard。
+   */
+  tracker: Pick<DiscardTracker, 'isDiscardedDrop'> = defaultTracker,
+): PickupTarget | null {
   const b = bot as
     | {
         entity?: { id?: unknown; position?: { x?: number; y?: number; z?: number } };
@@ -198,8 +143,9 @@ export function nearestDropWithin(bot: unknown, radius: number): PickupTarget | 
     if (e.id === self.id) continue;
     if (e.name !== 'item') continue;
     // 刚被自己扔掉的先别捡（名字 / 落点 / 实体 id 三条路都算），否则 discard 等于白干。
+    // **只看调用方自己的 tracker**：队友扔的东西对我是普通掉落物，应该能捡。
     if (
-      isDiscardedDrop(
+      tracker.isDiscardedDrop(
         typeof e.displayName === 'string' ? e.displayName : '',
         { x: e.position?.x, y: e.position?.y, z: e.position?.z },
         e.id,
@@ -228,6 +174,117 @@ export function nearestDropWithin(bot: unknown, radius: number): PickupTarget | 
 
 function num(v: unknown): number | null {
   return typeof v === 'number' && Number.isFinite(v) ? v : null;
+}
+
+/**
+ * **"刚扔的东西别自己捡回来"的免疫表——必须按 bot 实例隔离。**
+ *
+ * 真机事故（2026-10-18，两 bot 都报）：B 把 `oak_log×4` 扔在
+ * `(18.125,70,-14.672)`，A 站在 0.4 米处换了五种办法、**5 分钟都没捡起来**，
+ * 物品过期消失。两个 bot 各自独立报告，Lead 要确认"免疫是按 bot 还是按
+ * 物品/位置全局"。
+ *
+ * 结论：免疫的判定依据是（名字 / 落点半径 / 实体 id）匹配**自己进程里**的
+ * `discard` 记录——每个 bot 是独立进程，所以 B 的免疫天然管不到 A。
+ * **但**模块级数组是隐患：一旦两个 body 共享进程（测试、将来单进程多角色），
+ * 就会变成"B 扔的 A 不能捡"。所以这里把它做成**实例**：
+ * `createDiscardTracker()` 一人一份；模块级函数保留给现有调用方（默认实例）。
+ */
+export interface DiscardTracker {
+  markDiscarded(name: string, drop?: { x?: unknown; y?: unknown; z?: unknown } | null): void;
+  noteDiscardedEntity(id: unknown): boolean;
+  isDiscardedDrop(displayName: string, at?: { x?: unknown; y?: unknown; z?: unknown } | null, id?: unknown): boolean;
+  isDiscardedDropById(id: unknown): boolean;
+  clear(): void;
+}
+
+/** 建一份**独立**的免疫表（每个 bot/body 一份）。 */
+export function createDiscardTracker(): DiscardTracker {
+  const records: DiscardRecord[] = [];
+  const mark = (name: string, drop?: { x?: unknown; y?: unknown; z?: unknown } | null): void => {
+    records.push({
+      name: name.toLowerCase(),
+      at: Date.now(),
+      x: num(drop?.x),
+      y: num(drop?.y),
+      z: num(drop?.z),
+      ids: new Set<number>(),
+    });
+    if (records.length > MAX_DISCARD_RECORDS) records.shift();
+  };
+  const note = (id: unknown): boolean => {
+    const entityId = num(id);
+    if (entityId == null) return false;
+    const now = Date.now();
+    for (let i = records.length - 1; i >= 0; i--) {
+      const record = records[i] as DiscardRecord;
+      if (now - record.at > DISCARD_CLAIM_WINDOW_MS) break;
+      record.ids.add(entityId);
+      return true;
+    }
+    return false;
+  };
+  const match = (
+    displayName: string,
+    at: { x?: unknown; y?: unknown; z?: unknown } | null | undefined,
+    id: unknown,
+  ): DiscardRecord | null => matchedRecordIn(records, displayName, at, id, Date.now());
+  return {
+    markDiscarded: mark,
+    noteDiscardedEntity: note,
+    isDiscardedDrop: (displayName, at, id) => match(displayName ?? '', at, id) != null,
+    isDiscardedDropById: (id) => match('', null, id) != null,
+    clear: () => {
+      records.length = 0;
+    },
+  };
+}
+
+/** 模块级默认实例：给"一个进程一个 bot"的现有调用方（行为与以前一致）。 */
+const defaultTracker = createDiscardTracker();
+
+/** 记下"刚扔了这个"。统一存小写；比较时再做分隔符归一化（见 `itemNameMatches`）。 */
+export function markDiscarded(name: string, drop?: { x?: unknown; y?: unknown; z?: unknown } | null): void {
+  defaultTracker.markDiscarded(name, drop);
+}
+
+/**
+ * `itemDrop` 事件认领：把刚出现的掉落物实体挂到最近一次 discard 上。
+ *
+ * 只认 [0, DISCARD_CLAIM_WINDOW_MS] 内、且还没过期的那条；没有对应的 discard
+ * 就返回 false（普通掉落物不该被免疫）。
+ */
+export function noteDiscardedEntity(id: unknown): boolean {
+  return defaultTracker.noteDiscardedEntity(id);
+}
+
+/** 清空免疫表。**给测试用**：它跟着模块走，跨用例会互相污染。 */
+export function clearDiscards(): void {
+  defaultTracker.clear();
+}
+
+/**
+ * 这个掉落物是不是刚被**自己**扔掉的（且还在忽略窗口内）。
+ *
+ * ⚠️ 比较前两边都归一化：调用方传的是掉落物的 `displayName`（"Oak Log"），
+ * `markDiscarded` 记的是物品 id（`oak_log`）——下划线/空格/大小写都不一样，
+ * 严格相等永远 false（这里曾经让免疫永远不生效）。
+ *
+ * `at` / `id` 是**另外两条**屏蔽路径：名字读不到时按落点，身份不确定时按实体 id。
+ * 三条都不成立才放行。**判据只来自本实例的 discard 记录**，所以队友扔的东西
+ * 不会被你的免疫挡住（见 `createDiscardTracker`）。
+ */
+export function isDiscardedDrop(
+  displayName: string,
+  at?: { x?: unknown; y?: unknown; z?: unknown } | null,
+  id?: unknown,
+): boolean {
+  return defaultTracker.isDiscardedDrop(displayName ?? '', at, id);
+}
+
+/** 只按实体 id 判断（拾取走到一半时用：手上只有 id 和名字，位置可能已经过期）。 */
+export function isDiscardedDropById(id: unknown): boolean {
+  return defaultTracker.isDiscardedDropById(id);
 }
 
 export default {
