@@ -186,8 +186,18 @@ export class ActionRunner {
           running == null ? 0 : Math.max(0, Math.round((Date.now() - running.startedAt) / 1000)),
       });
       const runningSeconds = running == null ? 0 : Math.max(0, Math.round((Date.now() - running.startedAt) / 1000));
-      const reason =
-        running != null
+      // **紧急锁与"另一个动作在跑"必须说成两句不同的话。**
+      //
+      // 真机事故（2026-10-18 17:15，overnight_b）：它在 y=20 的深洞里、血 12、僵尸 11.7m，
+      // 想自救却连续收到 `An action is already running. Stop() first, then retry.`
+      // ——那是"调度器说忙、却报不出占用者"时的**回退文案**，而 `beginEmergency()`
+      // 故意清空 `currentAction()`，所以在紧急锁开着的那段时间里，**这句话是唯一可能的回复**。
+      // 模型于是以为自己被一个"看不见的动作"挡着，Stop 了也没用（当时 stopAll 不解锁）。
+      // 现在锁能解了，文案也必须点名：是谁占着、要不要 Stop、Stop 之后会发生什么。
+      const reason = this.scheduler.locked
+        ? '保命反射正在占用身体（保命优先），它会自己结束——不用重发这个动作。' +
+          '连续占用超过 45 秒它会主动把身体交还给你 25 秒；**急的话直接 Stop：Stop 会立刻解锁并把身体给你**。'
+        : running != null
           ? `另一个动作正在跑（${running.id}，generation ${String(running.generation)}，已 ${String(runningSeconds)} 秒）。` +
             `它会自己报结果；只有你确实要改做别的事时，才需要先 Stop。`
           : 'An action is already running. Stop() first, then retry.';

@@ -412,3 +412,34 @@ describe('ActionRunner', () => {
     expect(h.notices).toHaveLength(1);
   });
 });
+
+/**
+ * 真机 2026-10-18 17:15（overnight_b）：保命反射占着通道时，连 `restart` 和
+ * `disableSafeguards` 都被拒（`An action is already running. Stop() first, then retry.`）
+ * ——而它们正是**因为通道卡住才会去用**的工具；它最后只能靠关掉自己的安全护栏自救。
+ */
+describe('紧急锁下：自救开关仍然可达，普通动作仍然被拦', () => {
+  it('保命锁着通道时 restart 照样执行', async () => {
+    const h = makeHarness();
+    h.scheduler.beginEmergency();
+    const out = await h.runner.run('restart', {});
+    expect(out.status).toBe('completed');
+    expect(h.executed).toEqual(['restart']);
+  });
+
+  it('保命锁着通道时护栏开关照样执行', async () => {
+    const h = makeHarness();
+    h.scheduler.beginEmergency();
+    await h.runner.run('disableSafeguards', { restore: false, calls: 6 });
+    await h.runner.run('restoreAllSafety', {});
+    expect(h.executed).toEqual(['disableSafeguards', 'restoreAllSafety']);
+  });
+
+  it('护栏没被削弱：锁着的时候普通动作仍然被拒（不执行、不占通道）', async () => {
+    const h = makeHarness();
+    h.scheduler.beginEmergency();
+    const out = await h.runner.run('goToPlayer', { player_name: 's', closeness: 2 });
+    expect(out.status).toBe('rejected');
+    expect(h.executed).toEqual([]);
+  });
+});
