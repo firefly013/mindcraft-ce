@@ -4,6 +4,7 @@ import { enterNether } from '../library/nether_portal.js';
 import { markDiscarded } from '../auto_pickup.js';
 import { permits } from '../safety/permits.js';
 import { safeguards } from '../safety/safeguards.js';
+import { collectOverrideFacts, deathCostLine, disableSafeguardsVerdict } from '../safety/reflex_override.js';
 import { DANGEROUS_OPS, isAuthorizable } from '../safety/dangerous_ops.js';
 import { td, tp, MESSAGES } from '../../shared/prompts.js';
 import type { ToolParamDef } from '../../shared/tools.js';
@@ -504,19 +505,27 @@ export const actionsList: AgentCommand[] = [
             'restore': { type: 'boolean', description: tp('disableSafeguards', 'restore') }
         },
         perform: function (agent: any, minutes: number, calls: number, reason: string, restore?: boolean): string {
-            void agent;
             if (restore === true) {
                 safeguards.release();
                 return pad(`保命程序已重新打开。${safeguards.describe(Date.now())}`);
             }
+            // **自杀式调用先拒**（真机 2026-10-19 01:48：3.87 血、15 米外有苦力怕，
+            // 模型关掉正在跑的 escape 去 attack，血掉到 1.87）。拒绝时**不碰
+            // safeguards**，所以也不会留下"已静音"的计时器。
+            const facts = collectOverrideFacts(agent);
+            const verdict = disableSafeguardsVerdict(facts);
+            if (!verdict.allowed) return pad(verdict.text);
+            const honesty =
+                '\n    说明：上面那句"原因"是**你自己写的理由**，不是安全评估；关掉之后出事由你承担。' +
+                '\n    ' + deathCostLine(facts);
             const byCalls = typeof calls === 'number' && Number.isFinite(calls) && calls > 0;
             if (byCalls) {
                 safeguards.suppressCalls(calls, reason, Date.now());
-                return pad(`保命程序已关闭，接下来 ${calls} 次工具调用内不介入。${safeguards.describe(Date.now())}`);
+                return pad(`保命程序已关闭，接下来 ${calls} 次工具调用内不介入。${safeguards.describe(Date.now())}` + honesty);
             }
             const mins = typeof minutes === 'number' && Number.isFinite(minutes) && minutes > 0 ? minutes : 1;
             safeguards.suppressFor(mins, reason, Date.now());
-            return pad(`保命程序已关闭 ${mins} 分钟。${safeguards.describe(Date.now())}`);
+            return pad(`保命程序已关闭 ${mins} 分钟。${safeguards.describe(Date.now())}` + honesty);
         }
     },
     // 一键恢复**两层**保护：闸门许可 + 保命程序。
