@@ -275,6 +275,9 @@ describe('④ 保命优先：抢占拾取，且敌人附近不重启拾取', () 
       const done = events.find((e) => e.type === 'reflex.done' && e.payload.reflex === 'escape');
       expect(done.payload.outcome).toBe('aborted');
       expect(done.payload.detail).toContain('交还身体');
+      // 模型读到"已中断"不能以为保命关了：必须写明危险还在就会重新接管。
+      expect(done.payload.detail).toContain('重新接管');
+      expect(done.payload.detail).toContain('不是把保命关掉');
       expect(requestInterrupt).toHaveBeenCalled();
       // 交还之后身体是空的：模型可以发动作了（currentActionName 不再是 escape）。
       expect(body.currentActionName()).toBeNull();

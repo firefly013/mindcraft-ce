@@ -1132,7 +1132,9 @@ export class MineflayerBody {
                         outcome = 'aborted';
                         detail =
                             `保命处理跑了 ${Math.round(REFLEX_MAX_MS / 1000)} 秒还没脱险，` +
-                            '已中断并**交还身体通道**（模型可以吃药/逃跑/换方向自救了）。';
+                            '已中断并**交还身体通道**（模型可以吃药/逃跑/换方向自救）；' +
+                            '**如果危险还在，保命会在下一条受击事件上重新接管**——' +
+                            '这一段只是先把身体还给你，不是把保命关掉。';
                     } else {
                         const result = raced.r;
                         if (result.reason === 'died') {
