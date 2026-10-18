@@ -1294,6 +1294,8 @@ export interface HuntDeps {
      * 默认走 `skills.entityPresentById`（**全局实体表**，不是 24 格扫描——瞬移出扫描 ≠ 死）。
      */
     entityPresent?: (bot: any, id: number) => boolean | null;
+    /** 装备一件物品（默认 `skills.equip`）：挖不动时先换一把镐再试。 */
+    equip?: (bot: any, item: string) => Promise<boolean>;
 }
 
 function defaultFindEntity(bot: any, entity: string, radius: number): any | null {
@@ -1799,6 +1801,13 @@ export interface TunnelStep {
     floor: FlatPosition;
 }
 
+/** 判定"真的站进了那一格"的容差（格）：格子中心 ±0.4 才算站进去（旧的 1.5 会把"差一格"算成到达）。 */
+export const TUNNEL_ARRIVE_EPS = 0.75;
+/** 判定"这一动真的挪了位置"的最小 3D 位移（格）。 */
+export const TUNNEL_MOVE_EPS = 0.5;
+/** 连续这么多步既没挖到东西、人也没挪动 → 熔断（不许空转刷"进度"）。 */
+export const TUNNEL_MAX_STALLS = 3;
+
 /**
  * 第 `index` 步的几何：清哪几格、站到哪、踩在哪。
  *
@@ -1830,7 +1839,8 @@ export type TunnelStop =
     | 'travel_failed'
     | 'unreadable'
     | 'bad_direction'
-    | 'bridge_failed';
+    | 'bridge_failed'
+    | 'stalled';
 
 const TUNNEL_STOP_TEXT: Record<TunnelStop, string> = {
     done: '挖满了本次长度（可以接着挖同一条线）',
@@ -1847,16 +1857,28 @@ const TUNNEL_STOP_TEXT: Record<TunnelStop, string> = {
     unreadable: '读不到方块（区块没加载？），不敢瞎挖',
     bad_direction: '方向认不出来，也不给读朝向',
     bridge_failed: '想垫一块桥过去，但没垫成',
+    stalled: '连着几步既没挖到东西、人也没挪动（卡住了）',
 };
 
 export interface TunnelOutcome {
     dir: ResolvedTunnelDirection;
     height: number;
     requested: number;
-    /** 实际推进的格数（每一步都是"验证变空气 + 真的走进去了"才算）。 */
+    /**
+     * **真的推进了几格**：每一步都必须"人站进了新格子"（3D 距离 ≤ 0.75）才算。
+     * 真机事故：这个数字原来是"循环跑了多少轮"，于是"已挖 64 格 + 位移 0"。
+     */
     dug: number;
-    /** 实际挖掉的方块总数（含每步的 height 格）。 */
+    /** 挖掉并**验证变空气**的方块总数（不等于推进格数）。 */
     blocksDug: number;
+    /** 尝试挖的次数（含没变成空气的）——用来和 `blocksDug` 对照着说真话。 */
+    digAttempts: number;
+    /** 有位移的步数（`dug` 的另一侧证据；正常情况下等于 `dug`）。 */
+    moved: number;
+    /** 中途工具变过几次（`{from,to}`）——自动换手/镐断了，必须写进回执。 */
+    toolChanges: Array<{ from: string | null; to: string | null }>;
+    /** 连续"既没挖到东西也没挪动"的步数（熔断用）。 */
+    stalls: number;
     start: FlatPosition;
     here: FlatPosition;
     stop: TunnelStop;
@@ -1897,6 +1919,9 @@ export function tunnelNextAction(o: TunnelOutcome): string {
         case 'bad_direction':
         case 'unreadable':
             return 'stats(type="body")';
+        case 'stalled':
+            // **绝不把同一个会空转的调用原样丢回去**：先看清身体状态/手上工具。
+            return o.hintEquip != null ? `equip(item_name="${o.hintEquip}")` : 'stats(type="body")';
         default:
             // 正常可续：同一条线、剩下的长度。
             return `mineTunnel(length=${tunnelRemaining(o)}, direction="${o.dir.label}")`;
@@ -1907,11 +1932,42 @@ export function tunnelReceipt(o: TunnelOutcome): string {
     const lines: string[] = [];
     const where = formatPoint(o.here);
     const dirText = `${o.dir.label}${o.dir.fromYaw ? '（按当时的朝向推出来的，下一步照抄这个方向）' : ''}`;
+    // **进度只报量出来的数**：位移（3D 直线距离）+ 验证变空气的方块数 + 尝试次数。
+    const displacement = Math.hypot(o.here.x - o.start.x, o.here.y - o.start.y, o.here.z - o.start.z);
     lines.push(
-        `mineTunnel：**挖了 ${o.dug}/${o.requested} 格**（净推进 ${o.dug} 格，共挖掉 ${o.blocksDug} 个方块），` +
-            `现在 ${where}，方向 ${dirText}。`,
+        `mineTunnel：**净前进 ${o.dug}/${o.requested} 格**（实测位移 ${displacement.toFixed(1)} 格：` +
+            `${formatPoint(o.start)} → 现在 ${where}），挖掉并**验证变空气**的方块 ${o.blocksDug} 个` +
+            `${o.digAttempts > o.blocksDug ? `（尝试 ${o.digAttempts} 次）` : ''}，方向 ${dirText}。`,
     );
     lines.push(`停止原因：${TUNNEL_STOP_TEXT[o.stop]}${o.detail === '' ? '' : `——${o.detail}`}。`);
+    // **三项证据不一致就不许只报大的那个数**（两条可以同时成立，所以用独立的 if）。
+    if (o.dug === 0 && (o.digAttempts > 0 || o.moved === 0)) {
+        lines.push(
+            `⚠️ 读/挖了 ${o.digAttempts} 次、**没有一格真的变成空气，人也没往前挪**——按证据这一趟是 0 格` +
+                `（以前的回执会把这整段写成"挖满了"，那是假的）。`,
+        );
+    }
+    if (o.blocksDug > 0 && displacement < TUNNEL_MOVE_EPS) {
+        lines.push(
+            `⚠️ **矛盾**：挖掉了 ${o.blocksDug} 个方块（验证过变空气），但**位移是 0 格**——` +
+                `人不在地道里/被卡住了。别按"挖掉多少方块"去算走了多远。`,
+        );
+    }
+    if (o.moved < o.dug) {
+        lines.push(`ℹ️ 有 ${o.dug - o.moved} 步是"人到了但位移判不出来"，已按证据从低计。`);
+    }
+    if (o.stalls > 0) {
+        lines.push(`ℹ️ 有 ${o.stalls} 步既没挖到东西、人也没挪动（反复空转会被判"卡住了"并停手）。`);
+    }
+    if ((o.toolChanges ?? []).length > 0) {
+        const changes = (o.toolChanges ?? [])
+            .slice(0, 3)
+            .map((c) => `${c.from ?? '空手'} → ${c.to ?? '空手'}`)
+            .join('、');
+        lines.push(
+            `⚠️ **中途工具变了 ${(o.toolChanges ?? []).length} 次**（${changes}）：这是自动换手/镐断了，挖得慢是它造成的。`,
+        );
+    }
     if (o.handMining) {
         lines.push('⚠️ 手上没有镐：这些方块是**徒手挖**的，很慢，而且更费时间=更暴露；能换镐就换。');
     }
@@ -1948,6 +2004,8 @@ export interface TunnelDeps {
     scaffold?: (bot: any) => string | null;
     /** 垫一块方块（默认 `skills.placeBlock`）。 */
     place?: (bot: any, block: string, x: number, y: number, z: number) => Promise<boolean>;
+    /** 装备一件物品（默认 `skills.equip`）：挖不动时先换一把镐再试。 */
+    equip?: (bot: any, item: string) => Promise<boolean>;
     sleep?: (ms: number) => Promise<void>;
     now?: () => number;
 }
@@ -2005,6 +2063,7 @@ export async function digLine(
     const blockAt = deps.blockAt ?? defaultBlockObject;
     const dig = deps.dig ?? ((b: any, x: number, y: number, z: number) => skills.mineBlockAt(b, x, y, z));
     const travel = deps.travel ?? ((b: any, x: number, y: number, z: number) => skills.goToPosition(b, x, y, z, 1));
+    const equip = deps.equip ?? ((b: any, item: string) => skills.equip(b, item));
     const health = deps.health ?? defaultTunnelHealth;
     const tool = deps.tool ?? ((b: any) => skills.toolDurabilityGuard(b));
     // 垫脚材料：和 `pillarUp` / `applyScaffoldingBlocks` **同一套偏好**（圆石/泥土/下界岩…），
@@ -2042,6 +2101,10 @@ export async function digLine(
         requested,
         dug: 0,
         blocksDug: 0,
+        digAttempts: 0,
+        moved: 0,
+        toolChanges: [],
+        stalls: 0,
         start,
         here: start,
         stop: 'done',
@@ -2066,6 +2129,15 @@ export async function digLine(
     refreshTool();
 
     const cellText = (p: FlatPosition, name: string | null): string => `${formatPoint(p)} 是 ${name ?? '读不到'}`;
+
+    /** 上一轮看到的手上工具：**中途换手本身就是事实**，必须写进回执（哪怕没卡住）。 */
+    let lastToolName: string | null = outcome.toolName;
+    const noteToolChange = (nowName: string | null): void => {
+        if (nowName === lastToolName) return;
+        outcome.toolChanges.push({ from: lastToolName, to: nowName });
+        outcome.progress.push(`- 中途工具变了：${lastToolName ?? '空手'} → ${nowName ?? '空手'}`);
+        lastToolName = nowName;
+    };
 
     for (let index = 1; index <= requested; index++) {
         // ── 时间预算：到点自己收手（回执必须由工具自己交出来） ──
@@ -2159,6 +2231,7 @@ export async function digLine(
 
         // ── 安全门 4：没有镐时，只有徒手挖得动的方块才放行 ──
         const guard = refreshTool();
+        noteToolChange(guard.name);
         const hasPickaxe = guard.name != null && guard.name.includes('pickaxe');
         const needDig = digBlocks.filter(({ block }) => !isAirBlockName(block?.name));
         if (!hasPickaxe) {
@@ -2190,17 +2263,40 @@ export async function digLine(
             break;
         }
 
-        // ── 挖：然后**验证明明变空气**（事实，不是假设） ──
+        // ── 挖：然后**验证明明变空气**（事实，不是假设）。挖不动的先换一次镐再试。──
         for (const { cell, block } of digBlocks) {
             if (isAirBlockName(block?.name)) continue;
-            let ok = false;
-            try {
-                ok = await dig(bot, cell.x, cell.y, cell.z);
-            } catch {
-                ok = false;
+            outcome.digAttempts += 1;
+            const digOnce = async (): Promise<boolean> => {
+                try {
+                    return await dig(bot, cell.x, cell.y, cell.z);
+                } catch {
+                    return false;
+                }
+            };
+            let ok = await digOnce();
+            let after = blockAt(bot, cell.x, cell.y, cell.z);
+            if (after == null || !isAirBlockName(after?.name)) {
+                // **工具被换走/换手**是最常见的"挖不动"：换一把最好的镐，再试一次
+                // （真机 overnight_a 的"爬了 6 格就停"就是这个形状）。
+                const current = refreshTool().name;
+                const spare = bestPickaxeInInventory(bot, current);
+                if (spare != null) {
+                    try {
+                        await equip(bot, spare);
+                    } catch {
+                        /* 换不上就按失败处理 */
+                    }
+                    const switched = refreshTool().name;
+                    if (switched != null && switched !== current) {
+                        outcome.toolChanges.push({ from: current, to: switched });
+                        outcome.progress.push(`- 挖不动 → 换成 ${switched} 再试（原来是 ${current ?? '空手'}）`);
+                        outcome.digAttempts += 1;
+                        ok = await digOnce();
+                        after = blockAt(bot, cell.x, cell.y, cell.z);
+                    }
+                }
             }
-            outcome.blocksDug += 1;
-            const after = blockAt(bot, cell.x, cell.y, cell.z);
             if (after == null || !isAirBlockName(after?.name)) {
                 outcome.stop = 'dig_failed';
                 outcome.detail =
@@ -2208,10 +2304,12 @@ export async function digLine(
                 refreshTool();
                 return outcome;
             }
+            outcome.blocksDug += 1; // **只有验证过变空气的才计数**
         }
         await sleep(settleMs);
 
-        // ── 走进去 ──
+        // ── 走进去：**位移是唯一证据**（"报成功但人没动"是最常见的假进度） ──
+        const beforeStep = position(bot);
         let arrived = false;
         try {
             arrived = await travel(bot, step.feet.x, step.feet.y, step.feet.z);
@@ -2220,10 +2318,32 @@ export async function digLine(
         }
         const here = position(bot);
         outcome.here = here;
-        const atTarget = Math.abs(here.x - step.feet.x) <= 1.5 && Math.abs(here.z - step.feet.z) <= 1.5;
-        if (!arrived && !atTarget) {
+        // 3D 判定（旧的只比 x/z、还容忍 1.5 格 → **差一格就算"到了"**，于是原地 64 轮
+        // 也报"已挖 64 格"）。现在必须真的站进那一格。
+        const distToFeet = Math.hypot(here.x - step.feet.x, here.y - step.feet.y, here.z - step.feet.z);
+        const stepDist = Math.hypot(here.x - beforeStep.x, here.y - beforeStep.y, here.z - beforeStep.z);
+        const reallyArrived = distToFeet <= TUNNEL_ARRIVE_EPS;
+        const reallyMoved = stepDist >= TUNNEL_MOVE_EPS;
+        if (!reallyArrived && !reallyMoved) {
+            // 既没到目标格、也没挪动 → **这一步没有进度**（不管 travel 返回了什么）。
+            outcome.stalls += 1;
+            if (outcome.stalls >= TUNNEL_MAX_STALLS) {
+                outcome.stop = 'stalled';
+                outcome.detail =
+                    `连续 ${outcome.stalls} 步既没挖到东西、人也没挪动（` +
+                    `${arrived ? '寻路"报成功"但位移 0' : '走不进去'}）；` +
+                    `现在 ${formatPoint(here)}，目标格 ${formatPoint(step.feet)}`;
+                break;
+            }
+            await sleep(settleMs);
+            continue;
+        }
+        outcome.moved += 1;
+        outcome.stalls = 0;
+        if (!reallyArrived) {
+            // 动了但没到：如实记，**不算一步**（进度按"真的站进新格子"算）。
             outcome.stop = 'travel_failed';
-            outcome.detail = `第 ${index} 步已经挖通 ${formatPoint(step.feet)}，但人还停在 ${formatPoint(here)}`;
+            outcome.detail = `第 ${index} 步挖通了 ${formatPoint(step.feet)}，但人只挪到 ${formatPoint(here)}（没站进去）`;
             break;
         }
         outcome.dug += 1;
@@ -2268,6 +2388,10 @@ export async function mineTunnelSkill(
             requested,
             dug: 0,
             blocksDug: 0,
+            digAttempts: 0,
+            moved: 0,
+            toolChanges: [],
+            stalls: 0,
             start: (deps.position ?? defaultPosition)(bot),
             here: (deps.position ?? defaultPosition)(bot),
             stop: 'bad_direction',
@@ -2541,6 +2665,10 @@ export interface TravelOutcome {
     here: FlatPosition;
     /** 起手时离目标多远（用来算"推进了多少格"）。 */
     distanceBefore: number;
+    /** **实测位移**（起点 → 现在，3D 直线距离）——这是唯一能当"推进"用的数。 */
+    progressed: number;
+    /** 这一趟挖掉并验证变空气的方块数（和位移对照着看）。 */
+    blocksDug: number;
     stop: TravelStop;
     detail: string;
     layer: number | null;
@@ -2584,6 +2712,9 @@ export function travelNextAction(o: TravelOutcome): string {
         case 'bad_target':
             return 'stats(type="coords")';
         default:
+            // **0 进度不许把同一条调用原样丢回去**（那正是"原地打转"的形状）：
+            // 先看清身体状态/手上工具，再决定要不要重来。
+            if (o.progressed < TUNNEL_MOVE_EPS) return 'stats(type="body")';
             return travelResumeCall(o);
     }
 }
@@ -2602,22 +2733,33 @@ export function travelRemainingLabel(o: TravelOutcome): string {
 export function travelReceipt(o: TravelOutcome): string {
     const lines: string[] = [];
     const remaining = horizontalDistance(o.here, o.target);
-    const progressed = Math.max(0, Math.round(o.distanceBefore - remaining));
+    const progressed = Math.round(o.progressed);
     const label = travelRemainingLabel(o);
     if (o.stop === 'arrived') {
         lines.push(
             `travelTo：**到了**——现在 ${formatPoint(o.here)}（目标 ${formatPoint(o.target)}，水平还差 ${remaining.toFixed(1)} 格）。` +
-                `这一趟净推进 ${progressed} 格。`,
+                `这一趟**实测位移 ${o.progressed.toFixed(1)} 格**。`,
         );
     } else if (o.stop === 'bad_target' || o.stop === 'wrong_dimension' || o.stop === 'no_pickaxe') {
         lines.push(`travelTo：**没出发**（还站在 ${formatPoint(o.here)}）——${TRAVEL_STOP_TEXT[o.stop]}。`);
     } else {
+        // **位移是标题**：挖了多少方块、计划了多少格，都不如"人到底挪了几格"。
         lines.push(
-            `travelTo：这一趟往前**推进了 ${progressed} 格**（${formatPoint(o.start)} → ${formatPoint(o.here)}），` +
-                `**离目标还剩 ${Math.round(remaining)} 格**${label === '' ? '' : `（${label}）`}。`,
+            `travelTo：这一趟**往前推进了 ${progressed} 格（实测位移 ${o.progressed.toFixed(1)} 格**：` +
+                `${formatPoint(o.start)} → 现在 ${formatPoint(o.here)}），**离目标还剩 ${Math.round(remaining)} 格**` +
+                `${label === '' ? '' : `（${label}）`}。`,
         );
     }
     lines.push(`停止原因：${TRAVEL_STOP_TEXT[o.stop]}${o.detail === '' ? '' : `——${o.detail}`}。`);
+    // **挖了 ≠ 走了**：三项证据不一致就摆在最前面几行。
+    if (o.blocksDug > 0 && o.progressed < TUNNEL_MOVE_EPS) {
+        lines.push(
+            `⚠️ **矛盾**：这一趟挖掉了 ${o.blocksDug} 个方块（都验证过变空气），但**位移只有 ${o.progressed.toFixed(1)} 格**——` +
+                `人不在地道里/被卡住了。**别把挖掉的方块当成走过的路。**`,
+        );
+    } else if (o.blocksDug === 0 && o.progressed < TUNNEL_MOVE_EPS && o.stop !== 'arrived') {
+        lines.push('⚠️ 这一趟**既没挖到东西、人也没挪动**（0 格）——按证据就是白跑一趟，别当成"走了一段"。');
+    }
     if (o.layer != null && o.layerNote !== '') lines.push(`层高：${o.layerNote}`);
     for (const leg of o.legs) lines.push(`- ${leg.text}`);
     for (const line of capLines(o.progress, 4, '进度')) lines.push(line);
@@ -2706,6 +2848,8 @@ export async function travelToSkill(
         start,
         here: start,
         distanceBefore: horizontalDistance(start, target),
+        progressed: 0,
+        blocksDug: 0,
         stop: 'arrived',
         detail: '',
         layer,
@@ -2894,6 +3038,7 @@ export async function travelToSkill(
         );
         outcome.here = tunnel.here;
         outcome.handMining = outcome.handMining || tunnel.handMining;
+        outcome.blocksDug += tunnel.blocksDug;
         refreshTool();
         const advanced = Math.max(0, horizontalDistance(before, target) - horizontalDistance(tunnel.here, target));
         outcome.legs.push({
@@ -2928,6 +3073,12 @@ export async function travelToSkill(
 
     outcome.elapsedMs = now() - startedAt;
     outcome.here = position(bot);
+    // **实测位移**：起点 → 现在（3D）。回执的标题数字只用它。
+    outcome.progressed = Math.hypot(
+        outcome.here.x - outcome.start.x,
+        outcome.here.y - outcome.start.y,
+        outcome.here.z - outcome.start.z,
+    );
     refreshTool();
     return travelReceipt(outcome);
 }

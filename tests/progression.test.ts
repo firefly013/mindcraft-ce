@@ -1137,6 +1137,169 @@ function tunnelHarness(
     return { bot, deps, dugOrder, place };
 }
 
+describe('mineTunnel：进度必须是**量出来的**，不是数出来的（真机 02:0x 事故）', () => {
+    // 真机：回执「已挖 64 格」但**位移 0、背包 0 增量**。
+    // 机制：这一步前面本来就是空气（洞穴里很常见）→ 没挖任何东西；`travel` 没把 bot 挪动，
+    // 而"到没到"只比较 x/z 且容忍 1.5 格 → 差 1 格也算"到了" → 每轮 `dug += 1` → 64。
+    // 现在：一步必须**人真的站进新格子**才算；三项证据（变空气/位移/背包）不一致要明说。
+
+    /** 洞穴型假身体：脚/头是空气、**地板是实心**（所以不会触发"脚下悬空"那道门）；`travel` 不动。 */
+    function stuckInCave(options: { diggable?: boolean } = {}) {
+        const dugOrder: FlatPosition[] = [];
+        const bot: any = {
+            interrupt_code: false,
+            health: 20,
+            entity: { position: { x: 0, y: 70, z: 0 }, yaw: 0 },
+            inventory: { items: () => [{ name: 'diamond_pickaxe', count: 1 }] },
+            output: '',
+        };
+        const deps = {
+            position: () => ({ ...bot.entity.position }),
+            // 脚/头一直是空气（洞穴：这一格不需要挖，也永远不会"变成"空气）；地板实心
+            blockAt: (_b: any, x: number, y: number, z: number) => ({
+                name: y <= 69 ? 'netherrack' : 'air',
+                hardness: y <= 69 ? 0.4 : 0,
+                diggable: true,
+                boundingBox: y <= 69 ? 'block' : 'empty',
+                position: { x, y, z },
+            }),
+            dig: async (_b: any, x: number, y: number, z: number) => {
+                if (options.diggable === false) return false;
+                dugOrder.push({ x, y, z });
+                return true;
+            },
+            travel: async () => true, // **报成功但人不动**（这就是那一晚的形状）
+            tool: () => ({ name: 'diamond_pickaxe', remaining: 900, max: 1561, low: false }),
+            health: () => bot.health,
+            sleep: async (): Promise<void> => {},
+            now: () => 0,
+        };
+        return { bot, deps, dugOrder };
+    }
+
+    it('**人没动 + 前面本来就是空气** ⇒ 0 格，回执必须明说（原来会写 64 格）', async () => {
+        const h = stuckInCave();
+        const receipt = await mineTunnelSkill(h.bot, 64, 2, '+x', h.deps);
+
+        expect(receipt).toContain('**净前进 0/64 格**');
+        expect(receipt).not.toContain('净前进 64/64');
+        expect(receipt).toContain('0 格');
+        expect(receipt).toContain('没有一格真的变成空气');
+        expect(receipt).toContain('人也没往前挪');
+        // 位移确实还是 0
+        expect(h.bot.entity.position).toEqual({ x: 0, y: 70, z: 0 });
+    });
+
+    it('位移是 0 但挖掉了方块 ⇒ 回执把**矛盾**摆出来（不许只报大的那个数）', async () => {
+        // 方块能挖（真的变空气），但 bot 走不进去：挖了 ≠ 推进了
+        const dug = new Set<string>();
+        const bot: any = {
+            interrupt_code: false,
+            health: 20,
+            entity: { position: { x: 0, y: 70, z: 0 }, yaw: 0 },
+            inventory: { items: () => [{ name: 'diamond_pickaxe', count: 1 }] },
+            output: '',
+        };
+        const deps = {
+            position: () => ({ ...bot.entity.position }),
+            blockAt: (_b: any, x: number, y: number, z: number) => ({
+                name: dug.has(`${x},${y},${z}`) ? 'air' : 'netherrack',
+                hardness: 0.4,
+                diggable: true,
+                position: { x, y, z },
+            }),
+            dig: async (_b: any, x: number, y: number, z: number) => {
+                dug.add(`${x},${y},${z}`);
+                return true;
+            },
+            travel: async () => false, // 挖通了但走不进去
+            tool: () => ({ name: 'diamond_pickaxe', remaining: 900, max: 1561, low: false }),
+            health: () => bot.health,
+            sleep: async (): Promise<void> => {},
+            now: () => 0,
+        };
+        const receipt = await mineTunnelSkill(bot, 8, 2, '+x', deps);
+
+        expect(receipt).toContain('**净前进 0/8 格**');
+        expect(receipt).toContain('位移是 0 格');
+        expect(receipt).toContain('矛盾');
+        expect(receipt).not.toMatch(/已挖 [1-9]\d* 格/);
+    });
+
+    it('正常的隧道：报的格数 = **验证变空气**的格数，位移也自洽', async () => {
+        const h = tunnelHarness();
+        const receipt = await mineTunnelSkill(h.bot, 5, 2, '+x', h.deps);
+
+        expect(receipt).toContain('**净前进 5/5 格**');
+        expect(h.dugOrder).toHaveLength(10); // 5 步 × 2 格
+        expect(h.bot.entity.position).toEqual({ x: 5, y: 70, z: 0 });
+        // 位移与格数一致（1 格 = 1 步）
+        expect(receipt).toContain('实测位移');
+        expect(receipt).toContain('实测位移 5.0 格');
+    });
+
+    it('0 进度时**下一步不是同一条挖隧道调用**（不许把会空转的调用原样丢回去）', async () => {
+        const h = stuckInCave();
+        const receipt = await mineTunnelSkill(h.bot, 64, 2, '+x', h.deps);
+        const next = receipt.trimEnd().split('\n').at(-1) ?? '';
+        expect(next).toMatch(/^下一步（照做即可）：/);
+        expect(next).not.toContain('mineTunnel(');
+        expect(next).toContain('stats(type="body")');
+    });
+
+    it('挖不动时**先换镐再试**（真机"爬 6 格就停"的形状）：换完能挖就继续，并把换手写进回执', async () => {
+        const h = tunnelHarness({
+            inventory: [
+                { name: 'diamond_pickaxe', count: 1 },
+                { name: 'iron_pickaxe', count: 1 },
+            ],
+        });
+        let digs = 0;
+        const equipped: string[] = [];
+        const receipt = await mineTunnelSkill(h.bot, 4, 2, '+x', {
+            ...h.deps,
+            dig: async (b: any, x: number, y: number, z: number) => {
+                digs += 1;
+                if (digs === 1) return false; // 第一次挖不动（工具被换走/镐断了）
+                return h.deps.dig(b, x, y, z);
+            },
+            equip: async (_b: any, item: string) => {
+                equipped.push(item);
+                return true;
+            },
+            tool: () => ({
+                name: equipped.length > 0 ? 'iron_pickaxe' : 'diamond_pickaxe',
+                remaining: 900,
+                max: 1561,
+                low: false,
+            }),
+        });
+
+        expect(equipped).toEqual(['iron_pickaxe']); // 自动换了一把能用的镐
+        expect(receipt).toContain('净前进 4/4 格'); // 没有"爬 6 格就停"
+        expect(receipt).toContain('中途工具变了');
+        expect(receipt).toContain('diamond_pickaxe → iron_pickaxe');
+    });
+
+    it('工具中途被换走：回执点名"换过工具"，不是闷声少挖', async () => {
+        const h = tunnelHarness();
+        let reads = 0;
+        const receipt = await mineTunnelSkill(h.bot, 8, 2, '+x', {
+            ...h.deps,
+            // 第 3 次读工具时换成了别的（模拟自动换手/镐断了）
+            tool: () => {
+                reads += 1;
+                return reads >= 3
+                    ? { name: 'golden_pickaxe', remaining: 900, max: 32, low: false }
+                    : { name: 'diamond_pickaxe', remaining: 900, max: 1561, low: false };
+            },
+        });
+
+        expect(receipt).toContain('中途工具变了');
+        expect(receipt).toContain('diamond_pickaxe → golden_pickaxe');
+    });
+});
+
 describe('mineTunnel：直线隧道', () => {
     it('四个方向：挖的格子与终点逐一对应，回执写明方向且可续挖', async () => {
         const cases: Array<[string, FlatPosition, string[]]> = [
@@ -1150,10 +1313,10 @@ describe('mineTunnel：直线隧道', () => {
             const receipt = await mineTunnelSkill(h.bot, 3, 2, direction, h.deps);
             expect(h.dugOrder.map((c) => `${c.x},${c.y},${c.z}`), direction).toEqual(expected);
             expect(h.bot.entity.position, direction).toEqual(end);
-            expect(receipt, direction).toContain('挖了 3/3 格');
+            expect(receipt, direction).toContain('净前进 3/3 格');
             expect(receipt, direction).toContain(`现在 (${end.x}, ${end.y}, ${end.z})`);
             expect(receipt, direction).toContain(`方向 ${direction}`);
-            expect(receipt, direction).toContain('共挖掉 6 个方块');
+            expect(receipt, direction).toContain('验证变空气**的方块 6 个');
             expect(receipt.trimEnd().split('\n').at(-1), direction).toBe(
                 `下一步（照做即可）：mineTunnel(length=1, direction="${direction}")`,
             );
@@ -1175,7 +1338,7 @@ describe('mineTunnel：直线隧道', () => {
         const receipt = await mineTunnelSkill(h.bot, 4, 2, '+x', h.deps);
         expect(h.dugOrder).toEqual([]);
         expect(h.bot.entity.position).toEqual({ x: 0, y: 70, z: 0 });
-        expect(receipt).toContain('挖了 0/4 格');
+        expect(receipt).toContain('净前进 0/4 格');
         expect(receipt).toContain('前方脚所在格');
         expect(receipt).toContain('lava');
         expect(receipt).toContain('(1, 70, 0)');
@@ -1283,13 +1446,13 @@ describe('mineTunnel：直线隧道', () => {
         const r2 = await mineTunnelSkill(soft.bot, 2, 2, '+x', soft.deps);
         expect(soft.dugOrder.length).toBe(4);
         expect(r2).toContain('徒手挖');
-        expect(r2).toContain('挖了 2/2 格');
+        expect(r2).toContain('净前进 2/2 格');
     });
 
     it('中途被 Stop → 报挖了几格 + 续挖调用（不是从头再来）', async () => {
         const h = tunnelHarness({ interruptAfterSteps: 2 });
         const receipt = await mineTunnelSkill(h.bot, 5, 2, '+x', h.deps);
-        expect(receipt).toContain('挖了 2/5 格');
+        expect(receipt).toContain('净前进 2/5 格');
         expect(receipt).toContain('被 Stop/保命打断');
         expect(receipt.trimEnd().split('\n').at(-1)).toBe(
             '下一步（照做即可）：mineTunnel(length=3, direction="+x")',
@@ -1301,7 +1464,7 @@ describe('mineTunnel：直线隧道', () => {
         const receipt = await mineTunnelSkill(h.bot, 4, 2, '+x', h.deps);
         expect(h.dugOrder).toEqual([]);
         expect(receipt).toContain('读不到');
-        expect(receipt).toContain('挖了 0/4 格');
+        expect(receipt).toContain('净前进 0/4 格');
     });
 
     it('挖完还是原方块 → 报"挖不动"，绝不假装挖通、也不往前站', async () => {
@@ -1309,7 +1472,7 @@ describe('mineTunnel：直线隧道', () => {
         const receipt = await mineTunnelSkill(h.bot, 4, 2, '+x', h.deps);
         expect(h.bot.entity.position).toEqual({ x: 0, y: 70, z: 0 });
         expect(receipt).toContain('挖不动');
-        expect(receipt).toContain('挖了 0/4 格');
+        expect(receipt).toContain('净前进 0/4 格');
     });
 
     it('掉血 / 血量过低 → 停手保命', async () => {
@@ -1332,7 +1495,7 @@ describe('mineTunnel：直线隧道', () => {
         };
         const r2 = await mineTunnelSkill(hurt.bot, 5, 2, '+x', deps);
         expect(r2).toContain('掉血');
-        expect(r2).toContain('挖了 2/5 格');
+        expect(r2).toContain('净前进 2/5 格');
     });
 
     it('每 16 格报一次进度（20 格 → 只有一次 16 格进度）', async () => {
@@ -1355,7 +1518,7 @@ describe('mineTunnel：直线隧道', () => {
             { budgetMs: 150_000 },
         );
         expect(receipt).toContain('时间到');
-        expect(receipt).toContain('挖了 2/10 格');
+        expect(receipt).toContain('净前进 2/10 格');
         expect(receipt.trimEnd().split('\n').at(-1)).toBe(
             '下一步（照做即可）：mineTunnel(length=8, direction="+x")',
         );
@@ -1391,7 +1554,7 @@ describe('mineTunnel：直线隧道', () => {
         const receipt = await mineTunnelSkill(h.bot, 4, 2, 'sideways', h.deps);
         expect(h.dugOrder).toEqual([]);
         expect(receipt).toContain('认不出来');
-        expect(receipt).toContain('挖了 0/4 格');
+        expect(receipt).toContain('净前进 0/4 格');
         expect(receipt.trimEnd().split('\n').at(-1)).toBe('下一步（照做即可）：stats(type="body")');
     });
 
@@ -1491,7 +1654,7 @@ describe('blockAt 契约：参数必须是 Vec3（替身照真实 API 苛刻）'
         };
         const receipt = await mineTunnelSkill(bot, 3, 2, '-x', deps as any);
         expect(dugOrder).toEqual(['-15,70,3', '-15,71,3', '-16,70,3', '-16,71,3', '-17,70,3', '-17,71,3']);
-        expect(receipt).toContain('挖了 3/3 格');
+        expect(receipt).toContain('净前进 3/3 格');
         expect(receipt).not.toContain('读不到方块');
     });
 });
@@ -1966,6 +2129,11 @@ describe('huntFor 失控回执：参数名 / 熔断 / 下一步 / 长度上限',
             requested: 256,
             dug: 256,
             blocksDug: 512,
+            digAttempts: 512,
+            moved: 256,
+            toolChanges: [],
+            stalls: 0,
+            bridges: 0,
             height: 2,
             start: { x: 0, y: 70, z: 0 },
             here: { x: 256, y: 70, z: 0 },
@@ -1983,3 +2151,4 @@ describe('huntFor 失控回执：参数名 / 熔断 / 下一步 / 长度上限',
         expect(tunneled).toContain('省略');
     });
 });
+

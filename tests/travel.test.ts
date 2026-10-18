@@ -34,6 +34,10 @@ import { getOpenAITools } from '../src/brain/tools/advertise.js';
 import { ACTION_MAX_MS } from '../src/brain/action_runner.js';
 
 const key = (x: number, y: number, z: number): string => `${x},${y},${z}`;
+/** 回执里的**实测位移**（唯一能当"推进"用的数）。 */
+const displacementOf = (receipt: string): number => Number(/实测位移 ([\d.]+) 格/.exec(receipt)?.[1] ?? '0');
+/** 回执最后一行（"下一步"）。 */
+const lastLineOf = (receipt: string): string => receipt.trimEnd().split('\n').at(-1) ?? '';
 
 /**
  * 假身体：`cells` 里的格子有特殊方块，其余默认下界岩（实心、可挖）。
@@ -261,8 +265,8 @@ describe('travelTo：一次调用往前走（执行）', () => {
         });
         const receipt = await travelToSkill(h.bot, 500, 70, 0, 60_000, undefined, undefined, h.deps);
 
-        expect(receipt).toMatch(/\*\*没出发\*\*|\*\*推进了 \d+ 格\*\*/);
-        const advanced = Number(/(?:推进了|净推进) (\d+) 格/.exec(receipt)?.[1] ?? '0');
+        expect(receipt).toMatch(/\*\*没出发\*\*|\*\*往前推进了 \d+ 格/);
+        const advanced = displacementOf(receipt);
         expect(advanced).toBeGreaterThan(0);
         expect(advanced).toBeLessThan(500);
         expect(receipt).toContain('还剩');
@@ -379,7 +383,7 @@ describe('travelTo：搭桥（横向的 pillarUp）', () => {
         expect(h.bridgeCalls[0]?.block).toBe('netherrack');
         expect(receipt).toContain('垫了一块桥');
         expect(h.bot.entity.position.x).toBeGreaterThan(-29);
-        const advanced = Number(/(?:推进了|净推进) (\d+) 格/.exec(receipt)?.[1] ?? '0');
+        const advanced = displacementOf(receipt);
         expect(advanced).toBeGreaterThan(0);
         expect(receipt).not.toContain('**没出发**');
     });
@@ -416,11 +420,11 @@ describe('travelTo：搭桥（横向的 pillarUp）', () => {
         });
         // 预算只够挖一小段：第一趟必然是"部分推进 + 续跑"
         const first = await travelToSkill(h.bot, 60, 70, 0, 25_000, undefined, undefined, h.deps);
-        const advanced1 = Number(/(?:推进了|净推进) (\d+) 格/.exec(first)?.[1] ?? '0');
+        const advanced1 = displacementOf(first);
         const stop1 = h.bot.entity.position.x;
 
         const second = await travelToSkill(h.bot, 60, 70, 0, 25_000, undefined, undefined, h.deps);
-        const advanced2 = Number(/(?:推进了|净推进) (\d+) 格/.exec(second)?.[1] ?? '0');
+        const advanced2 = displacementOf(second);
 
         expect(advanced1).toBeGreaterThan(0); // 第一次就不能是 0（桥搭过去了）
         expect(advanced2).toBeGreaterThan(0); // 第二次接着走，也不会是 0
@@ -461,11 +465,46 @@ describe('travelTo：搭桥（横向的 pillarUp）', () => {
 
         // 推进行程是一条直线：x 从 0 连续走到 20，没有跳格/回头
         expect(h.bot.entity.position.x).toBe(20);
-        const advanced = Number(/(?:推进了|净推进) (\d+) 格/.exec(receipt)?.[1] ?? '0');
+        const advanced = displacementOf(receipt);
         expect(advanced).toBe(20);
         // 桥只垫在需要的那一格，不会把整条路铺满
         expect(h.bridgeCalls).toHaveLength(1);
         expect(h.bridgeCalls[0]).toMatchObject({ block: 'cobblestone', x: 1, y: 69, z: 0 });
+    });
+});
+
+describe('travelTo：进度必须是量出来的（真机 02:0x：挖了但位移 0）', () => {
+    it('挖得动但人进不去 ⇒ 标题就是 0 格，并把**矛盾**摆出来', async () => {
+        const h = travelHarness({
+            pos: { x: 0, y: 70, z: 0 },
+            dimension: 'overworld',
+            canWalk: false, // 走不动 → 只能挖
+            canStep: false, // 挖通了但**走不进去**（这就是"挖了 64 格、位移 0"的形状）
+        });
+        const receipt = await travelToSkill(h.bot, 200, 70, 0, 300_000, undefined, undefined, h.deps);
+
+        expect(displacementOf(receipt)).toBe(0);
+        expect(receipt).toContain('**往前推进了 0 格');
+        expect(receipt).toContain('**矛盾**');
+        expect(receipt).toContain('别把挖掉的方块当成走过的路');
+        // 位移 0 就不许给"接着走"的同一条调用
+        expect(lastLineOf(receipt)).toBe('下一步（照做即可）：stats(type="body")');
+        expect(lastLineOf(receipt)).not.toContain('travelTo(');
+    });
+
+    it('0 进度时**下一步不是同一个 travelTo**（不许原地打转）', async () => {
+        const h = travelHarness({
+            pos: { x: 0, y: 70, z: 0 },
+            dimension: 'the_nether',
+            canStep: false,
+            // 一开始就"到不了"：人卡在原地
+        });
+        const receipt = await travelToSkill(h.bot, 500, 70, 0, 300_000, undefined, undefined, h.deps);
+
+        const next = lastLineOf(receipt);
+        expect(next.startsWith('下一步（照做即可）：')).toBe(true);
+        expect(next).not.toContain('travelTo(');
+        expect(displacementOf(receipt)).toBe(0);
     });
 });
 
@@ -500,6 +539,8 @@ describe('travelTo：几何不变式（续跑真的接得上）', () => {
             start: { x: 0, y: 70, z: 0 },
             here: { x: -100, y: 116, z: 88 },
             distanceBefore: 343,
+            progressed: 243,
+            blocksDug: 243,
             stop: 'budget' as const,
             detail: '',
             layer: NETHER_TRAVEL_LAYER,
