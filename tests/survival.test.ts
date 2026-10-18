@@ -81,6 +81,15 @@ describe('物资识别', () => {
     expect(countFood({ cooked_beef: 3, dirt: 64, bread: 2 })).toBe(5);
     expect(countBeds({ red_bed: 1, blue_bed: 2, dirt: 1 })).toBe(3);
   });
+
+  it('食物计数认两代物品名：手上的 mutton 必须算数（15:58 真机事故）', () => {
+    // 旧行为：表里只有 raw_mutton，`mutton` 数不到 → "拿着食物报没有食物"
+    expect(countFood({ mutton: 2 })).toBe(2);
+    expect(countFood({ mutton: 2, raw_mutton: 1, cooked_mutton: 3, dirt: 64 })).toBe(6);
+    expect(countFood({ porkchop: 1, beef: 2, chicken: 1, cod: 1, salmon: 1, rabbit: 1 })).toBe(7);
+    // 不是食物的一律不算
+    expect(countFood({ stone: 64, mutton: 1 })).toBe(1);
+  });
 });
 
 // ---------------------------------------------------------------
@@ -358,6 +367,27 @@ describe('prepareBlazeSkill', () => {
     expect(text).toContain('没有抗火药水');
     expect(text).toContain('没有食物');
     expect(text).not.toContain('准备就绪');
+  });
+
+  it('手上拿着 mutton（1.13 短名）时绝不能说"没有食物"，并且真的吃掉它', async () => {
+    const blocks: BlockMap = { '0,64,0': { name: 'stone' } };
+    const bot = fakeBody(blocks, {
+      y: 60,
+      effects: [{ id: 12, amplifier: 0, duration: 3600 }], // 已有抗火 Buff：不喝药，只看吃
+      slots: [{ name: 'mutton', count: 2 }],
+      items: [{ name: 'mutton', count: 2 }],
+    });
+    bot.food = 8;
+    // 真吃进去了：consume 之后饱食度真的涨（consume 就按这个事实判定成功）
+    bot.consume = vi.fn(async () => {
+      bot.food = 20;
+      bot.foodSaturation = 5;
+    });
+
+    const text = await prepareBlazeSkill(bot);
+    expect(text).not.toContain('没有食物');
+    expect(text).toContain('吃了 mutton');
+    expect(bot.equip).toHaveBeenCalled();
   });
 });
 

@@ -35,20 +35,61 @@ describe('describeFatalReason', () => {
 });
 
 describe('ActionManager 超时兜底', () => {
+  /** 造一个"正在跑动作"的 manager：requestInterrupt 一响就把 executing 落下，stop() 才会收手。 */
+  function runningManager() {
+    const agent: any = {
+      bot: { interrupt_code: false },
+      requestInterrupt: vi.fn(),
+      cleanKill: vi.fn(),
+    };
+    const manager = new ActionManager(agent);
+    agent.requestInterrupt = vi.fn(() => {
+      manager.executing = false;
+    });
+    manager.executing = true;
+    manager.currentActionLabel = 'stay';
+    return { agent, manager };
+  }
+
   it('agent 没有 history 时 _startTimeout 不会抛 .add 的 TypeError', async () => {
     vi.useFakeTimers();
     try {
-      const agent = {
-        bot: { interrupt_code: false },
-        requestInterrupt: vi.fn(),
-        cleanKill: vi.fn(),
-      };
-      const manager = new ActionManager(agent);
-      manager.executing = false;
+      const { agent, manager } = runningManager();
       manager._startTimeout(0.0001);
       await vi.advanceTimersByTimeAsync(20);
       expect(agent.cleanKill).not.toHaveBeenCalled();
       expect(manager.timedout).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  // 真机教训：`timedout` 是**当前动作**的属性。旧定时器在动作已经结束/换人之后
+  // 再把它贴上去，会让新动作的回执全走"超时"分支（真消息被吞）。
+  it('动作已经结束（executing=false）→ 到点的定时器什么都不做', async () => {
+    vi.useFakeTimers();
+    try {
+      const { agent, manager } = runningManager();
+      manager._startTimeout(0.0001);
+      manager.executing = false; // 动作在超时前正常收尾
+      await vi.advanceTimersByTimeAsync(20);
+      expect(manager.timedout).toBe(false);
+      expect(agent.cleanKill).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('动作已经被换掉（currentStartedAt 变了）→ 旧定时器不再贴 timedout', async () => {
+    vi.useFakeTimers();
+    try {
+      const { manager } = runningManager();
+      manager._startTimeout(0.0001);
+      // 换人：新动作已经开跑，`_executeAction` 会重置这两个字段。
+      manager.currentStartedAt = Date.now() + 1000;
+      manager.timedout = false;
+      await vi.advanceTimersByTimeAsync(20);
+      expect(manager.timedout).toBe(false);
     } finally {
       vi.useRealTimers();
     }

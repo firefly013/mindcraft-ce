@@ -4,8 +4,12 @@
 import { describe, expect, it } from 'vitest';
 import {
   DEFAULT_MAX_HEALTH,
+  FOOD_ALIASES,
+  FOOD_VALUE,
   fleeDestination,
+  foodValueOf,
   nearestThreat,
+  normalizeFoodName,
   pickBestFood,
   runEmergency,
   SAFE_SECONDS,
@@ -33,6 +37,84 @@ describe('pickBestFood', () => {
     expect(pickBestFood(['rotten_flesh', 'dried_kelp'])).toBe('rotten_flesh');
     expect(pickBestFood(['mystery_meat'])).toBe('mystery_meat');
     expect(pickBestFood([])).toBeNull();
+  });
+
+  it('熟食优先于生食（两代名字都算数）', () => {
+    expect(pickBestFood(['mutton', 'cooked_mutton'])).toBe('cooked_mutton');
+    expect(pickBestFood(['raw_mutton', 'cooked_mutton'])).toBe('cooked_mutton');
+    expect(pickBestFood(['beef', 'cooked_beef'])).toBe('cooked_beef');
+    expect(pickBestFood(['porkchop', 'cooked_porkchop'])).toBe('cooked_porkchop');
+    expect(pickBestFood(['chicken', 'cooked_chicken'])).toBe('cooked_chicken');
+    expect(pickBestFood(['cod', 'cooked_cod'])).toBe('cooked_cod');
+    expect(pickBestFood(['salmon', 'cooked_salmon'])).toBe('cooked_salmon');
+    expect(pickBestFood(['rabbit', 'cooked_rabbit'])).toBe('cooked_rabbit');
+    // 只有生食时也必须认（不许当作"没食物"）
+    expect(pickBestFood(['mutton'])).toBe('mutton');
+    expect(pickBestFood(['porkchop'])).toBe('porkchop');
+    // **这两条会在别名失效时变红**：旧表里 mutton 得 0 分，会输给干海带
+    expect(pickBestFood(['mutton', 'dried_kelp'])).toBe('mutton');
+    expect(pickBestFood(['porkchop', 'melon_slice'])).toBe('porkchop');
+  });
+});
+
+/**
+ * 真机事故（overnight_b 15:58）：`consume(mutton)` 吃的羊肉在旧表里查不到
+ * （表里只有 `raw_mutton`），于是"手上拿着食物却报没有食物"。这里把两代物品名
+ * 的**一致性**钉死，谁改表都会立刻红。
+ */
+describe('食物表的两代物品名', () => {
+  it('每个别名都等于它规范名的数值（同一份元组，不可能漂移）', () => {
+    const aliases = Object.entries(FOOD_ALIASES);
+    expect(aliases.length).toBeGreaterThanOrEqual(7);
+    for (const [alias, canonical] of aliases) {
+      const aliasValue = foodValueOf(alias);
+      const canonicalValue = foodValueOf(canonical);
+      expect(canonicalValue, `${canonical} 不在表里`).not.toBeNull();
+      expect(aliasValue, `${alias} 不在表里`).toEqual(canonicalValue);
+    }
+  });
+
+  it('1.13 短名与 1.21.2 长名都能查到同一份数值', () => {
+    const pairs: Array<[string, string, number]> = [
+      ['mutton', 'raw_mutton', 2],
+      ['beef', 'raw_beef', 3],
+      ['porkchop', 'raw_porkchop', 3],
+      ['chicken', 'raw_chicken', 2],
+      ['cod', 'raw_cod', 2],
+      ['salmon', 'raw_salmon', 2],
+      ['rabbit', 'raw_rabbit', 3],
+    ];
+    for (const [short, long, food] of pairs) {
+      expect(foodValueOf(short), short).toEqual([food, expect.any(Number)]);
+      expect(foodValueOf(short)).toEqual(foodValueOf(long));
+      // 展开进 FOOD_VALUE：旧调用点（FOOD_VALUE[name]）自动变正确
+      expect(FOOD_VALUE[short]).toBe(FOOD_VALUE[long]);
+    }
+  });
+
+  it('归一化：命名空间/大小写/空白都认；不是食物就是 null', () => {
+    expect(normalizeFoodName('minecraft:Raw_Mutton ')).toBe('raw_mutton');
+    expect(foodValueOf('minecraft:mutton')).toEqual([2, 1.8]);
+    expect(foodValueOf('MUTTON')).toEqual([2, 1.8]);
+    expect(foodValueOf('cooked_mutton')).toEqual([6, 9.6]);
+    expect(foodValueOf('stone')).toBeNull();
+    expect(foodValueOf('')).toBeNull();
+    expect(foodValueOf(null)).toBeNull();
+  });
+
+  it('熟食七件都在表里（熟食两代同名，不该靠别名兜）', () => {
+    for (const cooked of [
+      'cooked_mutton',
+      'cooked_beef',
+      'cooked_porkchop',
+      'cooked_chicken',
+      'cooked_cod',
+      'cooked_salmon',
+      'cooked_rabbit',
+    ]) {
+      expect(foodValueOf(cooked), cooked).not.toBeNull();
+      expect(FOOD_ALIASES[cooked], `${cooked} 不该是别名`).toBeUndefined();
+    }
   });
 });
 

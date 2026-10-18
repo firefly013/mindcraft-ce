@@ -26,7 +26,7 @@ import { applyScaffoldingBlocks, movementsFor, MAX_DROP_DOWN } from "../safety/m
 import { deepWaterAllowed } from "../safety/permits.js";
 import { assessStandingSpot, chooseSafeFleeTarget } from "../safety/flee.js";
 import { safeguards } from "../safety/safeguards.js";
-import { FOOD_VALUE } from "../safety/emergency.js";
+import { foodValueOf, normalizeFoodName } from "../safety/emergency.js";
 
 export function log(bot: any, ...messages: any[]): void {
     bot.output += messages.join(' ') + '\n';
@@ -2223,27 +2223,15 @@ export function formatFoodDelta(before: FoodState, after: FoodState): string {
     return `${formatFoodState(before)} → ${formatFoodState(after)}${same ? '（没有变化）' : ''}`;
 }
 
-/** 1.13 去掉了 `raw_` 前缀、1.21.2 又加回来——两个名字都得认。 */
-const RAW_FOOD_ALIASES: Readonly<Record<string, string>> = Object.freeze({
-    mutton: 'raw_mutton',
-    beef: 'raw_beef',
-    porkchop: 'raw_porkchop',
-    chicken: 'raw_chicken',
-    cod: 'raw_cod',
-    salmon: 'raw_salmon',
-    rabbit: 'raw_rabbit',
-});
-
-function stripNamespace(name: unknown): string {
-    return typeof name === 'string' ? name.trim().toLowerCase().replace(/^minecraft:/, '') : '';
-}
-
-/** 这个物品能不能吃（返回 [饥饿值, 饱和度]）；不能吃返回 null。两个版本的命名都认。 */
-export function foodValueOf(name: unknown): readonly [number, number] | null {
-    const key = stripNamespace(name);
-    if (key === '') return null;
-    return FOOD_VALUE[key] ?? FOOD_VALUE[RAW_FOOD_ALIASES[key] ?? ''] ?? null;
-}
+/**
+ * 这个物品能不能吃（返回 `[饥饿值, 饱和度]`）——**转发 `safety/emergency.ts` 的唯一入口**。
+ *
+ * 教训（overnight_b 15:58 + 本轮根治）：我先前在本文件里抄过一份"1.13 短名"别名表来
+ * 绕过 `FOOD_VALUE` 缺 `mutton` 的问题。两张表迟早漂移，而漂移的代价是**生存数值静默
+ * 算错**（拿着食物报"没有食物"）。现在真源只有一处：`emergency.ts` 的
+ * `FOOD_VALUE`（别名已展开）/ `foodValueOf` / `normalizeFoodName`。
+ */
+export { foodValueOf };
 
 /** 背包里所有能吃的东西（按"值不值得吃"排序），带数量。 */
 export function listEdibleItems(bot: any): EdibleItem[] {
@@ -2301,7 +2289,7 @@ function describeEdibles(edibles: readonly EdibleItem[]): string {
 
 /** 失败之后：说清换哪一种、够不够、要不要先烤/做，并给**一条**能照抄的调用。 */
 function consumeAdvice(bot: any, wanted: string, edibles: readonly EdibleItem[]): { text: string; call: string } {
-    const others = edibles.filter((e) => stripNamespace(e.name) !== stripNamespace(wanted));
+    const others = edibles.filter((e) => normalizeFoodName(e.name) !== normalizeFoodName(wanted));
     if (others.length > 0) {
         const best = others[0] as EdibleItem;
         return {

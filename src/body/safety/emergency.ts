@@ -32,8 +32,8 @@ export const ALWAYS_HOSTILE = new Set([
   'warden', 'breeze',
 ]);
 
-/** 饱食度/饱和度（原版数值；表里没有的食物排最后）。 */
-export const FOOD_VALUE: Readonly<Record<string, readonly [number, number]>> = Object.freeze({
+/** 饱食度/饱和度（原版数值；表里没有的食物排最后）。**规范名写一份**，别名由下面展开。 */
+const FOOD_VALUES: Readonly<Record<string, readonly [number, number]>> = Object.freeze({
   hay_block: [20, 20],
   rabbit_stew: [10, 12],
   cooked_beef: [8, 12.8],
@@ -76,6 +76,61 @@ export const FOOD_VALUE: Readonly<Record<string, readonly [number, number]>> = O
   pufferfish: [1, 0.2],
 });
 
+/**
+ * 同一件东西的两个名字：**1.13 去掉了 `raw_` 前缀，1.21.2 又加回来**。
+ *
+ * 真机事故（overnight_b 15:58）：`consume(mutton)` 吃的就是羊肉，而这张表里只有
+ * `raw_mutton`——于是 `countFood` 数不到手上的 mutton、`pickBestFood` 给它 0 分，
+ * `prepareBlaze` 会**一边拿着食物一边报"背包没有食物"**。这类"静默算错生存数值"
+ * 是最贵的 bug：模型据此判断没吃的了，然后饿着肚子去打架。
+ *
+ * 别名在下面**展开进 `FOOD_VALUE`**（值引用同一份元组，永不漂移），所以旧调用点
+ * （`FOOD_VALUE[name]`、`Object.keys(FOOD_VALUE)`）自动变正确；需要判断"能不能吃"
+ * 的新代码一律走 `foodValueOf()`。
+ */
+export const FOOD_ALIASES: Readonly<Record<string, string>> = Object.freeze({
+  // 1.13–1.21.1 的短名 → 表里的规范名（熟食两代同名，本来就在表里，不需要别名）
+  mutton: 'raw_mutton',
+  beef: 'raw_beef',
+  porkchop: 'raw_porkchop',
+  chicken: 'raw_chicken',
+  cod: 'raw_cod',
+  salmon: 'raw_salmon',
+  rabbit: 'raw_rabbit',
+});
+
+function expandAliases(): Record<string, readonly [number, number]> {
+  const out: Record<string, readonly [number, number]> = {};
+  for (const [alias, canonical] of Object.entries(FOOD_ALIASES)) {
+    const value = FOOD_VALUES[canonical];
+    if (value != null) out[alias] = value; // 同一个元组引用：两代名字不可能漂移
+  }
+  return out;
+}
+
+/** 饱食度/饱和度（原版数值；**别名已展开**：`mutton` 与 `raw_mutton` 都在表里）。 */
+export const FOOD_VALUE: Readonly<Record<string, readonly [number, number]>> = Object.freeze({
+  ...FOOD_VALUES,
+  ...expandAliases(),
+});
+
+/** 物品名归一化：去命名空间、去空白、转小写（`minecraft:Raw_Mutton ` → `raw_mutton`）。 */
+export function normalizeFoodName(name: unknown): string {
+  return typeof name === 'string' ? name.trim().toLowerCase().replace(/^minecraft:/, '') : '';
+}
+
+/**
+ * 这个物品能不能吃（返回 `[饥饿值, 饱和度]`）；不能吃返回 null。
+ *
+ * **唯一的查表入口**：别名已经展开进 `FOOD_VALUE`，所以这里就是一次查表——
+ * 各处（生存评估、紧急进食、consume 回执）都别再自己维护"什么算食物"的第二张表。
+ */
+export function foodValueOf(name: unknown): readonly [number, number] | null {
+  const key = normalizeFoodName(name);
+  if (key === '') return null;
+  return FOOD_VALUE[key] ?? null;
+}
+
 /** 血量掉到 max*0.3 以下就触发。死了（0）不逃：上报，不跑。 */
 export function shouldTriggerEmergency(
   health: unknown,
@@ -89,7 +144,8 @@ export function shouldTriggerEmergency(
 export function pickBestFood(names: string[]): string | null {
   let best: { name: string; score: number } | null = null;
   for (const name of names) {
-    const value = FOOD_VALUE[name] ?? [0, 0];
+    // 走 foodValueOf：两代物品名（mutton / raw_mutton）都认，熟食自然排在生食前面。
+    const value = foodValueOf(name) ?? [0, 0];
     const score = value[1] * 100 + value[0];
     if (best == null || score > best.score) best = { name, score };
   }

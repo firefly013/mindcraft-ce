@@ -56,6 +56,23 @@ export interface FullState {
   };
 }
 
+/**
+ * "现在在干什么"这一格怎么填（纯函数，便于单测）。
+ *
+ * ⚠️ **身体反射也算"在干活"**：`isIdle()` 只回答"模型动作占没占通道"，
+ * 而 autoPickup / escape 反射会驱动身体。真机 2026-10-18 15:56 的快照写
+ * `action idle` 而 speed 2.0-2.4，模型据此以为可以发动作，结果全被拒。
+ */
+export function activityFrom(
+    currentName: string | null,
+    isIdle: boolean,
+    actionLabel: string,
+): { current: string; kind: string } {
+    if (currentName != null && currentName !== '') return { current: currentName, kind: 'acting' };
+    if (!isIdle) return { current: actionLabel || 'Acting', kind: 'acting' };
+    return { current: 'Idle', kind: 'idle' };
+}
+
 export function getFullState(agent: any): FullState {
     const bot: any = agent.bot;
 
@@ -96,14 +113,7 @@ export function getFullState(agent: any): FullState {
         typeof (agent as { currentActionName?: () => string | null }).currentActionName === 'function'
             ? (agent as { currentActionName: () => string | null }).currentActionName()
             : null;
-    let activity: { current: string; kind: string };
-    if (currentName != null && currentName !== '') {
-        activity = { current: currentName, kind: 'acting' };
-    } else if (!agent.isIdle()) {
-        activity = { current: agent.actions.currentActionLabel || 'Acting', kind: 'acting' };
-    } else {
-        activity = { current: 'Idle', kind: 'idle' };
-    }
+    const activity = activityFrom(currentName, agent.isIdle(), agent.actions.currentActionLabel);
 
     const state: FullState = {
         name: agent.name,

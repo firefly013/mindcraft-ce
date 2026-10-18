@@ -484,6 +484,16 @@ const CONTROL_TOOL_NAMES = new Set(['allowDangerousOps', 'disableSafeguards', 'r
  */
 const REFLEX_SLOW_MS = 30_000;
 
+/**
+ * 单次保命处理的时长上限（毫秒）。
+ *
+ * 真机有一条 `{"reflex":"escape","outcome":"ok","ms":419426}`——**七分钟**里
+ * 身体一直被保命循环占着，模型的自救动作全被拒。保命循环当然是优先的，
+ * 但它**不能永远不还身体**：跑过这个上限就中断它、如实报告，把通道交还给模型
+ * （模型可以吃药/逃跑/换方向，而不是看着自己被打死还调不动）。
+ */
+export const REFLEX_MAX_MS = 120_000;
+
 export class MineflayerBody {
     readonly name: string;
     readonly countId: number;
@@ -1102,25 +1112,49 @@ export class MineflayerBody {
                 this.currentReflexStartedAt = started;
                 let outcome: 'ok' | 'failed' | 'partial' | 'aborted' = 'ok';
                 let detail = '';
+                let capTimer: ReturnType<typeof setTimeout> | null = null;
                 try {
-                    const result = await this.rescue(next.intent);
-                    if (result.reason === 'died') {
-                        outcome = 'failed';
-                        detail = '处理过程中死亡。';
-                    } else if (this.reflexAbortRequested || this.bot?.interrupt_code === true) {
-                        // 被 Stop / 模型抢占打断：如实说"中断"，别说成"脱险了"。
+                    // **保命循环也要有上限**：跑太久就中断并交还身体。
+                    const raced = await Promise.race([
+                        this.rescue(next.intent).then((r) => ({ kind: 'done' as const, r })),
+                        new Promise<{ kind: 'timeout' }>((resolve) => {
+                            capTimer = setTimeout(() => resolve({ kind: 'timeout' }), REFLEX_MAX_MS);
+                        }),
+                    ]);
+                    if (raced.kind === 'timeout') {
+                        // 让它收手（skills 认 interrupt_code），并把通道还给模型。
+                        this.reflexAbortRequested = true;
+                        try {
+                            this.requestInterrupt();
+                        } catch {
+                            // 中断失败也要如实报"交还身体"。
+                        }
                         outcome = 'aborted';
-                        detail = '被 Stop/急停中断（模型要用身体，或保命升级）。';
-                    } else if (result.escaped) {
-                        outcome = 'ok';
-                        detail = next.intent === 'surface' ? '已经把头露出水面。' : '已经脱离威胁。';
+                        detail =
+                            `保命处理跑了 ${Math.round(REFLEX_MAX_MS / 1000)} 秒还没脱险，` +
+                            '已中断并**交还身体通道**（模型可以吃药/逃跑/换方向自救了）。';
                     } else {
-                        outcome = 'partial';
-                        detail = '处理结束了，但没能确认脱险。';
+                        const result = raced.r;
+                        if (result.reason === 'died') {
+                            outcome = 'failed';
+                            detail = '处理过程中死亡。';
+                        } else if (this.reflexAbortRequested || this.bot?.interrupt_code === true) {
+                            // 被 Stop / 模型抢占打断：如实说"中断"，别说成"脱险了"。
+                            outcome = 'aborted';
+                            detail = '被 Stop/急停中断（模型要用身体，或保命升级）。';
+                        } else if (result.escaped) {
+                            outcome = 'ok';
+                            detail = next.intent === 'surface' ? '已经把头露出水面。' : '已经脱离威胁。';
+                        } else {
+                            outcome = 'partial';
+                            detail = '处理结束了，但没能确认脱险。';
+                        }
                     }
                 } catch (err: unknown) {
                     outcome = 'failed';
                     detail = err instanceof Error ? err.message : String(err);
+                } finally {
+                    if (capTimer != null) clearTimeout(capTimer);
                 }
                 this.currentReflexName = null;
                 this.currentReflexStartedAt = 0;

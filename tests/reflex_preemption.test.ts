@@ -14,7 +14,8 @@
  *   4. 保命优先：拾取占着身体时，保命需求立刻抢占；敌人在附近就不重启拾取。
  */
 import { describe, expect, it, vi } from 'vitest';
-import { MineflayerBody } from '../src/body/mineflayer_body.js';
+import { MineflayerBody, REFLEX_MAX_MS } from '../src/body/mineflayer_body.js';
+import { activityFrom } from '../src/body/library/full_state.js';
 import {
   PICKUP_GIVE_UP_ATTEMPTS,
   PICKUP_GIVE_UP_MS,
@@ -96,6 +97,19 @@ describe('① 快照不许说谎：谁占着身体就报谁', () => {
     // 这正是 live_state 渲染 `action ${meta.currentAction ?? 'idle'}` 的输入。
     expect(body.sampleContext().currentAction).toBe('escape');
     expect(body.reflexStatus()).not.toBeNull();
+  });
+
+  it('fullState 的 activity 同一口径：反射在跑就不是 Idle', () => {
+    // 反射在跑（isIdle() 仍是 true——它只代表"模型动作没占通道"）。
+    expect(activityFrom('escape', true, '')).toEqual({ current: 'escape', kind: 'acting' });
+    expect(activityFrom('autoPickup', true, '')).toEqual({ current: 'autoPickup', kind: 'acting' });
+    // 模型动作在跑：报它自己的标签。
+    expect(activityFrom('goToCoordinates', false, 'goToCoordinates')).toEqual({
+      current: 'goToCoordinates',
+      kind: 'acting',
+    });
+    // 真的什么都没跑：这才是 Idle。
+    expect(activityFrom(null, true, '')).toEqual({ current: 'Idle', kind: 'idle' });
   });
 });
 
@@ -241,5 +255,31 @@ describe('④ 保命优先：抢占拾取，且敌人附近不重启拾取', () 
 
   it('拾取超时时间没被顺手改小（真机 8 格要走 12 秒）', () => {
     expect(PICKUP_TIMEOUT_MS).toBe(12_000);
+  });
+
+  it('保命处理也有上限：跑满就中断并**交还身体**，不是无限占着（真机那次 escape 419 秒）', async () => {
+    vi.useFakeTimers();
+    try {
+      const events: any[] = [];
+      const requestInterrupt = vi.fn();
+      const body = bareBody({
+        reflexQueue: [{ reflex: 'escape', intent: 'flee' }],
+        // 永不作答的保命处理：模拟"跑了 419 秒还没脱险"
+        rescue: () => new Promise(() => {}),
+        requestInterrupt,
+        notify: (type: string, _kind: unknown, _level: unknown, payload: unknown) => events.push({ type, payload }),
+      });
+      const pending = body.drainReflexes();
+      await vi.advanceTimersByTimeAsync(REFLEX_MAX_MS + 100);
+      await pending;
+      const done = events.find((e) => e.type === 'reflex.done' && e.payload.reflex === 'escape');
+      expect(done.payload.outcome).toBe('aborted');
+      expect(done.payload.detail).toContain('交还身体');
+      expect(requestInterrupt).toHaveBeenCalled();
+      // 交还之后身体是空的：模型可以发动作了（currentActionName 不再是 escape）。
+      expect(body.currentActionName()).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
