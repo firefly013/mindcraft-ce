@@ -1262,6 +1262,141 @@ export function planRecovery(input: RecoveryInput): RecoveryPlan {
     return { itemOutlook, secondsLeft, steps, message };
 }
 
+// ============================ 九·B、复活末影龙（把打完的世界变回能打） ============================
+/**
+ * 复活仪式要 **4 颗末影水晶**，放在返回门基座环上的四个缺口里。
+ *
+ * 为什么需要它：这个世界**已经通关了**（`DragonFight.DragonKilled=1`），
+ * 正常流程会直接走到 `done` —— 也就是说拆水晶和床炸这段代码在真机上**永远跑不到**。
+ * 原版给了唯一一条回去的路：往返回门的四个缺口各放一颗末影水晶，龙就会重新出现
+ * （10 根柱子上的水晶也会一起回来）。
+ */
+export const DRAGON_REVIVE_CRYSTALS = 4;
+
+/** 4 颗末影水晶的材料（1 颗 = 1 恶魂之泪 + 1 末影之眼 + 7 玻璃）。 */
+export const END_CRYSTAL_RECIPE = Object.freeze({ ghastTears: 4, eyesOfEnder: 4, glass: 28 });
+
+/** 缺材料时给模型看的采购清单（话写全，它才知道去哪儿弄）。 */
+export const END_CRYSTAL_SHOPPING_LIST: readonly string[] = Object.freeze([
+    '恶魂之泪 ×4（下界打恶魂）',
+    '末影之眼 ×4（= 末影珍珠 ×4，打末影人 + 烈焰粉 ×4 → 烈焰棒 ×2，打烈焰人）',
+    '玻璃 ×28（= 沙子 ×28 烧出来）',
+]);
+
+export type CardinalDirection = 'north' | 'east' | 'south' | 'west';
+
+/** 四个正方向（Minecraft：-Z 北，+X 东，+Z 南，-X 西）。 */
+export const CARDINAL_DIRECTIONS: ReadonlyArray<{ point: CardinalDirection; dx: number; dz: number }> = Object.freeze([
+    { point: 'east', dx: 1, dz: 0 },
+    { point: 'west', dx: -1, dz: 0 },
+    { point: 'south', dx: 0, dz: 1 },
+    { point: 'north', dx: 0, dz: -1 },
+]);
+
+export const CARDINAL_LABELS: Record<CardinalDirection, string> = Object.freeze({
+    north: '北(-Z)',
+    east: '东(+X)',
+    south: '南(+Z)',
+    west: '西(-X)',
+});
+
+export interface ReviveSpotPlan {
+    ok: boolean;
+    /** 用到的传送门中心（**观察值**，不是写死的常量）。 */
+    center: Vec3;
+    /** 找到的缺口（不足 4 个时就是找到的那几个）。 */
+    spots: Vec3[];
+    /** 哪个方向没找到缺口。 */
+    missing: CardinalDirection[];
+    /** 哪个方向有格子但被别的东西占了（第一格）。 */
+    blocked: Array<{ direction: CardinalDirection; cell: Vec3; block: string | null }>;
+    reason: string;
+}
+
+/**
+ * 从**真实方块**推出返回门基座上的四个缺口。
+ *
+ * 判据（不写死 `(0,62,0)`，也不写死"就在 y+1"）：
+ * 沿每个正方向、在中心 y 附近几层里找一个**空格**，要求
+ *   1. 正下方是基座方块（默认 `bedrock`）—— 缺口的底；
+ *   2. **垂直于半径方向的两侧同一层也是基座** —— 这条才是"环上的缺口"的签名。
+ *
+ * 第 2 条是必需的，不是洁癖：只按"空格 + 下面是基座"找，**环上方那一层**
+ * （`(±1, y+1, 0)`：空气、底下正是基座）也会中选，于是水晶会被放到错误的高度。
+ * 环上缺口两侧是环，环上方两侧是空气 —— 这是唯一能区分两者的判据。
+ *
+ * 读不到方块（null）一律跳过：宁可说"找不到缺口"，也不把水晶放错地方。
+ */
+export function planDragonReviveSpots(input: {
+    center: Vec3;
+    probe: (p: Vec3) => string | null;
+    /** 基座方块名，默认 `bedrock`。 */
+    baseName?: string;
+    /** 中心 y 往上/往下各搜几层，默认 2（中心 y 常有一两格的观测误差）。 */
+    yTolerance?: number;
+}): ReviveSpotPlan {
+    const base = input.baseName ?? 'bedrock';
+    const tolerance = Math.max(0, Math.floor(input.yTolerance ?? 2));
+    const cx = Math.floor(input.center.x);
+    const cz = Math.floor(input.center.z);
+    const cy = Math.floor(input.center.y);
+    const center = vec(cx, cy, cz);
+    const nameAt = (p: Vec3): string | null => input.probe(p);
+    const isBase = (p: Vec3): boolean => nameAt(p) === base;
+
+    const candidates = new Map<CardinalDirection, { cell: Vec3; score: number }>();
+    const blockedFirst = new Map<CardinalDirection, { cell: Vec3; block: string | null }>();
+
+    for (const dir of CARDINAL_DIRECTIONS) {
+        for (let dy = -tolerance; dy <= tolerance; dy++) {
+            for (let r = 1; r <= 3; r++) {
+                const cell = vec(cx + dir.dx * r, cy + dy, cz + dir.dz * r);
+                const here = nameAt(cell);
+                if (here == null) continue; // 读不到 → 不猜
+                if (here !== 'air' && here !== 'cave_air' && here !== 'void_air') {
+                    // 有东西占着：记住第一格，最后如实报出来
+                    if (!blockedFirst.has(dir.point)) blockedFirst.set(dir.point, { cell, block: here });
+                    continue;
+                }
+                if (!isBase(vec(cell.x, cell.y - 1, cell.z))) continue; // 缺口底下得是基座
+                // 环的签名：垂直于半径方向的两侧同层也是基座
+                const sideA = vec(cell.x - dir.dz, cell.y, cell.z - dir.dx);
+                const sideB = vec(cell.x + dir.dz, cell.y, cell.z + dir.dx);
+                if (!isBase(sideA) || !isBase(sideB)) continue;
+                const score = Math.abs(dy) * 10 + r;
+                const current = candidates.get(dir.point);
+                if (current == null || score < current.score) candidates.set(dir.point, { cell, score });
+                break; // 这个高度已经找到一个，换下一个高度
+            }
+        }
+    }
+
+    const spots: Vec3[] = [];
+    const missing: CardinalDirection[] = [];
+    const blocked: ReviveSpotPlan['blocked'] = [];
+    for (const dir of CARDINAL_DIRECTIONS) {
+        const found = candidates.get(dir.point);
+        if (found != null) {
+            spots.push(found.cell);
+            continue;
+        }
+        missing.push(dir.point);
+        const blockedCell = blockedFirst.get(dir.point);
+        if (blockedCell != null) blocked.push({ direction: dir.point, ...blockedCell });
+    }
+
+    const ok = spots.length === DRAGON_REVIVE_CRYSTALS;
+    const reason = ok
+        ? `返回门 (${cx},${cy},${cz}) 的四个缺口都在：${spots.map((s) => `(${s.x},${s.y},${s.z})`).join('、')}。`
+        : `只找到 ${spots.length}/${DRAGON_REVIVE_CRYSTALS} 个缺口——缺 ${missing.map((d) => CARDINAL_LABELS[d]).join('、')}` +
+            (blocked.length > 0
+                ? `；其中 ${blocked.map((b) => `${CARDINAL_LABELS[b.direction]} 的 (${b.cell.x},${b.cell.y},${b.cell.z}) 被 ${b.block} 占着`).join('、')}。`
+                : '。') +
+            '先把这几格清成空格（底下必须是基座、两侧也要是基座）再复活。';
+
+    return { ok, center, spots, missing, blocked, reason };
+}
+
 // ============================ 十、阶段状态机（接主循环用） ============================
 /**
  * 全流程阶段：**从"什么都没有"到"龙死"**。
@@ -1314,6 +1449,8 @@ export interface EndgameState {
     arrows?: number;
     /** 床的数量（没床就只能用箭/砍头打龙）。 */
     beds?: number;
+    /** 末影水晶（复活龙用）的数量。读不到就别填。 */
+    endCrystals?: number;
     /** 要塞找到了没有。 */
     strongholdFound?: boolean;
     /** 12 颗眼填满了没有。 */
@@ -1530,15 +1667,32 @@ export function nextEndgameStep(state: EndgameState): EndgameStepAdvice {
     }
     // 龙死了（实体消失）或血量读到 0 —— 两个信号任一成立就算打完。
     if (state.dragonAlive === false || state.dragonHealth === 0) {
-        return {
-            phase: 'done',
-            action: '龙死了：进 (0,64,0) 的出口传送门回主世界（会放终末之诗），记得捡龙蛋和 12000 经验。',
-            nextPhase: 'done',
-            reason:
-                state.dragonHealth === 0
-                    ? 'Boss 已经打完（血量 0）。'
-                    : '龙实体和 boss bar 都不在了，按"打完"处理；**如果还能看见它在飞，先调 endFightStatus 复核**再走。',
-        };
+        const crystals = state.endCrystals;
+        const hasCrystals = crystals != null && crystals >= DRAGON_REVIVE_CRYSTALS;
+        const crystalText = crystals == null ? '（末影水晶数量读不到）' : `你现在有 ${crystals} 个末影水晶`;
+        const shopping = `要凑 ${DRAGON_REVIVE_CRYSTALS} 颗末影水晶：${END_CRYSTAL_SHOPPING_LIST.join('；')}`;
+        const reviveDoor = hasCrystals
+            ? `**要再打一次（验证拆水晶/床炸流程）就往返回门的四个缺口各放一颗末影水晶**（${crystalText}）——龙会重新出现，柱子上的 10 颗水晶也一起回来。`
+            : `要再打一次得先凑够 4 颗末影水晶（${crystalText}）：${shopping}。`;
+        const reasonTail =
+            state.dragonHealth === 0
+                ? 'Boss 已经打完（血量 0）。'
+                : '龙实体和 boss bar 都不在了，按"打完"处理；**如果还能看见它在飞，先调 endFightStatus 复核**再走。';
+        return state.inEnd === true
+            ? {
+                  phase: 'done',
+                  action: `龙已经死了。两个选择：**要走**就进 (0,62,0) 的出口传送门（返回门）回主世界（会放终末之诗，别忘了捡龙蛋和 12000 经验）；${reviveDoor}`,
+                  tool: hasCrystals ? 'reviveDragon' : 'craft',
+                  nextPhase: 'done',
+                  reason: reasonTail,
+              }
+            : {
+                  phase: 'done',
+                  action: `龙已经死了（你在末地外面）。要回末地就从记下来的传送门再进去（激活过的门一直亮着）；${reviveDoor}`,
+                  tool: 'enterEnd',
+                  nextPhase: 'done',
+                  reason: reasonTail,
+              };
     }
     if (state.beds != null && state.beds <= 0) {
         // 没床 = 主输出没了。在末地出不去（出口要龙死才开），所以只能改打法。

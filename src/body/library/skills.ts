@@ -3040,6 +3040,16 @@ export async function goToPosition(bot: any, x: number | null, y: number | null,
             const leg = legs[i] as PathLeg;
             const lastLeg = i === legs.length - 1;
             const label = legs.length > 1 ? `第 ${i + 1}/${legs.length} 段` : undefined;
+            // 每一段**开始就报一行**：长导航静默几十秒时，模型至少知道自己在第几段。
+            if (legs.length > 1 && i > 0) {
+                const now: any = bot?.entity?.position;
+                const left = now == null ? null : Math.round(Math.hypot((x as number) - now.x, (z as number) - now.z));
+                log(
+                    bot,
+                    `${label}：开始走 (${Math.round(leg.x)},${Math.round(leg.y)},${Math.round(leg.z)})` +
+                        (left == null ? '。' : `，还剩约 ${left} 格。`),
+                );
+            }
             // 中间段只要求"进到那一格附近"（1 格），最后一段才用调用方的 min_distance。
             const outcome = await navigateLegWithLadder(bot, leg, lastLeg ? min_distance : 1, label);
             if (outcome.ok) {
@@ -3143,6 +3153,12 @@ async function navigateLegWithLadder(
             step.side === 0 ? leg : lateralOffsetWaypoint(here, leg, step.side as 1 | -1);
         const goal = new (pf as any).goals.GoalNear(waypoint.x, waypoint.y, waypoint.z, minDistance);
         const prefix = label != null ? label + '·第 ' + (step.attempt + 1) + ' 档' : '第 ' + (step.attempt + 1) + ' 档';
+        // **换档立刻报一行**（不等这一档跑完）。真机反馈（overnight_b 15:16）：
+        // goToCoordinates 静默 60 秒，只在心跳时回一句"还在跑"，模型分不清
+        // "在慢慢走"和"彻底卡住"。第几段、第几档、这一档在试什么，身体此刻就知道。
+        if (step.attempt > 0 || step.side !== 0) {
+            log(bot, prefix + '：' + step.what + '（马上试这一档）。');
+        }
         let outcome: PathfindOutcome;
         try {
             outcome = await goToGoalDetailed(bot, goal, {

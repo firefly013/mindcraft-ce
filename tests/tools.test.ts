@@ -11,6 +11,7 @@ import { stripBang } from '../src/shared/tools.js';
 import { executeToolCall } from '../src/body/commands/execute.js';
 import { toolDeclarations } from '../src/body/commands/registry.js';
 import { queryList } from '../src/body/commands/queries.js';
+import { LOCAL_WIKI_LABEL } from '../src/shared/wiki_local.js';
 import type { AgentCommand } from '../src/body/commands/actions.js';
 
 /** 与生产一致：工具目录来自身体握手报上来的声明。 */
@@ -251,19 +252,23 @@ describe('SearchWiki', () => {
     try {
       const out = (await searchWiki.perform({}, 'diamond')) as string;
       expect(out).toContain('503');
-      expect(out).toContain('no information');
+      // 网络失败 → 走**离线兜底**，但必须明说这是本地资料，不是 wiki 原文。
+      expect(out).toContain(LOCAL_WIKI_LABEL);
       expect(out).not.toContain('Service Unavailable');
     } finally {
       vi.stubGlobal('fetch', original);
     }
   });
 
-  it('keeps the friendly 404 message for a missing page', async () => {
+  it('本地资料和网络都答不上来时如实说没有（不编内容）', async () => {
     const original = globalThis.fetch;
     vi.stubGlobal('fetch', () => Promise.resolve({ ok: false, status: 404, text: () => Promise.resolve('') }));
     try {
       const out = (await searchWiki.perform({}, 'definitely_not_a_page')) as string;
-      expect(out).toContain('was not found on the Minecraft Wiki');
+      expect(out).toContain('404');
+      expect(out).toContain('也没有这个名字');
+      // 并指向真正离线可用的工具，而不是让模型继续换关键词。
+      expect(out).toContain('getCraftingPlan');
     } finally {
       vi.stubGlobal('fetch', original);
     }

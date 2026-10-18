@@ -323,6 +323,8 @@ describe('goToPosition：长目标真的分段走（每段一次 A*）', () => {
     expect(bot._calls).toHaveLength(2);
     expect(bot.output).toContain('换下一档');
     expect(bot.output).toContain('延长算路到 30 秒');
+    // **换档要立刻报一行**（真机 15:16：静默 60 秒只有心跳那句"还在跑"）。
+    expect(bot.output).toContain('第 2 档：延长算路到 30 秒（马上试这一档）');
   });
 
   it('中途被打断：不再往下试，如实报中断', async () => {

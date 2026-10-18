@@ -332,13 +332,57 @@ export function getAllBiomes(): any {
     return mcdata.biomes;
 }
 
-export function getItemCraftingRecipes(itemName: string): Array<[Record<string, number>, { craftedCount: number }]> | null {    const itemId: number | null = getItemId(itemName);
-    if (itemId === null || !mcdata.recipes[itemId]) {
+/**
+ * 离线配方/物品资料的数据源（给 `searchWiki` 的本地兜底用）。
+ *
+ * 优先用**连上服务器之后那份 `mcdata`**——它带 `expandTagRecipes` 的 tag 补丁，
+ * 和 `getItemCraftingRecipes` 是同一份数据（不复制第二份真相）。
+ * 没连服务器（单测、离线部署、重启后的头几秒）就按 settings 的版本自己造一份，
+ * 逐版本退让；**任何情况下都不抛**，读不到就返回 null，由调用方如实报"本地也没有"。
+ */
+let fallbackRecipeData: any = null;
+export function getRecipeData(): any {
+    if (mcdata != null) return mcdata;
+    if (fallbackRecipeData != null) return fallbackRecipeData;
+    const candidates: unknown[] = [mc_version, '1.20.6', '1.20.4', '1.21.4'];
+    for (const candidate of candidates) {
+        if (typeof candidate !== 'string' || candidate === '' || candidate === 'auto') continue;
+        try {
+            const data = minecraftData(candidate);
+            expandTagRecipes(data);
+            fallbackRecipeData = data;
+            return fallbackRecipeData;
+        } catch {
+            // 这个版本拿不到就试下一个。
+        }
+    }
+    return null;
+}
+
+/**
+ * 把 minecraft-data 的配方表归一化成 `[材料名→数量, { craftedCount }]`。
+ *
+ * **纯函数**：显式吃一份 dataset。这样"连上服务器那份"（带 tag 补丁）和
+ * searchWiki 的离线兜底那份共用同一份归一化逻辑——两份各写一遍迟早漂移
+ * （盾牌那次 `requires oak_planks` 的假提示就是这么来的）。
+ */
+export function normalizeRecipes(data: any, itemName: string): Array<[Record<string, number>, { craftedCount: number }]> | null {
+    const itemId: number | null = typeof data?.itemsByName?.[itemName]?.id === 'number' ? data.itemsByName[itemName].id : null;
+    if (itemId === null || !data?.recipes?.[itemId]) {
         return null;
     }
+    const nameOfId = (id: unknown): string | null => {
+        if (typeof id !== 'number') return null;
+        const direct = data?.items?.[id];
+        if (typeof direct?.name === 'string') return direct.name;
+        for (const [name, def] of Object.entries(data?.itemsByName ?? {})) {
+            if ((def as any)?.id === id) return name;
+        }
+        return null;
+    };
 
     const recipes: Array<[Record<string, number>, { craftedCount: number }]> = [];
-    for (const r of mcdata.recipes[itemId] as any[]) {
+    for (const r of data.recipes[itemId] as any[]) {
         const recipe: Record<string, number> = {};
         let ingredients: any[] = [];
         if (r.ingredients) {
@@ -347,16 +391,15 @@ export function getItemCraftingRecipes(itemName: string): Array<[Record<string, 
             ingredients = r.inShape.flat();
         }
         for (const ingredient of ingredients) {
-            const ingredientName = getItemName(ingredient);
+            const ingredientId = typeof ingredient === 'object' && ingredient !== null ? ingredient.id : ingredient;
+            const ingredientName = nameOfId(ingredientId);
             if (ingredientName === null) continue;
-            if (!recipe[ingredientName])
-                recipe[ingredientName] = 0;
-            recipe[ingredientName]++;
+            if (!recipe[ingredientName]) recipe[ingredientName] = 0;
+            recipe[ingredientName] += typeof ingredient === 'object' && ingredient !== null && typeof ingredient.count === 'number'
+                ? ingredient.count
+                : 1;
         }
-        recipes.push([
-            recipe,
-            { craftedCount: r.result.count },
-        ]);
+        recipes.push([recipe, { craftedCount: r.result.count }]);
     }
     // sort recipes by if their ingredients include common items
     const commonItems = ['oak_planks', 'oak_log', 'coal', 'cobblestone'];
@@ -367,6 +410,10 @@ export function getItemCraftingRecipes(itemName: string): Array<[Record<string, 
     });
 
     return recipes;
+}
+
+export function getItemCraftingRecipes(itemName: string): Array<[Record<string, number>, { craftedCount: number }]> | null {
+    return normalizeRecipes(mcdata, itemName);
 }
 
 export function isSmeltable(itemName: string): boolean {

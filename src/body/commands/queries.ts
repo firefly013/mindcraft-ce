@@ -4,8 +4,60 @@ import * as mc from '../data/mcdata.js';
 import { load } from 'cheerio';
 import { td, tp } from '../../shared/prompts.js';
 import { renderSections, type LiveSectionKey } from '../../shared/live_state.js';
+import { matchWikiName, renderLocalWikiAnswer } from '../../shared/wiki_local.js';
 import { sampleLiveState } from '../live_state.js';
 import type { AgentCommand } from './actions.js';
+
+/** wiki 请求的超时（毫秒）。站点被墙时会一直挂着，不能让它拖住整个动作。 */
+const WIKI_FETCH_TIMEOUT_MS = 8_000;
+
+/** 带超时的 wiki 抓取：超时/网络错误都算"这条路没通"，交给本地兜底。 */
+async function fetchWikiPage(query: string): Promise<Response> {
+    const url = `https://minecraft.wiki/w/${encodeURIComponent(query)}`;
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), WIKI_FETCH_TIMEOUT_MS);
+    try {
+        return await fetch(url, {
+            signal: controller.signal,
+            // 正常的浏览器头也一起带上：真机 403 不是 UA 的问题，但带上更体面。
+            headers: { 'User-Agent': 'Mozilla/5.0 (compatible; mindcraft-ce/1.0)', Accept: 'text/html' },
+        });
+    } finally {
+        clearTimeout(timer);
+    }
+}
+
+/**
+ * 本地兜底：把 query 对上 minecraft-data 里的物品/方块，渲染成可行动的答案。
+ *
+ * 对不上（或数据没加载）返回 null——**不许猜、不许编**。
+ */
+function localWikiLookup(query: string, why: string | null): string | null {
+    const data = mc.getRecipeData();
+    if (data == null) return null;
+    const items = (data.itemsByName ?? {}) as Record<string, any>;
+    const blocks = (data.blocksByName ?? {}) as Record<string, any>;
+    const name = matchWikiName(query, [...Object.keys(items), ...Object.keys(blocks)]);
+    if (name == null) return null;
+    const item = items[name] ?? null;
+    const block = blocks[name] ?? null;
+    if (item == null && block == null) return null;
+    let recipes: Array<[Record<string, number>, { craftedCount: number }]> | null = null;
+    try {
+        recipes = mc.normalizeRecipes(data, name);
+    } catch {
+        recipes = null; // 配方表读不到就只报"这是什么"，别把整条兜底也弄丢。
+    }
+    return renderLocalWikiAnswer({
+        query,
+        name,
+        item,
+        block,
+        recipes,
+        displayName: (n: string) => items[n]?.displayName ?? n,
+        why,
+    });
+}
 
 const pad = (str: string): string => {
     return '\n' + str + '\n';
@@ -201,36 +253,45 @@ export const queryList: AgentCommand[] = [
                     return `Wiki lookup for "${query}" failed. Treat this as no information, not as an answer.`;
                 }
             }
-            const url = `https://minecraft.wiki/w/${query}`;
+            // ── 网络这条路（真机上**基本注定失败**）─────────────────────
+            // 这台机器访问 `https://minecraft.wiki/w/Bow` 是 **HTTP 403**（带正常
+            // 浏览器 UA/Accept 也一样），example.com 却是 200——站点把我们挡了。
+            // 所以 403/超时/空正文都不是"没有这个条目"，必须换本地资料回答。
+            let why: string | null = null;
             try {
-                const response = await fetch(url);
+                const response = await fetchWikiPage(query);
                 if (response.status === 404) {
-                  return `${query} was not found on the Minecraft Wiki. Try adjusting your search term.`;
+                    why = 'wiki 上没有这个页面（HTTP 404）';
+                } else if (!response.ok) {
+                    // 非 404 的失败（403/429/5xx）**绝不能**接着解析错误页：
+                    // 那个页面上的文字会被当成知识回给模型，等于把故障当事实。
+                    why = `wiki 拒绝了这次查询（HTTP ${response.status}${response.status === 403 ? '，这台机器被挡了' : ''}）`;
+                } else {
+                    const html = await response.text();
+                    const $ = load(html);
+                    const parserOutput = $('div.mw-parser-output');
+                    parserOutput.find('table.navbox').remove();
+                    const text = parserOutput.text().trim();
+                    if (text === '') why = 'wiki 页面没有可读正文';
+                    else return text; // 真拿到了：原样返回（不是兜底）
                 }
-                if (!response.ok) {
-                  // 非 404 的失败（403/429/5xx）不能接着解析错误页：
-                  // 那个页面上的文字会被当成知识回给模型，等于把故障当事实。
-                  return `Wiki lookup for "${query}" failed (HTTP ${response.status}). Treat this as no information, not as an answer.`;
-                }
-                const html = await response.text();
-                const $ = load(html);
+            } catch (error: unknown) {
+                const message = error instanceof Error ? error.message : String(error);
+                why = `wiki 查询失败（网络/超时/解析：${message}）`;
+                console.error('Error fetching or parsing HTML:', error);
+            }
 
-                const parserOutput = $("div.mw-parser-output");
+            // ── 本地兜底：用 minecraft-data 回答"这是什么/怎么做"──────
+            const local = localWikiLookup(query, why);
+            if (local != null) return local;
 
-                parserOutput.find("table.navbox").remove();
-
-                const divContent = parserOutput.text();
-                const text = divContent.trim();
-                if (text === '') {
-                  return `The Minecraft Wiki page for "${query}" had no readable content. Treat this as no information.`;
-                }
-                return text;
-              } catch (error: unknown) {
-                console.error("Error fetching or parsing HTML:", error);
-                // 抓取失败必须如实报"没有信息"：以前把异常文本直接当
-                // 知识回给模型，等于教它把故障当事实。
-                return `Wiki lookup for "${query}" failed (network or parse error). Treat this as no information, not as an answer.`;
-              }
+            // ── 两边都没有：如实说没有，并指向能离线用的工具 ──────────
+            return (
+                `searchWiki 拿不到「${query}」：${why}；本地资料（minecraft-data 离线兜底）里也没有这个名字。\n` +
+                '这不是"你搜错了"，是这台机器访问不了 wiki。别再换关键词重试了，改用能离线工作的工具：\n' +
+                '① 配方/材料数量：getCraftingPlan(targetItem=<名字>, quantity=<数量>)；\n' +
+                '② 准确名字看 stats 里的背包/附近方块（都是 snake_case，例如 bow、oak_planks、crafting_table）。'
+            );
         }
     },
     {

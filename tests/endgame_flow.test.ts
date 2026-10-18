@@ -34,7 +34,7 @@ import { endgameStatusReport } from '../src/body/library/endgame_routine.js';
 
 const CATALOG = new Set(toolNames());
 
-/** 终态：没有"下一步工具"是对的，其他阶段都必须给一个真实存在的工具。 */
+/** 终态：`done` 现在也**给得出动作**（回主世界 / 花 4 颗末影水晶复活龙再打一次），只是不再推进阶段。 */
 const TERMINAL_PHASES: readonly EndgamePhase[] = ['done'];
 
 const ALL_PHASES: readonly EndgamePhase[] = [
@@ -63,12 +63,12 @@ function step(state: EndgameState) {
     // 不变式 1：有话说（说清下一步）
     expect(advice.action.trim().length, `${advice.phase} 没给出动作`).toBeGreaterThan(8);
     expect(advice.reason.trim().length, `${advice.phase} 没给出原因`).toBeGreaterThan(4);
-    // 不变式 2：工具真实存在
-    if (TERMINAL_PHASES.includes(advice.phase)) {
-        expect(advice.tool, `${advice.phase} 是终态，不该再建议工具`).toBeUndefined();
-    } else {
+    // 不变式 2：工具真实存在。`done` 是终态，允许没有工具（但**有工具就必须是真的**）。
+    if (!TERMINAL_PHASES.includes(advice.phase)) {
         expect(advice.tool, `${advice.phase} 没有工具 → 模型会卡住`).toBeDefined();
-        expect(CATALOG.has(advice.tool as string), `${advice.phase} 建议的 ${advice.tool} 不在工具表里`).toBe(true);
+    }
+    if (advice.tool != null) {
+        expect(CATALOG.has(advice.tool), `${advice.phase} 建议的 ${advice.tool} 不在工具表里`).toBe(true);
     }
     return advice;
 }
