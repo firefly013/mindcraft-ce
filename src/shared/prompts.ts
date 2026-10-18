@@ -334,6 +334,14 @@ export const TOOL_TEXT: Record<string, { description: string; params: Record<str
       max_ms: '时间预算毫秒（默认 300000 = 5 分钟，10000~300000）。到点自己收手并给完整回执。',
     },
   },
+  mineTunnel: {
+    description: '沿直线挖隧道（下界岩体里赶路比 goToCoordinates 可控）：每步「读格子 → 判危险 → 挖 → 验证真的变空气 → 走进去」，每 16 格报进度，挖满就停并给续挖调用。安全门：前方岩浆/水、脚下悬空、镐快用完、没镐且挖不动、掉血/低血、被 Stop —— 触发就停手并点名格子。挖完还是原方块就如实说"挖不动"，绝不假装挖通。',
+    params: {
+      length: '这次往前挖多少格（默认 32，1~256）。长距离反复调用它。',
+      height: '隧道高度（默认 2 = 能站着走，1~3）。',
+      direction: '方向 `+x`/`-x`/`+z`/`-z`（也认 east/west/north/south、东南西北）。留空 = 按当前朝向推；回执写明实际方向，续挖照抄。',
+    },
+  },
 };
 
 /** 取工具描述 */

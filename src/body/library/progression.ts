@@ -1130,3 +1130,526 @@ export async function collectDrops(
     const total = Math.max(startTotal, currentGain(bot, deps.items, deps.baselineAtStart));
     return { picked, total };
 }
+
+// ─────────────────────────── 直线隧道（mineTunnel） ───────────────────────────
+//
+// 为什么要有（overnight_a 2026-10-18 16:31 的自己汇报）：下界长途找要塞时
+// "这一带 **y=70-85 是致密石英/金矿岩体，寻路必须一路挖**"，于是 goToCoordinates
+// 又慢又险——30 个回合净推进约 100 格、死 3 次（岩浆 / 恶魂 / 疣猪顶下悬崖），
+// 还经常 `stuckForSeconds: 60/73`。模型自己给出的替代方案就是"沿某方向直线挖隧道
+// N 格，我自己在 y=70 挖一条走廊反而更可控"。
+//
+// 寻路在岩体里本来就要挖，差别只在**可不可控**：隧道的每一步都是
+// 「读格子 → 判危险 → 挖 → **验证明明变成空气** → 走进去 → 记进度」，
+// 任何一条安全门触发就停手并给完整回执（和 exploreFor / consume 同一个口径：
+// 给事实、给一条能照抄的下一步、绝不给堆栈）。
+
+export const DEFAULT_TUNNEL_LENGTH = 32;
+/** 单次调用最多挖多少格（模型会反复调用，单次别太长）。 */
+export const MAX_TUNNEL_LENGTH = 256;
+export const DEFAULT_TUNNEL_HEIGHT = 2;
+export const MAX_TUNNEL_HEIGHT = 3;
+/** 每挖这么多格报一次进度。 */
+export const TUNNEL_PROGRESS_EVERY = 16;
+/** 内部时间预算：到点**自己收手**并给完整回执（同 exploreFor 的教训）。 */
+export const DEFAULT_TUNNEL_BUDGET_MS = 4.5 * 60 * 1000;
+/** 血量低于这个值就停手。 */
+export const MIN_HEALTH_TO_DIG = 6;
+
+const TUNNEL_LIQUIDS: ReadonlySet<string> = new Set([
+    'lava',
+    'flowing_lava',
+    'water',
+    'flowing_water',
+    'bubble_column',
+]);
+const TUNNEL_AIR: ReadonlySet<string> = new Set(['air', 'cave_air', 'void_air']);
+
+export function isLiquidBlockName(name: unknown): boolean {
+    return typeof name === 'string' && TUNNEL_LIQUIDS.has(normalizeName(name));
+}
+
+export function isAirBlockName(name: unknown): boolean {
+    return typeof name === 'string' && TUNNEL_AIR.has(normalizeName(name));
+}
+
+/**
+ * 前面脚下这格**能不能踩**：空气/液体/没有碰撞箱（告示牌、火把…）都算踩空。
+ *
+ * 只看"不是空气"是不够的：下界岩体里真正的死法是"前面看着有地，走过去是岩浆海"，
+ * 或者脚下是 cave_air 直接掉下去。`boundingBox === 'empty'` / `passable` 是
+ * mineflayer 对"没有碰撞箱"的两种报法，都认。
+ */
+export function isUnsupportedFloorBlock(block: any): boolean {
+    if (block == null) return true;
+    const name = normalizeName(block?.name);
+    if (isAirBlockName(name) || isLiquidBlockName(name)) return true;
+    if (block?.boundingBox === 'empty') return true;
+    if (block?.passable === true) return true;
+    return false;
+}
+
+export interface TunnelDirection {
+    axis: 'x' | 'z';
+    sign: 1 | -1;
+    /** `+x` / `-x` / `+z` / `-z`：回执和下一步都照抄这个。 */
+    label: string;
+}
+
+export interface ResolvedTunnelDirection extends TunnelDirection {
+    /** true = 没给方向，是按当前朝向（yaw）推出来的。 */
+    fromYaw: boolean;
+}
+
+const DIRECTION_TABLE: Readonly<Record<string, TunnelDirection>> = Object.freeze({
+    '+x': { axis: 'x', sign: 1, label: '+x' },
+    'x+': { axis: 'x', sign: 1, label: '+x' },
+    x: { axis: 'x', sign: 1, label: '+x' },
+    east: { axis: 'x', sign: 1, label: '+x' },
+    东: { axis: 'x', sign: 1, label: '+x' },
+    '-x': { axis: 'x', sign: -1, label: '-x' },
+    'x-': { axis: 'x', sign: -1, label: '-x' },
+    west: { axis: 'x', sign: -1, label: '-x' },
+    西: { axis: 'x', sign: -1, label: '-x' },
+    '+z': { axis: 'z', sign: 1, label: '+z' },
+    'z+': { axis: 'z', sign: 1, label: '+z' },
+    z: { axis: 'z', sign: 1, label: '+z' },
+    south: { axis: 'z', sign: 1, label: '+z' },
+    南: { axis: 'z', sign: 1, label: '+z' },
+    '-z': { axis: 'z', sign: -1, label: '-z' },
+    'z-': { axis: 'z', sign: -1, label: '-z' },
+    north: { axis: 'z', sign: -1, label: '-z' },
+    北: { axis: 'z', sign: -1, label: '-z' },
+});
+
+/** 这些写法都表示"按当前朝向"；认不出来的写法一律拒绝（不猜方向）。 */
+const FACING_WORDS: ReadonlySet<string> = new Set(['', 'facing', 'current', 'forward', 'me', '当前', '朝向', '前方']);
+
+/**
+ * 方向解析：显式 `±x/±z`（或 east/north/…）优先，否则按 yaw 推。
+ *
+ * mineflayer 的 yaw 约定（和 `actions.ts` 的 discard 一致）：`dx = -sin(yaw)`、
+ * `dz = cos(yaw)` → 取分量大的那条轴。读不到 yaw 又没给方向就返回 null（拒绝）。
+ */
+export function resolveTunnelDirection(raw: unknown, yaw: number | null): ResolvedTunnelDirection | null {
+    const key = typeof raw === 'string' ? raw.trim().toLowerCase() : '';
+    const explicit = DIRECTION_TABLE[key];
+    if (explicit != null) return { ...explicit, fromYaw: false };
+    if (!FACING_WORDS.has(key)) return null;
+    if (yaw == null || !Number.isFinite(yaw)) return null;
+    const dx = -Math.sin(yaw);
+    const dz = Math.cos(yaw);
+    const alongX = Math.abs(dx) >= Math.abs(dz);
+    const positive = (alongX ? dx : dz) >= 0;
+    const axis: 'x' | 'z' = alongX ? 'x' : 'z';
+    return { axis, sign: positive ? 1 : -1, label: `${positive ? '+' : '-'}${axis}`, fromYaw: true };
+}
+
+export interface TunnelStep {
+    /** 第几步（1-based）。 */
+    index: number;
+    /** 要清掉的格子（脚到头的 height 格）。 */
+    dig: FlatPosition[];
+    /** 挖通后要站进去的脚位。 */
+    feet: FlatPosition;
+    /** 下一步脚下的支撑格：**不许**是液体或非实心。 */
+    floor: FlatPosition;
+}
+
+/** 第 `index` 步的几何：清哪几格、站到哪、踩在哪。 */
+export function tunnelStep(pos: FlatPosition, dir: TunnelDirection, height: number, index: number): TunnelStep {
+    const dx = dir.axis === 'x' ? dir.sign : 0;
+    const dz = dir.axis === 'z' ? dir.sign : 0;
+    const baseX = Math.round(pos.x) + dx;
+    const baseZ = Math.round(pos.z) + dz;
+    const baseY = Math.round(pos.y);
+    const dig: FlatPosition[] = [];
+    for (let i = 0; i < height; i++) dig.push({ x: baseX, y: baseY + i, z: baseZ });
+    return { index, dig, feet: { x: baseX, y: baseY, z: baseZ }, floor: { x: baseX, y: baseY - 1, z: baseZ } };
+}
+
+export type TunnelStop =
+    | 'done'
+    | 'budget'
+    | 'interrupted'
+    | 'low_health'
+    | 'damaged'
+    | 'liquid_ahead'
+    | 'unsupported_floor'
+    | 'no_tool'
+    | 'tool_low'
+    | 'dig_failed'
+    | 'travel_failed'
+    | 'unreadable'
+    | 'bad_direction';
+
+const TUNNEL_STOP_TEXT: Record<TunnelStop, string> = {
+    done: '挖满了本次长度（可以接着挖同一条线）',
+    budget: '时间到（内部预算）主动收手',
+    interrupted: '被 Stop/保命打断',
+    low_health: '血量太低，停手保命',
+    damaged: '中途掉血，停手',
+    liquid_ahead: '前方是液体（岩浆/水），不能往里面挖',
+    unsupported_floor: '下一步脚下不是实心方块，会掉下去',
+    no_tool: '没有能挖的镐，而且前面的方块徒手挖不动',
+    tool_low: '镐快用完了',
+    dig_failed: '挖完还是原方块（挖不动/被挡）',
+    travel_failed: '挖通了但没走进去（寻路失败）',
+    unreadable: '读不到方块（区块没加载？），不敢瞎挖',
+    bad_direction: '方向认不出来，也不给读朝向',
+};
+
+export interface TunnelOutcome {
+    dir: ResolvedTunnelDirection;
+    height: number;
+    requested: number;
+    /** 实际推进的格数（每一步都是"验证变空气 + 真的走进去了"才算）。 */
+    dug: number;
+    /** 实际挖掉的方块总数（含每步的 height 格）。 */
+    blocksDug: number;
+    start: FlatPosition;
+    here: FlatPosition;
+    stop: TunnelStop;
+    /** 触发停止的具体格子/方块（安全门必须点名，模型才知道绕开哪）。 */
+    detail: string;
+    /** 需要换的工具名（`equip` 提示用；没有就是 null）。 */
+    hintEquip: string | null;
+    progress: string[];
+    toolName: string | null;
+    toolRemaining: number | null;
+    toolMax: number | null;
+    handMining: boolean;
+}
+
+/** 挖了多少格 → 下一步还挖多少（原地接着挖同一条线）。 */
+export function tunnelRemaining(o: TunnelOutcome): number {
+    return Math.max(1, o.requested - o.dug);
+}
+
+export function tunnelNextAction(o: TunnelOutcome): string {
+    switch (o.stop) {
+        case 'liquid_ahead':
+            return 'moveAway(distance=8)';
+        case 'unsupported_floor':
+            return 'pillarUp(distance=2)';
+        case 'no_tool':
+        case 'tool_low':
+            return o.hintEquip != null ? `equip(item_name="${o.hintEquip}")` : 'stats(type="inventory")';
+        case 'low_health':
+        case 'damaged':
+            return 'survivalCheck';
+        case 'bad_direction':
+        case 'unreadable':
+            return 'stats(type="body")';
+        default:
+            // 正常可续：同一条线、剩下的长度。
+            return `mineTunnel(length=${tunnelRemaining(o)}, direction="${o.dir.label}")`;
+    }
+}
+
+export function tunnelReceipt(o: TunnelOutcome): string {
+    const lines: string[] = [];
+    const where = formatPoint(o.here);
+    const dirText = `${o.dir.label}${o.dir.fromYaw ? '（按当时的朝向推出来的，下一步照抄这个方向）' : ''}`;
+    lines.push(
+        `mineTunnel：**挖了 ${o.dug}/${o.requested} 格**（净推进 ${o.dug} 格，共挖掉 ${o.blocksDug} 个方块），` +
+            `现在 ${where}，方向 ${dirText}。`,
+    );
+    lines.push(`停止原因：${TUNNEL_STOP_TEXT[o.stop]}${o.detail === '' ? '' : `——${o.detail}`}。`);
+    if (o.handMining) {
+        lines.push('⚠️ 手上没有镐：这些方块是**徒手挖**的，很慢，而且更费时间=更暴露；能换镐就换。');
+    }
+    const toolText =
+        o.toolName == null
+            ? '镐：手上没有工具'
+            : o.toolRemaining == null
+              ? `镐：${o.toolName}（上限读不到，算不出还剩几次）`
+              : `镐：${o.toolName} 还剩约 ${o.toolRemaining} 次（${o.toolMax ?? '?'} 上限）`;
+    lines.push(toolText + '。');
+    for (const line of o.progress) lines.push(line);
+    lines.push(`下一步（照做即可）：${tunnelNextAction(o)}`);
+    return lines.join('\n');
+}
+
+export interface TunnelDeps {
+    /** 取当前位置（脚）。 */
+    position?: (bot: any) => FlatPosition;
+    /** 取朝向（弧度）。 */
+    yaw?: (bot: any) => number | null;
+    /** 读一格方块（返回 null = 读不到）。 */
+    blockAt?: (bot: any, x: number, y: number, z: number) => any | null;
+    /** 挖掉一格；返回是否真的挖掉了。 */
+    dig?: (bot: any, x: number, y: number, z: number) => Promise<boolean>;
+    /** 走进下一格；返回是否真的到了。 */
+    travel?: (bot: any, x: number, y: number, z: number) => Promise<boolean>;
+    /** 血量。 */
+    health?: (bot: any) => number | null;
+    /** 手上工具（默认走 skills.toolDurabilityGuard）。 */
+    tool?: (bot: any) => { name: string | null; remaining: number | null; max: number | null; low: boolean };
+    sleep?: (ms: number) => Promise<void>;
+    now?: () => number;
+}
+
+export interface TunnelOptions {
+    budgetMs?: number;
+    progressEvery?: number;
+    /** 每一步之间的小停顿（让服务端把方块更新同步回来）。 */
+    settleMs?: number;
+}
+
+function defaultBlockObject(bot: any, x: number, y: number, z: number): any | null {
+    try {
+        return bot?.blockAt?.({ x, y, z }) ?? null;
+    } catch {
+        return null;
+    }
+}
+
+function defaultTunnelHealth(bot: any): number | null {
+    const value = Number(bot?.health);
+    return Number.isFinite(value) ? value : null;
+}
+
+/**
+ * 沿一条直线挖隧道：每一格都"先判危险 → 挖 → 验证 → 走进去"。
+ *
+ * 安全门（都在**挖之前**判，触发就停手并点名格子）：
+ *   1. 前方脚/头、以及前方脚下那格是 lava/water → 停（就是这条害死了 overnight_a）；
+ *   2. 前方脚下那格不是实心 → 停（会走进岩浆海/悬崖）；
+ *   3. 没有镐且方块徒手挖不动 → 停并给 equip 提示；徒手挖得动的放行但要如实说慢；
+ *   4. 镐快用完（`toolDurabilityGuard.low`）→ 停并给换镐提示；
+ *   5. 掉血 / 血量过低 / 被 Stop → 停并说清挖了多少。
+ */
+export async function mineTunnelSkill(
+    bot: any,
+    rawLength?: unknown,
+    rawHeight?: unknown,
+    rawDirection?: unknown,
+    deps: TunnelDeps = {},
+    options: TunnelOptions = {},
+): Promise<string> {
+    const requested = clampInt(rawLength, DEFAULT_TUNNEL_LENGTH, 1, MAX_TUNNEL_LENGTH);
+    const height = clampInt(rawHeight, DEFAULT_TUNNEL_HEIGHT, 1, MAX_TUNNEL_HEIGHT);
+    const budgetMs = options.budgetMs ?? DEFAULT_TUNNEL_BUDGET_MS;
+    const progressEvery = Math.max(1, options.progressEvery ?? TUNNEL_PROGRESS_EVERY);
+    const settleMs = options.settleMs ?? 120;
+
+    const position = deps.position ?? defaultPosition;
+    const yaw = deps.yaw ?? ((b: any) => (Number.isFinite(Number(b?.entity?.yaw)) ? Number(b.entity.yaw) : null));
+    const blockAt = deps.blockAt ?? defaultBlockObject;
+    const dig = deps.dig ?? ((b: any, x: number, y: number, z: number) => skills.mineBlockAt(b, x, y, z));
+    const travel = deps.travel ?? ((b: any, x: number, y: number, z: number) => skills.goToPosition(b, x, y, z, 1));
+    const health = deps.health ?? defaultTunnelHealth;
+    const tool = deps.tool ?? ((b: any) => skills.toolDurabilityGuard(b));
+    const sleep = deps.sleep ?? sleepMs;
+    const now = deps.now ?? Date.now;
+
+    const start = position(bot);
+    const startedAt = now();
+    const startHealth = health(bot);
+    const outcome: TunnelOutcome = {
+        dir: { axis: 'x', sign: 1, label: '+x', fromYaw: false },
+        height,
+        requested,
+        dug: 0,
+        blocksDug: 0,
+        start,
+        here: start,
+        stop: 'done',
+        detail: '',
+        hintEquip: null,
+        progress: [],
+        toolName: null,
+        toolRemaining: null,
+        toolMax: null,
+        handMining: false,
+    };
+
+    const resolved = resolveTunnelDirection(rawDirection, yaw(bot));
+    if (resolved == null) {
+        outcome.stop = 'bad_direction';
+        outcome.detail =
+            typeof rawDirection === 'string' && rawDirection.trim() !== ''
+                ? `direction="${rawDirection}" 认不出来（只认 ±x / ±z / east / west / north / south，或留空按朝向）`
+                : '没给 direction，而且读不到 entity.yaw';
+        const g = tool(bot);
+        outcome.toolName = g.name;
+        outcome.toolRemaining = g.remaining;
+        outcome.toolMax = g.max;
+        return tunnelReceipt(outcome);
+    }
+    outcome.dir = resolved;
+
+    /** 一手工具的描述（每次都重新读，因为挖着挖着就磨损了）。 */
+    const refreshTool = (): { name: string | null; remaining: number | null; max: number | null; low: boolean } => {
+        const g = tool(bot);
+        outcome.toolName = g.name;
+        outcome.toolRemaining = g.remaining;
+        outcome.toolMax = g.max;
+        return g;
+    };
+    refreshTool();
+
+    const cellText = (p: FlatPosition, name: string | null): string => `${formatPoint(p)} 是 ${name ?? '读不到'}`;
+
+    for (let index = 1; index <= requested; index++) {
+        // ── 时间预算：到点自己收手（回执必须由工具自己交出来） ──
+        if (now() - startedAt >= budgetMs) {
+            outcome.stop = 'budget';
+            outcome.detail = `本轮预算 ${Math.round(budgetMs / 6000) / 10} 分钟用完`;
+            break;
+        }
+        if (bot?.interrupt_code === true) {
+            outcome.stop = 'interrupted';
+            break;
+        }
+        const hp = health(bot);
+        if (hp != null && hp <= MIN_HEALTH_TO_DIG) {
+            outcome.stop = 'low_health';
+            outcome.detail = `血量 ${hp} ≤ ${MIN_HEALTH_TO_DIG}`;
+            break;
+        }
+        if (hp != null && startHealth != null && hp < startHealth) {
+            outcome.stop = 'damaged';
+            outcome.detail = `血量 ${startHealth} → ${hp}`;
+            break;
+        }
+
+        const step = tunnelStep(position(bot), resolved, height, index);
+
+        // ── 安全门 1：前方（脚/头）与前方脚下都不许是液体 ──
+        const feetBlock = blockAt(bot, step.feet.x, step.feet.y, step.feet.z);
+        const headBlock = blockAt(bot, step.dig[step.dig.length - 1].x, step.dig[step.dig.length - 1].y, step.dig[step.dig.length - 1].z);
+        const floorBlock = blockAt(bot, step.floor.x, step.floor.y, step.floor.z);
+        const named = [
+            [feetBlock, step.feet, '前方脚所在格'],
+            [headBlock, step.dig[step.dig.length - 1], '前方头所在格'],
+            [floorBlock, step.floor, '前方脚下的格子'],
+        ] as Array<[any, FlatPosition, string]>;
+        const liquid = named.find(([block]) => isLiquidBlockName(block?.name));
+        if (liquid != null) {
+            outcome.stop = 'liquid_ahead';
+            outcome.detail = `${liquid[2]} ${cellText(liquid[1], normalizeName(liquid[0]?.name))}（挖进去就是死）`;
+            break;
+        }
+
+        // ── 安全门 2：前方脚下必须是实心（否则会掉下去/掉进岩浆海） ──
+        if (floorBlock == null) {
+            outcome.stop = 'unreadable';
+            outcome.detail = `读不到前方的支撑格 ${formatPoint(step.floor)}`;
+            break;
+        }
+        if (isUnsupportedFloorBlock(floorBlock)) {
+            outcome.stop = 'unsupported_floor';
+            outcome.detail = `前方脚下 ${cellText(step.floor, normalizeName(floorBlock?.name))}（下一步会踩空）`;
+            break;
+        }
+
+        // ── 安全门 3：要挖的格子必须读得到（读不到就不猜） ──
+        const digBlocks = step.dig.map((cell) => ({ cell, block: blockAt(bot, cell.x, cell.y, cell.z) }));
+        const unreadable = digBlocks.find(({ block }) => block == null);
+        if (unreadable != null) {
+            outcome.stop = 'unreadable';
+            outcome.detail = `读不到要挖的 ${formatPoint(unreadable.cell)}（区块没加载？）`;
+            break;
+        }
+
+        // ── 安全门 4：没有镐时，只有徒手挖得动的方块才放行 ──
+        const guard = refreshTool();
+        const hasPickaxe = guard.name != null && guard.name.includes('pickaxe');
+        const needDig = digBlocks.filter(({ block }) => !isAirBlockName(block?.name));
+        if (!hasPickaxe) {
+            const tooHard = needDig.find(({ block }) => {
+                try {
+                    return !skills.isHandMineable(block);
+                } catch {
+                    return true;
+                }
+            });
+            if (tooHard != null) {
+                outcome.stop = 'no_tool';
+                const replacement = bestPickaxeInInventory(bot);
+                outcome.hintEquip = replacement;
+                outcome.detail = replacement != null
+                    ? `前方 ${formatPoint(tooHard.cell)} 是 ${normalizeName(tooHard.block?.name)}，徒手挖不动；先装备 ${replacement}`
+                    : `前方 ${formatPoint(tooHard.cell)} 是 ${normalizeName(tooHard.block?.name)}，徒手挖不动，背包里也没有镐`;
+                break;
+            }
+            outcome.handMining = true;
+        } else if (guard.low) {
+            outcome.stop = 'tool_low';
+            const replacement = bestPickaxeInInventory(bot, guard.name);
+            outcome.hintEquip = replacement;
+            outcome.detail =
+                replacement != null
+                    ? `还剩约 ${guard.remaining ?? '?'} 次，先换 ${replacement}`
+                    : `还剩约 ${guard.remaining ?? '?'} 次，背包里没有别的镐`;
+            break;
+        }
+
+        // ── 挖：然后**验证明明变空气**（事实，不是假设） ──
+        for (const { cell, block } of digBlocks) {
+            if (isAirBlockName(block?.name)) continue;
+            let ok = false;
+            try {
+                ok = await dig(bot, cell.x, cell.y, cell.z);
+            } catch {
+                ok = false;
+            }
+            outcome.blocksDug += 1;
+            const after = blockAt(bot, cell.x, cell.y, cell.z);
+            if (after == null || !isAirBlockName(after?.name)) {
+                outcome.stop = 'dig_failed';
+                outcome.detail =
+                    `第 ${index} 步的 ${cellText(cell, normalizeName(after?.name))}${ok ? '（挖过了但没变空气）' : '（挖不动）'}`;
+                return tunnelReceipt(outcome);
+            }
+        }
+        await sleep(settleMs);
+
+        // ── 走进去 ──
+        let arrived = false;
+        try {
+            arrived = await travel(bot, step.feet.x, step.feet.y, step.feet.z);
+        } catch {
+            arrived = false;
+        }
+        const here = position(bot);
+        outcome.here = here;
+        const atTarget = Math.abs(here.x - step.feet.x) <= 1.5 && Math.abs(here.z - step.feet.z) <= 1.5;
+        if (!arrived && !atTarget) {
+            outcome.stop = 'travel_failed';
+            outcome.detail = `第 ${index} 步已经挖通 ${formatPoint(step.feet)}，但人还停在 ${formatPoint(here)}`;
+            break;
+        }
+        outcome.dug += 1;
+        if (outcome.dug % progressEvery === 0) {
+            outcome.progress.push(`- 已挖 ${outcome.dug} 格，现在 ${formatPoint(outcome.here)}`);
+        }
+    }
+
+    refreshTool();
+    return tunnelReceipt(outcome);
+}
+
+/** 背包里最好的一把镐（有镐才能继续挖；换镐提示要能直接照抄）。 */
+export function bestPickaxeInInventory(bot: any, exclude?: string | null): string | null {
+    let items: Array<{ name?: unknown; count?: unknown }>;
+    try {
+        items = (bot?.inventory?.items?.() ?? []) as Array<{ name?: unknown; count?: unknown }>;
+    } catch {
+        return null;
+    }
+    if (!Array.isArray(items)) return null;
+    const rank = ['netherite', 'diamond', 'iron', 'stone', 'golden', 'wooden'];
+    const candidates = items
+        .filter((item) => typeof item?.name === 'string' && item.name.includes('pickaxe') && item.name !== exclude)
+        .filter((item) => (typeof item.count === 'number' ? item.count : 0) > 0)
+        .map((item) => String(item.name));
+    if (candidates.length === 0) return null;
+    return candidates.sort((a, b) => {
+        const ra = rank.findIndex((prefix) => a.startsWith(prefix));
+        const rb = rank.findIndex((prefix) => b.startsWith(prefix));
+        return (ra < 0 ? rank.length : ra) - (rb < 0 ? rank.length : rb);
+    })[0] as string;
+}

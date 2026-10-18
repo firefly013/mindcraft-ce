@@ -51,6 +51,20 @@ export const PROGRESSION_TOOL_TEXT: Record<string, { description: string; params
             max_ms: '时间预算毫秒（默认 300000 = 5 分钟，10000~300000）。到点**自己收手并给完整回执**（拿到几个、打了几次、下一步调什么），可以再调一次接着刷。',
         },
     },
+    mineTunnel: {
+        description:
+            '**沿一条直线挖隧道**（下界岩体里赶路用它，比 goToCoordinates 可控）：每一步「读格子 → 判危险 → 挖 → 验证真的变成空气 → 走进去」，' +
+            '每 16 格报一次进度，挖了 32 格就停并给一条能照抄的续挖调用。' +
+            '**安全门（都在挖之前判，触发就停手并点名格子）**：① 前方脚/头或前方脚下是岩浆/水 → 停（挖进岩浆口袋是死法之一）；' +
+            '② 前方脚下不是实心（悬空/岩浆海）→ 停；③ 镐快用完（还剩 ≤20 次或 <15%）→ 停并给换镐提示；④ 没镐且方块徒手挖不动 → 停；' +
+            '⑤ 掉血/血量 ≤6/被 Stop → 停，并说清挖了多少、现在在哪。**每一步都验证**：挖完还是原方块就停手报"挖不动"，绝不假装挖通了。' +
+            '用法：mineTunnel(length=32, direction="-x")；不给 direction 就按当前朝向推（回执会写明推定出来的 ±x/±z，下一次照抄即可）。',
+        params: {
+            length: '这次往前挖多少格（默认 32，1~256）。挖满就自己停并给"接着挖"的下一步；长距离就反复调用它。',
+            height: '隧道高度（默认 2 = 能站着走，1~3）。2 格高才走得顺；1 格高会卡头。',
+            direction: '方向：`+x`/`-x`/`+z`/`-z`（也认 east/west/north/south、东/南/西/北）。留空 = 按当前朝向推。回执里会写明实际用的方向，续挖照抄它。',
+        },
+    },
 };
 
 const DESCRIPTION = (name: keyof typeof PROGRESSION_TOOL_TEXT): string => PROGRESSION_TOOL_TEXT[name].description;
@@ -71,6 +85,8 @@ export const EXPLORE_TIMEOUT_MIN = 6;
 export const HUNT_TIMEOUT_MIN = 8;
 /** `huntFor` 的时间预算上限（毫秒）：压到 5 分钟，保证"预算 + 最后一击"仍在超时之内。 */
 export const HUNT_MAX_MS_LIMIT = 5 * 60 * 1000;
+/** `mineTunnel` 的命令超时（分钟）。**必须 > `DEFAULT_TUNNEL_BUDGET_MS`**（它自己会先收手）。 */
+export const TUNNEL_TIMEOUT_MIN = 6;
 
 function clampInt(raw: unknown, fallback: number, min: number, max: number): number {
     const value = typeof raw === 'number' ? raw : Number(raw);
@@ -225,6 +241,37 @@ export const progressionActionList: AgentCommand[] = [
                 if (args.error != null) return Promise.resolve(`huntFor 参数不对：${args.error}`);
                 return progression.huntForSkill(agent.bot, args.entity, args.want, args.radius, args.maxMs);
             },
+        ),
+    },
+    {
+        name: '!mineTunnel',
+        description: DESCRIPTION('mineTunnel'),
+        params: {
+            length: {
+                type: 'int',
+                description: PROGRESSION_TOOL_TEXT.mineTunnel.params.length,
+                optional: true,
+                default: progression.DEFAULT_TUNNEL_LENGTH,
+                domain: [1, progression.MAX_TUNNEL_LENGTH],
+            },
+            height: {
+                type: 'int',
+                description: PROGRESSION_TOOL_TEXT.mineTunnel.params.height,
+                optional: true,
+                default: progression.DEFAULT_TUNNEL_HEIGHT,
+                domain: [1, progression.MAX_TUNNEL_HEIGHT],
+            },
+            direction: {
+                type: 'string',
+                description: PROGRESSION_TOOL_TEXT.mineTunnel.params.direction,
+                optional: true,
+            },
+        },
+        perform: runProgressionAction(
+            'mineTunnel',
+            TUNNEL_TIMEOUT_MIN,
+            (agent, rawLength?: unknown, rawHeight?: unknown, rawDirection?: unknown) =>
+                progression.mineTunnelSkill(agent.bot, rawLength, rawHeight, rawDirection),
         ),
     },
 ];
