@@ -36,13 +36,47 @@ export type ActionTrace =
   | { kind: 'stale_discarded'; name: string };
 
 /**
+ * **任何工具回执的硬上限。这是最后一道防线，不是装饰。**
+ *
+ * 真机事故（2026-10-18 19:19，overnight_a）：`huntFor` 内部去调 `attack` 时参数名写错，
+ * 每次攻击都当场失败 → 它在循环里疯狂重试（日志里数到 315 万次迭代）→
+ * **一条回执堆到 135,750,954 字符**（1.35 亿）。一轮对话的上下文当场被撑爆，
+ * 模型再也读不到别的东西，而回执末尾那句"下一步"还是同一个会再爆一次的调用。
+ *
+ * overnight_b 之前也撞过"6100 万字符回执"，当时被记成"聊太久导致的上下文溢出"
+ * ——其实**同一个病**。（这就是 F-21 那条压缩死锁的上游真凶之一。）
+ *
+ * 纪律：**谁能生成字符串，谁就必须被截断。** 具体动作该有重试上限是它自己的事，
+ * 但"回执不许无限长"是这里的事——两者都要有，因为前者总会漏。
+ */
+export const MAX_ACTION_OUTPUT_CHARS = 20_000;
+const TRUNCATE_KEEP_HEAD = 9_000;
+const TRUNCATE_KEEP_TAIL = 9_000;
+
+/**
+ * 截断策略是**留头留尾**：头部是"发生了什么"，**尾部那条「下一步（照做即可）」最有用**，
+ * 中间那几百万次重复的失败全部丢掉。截断本身必须**明说**，绝不悄悄吞内容。
+ */
+export function clampActionOutput(data: string): string {
+  if (data.length <= MAX_ACTION_OUTPUT_CHARS) return data;
+  const head = data.slice(0, TRUNCATE_KEEP_HEAD);
+  const tail = data.slice(-TRUNCATE_KEEP_TAIL);
+  const dropped = data.length - head.length - tail.length;
+  return (
+    `${head}\n\n…（**回执过长已截断**：中间省略 ${dropped.toLocaleString('en-US')} 字符，` +
+    `原文共 ${data.length.toLocaleString('en-US')} 字符。开头和结尾都保留了——` +
+    `结尾通常是你最需要的"下一步"。中间那一大段多半是同一个错误在重复，` +
+    `**别把"下一步"里那个同样的调用原样再发一次**。）\n\n${tail}`
+  );
+}
+
+/**
  * 一次动作完成的回执载荷。
  *
  * `call_id` 是这一次调用的唯一标识，`generation` 是调度器那一代。
  * 两者一起放进事件里，模型才能在回执乱序/延迟时认出「这条结果是哪一次调用交出来的」。
  */
-export interface ActionNotice {
-  call: string;
+export interface ActionNotice {  call: string;
   action_id: string;
   call_id: string;
   generation: number;
@@ -313,7 +347,7 @@ export class ActionRunner {
     }, ACTION_MAX_MS);
     let data: string;
     try {
-      data = await this.execute(name, args);
+      data = clampActionOutput(await this.execute(name, args));
     } catch (err: unknown) {
       data = `Tool ${name} failed: ${err instanceof Error ? err.message : String(err)}`;
     } finally {

@@ -3,7 +3,7 @@
  * 过期 generation 的完成回调就地丢弃。
  */
 import { describe, expect, it, vi } from 'vitest';
-import { ACTION_PROGRESS_NOTICE_MS, ActionRunner } from '../src/brain/action_runner.js';
+import { ACTION_PROGRESS_NOTICE_MS, ActionRunner, MAX_ACTION_OUTPUT_CHARS, clampActionOutput } from '../src/brain/action_runner.js';
 import { createToolCatalog } from '../src/brain/tools/catalog.js';
 import type { ToolOutcome } from '../src/brain/tools/tools.js';
 import { Scheduler } from '../src/brain/scheduler.js';
@@ -441,5 +441,38 @@ describe('紧急锁下：自救开关仍然可达，普通动作仍然被拦', (
     const out = await h.runner.run('goToPlayer', { player_name: 's', closeness: 2 });
     expect(out.status).toBe('rejected');
     expect(h.executed).toEqual([]);
+  });
+});
+
+/**
+ * **回执长度硬上限**——真机事故（2026-10-18 19:19，overnight_a）：
+ * `huntFor` 内部 attack 参数写错，每次攻击当场失败 → 疯狂重试（315 万次迭代）→
+ * **一条回执 135,750,954 字符**，一轮对话的上下文当场被撑爆。
+ * overnight_b 之前那条"6100 万字符"是同一个病（当时被误记成"聊太久"）。
+ */
+describe('回执长度上限：留头留尾，截断必须明说', () => {
+  it('短回执原样通过（不做任何加工）', () => {
+    const s = 'goToCoordinates：到了 (-81, 63, 68) 附近，还差 3 格。\n下一步（照做即可）：mineTunnel(length=32)';
+    expect(clampActionOutput(s)).toBe(s);
+  });
+
+  it('刚好到上限不截断，超一个字符就截断', () => {
+    expect(clampActionOutput('x'.repeat(MAX_ACTION_OUTPUT_CHARS))).toHaveLength(MAX_ACTION_OUTPUT_CHARS);
+    expect(clampActionOutput('x'.repeat(MAX_ACTION_OUTPUT_CHARS + 1))).toContain('回执过长已截断');
+  });
+
+  it('1.35 亿字符那种回执被压到有界，且**头尾都留**、中间省略量如实报出', () => {
+    const head = 'huntFor：开始刷 salmon\n';
+    const line = 'type 必填，且只认id / player / mob（收到 "entity"）。\n';
+    // 中间放一个**只此一处**的标记：它必须消失，才能证明"中间真的被丢了"。
+    const spam = line.repeat(1_700_000) + 'MIDDLE_ONLY_MARKER_9F3A\n' + line.repeat(1_700_000);
+    const tail = '下一步（照做即可）：huntFor(entity="salmon", want=2)\n';
+    const out = clampActionOutput(head + spam + tail);
+    expect(out.length).toBeLessThan(MAX_ACTION_OUTPUT_CHARS + 800); // 有界
+    expect(out).toContain('开始刷 salmon'); // 头留着
+    expect(out).toContain('下一步（照做即可）'); // 尾——最有用的一句必须活下来
+    expect(out).toContain('回执过长已截断');
+    expect(out).toContain('别把"下一步"里那个同样的调用原样再发一次');
+    expect(out).not.toContain('MIDDLE_ONLY_MARKER_9F3A'); // 中间那 1.5 亿字符没了
   });
 });
