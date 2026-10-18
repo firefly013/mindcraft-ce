@@ -12,6 +12,7 @@ import Vec3 from 'vec3';
  * 配了 `"cheat": true` 也不生效，而且没有任何报错。
  */
 import settings from "../../shared/settings.js";
+import { inventoryLossAdvice } from "../../shared/inventory_advice.js";
 import { permits, opContextFor } from "../safety/permits.js";
 import { refuseText } from "../safety/dangerous_ops.js";
 import {
@@ -26,10 +27,41 @@ import { applyScaffoldingBlocks, movementsFor, MAX_DROP_DOWN } from "../safety/m
 import { deepWaterAllowed } from "../safety/permits.js";
 import { assessStandingSpot, chooseSafeFleeTarget } from "../safety/flee.js";
 import { safeguards } from "../safety/safeguards.js";
-import { cookedCounterpartOf, foodValueOf, normalizeFoodName } from "../safety/emergency.js";
+import { cookedCounterpartOf, difficultyOf, foodValueOf, normalizeFoodName, starvationNote } from "../safety/emergency.js";
 
+/**
+ * `bot.output` 的硬上限（字符）。
+ *
+ * 为什么要在**唯一的写入点**上闸（真机 2026-10-18 19:19）：`huntFor` 内部 attack 参数写错 →
+ * 每次攻击都被拒 → 每次拒绝都 `log()` → **315 万行、1.35 亿字符**塞进 `bot.output`，
+ * 把整段上下文打爆（F-21 的上游原因）。下游的 clamp（动作通道 20k、回执 20k）只能事后掩盖，
+ * 挡不住"已经烧掉的 315 万次迭代"。**在源头留头尾**才是把这一整类病堵死。
+ */
+export const MAX_BOT_OUTPUT_CHARS = 20_000;
+/** 截断时头部保留多少（尾部保留剩下的；尾部通常是回执和"下一步"）。 */
+export const BOT_OUTPUT_HEAD_CHARS = 4_000;
+
+/**
+ * 把超长的输出截成**头 + 省略标记 + 尾**（纯函数，可单测）。
+ * 保留头是因为一轮动作的"起因/警告"往往在最前面，保留尾是因为回执在最后。
+ */
+export function capBotOutput(text: string, max: number = MAX_BOT_OUTPUT_CHARS): string {
+    if (typeof text !== 'string' || text.length <= max) return text;
+    const head = text.slice(0, BOT_OUTPUT_HEAD_CHARS);
+    const notice = `…（本次动作输出过长：中间省略 ${text.length - max} 字符，共 ${text.length} 字符）…\n`;
+    const tailBudget = Math.max(0, max - head.length - notice.length);
+    return `${head}${notice}${text.slice(text.length - tailBudget)}`;
+}
+
+/**
+ * 把回执写进 `bot.output`（模型的工具回执就是从这里来）。
+ *
+ * **唯一写入点 + 硬上限**：任何"循环里反复 log"的失控都不会再把上下文打爆。
+ */
 export function log(bot: any, ...messages: any[]): void {
+    if (typeof bot?.output !== 'string') bot.output = '';
     bot.output += messages.join(' ') + '\n';
+    if (bot.output.length > MAX_BOT_OUTPUT_CHARS) bot.output = capBotOutput(bot.output);
 }
 
 /**
@@ -994,7 +1026,96 @@ export function stopPvp(bot: any): void {
     try { bot?.bowpvp?.stop?.(); } catch { /* best-effort: bot may lack pvp plugins */ }
 }
 
-export async function attackEntity(bot: any, entity: any, kill: boolean = true): Promise<boolean | undefined> {
+/**
+ * 一次击杀最多等多久（毫秒）。**上限要宽（真打一只坦克怪要时间），但绝不能没有。**
+ *
+ * 真机教训同源：无上限的等待 = 丢掉身体 + 模型拿到零解释，和"没有预算的反射""永远压不完的
+ * 压缩""3.15 万次热循环"是同一类缺陷。所以到点**如实放弃**，并给一条能照抄的出路。
+ */
+export const KILL_WAIT_BUDGET_MS = 90_000;
+/** 击杀等待的轮询间隔（原逻辑就是 1 秒一次）。 */
+export const KILL_WAIT_POLL_MS = 1_000;
+/** "目标还在附近"的判定半径（原逻辑就是 24 格；离开列表 = 认为打完了）。 */
+export const KILL_WAIT_NEARBY_RADIUS = 24;
+
+export interface KillWaitOptions {
+    /** 击杀死等的预算（毫秒，默认 90 秒；测试用小值）。 */
+    budgetMs?: number;
+    /** 轮询间隔（毫秒）。 */
+    pollMs?: number;
+    /** 取当前时间（测试注入假时钟）。 */
+    now?: () => number;
+}
+
+function readEntityHealth(entity: any): number | null {
+    // **null/undefined 必须先挡掉**：`Number(null) === 0`，否则"血量读不到"会被当成
+    // "0 点血"（= 快死了），诊断就会给出完全相反的结论。
+    const raw = entity?.health;
+    if (raw == null) return null;
+    const health = typeof raw === 'number' ? raw : Number(raw);
+    return Number.isFinite(health) ? health : null;
+}
+
+/**
+ * 打不死时的**诊断**回执（纯渲染，可单测）。模型只有靠它才能判断
+ * 「快死了，再补两刀」和「你打不到它（隔着墙/在水里/在飞）」。
+ *
+ * 关于"挥了几刀"：`bot.swordpvp` 插件自己持续攻击，**没有可读的挥砍计数**——
+ * 所以这里如实报"等了多久 + 轮询几次"，不编一个挥砍数。
+ */
+export function describeKillGiveUp(
+    bot: any,
+    entity: any,
+    info: { waitedMs: number; polls: number; healthBefore: number | null },
+): string {
+    const name = entity?.name ?? '目标';
+    const after = readEntityHealth(entity);
+    const distance = (() => {
+        try {
+            const own = bot?.entity?.position;
+            const target = entity?.position;
+            if (own == null || target == null) return null;
+            if (typeof own.distanceTo === 'function') return own.distanceTo(target);
+            return Math.hypot(target.x - own.x, target.y - own.y, target.z - own.z);
+        } catch {
+            return null;
+        }
+    })();
+    const seconds = (info.waitedMs / 1000).toFixed(1);
+    const distanceText = distance == null ? '距离读不到' : `现在距离 ${distance.toFixed(1)} 米`;
+    const head = `打了 ${seconds} 秒还没打死 ${name}（轮询 ${info.polls} 次）；${distanceText}。`;
+
+    if (info.healthBefore == null || after == null) {
+        return (
+            `${head}\n血量读不到（服务端没给），**看不出掉没掉血**——先看一眼实体表再决定。` +
+            `\n下一步（照做即可）：stats(type="entities")`
+        );
+    }
+    if (after < info.healthBefore) {
+        return (
+            `${head}\n血量 ${info.healthBefore} → ${after}（**在掉血，只是慢**）：不是打不到，是没打死（护甲/回血/你输出不够）。` +
+            `\n下一步（照做即可）：attack(target="${name}", type="mob")`
+        );
+    }
+    if (distance != null && distance > 6) {
+        const target = entity?.position ?? {};
+        return (
+            `${head}\n血量 ${info.healthBefore} → ${after}（**一点没掉**）：**你打不到它**——太远/隔着方块，或者它在水里、在飞。` +
+            `\n下一步（照做即可）：goToCoordinates(x=${Math.round(Number(target.x ?? 0))}, y=${Math.round(Number(target.y ?? 0))}, z=${Math.round(Number(target.z ?? 0))}, closeness=2)`
+        );
+    }
+    return (
+        `${head}\n血量 ${info.healthBefore} → ${after}（**一点没掉**，而且就在手边）：它可能是无敌/被方块挡着/根本不在射程内。` +
+        `换个目标，别对着它耗。\n下一步（照做即可）：stats(type="entities")`
+    );
+}
+
+export async function attackEntity(
+    bot: any,
+    entity: any,
+    kill: boolean = true,
+    options: KillWaitOptions = {},
+): Promise<boolean | undefined> {
     /**
      * Attack mob of the given type.
      * @param {MinecraftBot} bot, reference to the minecraft bot.
@@ -1020,13 +1141,29 @@ export async function attackEntity(bot: any, entity: any, kill: boolean = true):
         if (bot.heldItem?.name) {
             bot.swordpvp.weaponOfChoice = bot.heldItem.name;
         }
+        const healthBefore = readEntityHealth(entity);
         await bot.swordpvp.attack(entity);
-        while (world.getNearbyEntities(bot, 24).includes(entity)) {
-            await new Promise(resolve => setTimeout(resolve, 1000));
+        // **有界等待**：原来这里是 `while (还在附近) { sleep(1000) }`，没有上限——
+        // 遇到打不死的目标（隔墙/水里/有甲）就是静默死等，直到动作超时或保险丝，
+        // 模型只会拿到一句"已强制释放动作通道"。现在到点放弃并给诊断。
+        const budgetMs = options.budgetMs ?? KILL_WAIT_BUDGET_MS;
+        const pollMs = options.pollMs ?? KILL_WAIT_POLL_MS;
+        const now = options.now ?? Date.now;
+        const startedAt = now();
+        let polls = 0;
+        while (world.getNearbyEntities(bot, KILL_WAIT_NEARBY_RADIUS).includes(entity)) {
+            // Stop / 保命反射语义**原样**：立刻停手、立刻返回 false。
             if (bot.interrupt_code) {
                 stopPvp(bot);
                 return false;
             }
+            if (now() - startedAt >= budgetMs) {
+                log(bot, describeKillGiveUp(bot, entity, { waitedMs: now() - startedAt, polls, healthBefore }));
+                stopPvp(bot);
+                return false;
+            }
+            await new Promise(resolve => setTimeout(resolve, pollMs));
+            polls += 1;
         }
         log(bot, `Successfully killed ${entity.name}.`);
         await pickupNearbyItems(bot);
@@ -2009,6 +2146,10 @@ export async function discard(bot: any, itemName: string, num: number = -1): Pro
      * await skills.discard(bot, "oak_log");
      **/
     let discarded = 0;
+    // 丢掉和存进箱子是**同一个决定**：都是"为了腾格子把保命的东西弄没"。
+    // 真机里队友正是靠丢垃圾腾位置的（19:20 那次是存箱子清空了自己），
+    // 所以丢之前先记一份整包账目，丢完把后果说出来。
+    const packBefore = world.getInventoryCounts(bot);
     while (true) {
         const item: any = bot.inventory.findInventoryItem(itemName);
         if (!item) {
@@ -2026,6 +2167,14 @@ export async function discard(bot: any, itemName: string, num: number = -1): Pro
         return false;
     }
     log(bot, `Discarded ${discarded} ${itemName}.`);
+    const advice = inventoryLossAdvice({
+        action: 'discard',
+        before: packBefore,
+        after: world.getInventoryCounts(bot),
+        isFood: (name) => foodValueOf(name) != null,
+        isPlaceable: (name) => bot?.registry?.blocksByName?.[name]?.boundingBox === 'block',
+    });
+    if (advice.text !== '') log(bot, advice.text);
     return true;
 }
 
@@ -2051,10 +2200,20 @@ export async function putInChest(bot: any, itemName: string, num: number = -1): 
     }
     const to_put: number = num === -1 ? item.count : Math.min(num, item.count);
     await goToPosition(bot, chest.position.x, chest.position.y, chest.position.z, 2);
+    // **存之前的整包账目**：存完要能说清"你还剩什么"（真机 19:20 把镐、剑、
+    // 食物、垫脚方块一起存了，回执只说"存了 X 个"，等到出门才发现包是空的）。
+    const packBefore = world.getInventoryCounts(bot);
     const chestContainer: any = await openBlockUi(bot, chest);
     await chestContainer.deposit(item.type, null, to_put);
     await chestContainer.close();
     log(bot, `Successfully put ${to_put} ${itemName} in the chest.`);
+    const advice = inventoryLossAdvice({
+        before: packBefore,
+        after: world.getInventoryCounts(bot),
+        isFood: (name) => foodValueOf(name) != null,
+        isPlaceable: (name) => bot?.registry?.blocksByName?.[name]?.boundingBox === 'block',
+    });
+    if (advice.text !== '') log(bot, advice.text);
     return true;
 }
 
@@ -2379,11 +2538,14 @@ export async function consume(bot: any, itemName: string = "", options: ConsumeO
             rawInPack.length > 0
                 ? ` 生肉只有熟食的一半左右：有熔炉就先 useBlock(type="furnace", input="1 ${rawInPack[0].name}", output="1 ${cookedCounterpartOf(rawInPack[0].name)}") 再吃。`
                 : '';
+        // 难度说明：Easy/Normal 饿不死，真正致命的是"不能回血 + 挨打"——
+        // 说清楚它才不会恐慌性清空存粮（真机原话：一捡到就吃掉，然后饿死）。
+        const starving = starvationNote(difficultyOf(bot));
         log(
             bot,
             `consume ${wanted}：**先留着——你现在不饿**（${formatFoodState(before)}）。` +
                 `背包里只剩 ${edibleTotal} 份能吃的（${keep}），这是低血期的救命粮：饿到 food ≤ ${FOOD_RESERVE_COMFORT - 1} 再吃。` +
-                `${rawHint} 趁现在去补：钓鱼（工作台做 fishing_rod）／打猎／种小麦。`,
+                `${rawHint}${starving === '' ? '' : ` ${starving}`} 趁现在去补：钓鱼（工作台做 fishing_rod）／打猎／种小麦。`,
         );
         log(bot, `下一步（照做即可）：searchForBlock(type="water", search_range=128)`);
         return false;

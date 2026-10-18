@@ -21,7 +21,7 @@ import * as world from './world.js';
 // 找水只留一份实现（`nearestWater` 在 progression 里，只扫已加载区块）：
 // progression 不 import survival，所以这条依赖不会成环。
 import { capLines, capReceipt, nearestWater } from './progression.js';
-import { FOOD_VALUE, cookedCounterpartOf, foodValueOf, isHostile, pickBestFood } from '../safety/emergency.js';
+import { FOOD_VALUE, cookedCounterpartOf, difficultyOf, foodValueOf, isHostile, pickBestFood, starvationNote } from '../safety/emergency.js';
 
 /** 与 edges / live_state 同一套夜晚阈值（12542 起怪物可刷，23460 天亮）。 */
 export const NIGHT_START = 12542;
@@ -72,6 +72,8 @@ export interface SurvivalSignals {
     bedCount: number;
     foodCount: number;
     fireResistPotionCount: number;
+    /** 世界难度（0 和平 / 1 简单 / 2 普通 / 3 困难）；读不到 null。 */
+    difficulty?: number | null;
 }
 
 
@@ -284,6 +286,7 @@ export function sampleSurvivalSignals(bot: any): SurvivalSignals {
         inventory,
         bedCount: countBeds(inventory),
         foodCount: countFood(inventory),
+        difficulty: difficultyOf(bot),
         fireResistPotionCount: findFireResistancePotion(bot) != null ? 1 : 0,
     };
 }
@@ -307,6 +310,8 @@ export interface SurvivalAssessment {
     foodCount: number;
     /** 食物储备资产（种子/线/木棍/木板/生肉）：算"可再生路线"用。 */
     foodAssets?: FoodReserveAssets;
+    /** 世界难度（0 和平 / 1 简单 / 2 普通 / 3 困难）；读不到 null。 */
+    difficulty?: number | null;
     bedCount: number;
     fireResistSeconds: number | null;
     fireResistPotionCount: number;
@@ -409,13 +414,19 @@ export function foodEmergencyLine(input: {
     food: number | null;
     edibles: number;
     assets?: FoodReserveAssets;
+    /** 世界难度（0/1/2/3）：用来把"会不会饿死"说准；读不到就什么都不说。 */
+    difficulty?: number | null;
 }): string | null {
     if (input.edibles > 0) return null;
     if (input.food == null || input.food >= FOOD_REGEN_THRESHOLD) return null;
     if (input.health == null || input.health > FOOD_EMERGENCY_HEALTH) return null;
+    // 血少挨打会死是真的；但"饿"本身在 Easy/Normal 不会把人饿死——两句分开说，
+    // 模型才不会恐慌性清空存粮（真机：它们会一捡到就吃掉，然后一小时后饿死）。
+    const starving = starvationNote(input.difficulty);
     return (
         `- ⚠️ 食物告急：血 ${input.health}、食物 ${input.food}（低于回血线 ${FOOD_REGEN_THRESHOLD}）、**背包没有能吃的东西** → ` +
-        `**先别打**：去钓鱼或种地${renewableFoodHint(input.assets)}。现在这个血量挨一下就没了。`
+        `**先别打**：去钓鱼或种地${renewableFoodHint(input.assets)}。现在这个血量挨一下就没了。` +
+        (starving === '' ? '' : ` ${starving}`)
     );
 }
 
@@ -524,6 +535,7 @@ export function assessSurvival(signals: SurvivalSignals): SurvivalAssessment {
         missing,
         advice,
         dimension: signals.dimension,
+        difficulty: signals.difficulty ?? null,
     };
 }
 
@@ -552,7 +564,7 @@ export function formatSurvivalReport(a: SurvivalAssessment): string {
         `就绪：地下庇护 ${a.sheltered ? '是' : '否'}；烈焰人准备 ${a.blazeReady ? '是' : `否（缺 ${a.missing.join('、') || '未知'}）`}`;
     // 食物两条线（见上方 FOOD_REGEN_THRESHOLD 那段的注释）：告急线只在该告急时出现，
     // 存粮线只在"还有一点但快没了"时出现；两条都不会在"食物充足"时来吵模型。
-    const foodInput = { health: a.health, food: a.food, edibles: a.foodCount, assets: a.foodAssets };
+    const foodInput = { health: a.health, food: a.food, edibles: a.foodCount, assets: a.foodAssets, difficulty: a.difficulty };
     const foodEmergency = foodEmergencyLine(foodInput);
     const foodReserve = foodReserveLine(foodInput);
     return [

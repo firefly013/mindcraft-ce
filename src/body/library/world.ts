@@ -321,7 +321,11 @@ export function getInventoryCounts(bot: any): Record<string, number> {
      * let hasWoodenPickaxe = inventory['wooden_pickaxe'] > 0;
      **/
     const inventory: Record<string, number> = {};
-    for (const slot of bot.inventory.slots as any[]) {
+    // 容错：`bot.inventory.slots` 在真实 mineflayer 里总有，但**顾问性质的调用方**
+    // （背包保管提醒）不该因为读到半个身体就抛异常——真机事故（20:12）是
+    // `discard` 里新增的记账把 `bot.inventory.slots is not iterable` 抛出来，
+    // 结果把一个本来能正常工作的动作弄坏了。读不到就当空包。
+    for (const slot of ((bot?.inventory?.slots ?? []) as any[])) {
         if (slot != null && slot.name) {
             if (inventory[slot.name] == null) {
                 inventory[slot.name] = 0;

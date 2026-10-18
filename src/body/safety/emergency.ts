@@ -167,6 +167,37 @@ export function isRawFood(name: unknown): boolean {
   return cookedCounterpartOf(name) != null;
 }
 
+/** 从 bot 读世界难度（0 和平 / 1 简单 / 2 普通 / 3 困难）；读不到 null。 */
+export function difficultyOf(bot: any): number | null {
+  const raw = bot?.game?.difficulty;
+  const n = typeof raw === 'number' ? raw : Number(raw);
+  return Number.isFinite(n) ? Math.round(n) : null;
+}
+
+/**
+ * "这个难度下会不会饿死"的一句话（给低血/低粮报告与 consume 的存粮提醒用）。
+ *
+ * 为什么值得写清楚：饿到食物 <18 就不能回血、血少时一次挨打就没了，模型会因此**恐慌性清空存粮**
+ * ——而 Easy/Normal 下饿本身并不会把人饿死（Easy 停在 5 点血、Normal 停在半颗心），
+ * 真正致命的是"不能回血 + 挨打"。两件事分开说，它才不会在做决定时用力过猛。
+ * 读不到难度就**什么都不说**（不猜）。
+ */
+export function starvationNote(difficulty: number | null | undefined): string {
+  if (difficulty == null || !Number.isFinite(difficulty)) return '';
+  switch (Math.round(difficulty)) {
+    case 0:
+      return '和平难度不会饿：饱食度根本不掉。';
+    case 1:
+      return '另外：**Easy 难度饿不死人**（饿到 5 点血就不再掉），但饿着不能回血、也扛不住任何一击——别慌着把存粮一次吃光。';
+    case 2:
+      return '另外：Normal 难度饿不死人（饿到半颗心就停），但那点血挨一下就没了——别慌着清空存粮。';
+    case 3:
+      return '另外：**Hard 难度会真的饿死**（掉到 0），别拖。';
+    default:
+      return '';
+  }
+}
+
 /** 血量掉到 max*0.3 以下就触发。死了（0）不逃：上报，不跑。 */
 export function shouldTriggerEmergency(
   health: unknown,

@@ -9,12 +9,18 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
   BARE_HAND_MAX_DIG_MS,
+  BOT_OUTPUT_HEAD_CHARS,
+  KILL_WAIT_BUDGET_MS,
+  MAX_BOT_OUTPUT_CHARS,
   PLACE_TARGET_EMPTY_BLOCKS,
   ateByFacts,
+  attackEntity,
   breakBlockAt,
+  capBotOutput,
   choosePillarMaterial,
   choosePillarMaterialChoice,
   consume,
+  describeKillGiveUp,
   describeStairJumpFailure,
   equip,
   foodValueOf,
@@ -24,6 +30,7 @@ import {
   isHandMineable,
   isFootingBlock,
   listEdibleItems,
+  log,
   mineBlockAt,
   pathfindDigPolicy,
   pathfindingDigAbort,
@@ -808,6 +815,15 @@ describe('consume：失败也要给事实，不给堆栈', () => {
     expect(bot.output).toContain('先留着');
     expect(bot.output).toContain('cooked_beef');
   });
+
+  it('存粮提醒里带难度说明（Easy 饿不死：别恐慌性清空存粮）', async () => {
+    const bot = consumeBot({ held: [{ name: 'cooked_beef', count: 2 }], food: 16 });
+    bot.game = { difficulty: 1 };
+
+    await expect(consume(bot, 'cooked_beef', NO_WAIT)).resolves.toBe(false);
+    expect(bot.output).toContain('先留着');
+    expect(bot.output).toContain('Easy 难度饿不死人');
+  });
 });
 
 describe('consume 的食物判定（纯函数）', () => {
@@ -847,5 +863,173 @@ describe('consume 的食物判定（纯函数）', () => {
       ],
     });
     expect(listEdibleItems(bot).map((e) => `${e.name}x${e.count}`)).toEqual(['cooked_beefx1', 'muttonx2']);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// bot.output 硬上限：真机 2026-10-18 19:19 的 1.35 亿字符就是从这里涨出来的
+// （huntFor 参数写错 → 315 万次 log → bot.output 爆炸）。下游 clamp 只能事后掩盖，
+// 所以在**唯一写入点**上闸，把这一整类病堵死。
+// ─────────────────────────────────────────────────────────────────────────────
+describe('log 与 bot.output 硬上限', () => {
+  it('单条超长：留头 + 省略标记 + 尾，总长不超上限', () => {
+    const bot: any = { output: '' };
+    log(bot, 'A'.repeat(5_000), 'B'.repeat(50_000));
+
+    expect(bot.output.length).toBeLessThanOrEqual(MAX_BOT_OUTPUT_CHARS);
+    expect(bot.output).toContain('输出过长');
+    expect(bot.output.startsWith('A')).toBe(true); // 头部（起因/警告）还在
+    expect(bot.output.trimEnd().endsWith('B')).toBe(true); // 尾部（回执）还在
+    expect(BOT_OUTPUT_HEAD_CHARS).toBeLessThan(MAX_BOT_OUTPUT_CHARS);
+  });
+
+  it('反复累加（315 万行那一路）也不会超上限，且最新一行还在', () => {
+    const bot: any = { output: '' };
+    for (let i = 0; i < 2_000; i++) log(bot, `第 ${i} 行 ` + 'x'.repeat(100));
+
+    expect(bot.output.length).toBeLessThanOrEqual(MAX_BOT_OUTPUT_CHARS);
+    expect(bot.output).toContain('输出过长');
+    expect(bot.output).toContain('第 1999 行'); // 模型靠最新输出拿"下一步"
+  });
+
+  it('假身没有 output 字段也不炸（防御式）', () => {
+    const bot: any = {};
+    expect(() => log(bot, 'hi')).not.toThrow();
+    expect(bot.output).toBe('hi\n');
+    // 非字符串也归一成字符串（真机上被别处写坏过就会静默拼成 "undefined…"）
+    const weird: any = { output: undefined };
+    log(weird, 'a');
+    expect(weird.output).toBe('a\n');
+  });
+
+  it('capBotOutput 是纯函数：没超上限原样返回', () => {
+    expect(capBotOutput('short')).toBe('short');
+    expect(capBotOutput('y'.repeat(30_000)).length).toBeLessThanOrEqual(MAX_BOT_OUTPUT_CHARS);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// attackEntity 的击杀等待：**有界 + 诊断**
+// 原来 `while (还在 24 格内) { sleep(1000) }` 没有上限——打不死的目标（隔墙/水里/有甲）
+// 就是静默死等，模型只会拿到一句"已强制释放动作通道"。上限要宽（默认 90 秒），
+// 但必须存在；放弃时要说清"等了多久 / 掉没掉血 / 打不打得到"并给一条不同的出路。
+// ─────────────────────────────────────────────────────────────────────────────
+describe('attackEntity 击杀等待：有界 + 诊断', () => {
+  function fightBot(options: { health?: number | null; interrupt?: boolean } = {}) {
+    const entity: any = {
+      id: 7,
+      name: 'zombie',
+      health: options.health === undefined ? 20 : options.health,
+      position: { x: 1, y: 64, z: 0, distanceTo: () => 3 },
+    };
+    let stops = 0;
+    const bot: any = {
+      output: '',
+      heldItem: null,
+      interrupt_code: options.interrupt === true,
+      entity: { position: { x: 0, y: 64, z: 0, distanceTo: () => 3 } },
+      entities: { 7: entity },
+      inventory: { items: () => [{ name: 'iron_sword', count: 1 }] },
+      equip: async (): Promise<void> => {},
+      nearestEntity: (): any => null,
+      swordpvp: {
+        weaponOfChoice: '',
+        attack: async (): Promise<void> => {},
+        stop: (): void => {
+          stops += 1;
+        },
+      },
+    };
+    return {
+      bot,
+      entity,
+      get stops() {
+        return stops;
+      },
+    };
+  }
+
+  /** 短预算版（真机默认 90 秒，测试用几百毫秒，语义一样）。 */
+  const FAST = { budgetMs: 120, pollMs: 20 };
+
+  it('打不死的目标：到预算就放弃（不再静默死等），并给出诊断回执', async () => {
+    const h = fightBot({ health: 20 });
+    const started = Date.now();
+    const killed = await attackEntity(h.bot, h.entity, true, FAST);
+
+    expect(killed).toBe(false);
+    expect(Date.now() - started).toBeLessThan(KILL_WAIT_BUDGET_MS); // 绝不等满 90 秒
+    expect(h.stops).toBe(1); // 停手，不把 pvp 挂着
+    expect(h.bot.output).toContain('还没打死 zombie');
+    expect(h.bot.output).toContain('一点没掉');
+    expect(h.bot.output).toContain('下一步（照做即可）：');
+    expect(h.bot.output).not.toContain('Successfully killed');
+  });
+
+  it('掉血但没死：诊断说"在掉血，只是慢"，下一步是补刀（不是同一个狩猎调用）', async () => {
+    const h = fightBot({ health: 20 });
+    // 打了两轮后掉到 12 血，但一直不死
+    setTimeout(() => {
+      h.entity.health = 12;
+    }, 50);
+    const killed = await attackEntity(h.bot, h.entity, true, FAST);
+
+    expect(killed).toBe(false);
+    expect(h.bot.output).toContain('在掉血，只是慢');
+    expect(h.bot.output).toContain('血量 20 → 12');
+    expect(h.bot.output).toContain('attack(target="zombie", type="mob")');
+  });
+
+  it('血量读不到：如实说"看不出掉没掉血"，让模型自己看实体表', async () => {
+    const h = fightBot({ health: null });
+    const killed = await attackEntity(h.bot, h.entity, true, FAST);
+
+    expect(killed).toBe(false);
+    expect(h.bot.output).toContain('血量读不到');
+    expect(h.bot.output).toContain('stats(type="entities")');
+  });
+
+  it('最后一刻打死了：仍然算击杀（返回 true、写 Successfully killed）', async () => {
+    const h = fightBot({ health: 20 });
+    // 60ms 后从实体表移除（预算 120ms）——"最后关头死了"
+    setTimeout(() => {
+      delete h.bot.entities[7];
+    }, 60);
+    const killed = await attackEntity(h.bot, h.entity, true, FAST);
+
+    expect(killed).toBe(true);
+    expect(h.bot.output).toContain('Successfully killed zombie');
+    expect(h.bot.output).not.toContain('还没打死');
+  });
+
+  it('目标离开 24 格列表：行为与今天一致（算打完，返回 true）', async () => {
+    const h = fightBot({ health: 20 });
+    delete h.bot.entities[7]; // 一开始就不在列表里 → 不等
+    const started = Date.now();
+    const killed = await attackEntity(h.bot, h.entity, true, FAST);
+
+    expect(killed).toBe(true);
+    expect(Date.now() - started).toBeLessThan(100);
+  });
+
+  it('Stop / 保命：立刻停手，绝不等预算', async () => {
+    const h = fightBot({ interrupt: true });
+    const started = Date.now();
+    // 预算 5 秒：如果 interrupt 没被尊重，这里会等 5 秒
+    const killed = await attackEntity(h.bot, h.entity, true, { budgetMs: 5_000, pollMs: 20 });
+
+    expect(killed).toBe(false);
+    expect(Date.now() - started).toBeLessThan(100);
+    expect(h.stops).toBe(1);
+    expect(h.bot.output).not.toContain('还没打死'); // 不是超时放弃，是被 Stop 打断
+  });
+
+  it('describeKillGiveUp 是纯渲染：远距离给"走过去"的坐标', () => {
+    const bot: any = { entity: { position: { x: 0, y: 64, z: 0, distanceTo: () => 14.7 } } };
+    const entity: any = { name: 'zombie', health: 20, position: { x: 14, y: 64, z: 0, distanceTo: () => 14.7 } };
+    const text = describeKillGiveUp(bot, entity, { waitedMs: 90_000, polls: 90, healthBefore: 20 });
+    expect(text).toContain('打了 90.0 秒还没打死 zombie');
+    expect(text).toContain('你打不到它');
+    expect(text).toContain('goToCoordinates(x=14, y=64, z=0, closeness=2)');
   });
 });

@@ -821,6 +821,41 @@ describe('食物储备：告急与存粮', () => {
         expect(line).toContain('furnace');
     });
 
+    // 真机：世界是 Easy（level.dat Difficulty=1）。饿到 <18 不能回血、血少挨打会死，
+    // 但**饿本身不会把人饿死**——两句分开说，模型才不会恐慌性清空存粮。
+    it('难度说明：Easy 饿不死（别慌着清空存粮）、Hard 会饿死、读不到就不提', () => {
+        const base = { health: 3, food: 2, edibles: 0 };
+        const easy = foodEmergencyLine({ ...base, difficulty: 1 });
+        expect(easy).toContain('食物告急');
+        expect(easy).toContain('现在这个血量挨一下就没了'); // 血少挨打会死：这句仍然对
+        expect(easy).toContain('Easy 难度饿不死人');
+        expect(easy).toContain('5 点血');
+        expect(easy).toContain('别慌着把存粮一次吃光');
+
+        expect(foodEmergencyLine({ ...base, difficulty: 3 })).toContain('Hard 难度会真的饿死');
+        expect(foodEmergencyLine({ ...base, difficulty: 2 })).toContain('Normal 难度饿不死人');
+        expect(foodEmergencyLine({ ...base, difficulty: 0 })).toContain('和平难度不会饿');
+        // 读不到难度就**不猜**（不许编"饿不死"或"会饿死"）
+        expect(foodEmergencyLine({ ...base })).not.toContain('饿死');
+        expect(foodEmergencyLine({ ...base, difficulty: null })).not.toContain('饿死');
+    });
+
+    it('端到端：signals 里带上难度 → 报告里就出现那句话；没带就不出现', () => {
+        const withEasy = formatSurvivalReport(assessSurvival(baseSignals({ health: 3, food: 2, difficulty: 1 })));
+        expect(withEasy).toContain('Easy 难度饿不死人');
+        const without = formatSurvivalReport(assessSurvival(baseSignals({ health: 3, food: 2 })));
+        expect(without).toContain('食物告急');
+        expect(without).not.toContain('饿死');
+    });
+
+    it('sampleSurvivalSignals 会读世界难度（读不到就是 null）', () => {
+        const bot = fakeBody({}, { y: 64 });
+        bot.game = { difficulty: 1 };
+        expect(sampleSurvivalSignals(bot).difficulty).toBe(1);
+        bot.game = {};
+        expect(sampleSurvivalSignals(bot).difficulty).toBeNull();
+    });
+
     it('打烈焰人前被存粮规则拦下 → 说"存粮先留着"，不谎报"没吃成"', async () => {
         const blocks: BlockMap = { '0,64,0': { name: 'stone' } };
         const bot = fakeBody(blocks, {

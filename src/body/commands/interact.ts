@@ -40,6 +40,8 @@ import * as world from '../library/world.js';
 import * as mc from '../data/mcdata.js';
 import Vec3 from 'vec3';
 import { td, tp } from '../../shared/prompts.js';
+import { inventoryLossAdvice } from '../../shared/inventory_advice.js';
+import { FOOD_VALUE } from '../safety/emergency.js';
 import type { AgentCommand } from './actions.js';
 
 /** 物品规格：`{name, count}` 或裸名字。 */
@@ -1583,6 +1585,9 @@ const interactCommands: AgentCommand[] = [
 
       if (plan.kind === 'deposit') {
         if (located == null) return renderReport(lines, '定位不到容器。');
+        // **整包账目**：存完要能回答"我还剩什么"——真机 19:20 那次把镐、剑、
+        // 食物、垫脚方块一起存了，回执只说"存了 X 个"，模型到出门时才发现包是空的。
+        const packBefore = world.getInventoryCounts(agent.bot);
         for (const item of parsedIn.items) {
           await settleInventory(agent.bot, 2, 50);
           const beforeCount = countInInventory(agent.bot, item.name);
@@ -1592,6 +1597,14 @@ const interactCommands: AgentCommand[] = [
           lines.push(step(`放入 ${item.name}：请求 ${item.count}${result.ok ? '' : '（操作未完成）'}`));
           lines.push('    ' + formatTransferReceipt(item.name, item.count, 'deposit', result, beforeCount, afterCount));
         }
+        const packAfter = world.getInventoryCounts(agent.bot);
+        const advice = inventoryLossAdvice({
+          before: packBefore,
+          after: packAfter,
+          isFood: (name) => FOOD_VALUE[name] != null,
+          isPlaceable: (name) => agent.bot?.registry?.blocksByName?.[name]?.boundingBox === 'block',
+        });
+        if (advice.text !== '') lines.push('    ' + advice.text);
         return renderReport(lines);
       }
 
