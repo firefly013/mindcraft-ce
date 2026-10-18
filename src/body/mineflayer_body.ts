@@ -83,6 +83,7 @@ import { getFullState } from './library/full_state.js';
 import { decodeCursor, EMPTY_CURSOR, encodeCursor, readInbox, type InboxCursor } from './inbox.js';
 import { safeguards } from './safety/safeguards.js';
 import { OFFENSIVE_TOOL_NAMES, combatRefusalVerdict } from './safety/reflex_override.js';
+import { DEPARTURE_TOOLS, departureVerdict, isWeaponName, targetDimensionOf } from './safety/departure_guard.js';
 import { permits } from './safety/permits.js';
 import { log, validateNameFormat, handleDisconnection } from './connection_handler.js';
 import { createLogger, type Logger } from '../shared/logger.js';
@@ -1522,6 +1523,105 @@ export class MineflayerBody {
         } catch {
             // 守卫自己出错时**放行**（不能因为守卫坏了让模型动不了）。
             return null;
+        }
+    }
+
+    /**
+     * **出发前准备检查**（`enterEnd` / `enterNether`）：返回 `{text}` = 拒绝文本。
+     *
+     * 只拦"进入"这两个工具；已经在目标维度、出口类工具、逃跑、保命反射都不受影响。
+     * **武器在背包里但没拿在手上 ⇒ 帮它 `equip` 再放行**（能救就救，不当成拒绝理由）。
+     */
+    async departureCheckFor(toolName: string): Promise<{ text: string | null; warning?: string }> {
+        try {
+            const tool = String(toolName ?? '');
+            if (!DEPARTURE_TOOLS.has(tool)) return { text: null };
+            const bot = this.bot as any;
+            const target = targetDimensionOf(tool);
+            let dimension: string | null = null;
+            try {
+                dimension = typeof bot?.game?.dimension === 'string' ? bot.game.dimension : null;
+            } catch {
+                dimension = null;
+            }
+            if (dimension != null && target != null && dimension.toLowerCase().includes(target)) {
+                return { text: null }; // 已经在里面：这不是"进入"
+            }
+            // **背包读不到 ≠ 背包是空的**：读失败就放行（不能让守卫因为读不到把人困住）。
+            const items: Array<{ name?: unknown; count?: unknown }> | null = (() => {
+                try {
+                    return (bot?.inventory?.items?.() ?? []) as Array<{ name?: unknown; count?: unknown }>;
+                } catch {
+                    return null;
+                }
+            })();
+            if (items == null) return { text: null };
+            const weapon = items.find((item) => isWeaponName(item?.name)) ?? null;
+            const heldNameOf = (): string => {
+                try {
+                    return String(bot?.heldItem?.name ?? '');
+                } catch {
+                    return '';
+                }
+            };
+            // **能救就救**：武器在背包里但没拿在手上 ⇒ 先帮它拿上，再判定。
+            // （这不是"拒绝理由"——空手进末地才是。）
+            if (weapon != null && !isWeaponName(heldNameOf())) {
+                try {
+                    await bot.equip(weapon, 'hand');
+                } catch {
+                    // 拿不上就继续判定（真没武器在手上才拒）。
+                }
+            }
+            const heldName = heldNameOf();
+            const blocks = (() => {
+                try {
+                    let total = 0;
+                    let known = false;
+                    for (const item of items) {
+                        const name = String(item?.name ?? '');
+                        const def = bot?.registry?.blocksByName?.[name];
+                        if (def == null || def.boundingBox !== 'block') continue;
+                        known = true;
+                        total += Number(item?.count ?? 0) || 0;
+                    }
+                    return known ? total : null;
+                } catch {
+                    return null;
+                }
+            })();
+            const health = Number(bot?.health);
+            const food = Number(bot?.food);
+            const facts = {
+                tool,
+                dimension,
+                health: Number.isFinite(health) ? health : null,
+                food: Number.isFinite(food) ? food : null,
+                // 拿在手上算数；拿不上但包里有，也算"有武器"（模型只要 equip 就能用）。
+                weapon: isWeaponName(heldName) ? heldName : typeof weapon?.name === 'string' ? weapon.name : null,
+                blocks,
+            };
+            const verdict = departureVerdict(facts);
+            if (!verdict.allowed) {
+                // 一行有界日志：以后能回答"这道门拦对了，还是拦下了一个准备好的 bot？"
+                try {
+                    this.log.with('lifecycle').info({
+                        event: 'departure-refusal',
+                        tool,
+                        weapon: facts.weapon,
+                        food: facts.food,
+                        blocks: facts.blocks,
+                        health: facts.health,
+                    });
+                } catch {
+                    // 日志失败不影响拒绝。
+                }
+                return { text: verdict.text ?? `**拒绝进${tool === 'enterEnd' ? '末地' : '下界'}**：准备不足。` };
+            }
+            return { text: null, warning: verdict.warning };
+        } catch {
+            // 守卫自己坏了 ⇒ 放行（不能让模型因为守卫出错而走不了）。
+            return { text: null };
         }
     }
 
@@ -3648,8 +3748,23 @@ export class MineflayerBody {
                             result: { ok: false, text: combatRefusal, code: 'REFUSED_CRITICAL_HEALTH' },
                         };
                     }
+                    // **出发前准备检查**（末地/下界是单向 + 致死地形）：空手走进去不是
+                    // 模型该"不小心"做的决定。真机 2026-10-19 07:00：overnight_a 空手
+                    // （背包只有 dirt×10）走过虚空桥，被末影人打死。
+                    // 只拦"进入"：出口/逃跑/保命反射一律不受影响；武器在包里就帮它拿上。
+                    const departure = await this.departureCheckFor(baseName);
+                    if (departure.text != null) {
+                        return {
+                            ok: true,
+                            op: 'action',
+                            result: { ok: false, text: departure.text, code: 'REFUSED_UNPREPARED_DEPARTURE' },
+                        };
+                    }
+                    // 边界情况放行，但**提醒必须带进回执**（模型下一轮就看得到）。
+                    const departureWarning = departure.warning ?? null;
                     try {
                         text = await executeToolCall(this, name, args);
+                        if (departureWarning != null) text = `${departureWarning}\n${text}`;
                     } catch (err: unknown) {
                         // 抛错也算"这次自救没成"：**不许给冷却**，让保命随时能回来。
                         if (rescueAttempt) this.settleModelRescue(false, baseName, preempted);
