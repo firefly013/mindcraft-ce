@@ -180,7 +180,10 @@ export class ActionRunner {
     if (!isActionTool(this.catalog, name)) {
       this.trace({ kind: 'query', name });
       this.speak(MESSAGES.usedMarker(name));
-      const data = await this.execute(name, args as Record<string, unknown>);
+      // **查询路径同样必须封顶。** 对抗验证的探针（tmp/verify/receipt_caps.probe.test.ts）
+      // 发现：动作路径 clamp 了、查询路径没 clamp——`stats` 这类查询返回 10 万字符时
+      // 会原样透出，而"回执不许无限长"这条纪律不该分路径。
+      const data = clampActionOutput(await this.execute(name, args as Record<string, unknown>));
       await this.record(data, name, args);
       return { status: 'completed', data };
     }

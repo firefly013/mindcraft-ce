@@ -48,21 +48,38 @@ function positiveNumber(value: unknown, fallback: number): number {
  */
 export const MIN_RESERVE_RATIO = 0.2;
 
+/**
+ * reserve 的**上限**：窗口的一半。对抗验证（tmp/verify/compaction_floor.probe.test.ts）发现
+ * 只抬不封顶会出事——8K 窗口下 reserve 被抬到 16_384（**大于窗口本身**），
+ * 触发线成了 `−8192`；而且 `keepRecentTokens=20_000 > window − reserve`，pi-durable 的
+ * `selectCut` 永远返回 undefined，于是阈值压缩和**溢出压缩**都选不出切点，
+ * 溢出直接变成 "An overflow is never retried" ——**又是 F-21 那个形状，只是换了个窗口大小**。
+ * 本机跑的是 1M 窗口所以今晚没踩到，但这段代码是通用的，不能只在 1M 下正确。
+ */
+export const MAX_RESERVE_RATIO = 0.5;
+
 /** 从 profile 解析上下文压缩策略。缺字段一律落回 pi-durable 的默认值。 */
 export function compactionPolicyFromProfile(profile: unknown, contextWindow?: number): CompactionPolicy {
   const source = (profile ?? {}) as Record<string, unknown>;
   const compaction = (source['compaction'] ?? {}) as Record<string, unknown>;
   const configured = positiveNumber(compaction['reserveTokens'], DEFAULT_RESERVE_TOKENS);
-  // 窗口已知时，把 reserve 抬到安全底线之上（profile 配得更保守就听 profile 的）。
-  const floor =
-    typeof contextWindow === 'number' && Number.isFinite(contextWindow) && contextWindow > 0
-      ? Math.round(contextWindow * MIN_RESERVE_RATIO)
-      : 0;
-  const reserveTokens = Math.max(configured, floor);
+  const configuredKeepRecent = positiveNumber(compaction['keepRecentTokens'], DEFAULT_KEEP_RECENT_TOKENS);
+  const hasWindow =
+    typeof contextWindow === 'number' && Number.isFinite(contextWindow) && contextWindow > 0;
+  // 窗口已知时：reserve 抬到窗口 20% 之上、**封顶在窗口 50%**（既留足余量，又保证触发线为正）。
+  const floor = hasWindow ? Math.round(contextWindow * MIN_RESERVE_RATIO) : 0;
+  const cap = hasWindow ? Math.round(contextWindow * MAX_RESERVE_RATIO) : Number.POSITIVE_INFINITY;
+  const reserveTokens = Math.min(Math.max(configured, floor), Math.max(cap, 1));
+  // `keepRecentTokens` 必须给"窗口 − reserve"留得下：否则 pi-durable 选不出切点，
+  // 压缩（含溢出压缩）永远做不成。收敛到剩余空间的 50%，1M 窗口下 20_000 不变。
+  const headroom = hasWindow ? contextWindow - reserveTokens : Number.POSITIVE_INFINITY;
+  const keepRecentTokens = Number.isFinite(headroom)
+    ? Math.max(1, Math.min(configuredKeepRecent, Math.floor(headroom * 0.5)))
+    : configuredKeepRecent;
   return {
     enabled: compaction['enabled'] !== false,
     reserveTokens,
-    keepRecentTokens: positiveNumber(compaction['keepRecentTokens'], DEFAULT_KEEP_RECENT_TOKENS),
+    keepRecentTokens,
     // 后台压缩的提前量。主线还没这个参数，落回 pi-durable 默认。
     backgroundTokens: positiveNumber(compaction['backgroundTokens'], DEFAULT_BACKGROUND_TOKENS),
   };
