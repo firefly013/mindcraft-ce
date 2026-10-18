@@ -34,20 +34,21 @@ export const ENDGAME_TOOL_TEXT: Record<string, { description: string; params: Re
     enterEnd: {
         description:
             '自动进入末地：附近有已激活的末地传送门就直接走进去；没有就找**空的**末地传送门框架，用背包里的末影之眼一颗颗填满（12 颗全填上才激活），然后走进去等维度切换。' +
-            '进去落在 (100,49,0) 的黑曜石平台上、面朝西，**平台和主岛之间可能隔着虚空**（要搭桥或扔珍珠）。' +
-            '注意：进末地之后只有"杀掉龙"或"死"两条路出来，先确认背包再调。要塞不在这里时它会明确告诉你先去掷末影之眼。',
+            '**两样都没有（要塞不在这）时它会替你掷一颗末影之眼指路**：跟着眼睛飞的方向走约 12 格再调一次；眼睛开始往下钻就说明要塞在脚下，往下挖。' +
+            '进门之前会把主世界那个传送门的坐标记下来（死亡回收要用）。' +
+            '进去落在 (100,49,0) 的黑曜石平台上、面朝西，**平台和主岛之间可能隔着虚空**（要搭桥或扔珍珠）。',
         params: {},
     },
     clearEndCrystals: {
         description:
-            '拆末地水晶，一次处理一颗。地面能看见的水晶：退到 12 格外（爆炸威力 6，水**挡不住伤害和击退**）用弓射；被铁栏杆笼住的那两颗：有 TNT 就在笼顶放一个点燃后撤（要先 allowDangerousOps(ops="ignite", calls=1)），没 TNT 就明说拆不掉、建议去合成。' +
-            '**必须全部拆完再打龙**：只要还剩一颗，龙就会持续回血，之前打的血全白打。回执会告诉你还剩几颗、下一颗在哪。',
+            '拆末地水晶，一次处理一颗。地面能看见的水晶：退到 12 格外（爆炸威力 6，水**挡不住伤害和击退**）用弓射——**退不够它不会放箭**，只告诉你该退到哪；被铁栏杆笼住的那两颗：有 TNT 就在笼顶放一个点燃、按 12 格爆炸半径后撤（要先 allowDangerousOps(ops="ignite", calls=1)），没 TNT 就明说拆不掉、建议去合成或带缓降上柱子。' +
+            '**必须全部拆完再打龙**：只要还剩一颗，龙就会持续回血，之前打的血全白打。回执会报"还剩几颗、下一颗在哪"。',
         params: {},
     },
     bedBombDragon: {
         description:
-            '床炸末影龙，一次一张床。**只在龙低头停在 (0,64,0) 出口传送门上时有用**（它飞着时床炸不到）；工具先算安全账：没有掩体、又退不到 10 格外（威力 5 的爆炸半径）时会**直接拒绝执行**，只告诉你哪里不行——被拒绝不是 bug。' +
-            '在末地点床 = 尝试睡觉 = 爆炸，属于危险操作，**必须先 allowDangerousOps(ops="sleep_in_bed", calls=1)**（一张床 = 一次），否则一个方块都不会放。',
+            '床炸末影龙，**一次一张床**（一张床 = 一次 sleep_in_bed 授权）。**只在龙低头停在 (0,64,0) 出口传送门上时有用**（它飞着时床炸不到）；工具先探真实地形选好"床位/掩体/站位"，再算安全账：**血量 <10、饥饿 <6、没有能兑现的掩体、够不着床、自伤超过一半血、龙离床 >3 格**——任一成立都**直接拒绝执行**并说清缺什么，一个方块都不放。被拒绝不是 bug。' +
+            '在末地点床 = 尝试睡觉 = 爆炸，属于危险操作，**必须先 allowDangerousOps(ops="sleep_in_bed", calls=1)**，否则它不会放床。',
         params: {},
     },
     dodgeDragonBreath: {
@@ -69,15 +70,16 @@ export const ENDGAME_TOOL_TEXT: Record<string, { description: string; params: Re
     },
     recoverAfterDeath: {
         description:
-            '死亡回收：读死亡点记录，给你"东西还在不在 + 从哪回去"的方案。掉落物 **5 分钟**后消失，但**只在区块被加载时才计时**（旁边没人 = 基本不会消失）；掉进虚空的东西**当场消失**，不用去捡。' +
-            '人已经在末地时会直接带你走到尸体坐标；在别的维度则只给路线（跨维度那一段要自己走）。**死亡后的第一件事就是调它**，别在原地发呆等掉落物过期。',
+            '死亡回收：读死亡点记录，给你"东西还在不在 + 已经过了多久 + 从哪回去"的方案。掉落物 **5 分钟**后消失，但**只在区块被加载时才计时**（旁边没人 = 基本不会消失，另一个 bot 在旁边则是在跑的）；掉进虚空（Y<-60）的东西**当场消失**，不用去捡。' +
+            '人已经在末地时会直接带你走到尸体坐标；在别的维度则给路线（有记过主世界传送门坐标就顺着它回去；跨维度那一段要自己走）。**死亡后的第一件事就是调它**，别在原地发呆等掉落物过期。',
         params: {},
     },
     throwHeld: {
         description:
             '把手里的东西扔出去（**先 equip 要扔的东西**：ender_eye 末影之眼 / ender_pearl 末影珍珠 / 雪球 / 鸡蛋）。' +
-            '末影之眼会朝最近要塞方向飞约 12 格（每次 20% 概率碎）——跟着它指的方向走，眼睛开始往下钻就说明要塞在脚下，往下挖；末影珍珠是位移/免摔伤，**正在下坠时会自动往脚下扔**。' +
-            '扔完会核对手里那一叠的数量有没有真的减少，没减少就说明服务端没采纳，它会如实报出来、不会假装成功。',
+            '末影之眼**扔出去之后会盯它 1~2 秒量出飞行方向**（8 方位罗盘 + 方位角 + 飞了多远），并把最后看到的位置记进 Memory Bank（last_eye_of_ender）——' +
+            '眼睛只活 1~2 秒，不量就永远不知道要塞在哪。跟着这个方向走约 12 格再扔一颗，两次方向交叉就是要塞；眼睛开始往下钻就往下挖。' +
+            '没采到位置时它会**如实说"没看清"**、绝不编方向。末影珍珠是位移/免摔伤，**正在下坠时会自动往脚下扔**。',
         params: {},
     },
 };
@@ -141,14 +143,17 @@ export const endgameActionList: AgentCommand[] = [
         description: DESCRIPTION('enterEnd'),
         params: {},
         // 找门 + 填 12 颗眼 + 走门 + 等维度切换，给足 5 分钟。
-        perform: runEndgameAction('enterEnd', 5, (agent) => logReceipt(agent, () => endgame.enterEndSkill(agent.bot))),
+        // 传 agent 是为了把主世界传送门坐标记进 Memory Bank（recoverAfterDeath 要用）。
+        perform: runEndgameAction('enterEnd', 5, (agent) =>
+            logReceipt(agent, () => endgame.enterEndSkill(agent.bot, agent)),
+        ),
     },
     {
         name: '!clearEndCrystals',
         description: DESCRIPTION('clearEndCrystals'),
         params: {},
-        // 走位 + 拉弓/放 TNT + 后撤，一次一颗，给 4 分钟。
-        perform: runEndgameAction('clearEndCrystals', 4, (agent) =>
+        // 走位 + 拉弓/放 TNT + 按爆炸半径后撤，一次一颗，给 5 分钟（和工具声明一致）。
+        perform: runEndgameAction('clearEndCrystals', 5, (agent) =>
             logReceipt(agent, () => endgame.clearEndCrystalsSkill(agent.bot)),
         ),
     },

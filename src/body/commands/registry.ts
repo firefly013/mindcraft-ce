@@ -14,6 +14,7 @@ import { queryList } from './queries.js';
 import { survivalActionList, survivalQueryList } from './survival.js';
 import { endgameActionList, endgameQueryList } from './endgame.js';
 import { makeObsidianActionList } from './make_obsidian.js';
+import { progressionActionList } from './progression.js';
 
 /** 与旧 `to_openai_tools.ts` 的 `commandList` 同一个来源、同一个顺序。 */
 export const GAME_COMMANDS: AgentCommand[] = [
@@ -23,6 +24,7 @@ export const GAME_COMMANDS: AgentCommand[] = [
     ...actionsList,
     ...survivalActionList,
     ...endgameActionList,
+    ...progressionActionList,
     ...makeObsidianActionList,
 ];
 
@@ -66,6 +68,7 @@ export function toolDeclarations(): ToolDeclaration[] {
         ...actionsList.map((command) => declarationOf(command, 'action')),
         ...survivalActionList.map((command) => declarationOf(command, 'action')),
         ...endgameActionList.map((command) => declarationOf(command, 'action')),
+        ...progressionActionList.map((command) => declarationOf(command, 'action')),
         ...makeObsidianActionList.map((command) => declarationOf(command, 'action')),
     ];
 }

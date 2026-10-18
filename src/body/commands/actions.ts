@@ -78,8 +78,19 @@ function runAsAction (actionFn: AgentActionFn, timeout = DEFAULT_ACTION_TIMEOUT_
             await actionFn(agent, ...args);
         };
         const code_return = await agent.actions.runAction(`action:${actionLabel}`, actionFnWithAgent, { timeout });
-        if (code_return.interrupted && !code_return.timedout)
-            return;
+        if (code_return.interrupted && !code_return.timedout) {
+            // **被中断也要给结论。** 以前这里直接 `return;`（回执是空串），大脑
+            // 只能补一句"没有得到明确结论，不能确认是否找到"——模型连续两次
+            // 收到一模一样的废话，既不知道是被谁打断、也不知道该不该重试
+            // （Feedback #42）。中断原因（body 侧 `interrupt_code`）就是结论本身：
+            // "搜索没做完，因为 Stop/保命反射抢走了身体"。
+            const logs = String(code_return.message ?? '').trim();
+            const tail = logs === '' ? '' : `\n中断前的日志：${logs.split('\n').slice(-4).join(' / ')}`;
+            return (
+                `${actionLabel}：**被中断**（Stop / 保命反射 / autoPickup 抢走了身体），没有做完，也没有结论。` +
+                `通道已经释放，可以开始下一个动作。${tail}`
+            );
+        }
         // **超时时必须把"卡在哪"说出来。** 光回一句"超时"等于没说：模型不知道
         // 是脚边被水占了、卡在方块里、还是目标根本够不着，只能瞎重试
         // （它自述"装桶重试 6 次""同一件事重发/换招"就是这个原因）。

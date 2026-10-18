@@ -153,7 +153,14 @@ export function sampleLiveState(ctx: SampleContext): LiveState {
       onGround: null,
       effects: [],
     },
-    held: { mainHand: null, offHand: null, armor: [], mainHandDurability: null, mainHandDurabilityRaw: null },
+    held: {
+      mainHand: null,
+      offHand: null,
+      armor: [],
+      mainHandDurability: null,
+      mainHandDurabilityUsed: null,
+      mainHandDurabilityMax: null,
+    },
     backpack: { freeSlots: null, items: [] },
     position: { x: null, y: null, z: null, yaw: null, pitch: null, dimension: null, biome: null, speed: null },
     environment: { timeOfDay: null, weather: 'Unknown', light: null, lightConfidence: 'unknown', day: null },
@@ -209,10 +216,8 @@ export function sampleLiveState(ctx: SampleContext): LiveState {
         (s): s is string => s != null && s !== 'null',
       ),
       mainHandDurability: durabilityFraction(usedDurability, maxDurability),
-      mainHandDurabilityRaw:
-        usedDurability != null || maxDurability != null
-          ? `used=${usedDurability ?? '?'} max=${maxDurability ?? '?'}`
-          : null,
+      mainHandDurabilityUsed: usedDurability,
+      mainHandDurabilityMax: maxDurability,
     };
 
     const packItems: string[] = [];

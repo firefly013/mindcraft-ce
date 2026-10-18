@@ -6,21 +6,29 @@
  * 改动公式时这些数字会当场拦下来。
  */
 import { describe, expect, it } from 'vitest';
+import { toolNames } from '../src/body/commands/registry.js';
 import {
     BREATH_HARM_RADIUS,
+    BLOCK_REACH_DISTANCE,
+    COMPASS_POINTS,
     DRAGON_MAX_HEALTH,
     END_PODIUM,
     EXPLOSION_POWER,
     ITEM_DESPAWN_SECONDS,
+    MIN_EYE_TRAVEL,
     PLATFORM_BLOCKS,
     activeEffectSeconds,
     assessEndGear,
     bedDamageVsDragon,
     bedsNeeded,
     blastRadius,
+    choosePotionToDrink,
+    compassBearing,
     countBedsIn,
+    describeEyeDirection,
     explosionDamage,
     explosionDamageToPlayer,
+    findNegativeEffect,
     findPotionItem,
     formatEndgameReport,
     hasActiveEffect,
@@ -32,9 +40,13 @@ import {
     planRecovery,
     potionKindOf,
     potionStock,
+    trackEyeFlight,
     vec,
     type BreathCloud,
+    type EffectInfo,
     type EndCrystalInfo,
+    type EyeSample,
+    type PotionStock,
 } from '../src/body/library/endgame.js';
 
 describe('爆炸伤害公式（照 Wiki 原式手算）', () => {
@@ -479,5 +491,255 @@ describe('阶段状态机', () => {
         expect(report).toContain('末地通关');
         expect(report).toContain('原因：');
         expect(report).toContain('缺口：');
+    });
+});
+
+// ============================ 回归测试：这一轮修掉的真实缺陷 ============================
+
+describe('床炸闸门（原来有一支恒真的判据让闸门形同虚设）', () => {
+    it('无掩体时不能靠"退到 10 格外"混过去——哪怕穿满爆炸保护也拒绝', () => {
+        const plan = planBedBombing({
+            dragonHead: vec(0, 65, 0),
+            bedCell: vec(1, 64, 0),
+            standCell: vec(2, 64, 0),
+            mitigation: { armorPoints: 20, blastProtectionLevel: 4, resistanceLevel: 2 },
+        });
+        // 修之前：enoughRoom 里的 `retreatDistance >= safeDistance` 恒真 → ok=true。
+        expect(plan.coverVerified).toBe(false);
+        expect(plan.method).toBe('run');
+        expect(plan.ok).toBe(false);
+        expect(plan.reason).toContain('掩体');
+    });
+
+    it('够不着床也不能炸：10 格外的"安全"是假的（点不着床）', () => {
+        const plan = planBedBombing({
+            dragonHead: vec(0, 65, 0),
+            bedCell: vec(0, 64, 0),
+            standCell: vec(12, 64, 0),
+            inTrench: true,
+        });
+        expect(plan.standDistance).toBe(12);
+        expect(plan.canReachBed).toBe(false);
+        expect(plan.ok).toBe(false);
+        expect(plan.reason).toContain('够不着');
+        expect(BLOCK_REACH_DISTANCE).toBeCloseTo(4.5, 6);
+    });
+
+    it('自伤超过一半血 → 拒绝（没当场死也会被下一发龙息/摔伤收掉）', () => {
+        const plan = planBedBombing({
+            dragonHead: vec(0, 65, 0),
+            bedCell: vec(1, 64, 0),
+            standCell: vec(2, 64, 0),
+            inTrench: true,
+            health: 10,
+        });
+        expect(plan.lethal).toBe(false);
+        expect(plan.tooRisky).toBe(true);
+        expect(plan.ok).toBe(false);
+        expect(plan.reason).toContain('一半');
+    });
+
+    it('要几张床按"龙还剩多少血"算，不是永远 4 张', () => {
+        const plan = planBedBombing({
+            dragonHead: vec(0, 65, 0),
+            bedCell: vec(1, 64, 0),
+            standCell: vec(2, 64, 0),
+            inTrench: true,
+            dragonHealth: 50,
+        });
+        expect(plan.ok).toBe(true);
+        expect(plan.bedsNeeded).toBe(1);
+    });
+});
+
+describe('躲龙息的方向兜底（原来会"一步没动"却报"已挪开"）', () => {
+    it('龙低头 + 我在 20 格内 + 地上没云 → 朝远离传送门的方向给一个真目标', () => {
+        const escape = planBreathEscape({ self: vec(5, 64, 0), clouds: [], dragonPerched: true });
+        expect(escape.urgency).toBe('move');
+        expect(escape.escapeMode).toBe('perch');
+        expect(Math.abs(escape.escapeDirection.dx) + Math.abs(escape.escapeDirection.dz)).toBeGreaterThan(0);
+        const podiumDistanceAfter = Math.hypot(escape.escapeTarget.x - END_PODIUM.x, escape.escapeTarget.z - END_PODIUM.z);
+        expect(podiumDistanceAfter).toBeGreaterThan(escape.podiumDistance);
+    });
+
+    it('云心正好踩在脚下（方向退化）也给确定方向，不会原地不动', () => {
+        const escape = planBreathEscape({ self: vec(0, 64, 0), clouds: [{ position: vec(0, 64, 0) }] });
+        expect(escape.urgency).toBe('sprint');
+        expect(escape.distanceToMove).toBeGreaterThan(0);
+        expect(Math.abs(escape.escapeDirection.dx) + Math.abs(escape.escapeDirection.dz)).toBeGreaterThan(0);
+        expect(Math.hypot(escape.escapeTarget.x, escape.escapeTarget.z)).toBeGreaterThan(BREATH_HARM_RADIUS);
+    });
+
+    it('不在危险里时仍然一动不动（escapeMode=none）', () => {
+        const escape = planBreathEscape({ self: vec(30, 64, 0), clouds: [], dragonPerched: true });
+        expect(escape.urgency).toBe('none');
+        expect(escape.escapeMode).toBe('none');
+        expect(escape.distanceToMove).toBe(0);
+    });
+});
+
+describe('阶段状态机：龙死 / 水晶未知 / 工具名必须真的存在', () => {
+    const ready = { gearReady: true, strongholdFound: true, portalActivated: true, inEnd: true } as const;
+
+    it('龙实体消失且 boss bar 也没了 → done（原来会永远停在 fight_dragon 对着尸体放床）', () => {
+        const advice = nextEndgameStep({ ...ready, crystalsAlive: 0, dragonHealth: null, dragonAlive: false });
+        expect(advice.phase).toBe('done');
+        expect(advice.action).toContain('出口传送门');
+    });
+
+    it('龙血读得到（>0）→ 继续打；实体还在也继续打', () => {
+        expect(nextEndgameStep({ ...ready, crystalsAlive: 0, dragonHealth: 120, dragonAlive: true }).phase).toBe('fight_dragon');
+        expect(nextEndgameStep({ ...ready, crystalsAlive: 0, dragonHealth: null, dragonAlive: true }).phase).toBe('fight_dragon');
+    });
+
+    it('水晶数读不到 → 回末地保守拆水晶，不跳过去打龙', () => {
+        const advice = nextEndgameStep({ ...ready, dragonHealth: 200 });
+        expect(advice.phase).toBe('clear_crystals');
+        expect(advice.action).toContain('读不到');
+    });
+
+    it('建议的工具名全部能在 registry 里查到（原来有 locateStronghold / activateEndPortal）', () => {
+        const names = new Set(toolNames());
+        const states = [
+            {},
+            { gearReady: true },
+            { gearReady: true, strongholdFound: true },
+            { ...ready, crystalsAlive: 3 },
+            { ...ready, crystalsAlive: 0, dragonHealth: 100 },
+        ];
+        for (const state of states) {
+            const advice = nextEndgameStep(state);
+            if (advice.tool != null) expect(names.has(advice.tool), `${advice.phase} → ${advice.tool}`).toBe(true);
+        }
+    });
+});
+
+describe('装备清单：笼中水晶的工具缺口不许悄悄漏掉', () => {
+    it('没有 TNT 也没有镐 → 明确警告（仍然不是硬缺口）', () => {
+        const report = assessEndGear({ inventory: { white_bed: 4, obsidian: 64 } });
+        expect(report.ok).toBe(true);
+        expect(report.fatal).toHaveLength(0);
+        expect(report.warnings.join()).toContain('既没有 TNT 也没有镐');
+    });
+
+    it('有镐就不再警告 TNT 缺口', () => {
+        const report = assessEndGear({ inventory: { white_bed: 4, obsidian: 64, iron_pickaxe: 1 } });
+        expect(report.warnings.join()).not.toContain('既没有 TNT 也没有镐');
+    });
+
+    it('硬缺口仍然只有设计稿写的那两条', () => {
+        expect(assessEndGear({ inventory: { bedrock: 64 } }).fatal).toHaveLength(2);
+    });
+});
+
+describe('牛奶：只在负面效果时喝，且不牺牲自己的好 Buff', () => {
+    const emptyStock: PotionStock = {
+        slow_falling: 0,
+        resistance: 0,
+        regeneration: 0,
+        healing: 0,
+        strength: 0,
+        fire_resistance: 0,
+        swiftness: 0,
+        other: 0,
+        milk: 0,
+    };
+    const stock = (overrides: Partial<PotionStock>): PotionStock => ({ ...emptyStock, ...overrides });
+
+    it('中毒 + 没有好 Buff + 有牛奶 → 喝牛奶', () => {
+        const decision = choosePotionToDrink({
+            stock: stock({ milk: 1 }),
+            effects: [{ name: 'poison', seconds: 20, amplifier: 0 }],
+            health: 20,
+            inEnd: false,
+        });
+        expect(decision.kind).toBe('milk');
+        expect(decision.reason).toContain('poison');
+    });
+
+    it('中毒但身上有缓降 → 不喝（牛奶会把缓降一起清掉，等于把命交给下坠）', () => {
+        const effects: EffectInfo[] = [
+            { name: 'poison', seconds: 20, amplifier: 0 },
+            { name: 'slow_falling', seconds: 120, amplifier: 0 },
+        ];
+        const decision = choosePotionToDrink({ stock: stock({ milk: 1 }), effects, health: 20, inEnd: false });
+        expect(decision.kind).toBeNull();
+        expect(decision.considered.join()).toContain('一起清掉');
+    });
+
+    it('findNegativeEffect 认得中毒/缓慢，不把缓降当负面', () => {
+        expect(findNegativeEffect([{ name: 'Slowness', seconds: 5, amplifier: 0 }])).toBe('slowness');
+        expect(findNegativeEffect([{ name: 'slow_falling', seconds: 5, amplifier: 0 }])).toBeNull();
+    });
+});
+
+describe('末影之眼：方向是唯一线索，必须量准（+X 东 / +Z 南）', () => {
+    const origin = vec(0, 64, 0);
+
+    it('八个方向都能认出来', () => {
+        const cases: Array<[number, number, string]> = [
+            [10, 0, 'east'],
+            [-10, 0, 'west'],
+            [0, 10, 'south'],
+            [0, -10, 'north'],
+            [10, -10, 'northeast'],
+            [10, 10, 'southeast'],
+            [-10, 10, 'southwest'],
+            [-10, -10, 'northwest'],
+        ];
+        for (const [dx, dz, point] of cases) {
+            const bearing = compassBearing(origin, vec(dx, 64, dz));
+            expect(bearing?.point, `${dx},${dz}`).toBe(point);
+        }
+        expect(COMPASS_POINTS).toHaveLength(8);
+    });
+
+    it('方位角 0 = 正北、顺时针；水平距离单独给', () => {
+        expect(compassBearing(origin, vec(0, 64, -5))?.degrees).toBeCloseTo(0, 6);
+        expect(compassBearing(origin, vec(5, 64, 0))?.degrees).toBeCloseTo(90, 6);
+        expect(compassBearing(origin, vec(0, 64, 5))?.degrees).toBeCloseTo(180, 6);
+        expect(compassBearing(origin, vec(3, 64, 4))?.distance).toBeCloseTo(5, 6);
+    });
+
+    it('重合/坏数据 → null（看不出方向就是看不出，不许编）', () => {
+        expect(compassBearing(origin, vec(0, 64, 0))).toBeNull();
+        expect(compassBearing(origin, vec(Number.NaN, 64, 0))).toBeNull();
+    });
+
+    it('采样轨迹：取最早和最晚两点算方向', () => {
+        const samples: EyeSample[] = [
+            { position: vec(0, 64, 0) },
+            { position: vec(3, 64, 0.2) },
+            { position: vec(9, 64, 0.4) },
+        ];
+        const track = trackEyeFlight(samples);
+        expect(track?.point).toBe('east');
+        expect(track?.travelled).toBeCloseTo(Math.hypot(9, 0.4), 6);
+        expect(track?.samples).toBe(3);
+        expect(track?.lastPosition).toEqual(vec(9, 64, 0.4));
+    });
+
+    it('首末几乎重合（出手就碎）→ 退而取"位移最大的一对"', () => {
+        const samples: EyeSample[] = [
+            { position: vec(0, 64, 0) },
+            { position: vec(5, 64, 0) },
+            { position: vec(0.2, 64, 0) },
+        ];
+        expect(trackEyeFlight(samples)?.point).toBe('east');
+    });
+
+    it('采样点不够 / 位移太小 → null（如实说"没看清"）', () => {
+        expect(trackEyeFlight([])).toBeNull();
+        expect(trackEyeFlight([{ position: vec(0, 64, 0) }])).toBeNull();
+        expect(trackEyeFlight([{ position: vec(0, 64, 0) }, { position: vec(MIN_EYE_TRAVEL / 2, 64, 0) }])).toBeNull();
+    });
+
+    it('回执里把方位说成人话，并且明说"这不是到要塞的距离"', () => {
+        const track = trackEyeFlight([{ position: vec(0, 64, 0) }, { position: vec(8, 64, 0) }]);
+        expect(track).not.toBeNull();
+        if (track == null) return;
+        const text = describeEyeDirection(track);
+        expect(text).toContain('东');
+        expect(text).toContain('不是到要塞的距离');
     });
 });

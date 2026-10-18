@@ -1,21 +1,79 @@
-import { describe, expect, it } from 'vitest';
-import { DRAGON_MAX_HEALTH } from '../src/body/library/endgame.js';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { DRAGON_MAX_HEALTH, distance as vecDistance, vec, type Vec3 } from '../src/body/library/endgame.js';
 
 // ============================ 碰世界那一层（用假 bot，不连服务端） ============================
 import {
+    bedBombDragon,
+    clearEndCrystalsSkill,
+    countEyesOfEnder,
+    countPotionsOfKind,
+    crystalToolKit,
+    detectPodiumTrench,
     drinkPotionByKind,
     endgameStatusReport,
     endgameToolSpecs,
+    enterEndSkill,
+    frameHasEye,
     pickBedItemName,
+    planBedBombSite,
     readDragonHealth,
     readDragonPerched,
     readEffects,
     readEndCrystals,
     readEndSignals,
+    recoverAfterDeathSkill,
+    resetDeathClocks,
+    throwEyeAndTrack,
+    throwHeldSkill,
 } from '../src/body/library/endgame_routine.js';
+import { permits } from '../src/body/safety/permits.js';
+
+/**
+ * 测试里没有真服务端：`world.getNearestBlocks*` 会去问 minecraft-data（未连接时是 null），
+ * `skills.goToPosition` 会去用 pathfinder。这里只把**这两种碰真机的能力**换成假的 ——
+ * 其余（`getInventoryCounts`、`skills.log/wait/equip`）保持真实实现。
+ */
+vi.mock('../src/body/library/world.js', async (importOriginal) => {
+    const actual: any = await importOriginal();
+    return {
+        ...actual,
+        getNearestBlocks: vi.fn(() => []),
+        getNearestBlock: vi.fn(() => null),
+        getNearestBlocksWhere: vi.fn(() => []),
+    };
+});
+
+vi.mock('../src/body/library/skills.js', async (importOriginal) => {
+    const actual: any = await importOriginal();
+    return {
+        ...actual,
+        goToPosition: vi.fn(() => Promise.resolve(true)),
+        moveAway: vi.fn(() => Promise.resolve(true)),
+        placeBlock: vi.fn(() => Promise.resolve(true)),
+    };
+});
+
+import * as skills from '../src/body/library/skills.js';
+import * as world from '../src/body/library/world.js';
 
 function stack(name: string, count = 1, extra: Record<string, any> = {}) {
     return { name, count, ...extra };
+}
+
+/**
+ * 假 bot 的"吃东西/喝药"必须**真的从背包里扣掉**。
+ * `drinkPotionByKind` 现在会核对数量（数量没变 = 没喝下去），假 bot 不扣就等于
+ * 永远喝不成 —— 那不是被测代码的 bug，是假 bot 不忠实。
+ */
+function consumeOne(items: any[], held: any): void {
+    if (held == null) return;
+    const index = items.indexOf(held);
+    if (index < 0) return;
+    const item = items[index];
+    if (typeof item.count === 'number' && item.count > 1) item.count -= 1;
+    else items.splice(index, 1);
+    // 同一份栈：**只扣一次**（held 往往就是 items 里那个对象）。
+    if (item !== held && typeof held.count === 'number' && held.count > 1) held.count -= 1;
 }
 
 let fakePosition: any;
@@ -30,6 +88,9 @@ function makeFakeBot(options: {
     registry?: any;
     blockAt?: (p: any) => any;
     position?: { x: number; y: number; z: number };
+    findBlocks?: () => any[];
+    health?: number;
+    food?: number;
 } = {}) {
     const p = options.position ?? { x: 0, y: 64, z: 0 };
     fakePosition = {
@@ -41,6 +102,7 @@ function makeFakeBot(options: {
         },
     };
     const stacks = options.stacks ?? [];
+    const items = options.items ?? stacks;
     const calls: any[] = [];
     const bot: any = {
         game: { dimension: options.dimension ?? 'minecraft:the_end' },
@@ -48,17 +110,31 @@ function makeFakeBot(options: {
         entities: options.entities ?? {},
         bossBars: options.bossBars,
         registry: options.registry ?? { effects: {} },
+        health: options.health ?? 20,
+        food: options.food ?? 20,
         output: '',
         inventory: {
             slots: stacks,
-            items: () => options.items ?? stacks,
+            items: () => items,
         },
+        findBlocks: options.findBlocks ?? (() => []),
         equip: (item: any) => {
             calls.push({ fn: 'equip', item });
+            bot.heldItem = item;
             return Promise.resolve();
         },
         consume: () => {
             calls.push({ fn: 'consume' });
+            consumeOne(items, bot.heldItem);
+            return Promise.resolve();
+        },
+        activateItem: () => {
+            calls.push({ fn: 'activateItem' });
+            consumeOne(items, bot.heldItem);
+            return Promise.resolve();
+        },
+        lookAt: () => {
+            calls.push({ fn: 'lookAt' });
             return Promise.resolve();
         },
         calls,
@@ -182,9 +258,475 @@ describe('drinkPotionByKind（按效果喝药，不是按物品名）', () => {
         expect(bot.output).toContain('失败');
     });
 
+    it('drinkPotionByKind：背包里那叠数量没变 → 不算喝成功，如实报出来', async () => {
+        const potion = stack('potion', 1, { nbt: { value: { Potion: 'minecraft:long_slow_falling' } } });
+        const bot = makeFakeBot({ items: [potion] });
+        // 服务端没采纳（consume 什么也没干）——不能当喝到了。
+        bot.consume = () => {
+            bot.calls.push({ fn: 'consume' });
+            return Promise.resolve();
+        };
+        await expect(drinkPotionByKind(bot, 'slow_falling')).resolves.toBe(false);
+        expect(bot.output).toContain('数量没变');
+        expect(countPotionsOfKind(bot, 'slow_falling')).toBe(1);
+    });
+
+    it('drinkPotionByKind：喝下去之后那一叠真的少一瓶', async () => {
+        const potions = [
+            stack('potion', 2, { nbt: { value: { Potion: 'minecraft:long_slow_falling' } } }),
+        ];
+        const bot = makeFakeBot({ items: potions });
+        await expect(drinkPotionByKind(bot, 'slow_falling')).resolves.toBe(true);
+        expect(countPotionsOfKind(bot, 'slow_falling')).toBe(1);
+        expect(bot.output).toContain('还剩 1 瓶');
+    });
+
     it('pickBedItemName 只认床，不认 bedrock', () => {
         expect(pickBedItemName(makeFakeBot({ items: [stack('bedrock', 64), stack('red_bed', 1)] }))).toBe('red_bed');
         expect(pickBedItemName(makeFakeBot({ items: [stack('bedrock', 64)] }))).toBeNull();
+    });
+});
+
+// ============================ 回归测试：床炸选址 / 掩体 / 死亡回收 ============================
+
+describe('床炸选址：从真实方块读，不写死坐标', () => {
+    /** 地面在 y=64 及以下，上面是空气。 */
+    const ground = (p: Vec3): string => (p.y <= 64 ? 'end_stone' : 'air');
+
+    it('在龙头旁边选出床位/掩体/站位，站位在 4.5 格交互距离内', () => {
+        const result = planBedBombSite({ dragonHead: vec(0, 65, 0), self: vec(2.5, 64, 0.5), probe: ground });
+        expect(result.ok).toBe(true);
+        const site = result.site;
+        expect(site).toBeDefined();
+        if (site == null) return;
+        // 床位贴着龙头（水平邻格）
+        expect(Math.hypot(site.bedCell.x, site.bedCell.z)).toBeCloseTo(1, 6);
+        // 掩体在床和站位中间，人在掩体后面点床
+        expect(vecDistance(site.bedCell, site.coverCell)).toBeCloseTo(1, 6);
+        expect(vecDistance(site.bedCell, site.standCell)).toBeCloseTo(2, 6);
+        expect(site.standDistance).toBeLessThanOrEqual(4.5);
+        // 方向朝我现在站的那一侧（少走路，掩体天然在中间）
+        expect(site.coverCell.x).toBeGreaterThan(site.bedCell.x);
+    });
+
+    it('掩体格本来就是实心 → coverAlreadySolid（不用再放一块）', () => {
+        const probe = (p: Vec3): string => {
+            if (p.y === 65 && p.x === 2 && p.z === 0) return 'obsidian';
+            return p.y <= 64 ? 'end_stone' : 'air';
+        };
+        const result = planBedBombSite({ dragonHead: vec(0, 65, 0), self: vec(3.5, 65, 0.5), probe });
+        expect(result.ok).toBe(true);
+        expect(result.site?.coverAlreadySolid).toBe(true);
+    });
+
+    it('读不到世界（全 null）→ 拒绝选址，绝不猜地形', () => {
+        const result = planBedBombSite({ dragonHead: vec(0, 65, 0), self: vec(2, 64, 0), probe: () => null });
+        expect(result.ok).toBe(false);
+        expect(result.reason).toContain('能放下床');
+    });
+
+    it('床边没有能站住的地方（悬空）→ 拒绝', () => {
+        const result = planBedBombSite({ dragonHead: vec(0, 65, 0), self: vec(2, 64, 0), probe: () => 'air' });
+        expect(result.ok).toBe(false);
+        expect(result.reason).toContain('能站住');
+    });
+});
+
+describe('碗形基岩框（trench）判定：读不到就说不知道', () => {
+    const bedrockCells = new Set(['0,63,0', '1,64,0', '-1,64,0', '0,64,1']);
+    const bowlProbe = (p: any) => (bedrockCells.has(`${p.x},${p.y},${p.z}`) ? { name: 'bedrock' } : { name: 'air' });
+
+    it('站在传送门 4 格内、两面以上基岩 → 算钻进了结构里', () => {
+        const bot = makeFakeBot({ blockAt: bowlProbe });
+        expect(detectPodiumTrench(bot, vec(0, 64, 0))).toBe(true);
+    });
+
+    it('离传送门 4 格外 → 直接 false（不用再探方块）', () => {
+        const bot = makeFakeBot({ blockAt: bowlProbe });
+        expect(detectPodiumTrench(bot, vec(10, 64, 0))).toBe(false);
+    });
+
+    it('读不到方块 → null（不知道），绝不当作"有掩体"', () => {
+        expect(detectPodiumTrench(makeFakeBot({}), vec(0, 64, 0))).toBeNull();
+    });
+});
+
+describe('末地传送门框架的眼：1.13+ 是方块状态，不是 metadata', () => {
+    it('eye=true 的框架不算空框架（原来 metadata 恒 0，会把有眼的也当空的）', () => {
+        expect(frameHasEye({ name: 'end_portal_frame', getProperties: () => ({ eye: 'true' }) })).toBe(true);
+        expect(frameHasEye({ name: 'end_portal_frame', getProperties: () => ({ eye: 'false' }) })).toBe(false);
+    });
+
+    it('老版本（1.12-）走 metadata bit 2', () => {
+        expect(frameHasEye({ name: 'end_portal_frame', metadata: 4 })).toBe(true);
+        expect(frameHasEye({ name: 'end_portal_frame', metadata: 0 })).toBe(false);
+    });
+});
+
+describe('enterEnd：要塞不在这就替你掷眼（原来只是干说一句）', () => {
+    afterEach(() => {
+        vi.mocked(world.getNearestBlock).mockReturnValue(null);
+        vi.mocked(world.getNearestBlocksWhere).mockReturnValue([]);
+    });
+
+    it('没有门也没有框架，手里有眼 → equip + 扔一颗，数量真的少一颗', async () => {
+        const bot = makeFakeBot({ dimension: 'minecraft:overworld', stacks: [stack('ender_eye', 8)] });
+        const receipt = await enterEndSkill(bot, { memory_bank: { rememberPlace: () => undefined } });
+        expect(receipt).toContain('末影之眼');
+        expect(receipt).toContain('掷');
+        expect(bot.calls.map((c: any) => c.fn)).toContain('equip');
+        expect(bot.calls.map((c: any) => c.fn)).toContain('activateItem');
+        expect(countEyesOfEnder(bot)).toBe(7);
+    });
+
+    it('连眼都没有 → 说清怎么弄眼，不假装丢过', async () => {
+        const bot = makeFakeBot({ dimension: 'minecraft:overworld', stacks: [] });
+        const receipt = await enterEndSkill(bot, {});
+        expect(receipt).toContain('没有末影之眼');
+        expect(receipt).toContain('烈焰粉');
+        expect(bot.calls).toHaveLength(0);
+    });
+
+    it('已经在末地 → 直接返回，不做任何动作', async () => {
+        const bot = makeFakeBot({ dimension: 'the_end' });
+        await expect(enterEndSkill(bot, {})).resolves.toContain('已经在末地');
+        expect(bot.calls).toHaveLength(0);
+    });
+
+    it('发现已激活的传送门：先把手坐标记进 Memory Bank，再走进去', async () => {
+        const bot = makeFakeBot({ dimension: 'minecraft:overworld', position: { x: 300, y: 30, z: -120 } });
+        vi.mocked(world.getNearestBlock).mockReturnValue({ name: 'end_portal', position: { x: 300, y: 30, z: -120 } });
+        // 走门 = 进维度：让假的 goToPosition 顺便把维度切过去，waitFor 立刻成立。
+        vi.mocked(skills.goToPosition).mockImplementation((target: any) => {
+            target.game.dimension = 'the_end';
+            return Promise.resolve(true);
+        });
+        const remembered: Array<[string, number, number, number]> = [];
+        const agent = {
+            memory_bank: {
+                rememberPlace: (name: string, x: number, y: number, z: number) => remembered.push([name, x, y, z]),
+            },
+        };
+        const receipt = await enterEndSkill(bot, agent);
+        expect(remembered).toEqual([['overworld_end_portal', 300, 30, -120]]);
+        expect(receipt).toContain('已进入末地');
+        expect(receipt).toContain('100,49,0');
+        vi.mocked(skills.goToPosition).mockImplementation(() => Promise.resolve(true));
+    });
+});
+
+describe('末影之眼：扔出去之后必须盯住它的飞行方向', () => {
+    /** 假 bot：activateItem 时"生成"一颗会持续向东飞的眼实体（每次读 position 前进 2 格）。 */
+    function makeEyeBot(options: { eyeAppears?: boolean; eyeMoves?: boolean } = {}) {
+        const bot = makeFakeBot({ stacks: [stack('ender_eye', 3)] });
+        bot.heldItem = bot.inventory.slots[0]; // 手上已经拿着眼睛了（equip 过了）
+        const entities: Record<string, any> = {};
+        bot.entities = entities;
+        const originalActivate = bot.activateItem;
+        bot.activateItem = () => {
+            bot.calls.push({ fn: 'activateItem' });
+            consumeOne(bot.inventory.items(), bot.heldItem);
+            if (options.eyeAppears !== false) {
+                let x = 0;
+                const eye: any = { name: 'eye_of_ender' };
+                Object.defineProperty(eye, 'position', {
+                    enumerable: true,
+                    get() {
+                        if (options.eyeMoves === false) return { x: 0, y: 64, z: 0 };
+                        x += 2;
+                        return { x, y: 64, z: 0 };
+                    },
+                });
+                entities['42'] = eye;
+            }
+            return Promise.resolve();
+        };
+        void originalActivate;
+        return bot;
+    }
+
+    it('采到轨迹 → 报出 8 方位方向 + 飞了多远，并把最后位置记进 Memory Bank', async () => {
+        const bot = makeEyeBot();
+        const remembered: Array<[string, number, number, number]> = [];
+        const receipt = await throwHeldSkill(bot, {
+            memory_bank: { rememberPlace: (name: string, x: number, y: number, z: number) => remembered.push([name, x, y, z]) },
+        });
+        expect(receipt).toContain('东');
+        expect(receipt).toContain('方向已经量出来了');
+        expect(remembered).toHaveLength(1);
+        expect(remembered[0][0]).toBe('last_eye_of_ender');
+        expect(remembered[0][1]).toBeGreaterThan(0);
+    });
+
+    it('眼睛一出膛就没了 → 如实说"没看清"，绝不编方向', async () => {
+        const bot = makeEyeBot({ eyeAppears: false });
+        const report = await throwEyeAndTrack(bot, { maxMs: 250, intervalMs: 50 });
+        expect(report.threw).toBe(true);
+        expect(report.track).toBeNull();
+        expect(report.message).toContain('没看清');
+        // 不许出现任何方位词
+        for (const word of ['东北', '东南', '西北', '西南', '朝东', '朝南', '朝西', '朝北']) {
+            expect(report.message).not.toContain(word);
+        }
+    });
+
+    it('眼睛出现了但一动不动（还捏在手里）→ 也判"没看清"', async () => {
+        const bot = makeEyeBot({ eyeMoves: false });
+        const report = await throwEyeAndTrack(bot, { maxMs: 250, intervalMs: 50 });
+        expect(report.track).toBeNull();
+        expect(report.message).toContain('没看清');
+    });
+
+    it('扔不出去（手里数量没变）→ 不算扔了，也不量方向', async () => {
+        const bot = makeFakeBot({ stacks: [stack('ender_eye', 3)] });
+        bot.activateItem = () => {
+            bot.calls.push({ fn: 'activateItem' });
+            return Promise.resolve(); // 服务端没采纳：数量不变
+        };
+        const report = await throwEyeAndTrack(bot, { maxMs: 150, intervalMs: 50 });
+        expect(report.threw).toBe(false);
+        expect(report.track).toBeNull();
+        expect(report.message).toContain('没扔出去');
+    });
+
+    it('手上不是眼睛 → 先 equip，背包装不下就如实说', async () => {
+        const bot = makeFakeBot({ stacks: [] });
+        const report = await throwEyeAndTrack(bot, { maxMs: 100, intervalMs: 50 });
+        expect(report.threw).toBe(false);
+        expect(report.message).toContain('没有末影之眼');
+    });
+});
+
+describe('recoverAfterDeath：不再硬编码"刚死/没倒计时"', () => {
+    afterEach(() => {
+        resetDeathClocks();
+        vi.useRealTimers();
+    });
+
+    function makeAgent(options: {
+        dimension?: string;
+        death?: [number, number, number];
+        portal?: [number, number, number];
+        blockAt?: (p: any) => any;
+    }) {
+        const bot = makeFakeBot({ dimension: options.dimension ?? 'overworld', blockAt: options.blockAt });
+        return {
+            bot,
+            memory_bank: {
+                recallPlace: (name: string) =>
+                    name === 'last_death_position' ? options.death : name === 'overworld_end_portal' ? options.portal : undefined,
+            },
+        };
+    }
+
+    it('掉进虚空（Y<-60）→ 直接判 lost、劝去重新备战', async () => {
+        const receipt = await recoverAfterDeathSkill(makeAgent({ death: [5, -80, 5] }));
+        expect(receipt).toContain('虚空');
+        expect(receipt).toContain('重新备战');
+    });
+
+    it('第一次调用如实说"真实死亡时间未知"；第二次报出真实经过时间并按 5 分钟倒计时', async () => {
+        vi.useFakeTimers();
+        const agent = makeAgent({ death: [10, 64, 10], blockAt: () => ({ name: 'stone' }) });
+        const first = await recoverAfterDeathSkill(agent);
+        expect(first).toContain('真实死亡时间未知');
+
+        vi.advanceTimersByTime(120_000);
+        const second = await recoverAfterDeathSkill(agent);
+        expect(second).toContain('已经过了 120s');
+        expect(second).toContain('剩 180s'); // 300 - 120
+        expect(second).toContain('倒计时在跑');
+
+        vi.advanceTimersByTime(200_000);
+        const third = await recoverAfterDeathSkill(agent);
+        expect(third).toContain('重新备战');
+    });
+
+    it('尸体区块没加载 → 说明不倒计时（但也提醒另一个 bot 在旁边时是在跑的）', async () => {
+        const receipt = await recoverAfterDeathSkill(makeAgent({ death: [10, 64, 10], blockAt: () => null }));
+        expect(receipt).toContain('不在加载区块里');
+        expect(receipt).toContain('另一个 bot');
+    });
+
+    it('记过主世界传送门就给出回末地的路线；没记过就说清为什么没有', async () => {
+        const withPortal = await recoverAfterDeathSkill(
+            makeAgent({ death: [10, 64, 10], portal: [300, 30, -120] }),
+        );
+        expect(withPortal).toContain('300,30,-120');
+        expect(withPortal).toContain('enterEnd');
+
+        const withoutPortal = await recoverAfterDeathSkill(makeAgent({ death: [10, 64, 10] }));
+        expect(withoutPortal).toContain('overworld_end_portal 是空的');
+    });
+});
+
+describe('bedBombDragon 的前置条件（不放床就拒绝）', () => {
+    afterEach(() => {
+        permits.revokeAll();
+    });
+
+    const perchedDragon = { 1: { name: 'ender_dragon', position: { x: 0, y: 65, z: 0 } } };
+
+    it('血量太低 → 拒绝，并且一个方块都不放', async () => {
+        const bot = makeFakeBot({
+            stacks: [stack('white_bed', 1), stack('obsidian', 8)],
+            entities: perchedDragon,
+            health: 4,
+        });
+        const receipt = await bedBombDragon(bot);
+        expect(receipt).toContain('血量');
+        expect(receipt).toContain('太低');
+    });
+
+    it('饥饿太低 → 拒绝（受伤后要靠饥饿回血）', async () => {
+        const bot = makeFakeBot({
+            stacks: [stack('white_bed', 1), stack('obsidian', 8)],
+            entities: perchedDragon,
+            health: 20,
+            food: 2,
+        });
+        const receipt = await bedBombDragon(bot);
+        expect(receipt).toContain('饥饿值');
+    });
+
+    it('没有授权 → 说清缺 sleep_in_bed，且不放任何方块', async () => {
+        const bot = makeFakeBot({
+            stacks: [stack('white_bed', 1), stack('obsidian', 8)],
+            entities: perchedDragon,
+            blockAt: (p: any) => ({ name: p.y <= 64 ? 'end_stone' : 'air' }),
+        });
+        const receipt = await bedBombDragon(bot);
+        expect(receipt).toContain('sleep_in_bed');
+        expect(receipt).toContain('没有放任何方块');
+    });
+
+    it('读不到方块（区块没加载）→ 拒绝选址，不猜地形', async () => {
+        const bot = makeFakeBot({ stacks: [stack('white_bed', 1)], entities: perchedDragon });
+        const receipt = await bedBombDragon(bot);
+        expect(receipt).toContain('没有执行床炸');
+    });
+
+    it('龙没低头 → 直接拒绝', async () => {
+        const bot = makeFakeBot({
+            stacks: [stack('white_bed', 1)],
+            entities: { 1: { name: 'ender_dragon', position: { x: 30, y: 90, z: 0 } } },
+        });
+        await expect(bedBombDragon(bot)).resolves.toContain('没低头停在传送门上');
+    });
+
+    it('授权 + 地形齐 → 放床、放掩体、站到掩体后、点床、退到 10 格外（全流程）', async () => {
+        permits.grantCalls(['sleep_in_bed'], 3, '测试', Date.now());
+        const blocks = new Map<string, string>();
+        const key = (p: any): string => `${Math.floor(p.x)},${Math.floor(p.y)},${Math.floor(p.z)}`;
+        const bot = makeFakeBot({
+            stacks: [stack('white_bed', 2), stack('obsidian', 8)],
+            entities: { 1: { name: 'ender_dragon', position: { x: 0, y: 65, z: 0 } } },
+            position: { x: 2.5, y: 64, z: 0.5 },
+            health: 20,
+            food: 20,
+            blockAt: (p: any) => {
+                const override = blocks.get(key(p));
+                if (override != null) return { name: override };
+                return { name: p.y <= 64 ? 'end_stone' : 'air' };
+            },
+        });
+        const slept: any[] = [];
+        bot.sleep = (bed: any) => {
+            slept.push(bed);
+            return Promise.resolve();
+        };
+        const placed: Array<[string, number, number, number]> = [];
+        vi.mocked(skills.placeBlock).mockImplementation((_bot: any, item: string, x: number, y: number, z: number) => {
+            placed.push([item, x, y, z]);
+            blocks.set(`${x},${y},${z}`, item);
+            // 真 placeBlock 会扣掉背包里的方块，假 bot 也要扣，否则"还剩几张床"是假的。
+            const items = _bot.inventory.items();
+            const used = items.find((stack: any) => stack?.name === item);
+            if (used != null) consumeOne(items, used);
+            return Promise.resolve(true);
+        });
+
+        const receipt = await bedBombDragon(bot);
+        expect(receipt).toContain('床炸完了');
+        // 先放床，再在床边放挡爆风的方块
+        expect(placed.map((p) => p[0])).toEqual(['white_bed', 'obsidian']);
+        expect(Math.abs(placed[0][1] - placed[1][1])).toBeLessThanOrEqual(1); // 床和掩体挨着
+        expect(slept).toHaveLength(1); // 真的点了床
+        expect(vi.mocked(skills.goToPosition)).toHaveBeenCalled(); // 有站位/撤退
+        expect(vi.mocked(skills.moveAway)).toHaveBeenCalled();
+        // 自伤预估要报出来，且床数按真实库存算
+        expect(receipt).toContain('还剩 1 张床');
+
+        vi.mocked(skills.placeBlock).mockResolvedValue(true);
+    });
+});
+
+describe('clearEndCrystals：退不到 12 格就不放箭', () => {
+    afterEach(() => {
+        vi.mocked(skills.goToPosition).mockImplementation(() => Promise.resolve(true));
+    });
+
+    it('离水晶 8 格、又退不动 → 一支箭都不放，回执说清该退到哪', async () => {
+        const bot = makeFakeBot({ stacks: [stack('bow', 1), stack('arrow', 32)] });
+        bot.entities = { 7: { name: 'end_crystal', position: { x: 8, y: 70, z: 0 } } };
+        vi.mocked(skills.goToPosition).mockResolvedValue(false); // 路被堵，退不动
+
+        const receipt = await clearEndCrystalsSkill(bot);
+        expect(receipt).toContain('没有放箭');
+        expect(receipt).toContain('12');
+        expect(bot.calls.filter((c: any) => c.fn === 'activateItem')).toHaveLength(0);
+        expect(crystalToolKit(bot).arrows).toBe(32);
+    });
+
+    /** 模拟"放一箭"：真的扣一支箭；hit=true 时水晶被炸掉。 */
+    function fakeShoot(bot: any, options: { hit: boolean }): void {
+        bot.activateItem = () => {
+            bot.calls.push({ fn: 'activateItem' });
+            const arrows = bot.inventory.items().find((stack: any) => stack?.name === 'arrow');
+            if (arrows != null) consumeOne(bot.inventory.items(), arrows);
+            if (options.hit) delete bot.entities['7'];
+            return Promise.resolve();
+        };
+        bot.deactivateItem = () => {
+            bot.calls.push({ fn: 'deactivateItem' });
+            return Promise.resolve();
+        };
+    }
+
+    it('退到 13 格后才放箭，并按"水晶数掉没掉"报进度', async () => {
+        const bot = makeFakeBot({ stacks: [stack('bow', 1), stack('arrow', 32)] });
+        bot.entities = { 7: { name: 'end_crystal', position: { x: 8, y: 70, z: 0 } } };
+        vi.mocked(skills.goToPosition).mockImplementation(
+            (target: any, x: number | null, _y: number | null, z: number | null) => {
+                if (x != null) target.entity.position.x = x; // 真的走过去了
+                if (z != null) target.entity.position.z = z;
+                return Promise.resolve(true);
+            },
+        );
+        fakeShoot(bot, { hit: true });
+
+        const receipt = await clearEndCrystalsSkill(bot);
+        expect(crystalToolKit(bot).arrows).toBe(31); // 箭真的少了
+        expect(receipt).toContain('这一下有效');
+        expect(receipt).toContain('水晶全拆完了');
+    });
+
+    it('射了但水晶没掉 → 如实说"多半没打中/被挡住"', async () => {
+        const bot = makeFakeBot({ stacks: [stack('bow', 1), stack('arrow', 32)] });
+        bot.entities = { 7: { name: 'end_crystal', position: { x: 8, y: 70, z: 0 } } };
+        vi.mocked(skills.goToPosition).mockImplementation(
+            (target: any, x: number | null, _y: number | null, z: number | null) => {
+                if (x != null) target.entity.position.x = x;
+                if (z != null) target.entity.position.z = z;
+                return Promise.resolve(true);
+            },
+        );
+        fakeShoot(bot, { hit: false });
+
+        const receipt = await clearEndCrystalsSkill(bot);
+        expect(crystalToolKit(bot).arrows).toBe(31);
+        expect(receipt).toContain('没拆掉水晶');
+        expect(receipt).toContain('没掉');
     });
 });
 

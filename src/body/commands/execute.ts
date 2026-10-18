@@ -99,6 +99,23 @@ export function annotateCollectBlocks(text: string): string {
             `移动 ${done[5]} 格。`
         );
     }
+    // **缺工具是独立原因**：技能层已经写了"没有能挖 X 的工具（手持 Y）"，
+    // 不能再把它归到"掉落被抢/不可达"里。Feedback #36：同一次失败里
+    // mineBlock 的报错说清了缺镐，collectBlocks 却只报"数量没变"，
+    // 模型于是去查掉落物和寻路，真正缺的那把镐反而没人提。
+    const noTool = /没有能挖 ([^\s（]+) 的工具（手持 ([^）]*)）/.exec(body);
+    if (noTool != null) {
+        const blockName = noTool[1];
+        const held = noTool[2];
+        const unchanged = /数量没变（仍是 (\d+)）/.exec(body);
+        const bag = unchanged != null ? `背包 ${unchanged[1]} → ${unchanged[1]}，没变化` : '背包没有增加';
+        return (
+            `collectBlocks：**没有能挖 ${blockName} 的工具（手持 ${held}）**，所以一块都没采到（${bag}）。` +
+            '这不是掉落被抢、也不是目标太远：缺的就是对应的工具（镐/铲/斧）。' +
+            '先 equip 正确的工具（或去箱子里拿一把）；只求挖开软方块（下界岩/泥土/沙/沙砾）可以用 mineBlock 徒手挖，' +
+            '但**没有工具就不会有掉落**。请用 stats 核对背包。'
+        );
+    }
     const unchanged = /采集结束：([^\s]+) 数量没变（仍是 (\d+)）。移动 ([\d.]+) 格/.exec(body);
     if (unchanged != null) {
         return (
@@ -134,31 +151,58 @@ export function annotateSearchForBlock(
         target != null && from != null
             ? `，离你约 ${Math.hypot(from.x - target.x, from.y - target.y, from.z - target.z).toFixed(1)} 格`
             : '';
+    // **每条回执都要以"结论"收尾。** 模型连续两次收到"没有得到明确结论"，
+    // 却不知道是没搜到、被中断、还是日志丢了，于是只能原样重试
+    // （Feedback #42：缩小范围再试，回执一模一样）。这里分四类收口：
+    // 找到 / 找到但走不到 / 明确没有 / 拿不到结论（**附原因**）。
     if (body.includes('Could not find any') || body.includes('范围内确实没有')) {
-        return `searchForBlock：未找到 ${type}（搜索范围 ${range} 格，已搜完）。${moved}`;
+        return `searchForBlock：未找到 ${type}（搜索范围 ${range} 格，已搜完）。${moved}结论：范围内的确定没有 ${type}。`;
     }
     if (body.includes('could not reach it')) {
         return (
             `searchForBlock：找到了 ${type} ${targetText}，但走不过去（路径被堵或太远）。` +
-            `搜索范围 ${range} 格${distanceText}；${moved}`
+            `搜索范围 ${range} 格${distanceText}；${moved}` +
+            `结论：范围内找到了 ${type} ${targetText}，但当前走不到；要么挖通道/绕路过去，要么换目标。`
         );
     }
     if (/\bFound\b/i.test(body) && target != null) {
         return (
             `searchForBlock：找到了 ${type} ${targetText}${distanceText}（搜索范围 ${range} 格）。` +
-            moved
+            `${moved}结论：范围内找到了 ${type} ${targetText}。`
+        );
+    }
+    if (/被中断|中断（|interrupted/i.test(body)) {
+        return (
+            `searchForBlock：搜索没做完就被中断了（Stop / 保命反射 / autoPickup 抢走身体都会这样），` +
+            `搜索范围 ${range} 格；${moved}` +
+            `结论：无法确认 ${type} 是否在范围内（原因：搜索被中断，没有写出找到/未找到）。` +
+            '通道已释放，可以缩小 search_range 重试或换目标；急用就先 stats 核对当前位置。' +
+            (body === '' ? '' : ` 原始日志：${body.slice(0, 160)}`)
+        );
+    }
+    if (body.includes('超时')) {
+        return (
+            `searchForBlock：搜索超时（跑满时限被停掉），搜索范围 ${range} 格；${moved}` +
+            `结论：无法确认 ${type} 是否在范围内（原因：搜索超时中断）。` +
+            '可以缩小 search_range 再试，或先走到可疑区域附近。'
         );
     }
     if (body === '' || body === '(no output)' || body.includes('Searching for')) {
+        const why = body === '' || body === '(no output)'
+            ? '身体日志是空的（动作被中断时输出会被丢弃，或日志读取失败）'
+            : '日志只写到"开始搜索"，没有写出找到/未找到';
         return (
             `searchForBlock：没有得到明确结论，不能确认是否找到 ${type}（可能还在搜、被中断（Stop/autoPickup），` +
             '或客户端/日志没有同步）。' +
-            `搜索范围 ${range} 格；${moved}；请用 stats 看当前位置，必要时缩小 search_range 重试。`
+            `搜索范围 ${range} 格；${moved}` +
+            `结论：无法确认 ${type} 是否在范围内（原因：${why}）。` +
+            '请用 stats 看当前位置，必要时缩小 search_range 重试。'
         );
     }
     return (
-        `searchForBlock：没有得到明确结论，不能确认是否找到 ${type}。搜索范围 ${range} 格；${moved}。` +
-        '身体日志里没有出现明确的找到/未找到结论；请用 stats 核对当前位置，必要时缩小 search_range 重试。'
+        `searchForBlock：没有得到明确结论，不能确认是否找到 ${type}。搜索范围 ${range} 格；${moved}` +
+        `结论：无法确认 ${type} 是否在范围内（原因：身体日志里没有出现明确的找到/未找到结论）。` +
+        '请用 stats 核对当前位置，必要时缩小 search_range 重试。'
     );
 }
 

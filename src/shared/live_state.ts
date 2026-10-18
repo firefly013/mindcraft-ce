@@ -34,13 +34,15 @@ export interface LiveHeld {
   /** 主手剩余耐久比例 0~1；空手或无耐久物品为 null。 */
   mainHandDurability: number | null;
   /**
-   * 主手耐久的**原始读数**（used / max），用来诊断。
+   * 主手耐久的**原始读数**（已用 NBT damage / 上限），用来诊断也用来显示。
    *
    * 模型报过"耐久剩余 0%"但工具明显没坏（挖了 36 格），而 `prismarine-item` 的
    * `durabilityUsed` 是 getter，读不到 NBT 时会退化成 0 或 max，容易把"读不到"
-   * 说成"快报废"。把两个原始数摊开，一眼能分清是读数错了还是真坏了。
+   * 说成"快报废"。绝对数摆出来（`耐久 37/251`）比百分比更抗歧义：模型不用自己
+   * 乘上限就知道还能挖几格；上限读不到时也能一眼看出是读数问题。
    */
-  mainHandDurabilityRaw: string | null;
+  mainHandDurabilityUsed: number | null;
+  mainHandDurabilityMax: number | null;
 }
 
 export interface LiveBackpack {
@@ -268,6 +270,10 @@ export const KEY_BLOCKS: readonly string[] = Object.freeze([
   'furnace', 'blast_furnace', 'smoker', 'crafting_table', 'enchanting_table',
   'anvil', 'chipped_anvil', 'damaged_anvil', 'brewing_stand', 'beacon',
   'bedrock', 'spawner', 'trial_spawner', 'bed',
+  // **通关路线上的三个关键方块。** 真机上黑曜石下界门就在 1.9 米外，快照里却
+  // 只列铜矿/煤矿，模型据此判断"门不在附近"并去质疑队友坐标（Feedback #28）。
+  // 要塞的 nether_bricks、末地传送门框 end_portal_frame 同理：看不见就等于没有。
+  'obsidian', 'nether_bricks', 'end_portal_frame',
 ]);
 
 /**
@@ -311,6 +317,27 @@ export const LIVE_SECTION_KEYS = [
 
 export type LiveSectionKey = (typeof LIVE_SECTION_KEYS)[number];
 
+/**
+ * 主手耐久后缀。**绝对读数必须给出来**：只有百分比时，模型要自己乘上限
+ * 才知道还能挖几格；上限读不到（`max <= 1`，读到的是 stackSize）时百分比
+ * 是 null、整段后缀消失——「铁镐用了几百格无声消失」就是这么来的
+ * （Feedback #40）。现在能算就写 `耐久 37/251，还剩 214，85%`；
+ * 只有原始读数就写明"上限读不到"，不假装能算。
+ */
+function heldDurabilitySuffix(h: LiveHeld): string {
+  const used = h.mainHandDurabilityUsed;
+  const max = h.mainHandDurabilityMax;
+  if (used != null && max != null && max > 1) {
+    const remain = Math.max(0, max - used);
+    const pct = h.mainHandDurability != null ? `，${Math.round(h.mainHandDurability * 100)}%` : '';
+    return `（耐久 ${used}/${max}，还剩 ${remain}${pct}）`;
+  }
+  if (used != null || max != null) {
+    return `（耐久读数 used=${used ?? '?'} max=${max ?? '?'}——上限读不到，算不出剩余）`;
+  }
+  return '';
+}
+
 /** 每段渲成若干行：有的段有附带行（backpack 的 totals、entities 的 farther merged）。 */
 const SECTION_RENDERERS: Record<LiveSectionKey, (s: LiveState) => string[]> = {
   body: (s) => {
@@ -330,7 +357,7 @@ const SECTION_RENDERERS: Record<LiveSectionKey, (s: LiveState) => string[]> = {
   held: (s) => {
     const h = s.held;
     return [
-      `Held: main ${h.mainHand ?? 'empty'}${h.mainHandDurability != null ? ` (耐久剩余 ${Math.round(h.mainHandDurability * 100)}%${h.mainHandDurabilityRaw != null ? `，原始 ${h.mainHandDurabilityRaw}` : ''})` : ''} ` +
+      `Held: main ${h.mainHand ?? 'empty'}${heldDurabilitySuffix(h)} ` +
         `off ${h.offHand ?? 'empty'} armor ${h.armor.length > 0 ? h.armor.join('/') : 'none'}`,
     ];
   },

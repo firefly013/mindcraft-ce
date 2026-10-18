@@ -315,6 +315,25 @@ export const TOOL_TEXT: Record<string, { description: string; params: Record<str
     description: '把你遇到的不顺**立刻**反馈给我们：工具报错、报错看不懂、行为不符预期、反复被拒、缺某个能力、快照信息不对或过时。看到就写，不用攒到任务结束——测试期里这条比通关本身更重要。提完接着干活，不用等回复。',
     params: { title: '一句话概括，如「寻路过水反复卡住」。', body: '说清三件事：我当时想做什么、实际发生了什么（把工具原文贴上）、期望应该怎样。' },
   },
+  // 中段推进（`commands/progression.ts`）。更长的模型侧文案住在那个文件里；
+  // 这里按 check:prompts 的要求留一份参数说明（参数名必须逐字对齐 schema）。
+  exploreFor: {
+    description: '系统性探索：方形螺旋一腿一腿走（默认每腿 32 格），每腿落地后重扫目标方块，找到就停并报坐标。回执写明扫描半径只覆盖已加载区块、实际走了多少格，以及 found <方块> at (x,y,z) 或 not found after N steps。找下界要塞（nether_bricks）用它。',
+    params: {
+      block: '要找的方块 id（英文），例如 nether_bricks（下界要塞）/ obsidian / end_portal_frame。也认中文俗称。',
+      max_steps: '最多走几腿（默认 12，1~64）。12 腿约覆盖出发点外 192 格。',
+      step: '每腿走多少格（默认 32，4~128）。地形破碎调小，开阔地调大。',
+    },
+  },
+  huntFor: {
+    description: '刷怪刷到够数：找最近的这类怪 → 打 → 自己走过去把掉落物踩掉 → 按背包真实增量核对；够了（want）或时间到（max_ms）就停，并逐次报进度。烈焰棒用 blaze，末影珍珠用 enderman。血量过低/岩浆/被 Stop 会立刻收手并说明原因。',
+    params: {
+      entity: '要刷的实体 id（英文），例如 blaze（烈焰人）/ enderman（末影人）/ cow。也认中文俗称。',
+      want: '要几个掉落物（默认 4，1~64）。烈焰棒推荐 7，末影珍珠推荐 12。',
+      radius: '搜索半径（默认 48，8~128）。',
+      max_ms: '时间预算毫秒（默认 300000 = 5 分钟，10000~420000）。',
+    },
+  },
 };
 
 /** 取工具描述 */

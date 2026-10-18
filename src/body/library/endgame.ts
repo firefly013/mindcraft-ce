@@ -26,8 +26,20 @@ export const END_PILLAR_RADIUS = 42;
 export const END_CRYSTAL_TOTAL = 10;
 export const END_CAGED_CRYSTAL_TOTAL = 2;
 
-/** 爆炸威力：末地水晶 6（= 高压苦力怕），床 5。 */
-export const EXPLOSION_POWER = Object.freeze({ endCrystal: 6, bed: 5 });
+/** 爆炸威力：末地水晶 6（= 高压苦力怕），床 5，TNT 4（拆笼中水晶用）。 */
+export const EXPLOSION_POWER = Object.freeze({ endCrystal: 6, bed: 5, tnt: 4 });
+
+/**
+ * 原版"够得着"的距离：生存模式下玩家对**方块**的交互距离是 4.5 格。
+ *
+ * 为什么它必须进床炸闸门：床炸的动作是"右键点床"，而点床要够得着。
+ * 站到 10 格（爆炸半径）之外确实不会挨炸，但**也点不着那张床**——
+ * 这种"看起来安全"的方案是假的，所以在闸门里直接判不通过。
+ */
+export const BLOCK_REACH_DISTANCE = 4.5;
+
+/** TNT 引信 4 秒（80 tick）。点火后撤离的时间窗就是这个数。 */
+export const TNT_FUSE_SECONDS = 4;
 
 /** 末影龙 200 HP（100 心）。 */
 export const DRAGON_MAX_HEALTH = 200;
@@ -118,6 +130,138 @@ export function horizontalDirection(from: Vec3, to: Vec3): { dx: number; dz: num
 
 export function cellKey(p: Vec3): string {
     return `${Math.floor(p.x)},${Math.floor(p.y)},${Math.floor(p.z)}`;
+}
+
+// ============================ 二·B、末影之眼：飞行方向（8 方位罗盘） ============================
+/**
+ * 8 方位罗盘。**Minecraft 的坐标约定**：+X = 东，-X = 西，+Z = 南，-Z = 北。
+ * 所以方位角 0° = 正北，顺时针增加（90° = 正东）。
+ */
+export const COMPASS_POINTS = Object.freeze([
+    'north',
+    'northeast',
+    'east',
+    'southeast',
+    'south',
+    'southwest',
+    'west',
+    'northwest',
+] as const);
+export type CompassPoint = (typeof COMPASS_POINTS)[number];
+
+export interface CompassBearing {
+    point: CompassPoint;
+    /** 0~360，0 = 正北，顺时针。 */
+    degrees: number;
+    /** 两点之间的**水平**距离（格）。 */
+    distance: number;
+}
+
+/**
+ * `from` → `to` 的 8 方位罗盘。两点水平重合（或数据坏了）时返回 **null**——
+ * 返回 null 是"看不出方向"，绝不允许拿它编一个方向出来。
+ */
+export function compassBearing(from: Vec3, to: Vec3): CompassBearing | null {
+    if (from == null || to == null) return null;
+    const dx = to.x - from.x;
+    const dz = to.z - from.z;
+    if (![dx, dz].every((n) => Number.isFinite(n))) return null;
+    const distance = Math.sqrt(dx * dx + dz * dz);
+    if (!(distance > 0)) return null;
+    const degrees = (Math.atan2(dx, -dz) * 180) / Math.PI;
+    const normalized = (degrees + 360) % 360;
+    const index = Math.round(normalized / 45) % COMPASS_POINTS.length;
+    return { point: COMPASS_POINTS[index], degrees: normalized, distance };
+}
+
+/** 方位角 → 中文说法（回执用；模型看得懂，也方便人读日志）。 */
+export const COMPASS_LABELS: Record<CompassPoint, string> = Object.freeze({
+    north: '北（-Z）',
+    northeast: '东北（+X-Z）',
+    east: '东（+X）',
+    southeast: '东南（+X+Z）',
+    south: '南（+Z）',
+    southwest: '西南（-X+Z）',
+    west: '西（-X）',
+    northwest: '西北（-X-Z）',
+});
+
+export interface EyeSample {
+    position: Vec3;
+    /** 采样时刻（毫秒，只用于排序/诊断）。 */
+    atMs?: number;
+}
+
+export interface EyeFlightTrack {
+    /** 眼睛飞行的 8 方位方向。 */
+    point: CompassPoint;
+    degrees: number;
+    /** 首末采样之间的水平位移（眼睛实际飞了多远）。**不是"到要塞的距离"**。 */
+    travelled: number;
+    samples: number;
+    /** 最后一次看到眼睛的位置（可以走过去再扔一颗做三角定位）。 */
+    lastPosition: Vec3;
+}
+
+/** 少于这个水平位移就不算"看得出方向"（眼睛还在手上/原地打转）。 */
+export const MIN_EYE_TRAVEL = 0.75;
+
+/**
+ * 从末影之眼的**采样轨迹**推方向。
+ *
+ * 为什么要做成纯函数：末影之眼实体只活 1~2 秒，方向信息**过期不候**；
+ * 而"眼睛往哪飞"是模型找要塞的唯一可编程线索。这段几何必须能离线钉死，
+ * 不能埋在 `bot.entities` 的轮询里靠真机试。
+ *
+ * 取"最早 vs 最晚"两个采样；如果这两个点几乎重合（眼睛刚出手就消失了），
+ * 就退而求其次找**位移最大的一对**；还是不够 `MIN_EYE_TRAVEL` → 返回 null
+ * （"没看清"，由调用方如实报出来，不许瞎指方向）。
+ */
+export function trackEyeFlight(samples: EyeSample[]): EyeFlightTrack | null {
+    const usable = (Array.isArray(samples) ? samples : []).filter(
+        (sample) =>
+            sample?.position != null &&
+            [sample.position.x, sample.position.y, sample.position.z].every((n) => Number.isFinite(n))
+    );
+    if (usable.length < 2) return null;
+
+    const lastPosition = usable[usable.length - 1].position;
+    const firstLast = compassBearing(usable[0].position, lastPosition);
+    if (firstLast != null && firstLast.distance >= MIN_EYE_TRAVEL) {
+        return {
+            point: firstLast.point,
+            degrees: firstLast.degrees,
+            travelled: firstLast.distance,
+            samples: usable.length,
+            lastPosition,
+        };
+    }
+
+    let best: CompassBearing | null = null;
+    for (let i = 0; i < usable.length; i++) {
+        for (let j = i + 1; j < usable.length; j++) {
+            const bearing = compassBearing(usable[i].position, usable[j].position);
+            if (bearing == null) continue;
+            if (best == null || bearing.distance > best.distance) best = bearing;
+        }
+    }
+    if (best == null || best.distance < MIN_EYE_TRAVEL) return null;
+    return {
+        point: best.point,
+        degrees: best.degrees,
+        travelled: best.distance,
+        samples: usable.length,
+        lastPosition,
+    };
+}
+
+/** 把方位角转成"跟着走的下一步"人话。 */
+export function describeEyeDirection(track: EyeFlightTrack): string {
+    return (
+        `眼睛朝**${COMPASS_LABELS[track.point]}**飞（方位角 ${track.degrees.toFixed(0)}°），` +
+        `在视野里飞了约 ${track.travelled.toFixed(1)} 格就消失了（这是眼睛的位移，**不是到要塞的距离**）。` +
+        `最后看到它在 (${Math.round(track.lastPosition.x)},${Math.round(track.lastPosition.y)},${Math.round(track.lastPosition.z)})。`
+    );
 }
 
 // ============================ 三、爆炸伤害（官方公式） ============================
@@ -237,6 +381,8 @@ export interface BedBombInput {
     mitigation?: DamageMitigation;
     /** 你自己还剩多少血（默认满血 20）。 */
     health?: number;
+    /** 龙还剩多少血；读不到就别给（默认按满血 200 算"还要几张床"）。 */
+    dragonHealth?: number | null;
 }
 
 export interface BedBombPlan {
@@ -250,6 +396,17 @@ export interface BedBombPlan {
     selfRawDamage: number;
     selfFinalDamage: number;
     lethal: boolean;
+    /** 点到床的距离（脚到床）。 */
+    standDistance: number;
+    /**
+     * 有没有**能兑现的**掩体：`coverCells` 是调用方验过的实体方块，或者确认钻进了传送门结构。
+     * 注意这是"配置声明"，**纯逻辑层不探世界**——探世界是 routine 的事。
+     */
+    coverVerified: boolean;
+    /** 站得够不够近：够不着床就点不着（4.5 格）。 */
+    canReachBed: boolean;
+    /** 自伤超过一半血（不是当场死，但下一发龙息/摔伤就能收掉）。 */
+    tooRisky: boolean;
     /** 'run' 方案要退到哪、退多远（blastRadius(5)=10 格）。 */
     retreat?: Vec3;
     retreatDistance: number;
@@ -258,9 +415,19 @@ export interface BedBombPlan {
 }
 
 /**
- * 规划一次床炸。**安全闸门**是硬的：
- * - 没掩体、又不退到 10 格外 → 直接判 lethal、ok=false，只报告不执行；
- * - 龙离床 > 3 格 → 打不动龙，白炸一次还把自己搭进去，也判 ok=false。
+ * 规划一次床炸。**安全闸门是硬的**（判定顺序就是下面 if 的顺序）：
+ *
+ * 1. `自伤 ≥ 当前血量` → lethal、`ok=false`（"床炸会打死自己"）；
+ * 2. `自伤 > 一半血` → `ok=false`（没当场死也会被下一发龙息/摔伤收掉）；
+ * 3. **没有能兑现的掩体** → `ok=false`（"退到 10 格外"这个借口不成立：10 格外够不着床）；
+ * 4. 够不着床（> {@link BLOCK_REACH_DISTANCE}） → `ok=false`；
+ * 5. 龙离床 > 3 格（打不掉血） → `ok=false`。
+ *
+ * ⚠️ 历史教训（真机前必须记住）：这里原来写的是
+ * `enoughRoom = method === 'cover' || standDistance >= safeDistance || retreatDistance >= safeDistance`，
+ * 而 `retreatDistance` 的定义就是 `max(standDistance, safeDistance)` —— 第三个分支**恒为真**，
+ * 于是"无掩体"这条闸门从来没生效过，`reason` 里的"退路不够"分支是死代码。
+ * 现在改成显式三条独立判据，且掩体必须由调用方探世界后声明。
  */
 export function planBedBombing(input: BedBombInput): BedBombPlan {
     const warnings: string[] = [];
@@ -269,9 +436,9 @@ export function planBedBombing(input: BedBombInput): BedBombPlan {
     const expectedDragonDamage = bedDamageVsDragon(dragonDistance);
 
     const coverCells = input.coverCells ?? [];
-    const hasCover = coverCells.length > 0 || input.inTrench === true;
+    const coverVerified = coverCells.length > 0 || input.inTrench === true;
     // 经验暴露度：有掩体/在坑里 0.15，完全裸奔 1。
-    const exposure = input.exposure ?? (hasCover ? 0.15 : 1);
+    const exposure = input.exposure ?? (coverVerified ? 0.15 : 1);
     const standDistance = distance(input.bedCell, input.standCell);
     const selfRawDamage = explosionDamage(power, standDistance, exposure);
     const selfFinalDamage = explosionDamageToPlayer(
@@ -282,7 +449,7 @@ export function planBedBombing(input: BedBombInput): BedBombPlan {
     );
     const health = input.health ?? PLAYER_MAX_HEALTH;
 
-    const method: BedBombMethod = hasCover ? 'cover' : 'run';
+    const method: BedBombMethod = coverVerified ? 'cover' : 'run';
     const safeDistance = blastRadius(power);
     const retreatDistance = standDistance >= safeDistance ? standDistance : safeDistance;
     const { dx, dz, length } = horizontalDirection(input.bedCell, input.standCell);
@@ -300,33 +467,46 @@ export function planBedBombing(input: BedBombInput): BedBombPlan {
     if (selfFinalDamage >= 6) {
         warnings.push(`预计自伤 ${selfFinalDamage.toFixed(1)} HP——超过 6 点就要重新找掩体。`);
     }
-    if (input.inTrench !== true && coverCells.length === 0) {
+    if (!coverVerified) {
         warnings.push('没有掩体也没钻进传送门结构：床炸几乎是自杀。');
     }
 
     const lethal = selfFinalDamage >= health;
-    const enoughRoom = method === 'cover' || standDistance >= safeDistance || retreatDistance >= safeDistance;
-    const ok = !lethal && enoughRoom && expectedDragonDamage > 0;
+    const tooRisky = !lethal && selfFinalDamage * 2 > health;
+    const canReachBed = standDistance <= BLOCK_REACH_DISTANCE;
+    const ok = !lethal && !tooRisky && coverVerified && canReachBed && expectedDragonDamage > 0;
 
     const reason = !ok
         ? lethal
             ? `床炸会打死自己（预计 ${selfFinalDamage.toFixed(1)} HP ≥ ${health} HP），需要掩体或先退到 ${safeDistance} 格外。`
-            : expectedDragonDamage <= 0
-                ? `床离龙头 ${dragonDistance.toFixed(1)} 格太远，打不到龙。`
-                : `退路 ${standDistance.toFixed(1)} 格不够安全（要 ≥ ${safeDistance} 格）。`
+            : tooRisky
+                ? `自伤 ${selfFinalDamage.toFixed(1)} HP 超过你 ${health} HP 的一半：先回血 / 补掩体（床边放一块方块或钻进出口传送门结构），别赌。`
+                : !coverVerified
+                    ? `没有能兑现的掩体：先退到 ${safeDistance} 格外就够不着床了（交互距离 ${BLOCK_REACH_DISTANCE} 格），先在床和你之间放一块方块、或钻进出口传送门结构再点。`
+                    : !canReachBed
+                        ? `床离你 ${standDistance.toFixed(1)} 格，够不着（上限 ${BLOCK_REACH_DISTANCE} 格）：走近到床边再放/点。`
+                        : `床离龙头 ${dragonDistance.toFixed(1)} 格太远，打不到龙。`
         : method === 'cover'
             ? `有掩体（暴露度 ${exposure}），预计打掉龙 ${expectedDragonDamage.toFixed(0)} HP、自伤 ${selfFinalDamage.toFixed(1)} HP。`
             : `点完床立刻沿远离床的方向退到 ${safeDistance} 格外，预计打掉龙 ${expectedDragonDamage.toFixed(0)} HP。`;
+
+    const dragonHealth = typeof input.dragonHealth === 'number' && Number.isFinite(input.dragonHealth)
+        ? Math.max(0, input.dragonHealth)
+        : DRAGON_MAX_HEALTH;
 
     return {
         ok,
         method,
         dragonDistance,
         expectedDragonDamage,
-        bedsNeeded: bedsNeeded(DRAGON_MAX_HEALTH),
+        bedsNeeded: bedsNeeded(dragonHealth),
         selfRawDamage,
         selfFinalDamage,
         lethal,
+        standDistance,
+        coverVerified,
+        canReachBed,
+        tooRisky,
         retreat,
         retreatDistance,
         warnings,
@@ -356,6 +536,8 @@ export interface BreathEscape {
     escapeDirection: { dx: number; dz: number };
     distanceToMove: number;
     urgency: 'none' | 'move' | 'sprint';
+    /** 这次撤离是被什么驱动的：`cloud` = 地上的云；`perch` = 龙低头 + 20 格内；`none` = 不用动。 */
+    escapeMode: 'cloud' | 'perch' | 'none';
     reason: string;
 }
 
@@ -374,6 +556,12 @@ const EIGHT_WAYS: Array<{ dx: number; dz: number }> = [
  * 龙息云是"一桶高、直径 5~6 格"的圆盘，掉血区只有中间 3~4 格。
  * 这里把云当成圆柱（y 差 ≤ 1 才算同一层），沿 8 个方向各试探 4 格，
  * 挑一个**离所有云最远**的格子走。
+ *
+ * ⚠️ 历史教训：原来"8 个方向都试不出更远的格子"时会把目标格留在**原地**
+ * （`clearance` 全是 `Infinity` 时 `>` 永远不成立），而外层调用者（`dodgeDragonBreathSkill`）
+ * 会照样报"已经挪开了" —— 一次都没动，回执却说动了。
+ * 现在补了**方向兜底**：云比不出来就朝"远离传送门"的方向走（龙低头时的 20 格规则），
+ * 实在没有方向可用时至少给一个确定方向，并且 `escapeMode` 如实标出这次是被什么驱动的。
  */
 export function planBreathEscape(input: {
     self: Vec3;
@@ -405,6 +593,10 @@ export function planBreathEscape(input: {
     const nearestCloudDistance = Number.isFinite(nearest) ? nearest : Infinity;
     const inside = nearestCloudDistance < 0;
 
+    const podiumDistance = horizontalDistance(input.self, END_PODIUM);
+    const dragonPerched = input.dragonPerched === true;
+    const dangerFromPerch = dragonPerched && podiumDistance < PERCH_BREATH_RANGE;
+
     let best: { dx: number; dz: number; clearance: number } = { dx: 0, dz: 0, clearance: clearanceAt(input.self) };
     for (const dir of EIGHT_WAYS) {
         const candidate = offset(input.self, dir.dx * step, 0, dir.dz * step);
@@ -412,10 +604,50 @@ export function planBreathEscape(input: {
         if (clearance > best.clearance) best = { dx: dir.dx, dz: dir.dz, clearance };
     }
 
+    const needsMove = inside || dangerFromPerch || (Number.isFinite(nearestCloudDistance) && nearestCloudDistance < step);
+    let escapeMode: BreathEscape['escapeMode'] = 'none';
+
+    if (needsMove) {
+        if (best.dx !== 0 || best.dz !== 0) {
+            escapeMode = inside || Number.isFinite(nearestCloudDistance) ? 'cloud' : 'perch';
+        } else {
+            // 兜底 1：朝"离最近那团云"的反方向走。
+            let fallback: { dx: number; dz: number } | null = null;
+            let nearestCloud: BreathCloud | null = null;
+            let nearestCloudDist = Infinity;
+            for (const cloud of sameLayer) {
+                const d = horizontalDistance(input.self, cloud.position);
+                if (d < nearestCloudDist) {
+                    nearestCloudDist = d;
+                    nearestCloud = cloud;
+                }
+            }
+            if (nearestCloud != null) {
+                const dir = horizontalDirection(nearestCloud.position, input.self);
+                if (dir.length > 0) {
+                    fallback = { dx: dir.dx, dz: dir.dz };
+                    escapeMode = 'cloud';
+                }
+            }
+            // 兜底 2：龙低头时的 20 格规则——朝远离传送门的方向走。
+            if (fallback == null && dangerFromPerch) {
+                const dir = horizontalDirection(END_PODIUM, input.self);
+                if (dir.length > 0) {
+                    fallback = { dx: dir.dx, dz: dir.dz };
+                    escapeMode = 'perch';
+                }
+            }
+            // 兜底 3：站在传送门正中 / 云心正中，方向退化——至少给一个确定方向，别假装动了。
+            if (fallback == null) {
+                fallback = { dx: EIGHT_WAYS[0].dx, dz: EIGHT_WAYS[0].dz };
+                escapeMode = dangerFromPerch ? 'perch' : 'cloud';
+            }
+            const candidate = offset(input.self, fallback.dx * step, 0, fallback.dz * step);
+            best = { dx: fallback.dx, dz: fallback.dz, clearance: clearanceAt(candidate) };
+        }
+    }
+
     const escapeTarget = offset(input.self, best.dx * step, 0, best.dz * step);
-    const podiumDistance = horizontalDistance(input.self, END_PODIUM);
-    const dragonPerched = input.dragonPerched === true;
-    const dangerFromPerch = dragonPerched && podiumDistance < PERCH_BREATH_RANGE;
 
     let urgency: BreathEscape['urgency'] = 'none';
     let reason = `周围没有龙息云（最近 ${Number.isFinite(nearestCloudDistance) ? nearestCloudDistance.toFixed(1) : '∞'} 格）。`;
@@ -424,10 +656,12 @@ export function planBreathEscape(input: {
         reason = `正站在龙息掉血区里（离云心 ${(nearestCloudDistance + BREATH_HARM_RADIUS).toFixed(1)} 格），立刻往 (${Math.round(escapeTarget.x)},${Math.round(escapeTarget.z)}) 方向冲刺。`;
     } else if (dangerFromPerch) {
         urgency = 'move';
-        reason = `龙正低头停在传送门上，而你在它 ${podiumDistance.toFixed(1)} 格内（<${PERCH_BREATH_RANGE}）——下一发龙息就是冲你来的，先撤出 ${PERCH_BREATH_RANGE} 格。`;
+        reason = `龙正低头停在传送门上，而你在它 ${podiumDistance.toFixed(1)} 格内（<${PERCH_BREATH_RANGE}）——下一发龙息就是冲你来的，先撤出 ${PERCH_BREATH_RANGE} 格：往 (${Math.round(escapeTarget.x)},${Math.round(escapeTarget.z)}) 走。`;
     } else if (Number.isFinite(nearestCloudDistance) && nearestCloudDistance < step) {
         urgency = 'move';
-        reason = `最近的龙息云还剩 ${nearestCloudDistance.toFixed(1)} 格余量，先挪开。`;
+        reason = `最近的龙息云还剩 ${nearestCloudDistance.toFixed(1)} 格余量，先挪到 (${Math.round(escapeTarget.x)},${Math.round(escapeTarget.z)})。`;
+    } else {
+        escapeMode = 'none';
     }
 
     return {
@@ -439,6 +673,7 @@ export function planBreathEscape(input: {
         escapeDirection: { dx: best.dx, dz: best.dz },
         distanceToMove: urgency === 'none' ? 0 : step,
         urgency,
+        escapeMode: urgency === 'none' ? 'none' : escapeMode,
         reason,
     };
 }
@@ -843,7 +1078,8 @@ export function activeEffectSeconds(effects: EffectInfo[] | undefined, kind: str
 }
 
 /**
- * 进末地前的装备检查。**硬缺口（fatal）只有一条**：既没有方块、又没有能伤龙的手段。
+ * 进末地前的装备检查。**硬缺口（fatal）只有两条**（设计稿 §3.5）：
+ * "没有任何伤龙手段（没床、没 TNT、没弓+箭）" 和 "一个方块都没有"。
  * 血量类（缓降/再生/金苹果/牛奶）缺失只降级为警告 —— 但警告里会写清楚后果。
  */
 export function assessEndGear(input: EndGearInput): EndGearAssessment {
@@ -902,6 +1138,15 @@ export function assessEndGear(input: EndGearInput): EndGearAssessment {
         { key: 'food', label: '食物', have: food, need: req.food, ok: food >= req.food },
         { key: 'ender_pearl', label: '末影珍珠（被掀飞时自救/位移）', have: enderPearls, need: req.enderPearls, ok: enderPearls >= req.enderPearls },
         { key: 'pickaxe', label: '镐（拆铁栏杆）', have: pickaxes, need: req.pickaxe, ok: pickaxes >= req.pickaxe },
+        {
+            // 笼中那 2 颗水晶：有 TNT 就从笼顶掏（推荐），没 TNT 只能上柱子拆栏杆（得有镐 + 缓降）。
+            // 两样都没有时地面对射基本无效 → **这一项必须出现在清单里**，否则"清单全绿"是假的。
+            key: 'cage_kit',
+            label: 'TNT 或镐（拆笼中水晶）',
+            have: tnt + (pickaxes > 0 ? 1 : 0),
+            need: 1,
+            ok: tnt + (pickaxes > 0 ? 1 : 0) >= 1,
+        },
     ];
 
     const checkByKey = new Map(checks.map((c) => [c.key, c] as const));
@@ -923,6 +1168,9 @@ export function assessEndGear(input: EndGearInput): EndGearAssessment {
     if (!checkOk('resistance')) warnings.push('没有抗性提升药水：爆炸和撞伤都按满额吃。');
     if (!checkOk('regeneration')) warnings.push('没有再生药水：龙息间隙回不满血，容易被连招带走。');
     if (!checkOk('milk')) warnings.push('没有牛奶桶：中了负面效果只能等它自己过期。');
+    if (!checkOk('cage_kit')) {
+        warnings.push('既没有 TNT 也没有镐：笼中那 2 颗水晶拆不掉（从地面射栏杆基本无效），只要还剩一颗龙就持续回血。带 TNT 去笼顶掏，或带镐上柱子拆栏杆（必须先喝缓降）。');
+    }
     if (totems > 0) warnings.push(`带了 ${totems} 个不死图腾——记得拿在手上/副手，触发后立刻换第二个。`);
     if (input.armorPoints != null && input.armorPoints < 15) {
         warnings.push(`护甲只有 ${input.armorPoints} 点（钻石套是 20），爆炸里很吃亏。`);
@@ -1035,10 +1283,18 @@ export interface EndgameState {
     /** 12 颗眼填满了没有。 */
     portalActivated?: boolean;
     inEnd?: boolean;
-    /** 还剩几颗水晶。 */
+    /** 还剩几颗水晶；**读不到就别填**（在末地按"还没拆完"保守处理）。 */
     crystalsAlive?: number;
     /** 龙血读得到就给数字；读不到给 null。 */
     dragonHealth?: number | null;
+    /**
+     * 末影龙实体还在不在。
+     *
+     * 为什么单独要这个信号：龙一死 **boss bar 就消失**，`dragonHealth` 变成 null ——
+     * 而 null 的语义是"读不到"，不能当成"打完了"。没有这一位时状态机会在龙死后
+     * **永远停在 fight_dragon**，让 bot 对着一具尸体继续放床。
+     */
+    dragonAlive?: boolean;
 }
 
 export interface EndgameStepAdvice {
@@ -1078,8 +1334,10 @@ export function nextEndgameStep(state: EndgameState): EndgameStepAdvice {
     if (state.strongholdFound !== true) {
         return {
             phase: 'travel_stronghold',
-            action: '掷末影之眼找要塞：眼飞 12 格指方向（20% 概率碎），跟着走，直到眼睛开始往下钻 → 往下挖。',
-            tool: 'locateStronghold',
+            // 工具名必须是**注册表里真的存在**的：原来这里写 `locateStronghold`，
+            // 而 registry 里没有这条命令，模型照着调只会拿到"未知工具"。
+            action: '掷末影之眼找要塞：先 equip 把 ender_eye 拿到手上，再 throwHeld（眼飞 12 格指方向，20% 概率碎）；跟着走，直到眼睛开始往下钻 → 往下挖到传送门房。',
+            tool: 'throwHeld',
             nextPhase: 'activate_portal',
             reason: '还没定位要塞。末地传送门在要塞里。',
         };
@@ -1087,10 +1345,10 @@ export function nextEndgameStep(state: EndgameState): EndgameStepAdvice {
     if (state.portalActivated !== true) {
         return {
             phase: 'activate_portal',
-            action: '在要塞传送门房里把 12 个框架都用末影之眼填满（天然自带约 10%），填满即激活。',
-            tool: 'activateEndPortal',
+            action: '站在要塞传送门房里调 enterEnd：它会把 12 个空框架都用末影之眼填满（天然自带约 10%），填满即激活，然后直接走进去。',
+            tool: 'enterEnd',
             nextPhase: 'enter_end',
-            reason: '传送门没激活就进不去末地。',
+            reason: '传送门没激活就进不去末地（原来这里写的是不存在的 activateEndPortal）。',
         };
     }
     if (state.inEnd !== true) {
@@ -1102,29 +1360,33 @@ export function nextEndgameStep(state: EndgameState): EndgameStepAdvice {
             reason: '传送门已激活，该过去了。',
         };
     }
-    if ((state.crystalsAlive ?? 0) > 0) {
+    if (state.crystalsAlive == null || state.crystalsAlive > 0) {
+        const unknown = state.crystalsAlive == null;
         return {
             phase: 'clear_crystals',
-            action: `先拆水晶，还剩 ${state.crystalsAlive} 颗：站在离水晶 ≥12 格外用弓射；笼中那两颗最后处理（TNT 或上柱子拆栏杆）。全拆完再贴脸打龙。`,
+            action: unknown
+                ? '水晶数量读不到（实体没加载？）：先调 endFightStatus 看治疗光束/实体，确认拆干净之前不要贴脸打龙——只要还剩一颗，龙就一直回血。'
+                : `先拆水晶，还剩 ${state.crystalsAlive} 颗：站在离水晶 ≥12 格外用弓射；笼中那两颗最后处理（TNT 或上柱子拆栏杆）。全拆完再贴脸打龙。`,
             tool: 'clearEndCrystals',
             nextPhase: 'fight_dragon',
             reason: '只要还有一颗水晶，龙就会一直回血，打了也白打。',
         };
     }
-    if (state.dragonHealth !== 0) {
+    // 龙死了（实体消失）或血量读到 0 —— 两个信号任一成立就算打完。
+    if (state.dragonAlive === false || state.dragonHealth === 0) {
         return {
-            phase: 'fight_dragon',
-            action: '打龙：它低头停在 (0,64,0) 传送门上时用床炸（站到掩体后面再点）或砍头；飞着的时候在它飞行轨迹前面放箭。随时留一颗心喝再生。',
-            tool: 'bedBombDragon',
+            phase: 'done',
+            action: '龙死了：进 (0,64,0) 的出口传送门回主世界（会放终末之诗），记得捡龙蛋和 12000 经验。',
             nextPhase: 'done',
-            reason: '水晶拆完、龙还活着，进入收割阶段。',
+            reason: 'Boss 已经打完。',
         };
     }
     return {
-        phase: 'done',
-        action: '龙死了：进 (0,64,0) 的出口传送门回主世界（会放终末之诗），记得捡龙蛋和 12000 经验。',
+        phase: 'fight_dragon',
+        action: '打龙：它低头停在 (0,64,0) 传送门上时用床炸（站到掩体后面再点）或砍头；飞着的时候在它飞行轨迹前面放箭。随时留一颗心喝再生。',
+        tool: 'bedBombDragon',
         nextPhase: 'done',
-        reason: 'Boss 已经打完。',
+        reason: '水晶拆完、龙还活着，进入收割阶段。',
     };
 }
 
@@ -1140,6 +1402,36 @@ export function formatEndgameReport(assessment: EndGearAssessment, advice: Endga
     return lines.join('\n');
 }
 // ============================ 十一、按优先级喝药（纯决策） ============================
+/**
+ * 值得"用牛奶清掉"的负面效果（设计稿 §3.5：牛奶只在中了负面效果时用）。
+ * 缓降/再生/抗性这些**好** Buff 不在这个表里 —— 喝奶会把它们一起清掉，所以有它们在时不喝。
+ */
+export const NEGATIVE_EFFECTS: readonly string[] = Object.freeze([
+    'poison',
+    'wither',
+    'weakness',
+    'slowness',
+    'mining_fatigue',
+    'hunger',
+    'blindness',
+    'nausea',
+    'levitation',
+    'unluck',
+    'darkness',
+    'instant_damage',
+    'bad_omen',
+]);
+
+/** 身上有没有负面效果；返回第一个命中的名字（给回执用）。 */
+export function findNegativeEffect(effects: EffectInfo[] | undefined): string | null {
+    if (!Array.isArray(effects)) return null;
+    for (const effect of effects) {
+        const name = normalizeName(effect?.name);
+        if (NEGATIVE_EFFECTS.includes(name)) return name;
+    }
+    return null;
+}
+
 export interface DrinkDecisionInput {
     effects?: EffectInfo[];
     stock: PotionStock;
@@ -1170,7 +1462,9 @@ export interface DrinkDecision {
  * 1. **缓降**：在末地/空中，且没 Buff 或剩余 < 30s → 立刻补。摔死是末地头号死法。
  * 2. **再生 / 治疗**：血量 ≤ 10（半血）时先回血。
  * 3. **抗性提升**：在末地且没有抗性 Buff → 顶一个（爆炸和撞击都能减）。
- * 4. 都不满足 → 不喝，回执里列出背包还有哪些药。
+ * 4. **牛奶（只在中毒/虚弱这类负面效果时）**：且身上**没有**缓降/再生/抗性时才喝
+ *    —— 牛奶清的是全部效果，为解一个中毒把刚喝的缓降清掉是拿命换。
+ * 5. 都不满足 → 不喝，回执里列出背包还有哪些药。
  */
 export function choosePotionToDrink(input: DrinkDecisionInput): DrinkDecision {
     const stock = input.stock;
@@ -1208,6 +1502,27 @@ export function choosePotionToDrink(input: DrinkDecisionInput): DrinkDecision {
         return { kind: 'resistance', reason: '在末地且没有抗性提升：先顶一瓶，爆炸和撞击都按这个减。', considered };
     }
     considered.push(`抗性：库存 ${stock.resistance} 瓶，Buff ${hasActiveEffect(input.effects, 'resistance') ? '有' : '无'}`);
+
+    // 牛奶：**只在中了负面效果时**喝。而且身上有好 Buff（缓降/再生/抗性）时不喝——
+    // 牛奶清的是"全部"效果，为解一个中毒把刚喝的缓降一起清掉，等于把命交给下坠。
+    const negative = findNegativeEffect(input.effects);
+    if (negative != null) {
+        const sacrificial = ['slow_falling', 'regeneration', 'resistance'].filter((kind) =>
+            hasActiveEffect(input.effects, kind)
+        );
+        if (stock.milk > 0 && sacrificial.length === 0) {
+            return {
+                kind: 'milk',
+                reason: `身上有 ${negative}：喝牛奶立刻清掉全部负面效果（现在没有会被一起清掉的好 Buff）。牛奶不能灭火。`,
+                considered,
+            };
+        }
+        considered.push(
+            stock.milk > 0
+                ? `中了 ${negative}，但身上还有 ${sacrificial.join('/')}：喝奶会一起清掉，先不喝（等它们过期或确认值得换）。`
+                : `中了 ${negative}，但没有牛奶桶。`,
+        );
+    }
 
     const stockText = POTION_KINDS.filter((kind) => kind !== 'other' && stock[kind] > 0)
         .map((kind) => `${kind}×${stock[kind]}`)

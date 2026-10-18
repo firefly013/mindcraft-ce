@@ -35,6 +35,18 @@ function stack(name: string, count = 1, extra: Record<string, any> = {}) {
     return { name, count, ...extra };
 }
 
+/** 喝药/吃东西要真的从背包里扣掉（`drinkPotionByKind` 会核对数量，假 bot 不扣等于永远喝不成）。 */
+function consumeOne(items: any[], held: any): void {
+    if (held == null) return;
+    const index = items.indexOf(held);
+    if (index < 0) return;
+    const item = items[index];
+    if (typeof item.count === 'number' && item.count > 1) item.count -= 1;
+    else items.splice(index, 1);
+    // 同一份栈：**只扣一次**（held 往往就是 items 里那个对象）。
+    if (item !== held && typeof held.count === 'number' && held.count > 1) held.count -= 1;
+}
+
 function makeFakeBot(options: {
     dimension?: string;
     stacks?: any[];
@@ -48,6 +60,7 @@ function makeFakeBot(options: {
 } = {}) {
     const p = { x: 0, y: 64, z: 0 };
     const stacks = options.stacks ?? [];
+    const items = options.items ?? stacks;
     const calls: any[] = [];
     const bot: any = {
         game: { dimension: options.dimension ?? 'the_end' },
@@ -67,7 +80,7 @@ function makeFakeBot(options: {
         health: options.health ?? 20,
         output: '',
         heldItem: options.heldItem,
-        inventory: { slots: stacks, items: () => options.items ?? stacks },
+        inventory: { slots: stacks, items: () => items },
         calls,
         lookAt: () => {
             calls.push({ fn: 'lookAt' });
@@ -89,6 +102,7 @@ function makeFakeBot(options: {
         },
         consume: () => {
             calls.push({ fn: 'consume' });
+            consumeOne(items, bot.heldItem);
             return Promise.resolve();
         },
     };

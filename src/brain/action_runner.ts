@@ -52,8 +52,27 @@ export interface ActionNotice {
 /** 动作跑太久没有任何结果时，主动发一条进度回执的间隔（毫秒）。 */
 export const ACTION_PROGRESS_NOTICE_MS = 60_000;
 
-/** 动作在脑侧的最长挂起时间；到点强制释放动作通道。 */
-const ACTION_MAX_MS = 10 * 60 * 1000;
+/**
+ * 身体侧单个动作的**最长**超时（分钟）。
+ *
+ * `collectBlocks` 是 6 分钟（`body/commands/actions.ts` 里 `runAsAction(..., 6)`）、
+ * `goToCoordinates` / `enterNether` 5 分钟、`pillarUp` / `stairUp` 4 分钟，
+ * 其余默认 2 分钟（`DEFAULT_ACTION_TIMEOUT_MIN`）。
+ */
+const BODY_ACTION_TIMEOUT_MAX_MIN = 6;
+
+/**
+ * 动作在脑侧的最长挂起时间；到点强制释放动作通道。
+ *
+ * **必须略长于身体侧的最长超时**：这是"身体彻底没回来"（幽灵锁）的最后保险丝，
+ * 不是常规收尾手段——身体侧自己会在超时时带原因回来。
+ * 以前写死 10 分钟，幽灵锁要卡满 10 分钟；现在收到 6 分 30 秒。
+ * 但**不能再往 2~3 分钟压**：那会把还在正常跑的 `collectBlocks`（可达 6 分钟）
+ * 判成泄漏——大脑释放通道、身体还在挖，正是"快照 idle 但动作被拒"那类幽灵锁
+ * 的来源。要做到"每个动作各自的保险丝"，得让身体在握手声明里带上自己的超时，
+ * 那是接口变更，不在这条修复里做。
+ */
+export const ACTION_MAX_MS = (BODY_ACTION_TIMEOUT_MAX_MIN * 60 + 30) * 1000;
 
 export interface ActionRunnerDeps {
   scheduler: Scheduler;
