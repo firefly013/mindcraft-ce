@@ -41,6 +41,7 @@ import {
   createFeedbackTool,
   createGetPlacesTool,
   createGoToRememberedPlaceTool,
+  goToCoordinatesArgs,
   createRememberHereTool,
   createStopTool,
   createUpdatePlanTool,
@@ -936,7 +937,12 @@ export class Agent {
           }
         },
         // 走动作通道：占身体的动作必须走它，不然会和别的动作抢身体。
-        goto: async (x, y, z) => await this.invokeTool('!goToCoordinates', { x, y, z }),
+        //
+        // ⚠️ **必须带 `closeness`**：`!goToCoordinates` 的 schema 里它是必填（没有 default），
+        // 少了它会在**参数校验**就被拒（`missing required property 'closeness'`）——
+        // 于是 `goToRememberedPlace` 这个工具"文档里能用、实际永远调不动"（真机 overnight_a）。
+        // 2 格 = "站到它旁边"，和别处内部调用同一个口径。
+        goto: async (x, y, z) => await this.invokeTool('!goToCoordinates', goToCoordinatesArgs(x, y, z)),
       };
     }
 

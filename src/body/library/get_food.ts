@@ -182,6 +182,8 @@ export interface GetFoodDeps {
     hunt?: (bot: any, entity: string, want: number, radius: number, maxMs: number) => Promise<GetFoodStepResult>;
     fish?: (bot: any, maxMs: number, casts: number) => Promise<GetFoodStepResult>;
     findBlock?: (bot: any, block: string, radius: number) => FlatPosition | null;
+    /** 一次拿到**多个**蛛网（用来挑"最省事"的那个：先看竖直距离，少爬少挖）。 */
+    findCobwebs?: (bot: any, radius: number) => FlatPosition[];
     travel?: (bot: any, x: number, y: number, z: number, closeness: number) => Promise<boolean>;
     mine?: (bot: any, x: number, y: number, z: number) => Promise<boolean>;
     craftRod?: (bot: any) => Promise<boolean>;
@@ -204,6 +206,25 @@ function clampInt(value: unknown, fallback: number, min: number, max: number): n
 }
 
 /**
+ * 已知的蛛网点（**实测**，不是推算）：overnight_a 在 2026-10-19 找到第 5 个蛛网
+ * (71, 28, -76)，**y=28** —— 比从存档推出来的那四个浅得多（那四个要往下挖 ~80 格，
+ * 深度才是这条链上真正贵的东西）。扫描半径内没有蛛网时，直接给这个点，别再让它
+ * 靠 `exploreFor` 瞎撞。
+ */
+export const KNOWN_COBWEB_SITES: ReadonlyArray<FlatPosition> = Object.freeze([{ x: 71, y: 28, z: -76 }]);
+
+/** 已知蛛网点里最"省事"的一个：**先看竖直距离**（少爬少挖），再看水平距离。 */
+export function bestKnownCobwebSite(
+    here: FlatPosition | null,
+    sites: ReadonlyArray<FlatPosition> = KNOWN_COBWEB_SITES,
+): FlatPosition | null {
+    if (sites.length === 0) return null;
+    if (here == null) return sites[0] ?? null;
+    const cost = (site: FlatPosition): number => Math.abs(site.y - here.y) * 4 + Math.hypot(site.x - here.x, site.z - here.z);
+    return [...sites].sort((a, b) => cost(a) - cost(b))[0] ?? null;
+}
+
+/**
  * 一条能照抄的"接着做"：把这条链**从当前断点继续**。
  *
  * 关键点：杆子这条路**永远点名工作台**（3×3 配方，2×2 的 `craft` 放不下——我们自己踩过）。
@@ -215,6 +236,10 @@ export function rodNextCall(options: {
     cobweb: FlatPosition | null;
     spawner: string | null;
     water: { position: FlatPosition; distance: number } | null;
+    /** 现在在哪（用来挑"最省事"的已知蛛网点）；读不到就 null。 */
+    here?: FlatPosition | null;
+    /** 当前维度：已知蛛网点在主世界，别的维度不能照抄。 */
+    dimension?: string | null;
 }): string {
     if (options.hasRod) {
         if (options.water == null) return 'searchForBlock(type="water", search_range=256)';
@@ -226,6 +251,13 @@ export function rodNextCall(options: {
         }
         if (options.cobweb != null) {
             return `goToCoordinates(x=${Math.round(options.cobweb.x)}, y=${Math.round(options.cobweb.y)}, z=${Math.round(options.cobweb.z)}, closeness=2)`;
+        }
+        const dimension = options.dimension ?? 'overworld';
+        if (!dimension.toLowerCase().includes('nether') && !dimension.toLowerCase().includes('end')) {
+            const site = bestKnownCobwebSite(options.here ?? null);
+            if (site != null) {
+                return `goToCoordinates(x=${Math.round(site.x)}, y=${Math.round(site.y)}, z=${Math.round(site.z)}, closeness=2)`;
+            }
         }
         return 'exploreFor(block="cobweb", max_steps=8, step=32)';
     }
@@ -330,6 +362,47 @@ export async function getFoodSkill(
                 return null;
             }
         });
+    /**
+     * 找蛛网：**先看竖直距离**（少爬少挖），再看水平距离。
+     *
+     * 真机经验（overnight_a）：第 5 个蛛网在 y=28，而按存档推出来的四个要往下挖 ~80 格——
+     * **深度才是这条链上贵的东西**。原来的 `getNearestBlocksWhere(..., 1)` 只给"最近"的，
+     * 于是可能挑中头顶 40 格那个（要搭/爬）而错过脚下 20 格那个（走过去就行）。
+     */
+    const findShallowCobweb = (b: any): FlatPosition | null => {
+        const candidates: FlatPosition[] = (() => {
+            if (deps.findCobwebs != null) {
+                try {
+                    return deps.findCobwebs(b, GETFOOD_COBWEB_RADIUS) ?? [];
+                } catch {
+                    return [];
+                }
+            }
+            if (deps.findBlock != null) {
+                const one = findBlock(b, 'cobweb', GETFOOD_COBWEB_RADIUS);
+                return one == null ? [] : [one];
+            }
+            try {
+                return (world.getNearestBlocksWhere(b, (x: any) => String(x?.name ?? '').trim().toLowerCase() === 'cobweb', GETFOOD_COBWEB_RADIUS, 8) ?? [])
+                    .map((block: any) => block?.position)
+                    .filter((p: any) => p != null)
+                    .map((p: any) => ({ x: Number(p.x), y: Number(p.y), z: Number(p.z) }));
+            } catch {
+                return [];
+            }
+        })();
+        if (candidates.length === 0) return null;
+        let here: FlatPosition | null = null;
+        try {
+            const pos = b?.entity?.position;
+            if (pos != null) here = { x: Number(pos.x), y: Number(pos.y), z: Number(pos.z) };
+        } catch {
+            here = null;
+        }
+        const cost = (site: FlatPosition): number =>
+            here == null ? Math.hypot(site.x, site.z) : Math.abs(site.y - here.y) * 4 + Math.hypot(site.x - here.x, site.z - here.z);
+        return [...candidates].sort((a, b2) => cost(a) - cost(b2))[0] ?? null;
+    };
     const travel =
         deps.travel ?? ((b: any, x: number, y: number, z: number, closeness: number) => skills.goToPosition(b, x, y, z, closeness));
     const mine = deps.mine ?? ((b: any, x: number, y: number, z: number) => skills.breakBlockAt(b, x, y, z));
@@ -439,7 +512,7 @@ export async function getFoodSkill(
                     if (string < 2 && left() >= GETFOOD_MIN_STEP_MS) {
                         let websMined = 0;
                         for (let i = 0; i < GETFOOD_MAX_COBWEBS && string < 2 && left() >= 5_000; i++) {
-                            const web = findBlock(bot, 'cobweb', GETFOOD_COBWEB_RADIUS);
+                            const web = findShallowCobweb(bot);
                             if (web == null) break;
                             const arrived = await travel(bot, web.x, web.y, web.z, 2);
                             if (!arrived) break;
@@ -448,7 +521,7 @@ export async function getFoodSkill(
                             websMined += 1;
                             string = countOf(bot, 'string');
                         }
-                        const web = findBlock(bot, 'cobweb', GETFOOD_COBWEB_RADIUS);
+                        const web = findShallowCobweb(bot);
                         record(
                             'rod',
                             websMined === 0
@@ -467,7 +540,7 @@ export async function getFoodSkill(
                     record('rod', `做竿：${crafted || hasRod ? '成了（fishing_rod +1）' : '**没成**（缺材料或附近没有工作台）'}。`, 0);
                 }
                 if (!hasRod) {
-                    const web = findBlock(bot, 'cobweb', GETFOOD_COBWEB_RADIUS);
+                    const web = findShallowCobweb(bot);
                     const spawner = nearestEntity(bot, ['spider', 'cave_spider'], GETFOOD_HUNT_RADIUS);
                     nextCall = rodNextCall({ hasRod: false, string: countOf(bot, 'string'), sticks: countOf(bot, 'stick'), cobweb: web, spawner, water: waterInfo });
                     record(

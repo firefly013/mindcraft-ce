@@ -1802,11 +1802,21 @@ export interface TunnelStep {
 }
 
 /** 判定"真的站进了那一格"的容差（格）：格子中心 ±0.4 才算站进去（旧的 1.5 会把"差一格"算成到达）。 */
-export const TUNNEL_ARRIVE_EPS = 0.75;
-/** 判定"这一动真的挪了位置"的最小 3D 位移（格）。 */
+export const TUNNEL_ARRIVE_EPS = 0.75;/** 判定"这一动真的挪了位置"的最小 3D 位移（格）。 */
 export const TUNNEL_MOVE_EPS = 0.5;
 /** 连续这么多步既没挖到东西、人也没挪动 → 熔断（不许空转刷"进度"）。 */
 export const TUNNEL_MAX_STALLS = 3;
+/** 搭桥时最多换几种材料（换依附面已经在里面循环了）。 */
+export const BRIDGE_MAX_MATERIALS = 3;
+/** 搭桥时依次尝试的依附面：先按常规从下方/侧面搭，再试上面。 */
+export const BRIDGE_FACES = ['bottom', 'side', 'top'] as const;
+export type BridgeFace = (typeof BRIDGE_FACES)[number];
+/** 依附面的中文说法（回执里要能照抄/看懂）。 */
+export const BRIDGE_FACE_TEXT: Readonly<Record<BridgeFace, string>> = Object.freeze({
+    bottom: '下方依附',
+    side: '侧面依附',
+    top: '上方依附',
+});
 
 /**
  * 第 `index` 步的几何：清哪几格、站到哪、踩在哪。
@@ -1969,7 +1979,10 @@ export function tunnelReceipt(o: TunnelOutcome): string {
         );
     }
     if (o.handMining) {
-        lines.push('⚠️ 手上没有镐：这些方块是**徒手挖**的，很慢，而且更费时间=更暴露；能换镐就换。');
+        lines.push(
+            '⚠️ **手上和背包里都没有镐**：这些方块是**徒手挖**的，很慢，而且更费时间=更暴露；' +
+                '能找/做一把镐就先做（3 个石头 + 2 根木棍）。',
+        );
     }
     const toolText =
         o.toolName == null
@@ -2002,8 +2015,10 @@ export interface TunnelDeps {
     tool?: (bot: any) => { name: string | null; remaining: number | null; max: number | null; low: boolean };
     /** 挑一块能垫的方块（默认走 `skills.choosePillarMaterial`，和 pillarUp 同一套偏好）。 */
     scaffold?: (bot: any) => string | null;
-    /** 垫一块方块（默认 `skills.placeBlock`）。 */
-    place?: (bot: any, block: string, x: number, y: number, z: number) => Promise<boolean>;
+    /** 挑**一串**能垫的方块（按偏好排序）：搭桥一次不成要能换材料。 */
+    scaffoldAll?: (bot: any) => string[];
+    /** 垫一块方块（默认 `skills.placeBlock`）；`face` = 依附面（bottom/side/top）。 */
+    place?: (bot: any, block: string, x: number, y: number, z: number, face?: string) => Promise<boolean>;
     /** 装备一件物品（默认 `skills.equip`）：挖不动时先换一把镐再试。 */
     equip?: (bot: any, item: string) => Promise<boolean>;
     sleep?: (ms: number) => Promise<void>;
@@ -2083,8 +2098,56 @@ export async function digLine(
                 return null;
             }
         });
+    /**
+     * 能垫的方块，**按偏好排序的一串**：搭桥一次不成要能换材料（换材料 = 换尺寸/朝向，
+     * 依附面不成立时往往换个方块就成立）。实现就是把挑中的材料从候选里剔掉再挑一次。
+     */
+    const scaffoldChoices = (b: any): string[] => {
+        if (deps.scaffoldAll != null) {
+            try {
+                return (deps.scaffoldAll(b) ?? []).filter((name) => typeof name === 'string' && name !== '');
+            } catch {
+                return [];
+            }
+        }
+        const out: string[] = [];
+        for (let i = 0; i < BRIDGE_MAX_MATERIALS; i++) {
+            let items: Array<{ name?: unknown; count?: unknown }> = [];
+            try {
+                items = (b?.inventory?.items?.() ?? []) as Array<{ name?: unknown; count?: unknown }>;
+            } catch {
+                items = [];
+            }
+            const filtered = items.filter((item) => typeof item?.name !== 'string' || !out.includes(item.name));
+            let picked: string | null = null;
+            try {
+                picked =
+                    skills.choosePillarMaterial(
+                        filtered,
+                        1,
+                        (b?.registry?.blocksByName ?? null) as Record<string, any> | null,
+                    ) ?? null;
+            } catch {
+                picked = null;
+            }
+            if (picked == null) break;
+            out.push(picked);
+        }
+        if (out.length === 0) {
+            // 自定义 `scaffold` 依赖（测试/别的身体）兜底：至少给它一次机会。
+            try {
+                const one = scaffold(b);
+                if (typeof one === 'string' && one !== '') out.push(one);
+            } catch {
+                /* ignore */
+            }
+        }
+        return out;
+    };
     const place =
-        deps.place ?? ((b: any, block: string, x: number, y: number, z: number) => skills.placeBlock(b, block, x, y, z, 'side'));
+        deps.place ??
+        ((b: any, block: string, x: number, y: number, z: number, face?: string) =>
+            skills.placeBlock(b, block, x, y, z, face ?? 'side'));
     const sleep = deps.sleep ?? sleepMs;
     const now = deps.now ?? Date.now;
 
@@ -2194,30 +2257,50 @@ export async function digLine(
                 outcome.detail = `${cellText(step.floor, normalizeName(below?.name))} 就是岩浆（桥下面），不能在上面搭桥`;
                 break;
             }
-            const material = scaffold(bot);
-            if (material == null) {
+            const materials = scaffoldChoices(bot).slice(0, BRIDGE_MAX_MATERIALS);
+            if (materials.length === 0) {
                 outcome.stop = 'unsupported_floor';
                 outcome.detail =
                     `${cellText(step.floor, normalizeName(floorBlock?.name))}（下一步会踩空），` +
                     `**背包里没有能垫的方块**——先弄 1 个（挖两格就有下界岩/圆石）`;
                 break;
             }
+            // **一次不成不代表搭不了**：换依附面、再换材料，都试过才认输
+            // （真机：只给 moveAway 等于把"换个角度再来"这件事丢给模型）。
             let placedOk = false;
-            try {
-                placedOk = await place(bot, material, step.floor.x, step.floor.y, step.floor.z);
-            } catch {
-                placedOk = false;
+            let usedMaterial: string | null = null;
+            let usedFace: BridgeFace | null = null;
+            const tried: string[] = [];
+            for (const material of materials) {
+                for (const face of BRIDGE_FACES) {
+                    try {
+                        placedOk = await place(bot, material, step.floor.x, step.floor.y, step.floor.z, face);
+                    } catch {
+                        placedOk = false;
+                    }
+                    const now = blockAt(bot, step.floor.x, step.floor.y, step.floor.z);
+                    if (now != null && !isUnsupportedFloorBlock(now)) {
+                        usedMaterial = material;
+                        usedFace = face;
+                        break;
+                    }
+                    tried.push(`${material}@${face}`);
+                }
+                if (usedMaterial != null) break;
             }
-            const afterPlace = blockAt(bot, step.floor.x, step.floor.y, step.floor.z);
-            if (afterPlace == null || isUnsupportedFloorBlock(afterPlace)) {
+            if (usedMaterial == null) {
+                const nowBlock = blockAt(bot, step.floor.x, step.floor.y, step.floor.z);
                 outcome.stop = 'bridge_failed';
                 outcome.detail =
-                    `想在 ${formatPoint(step.floor)} 垫一块 ${material} 搭桥，` +
-                    `但没成功（现在还是 ${normalizeName(afterPlace?.name) ?? '读不到'}）`;
+                    `想在 ${formatPoint(step.floor)} 垫一块桥，试了 ${tried.length} 种（${tried.slice(0, 4).join('、')}）` +
+                    `都没成功（现在还是 ${normalizeName(nowBlock?.name) ?? '读不到'}）`;
                 break;
             }
             outcome.bridges += 1;
-            outcome.progress.push(`- 前方脚下 ${formatPoint(step.floor)} 是空洞 → 用 ${material} 垫了一块桥过去（第 ${outcome.bridges} 块）`);
+            outcome.progress.push(
+                `- 前方脚下 ${formatPoint(step.floor)} 是空洞 → 用 ${usedMaterial} 从 ${BRIDGE_FACE_TEXT[usedFace ?? 'bottom']} 垫了一块桥过去` +
+                    `（第 ${outcome.bridges} 块${tried.length > 0 ? `；先试了 ${tried.length} 次别的依附面/材料` : ''}）`,
+            );
         }
 
         // ── 安全门 3：要挖的格子必须读得到（读不到就不猜） ──
@@ -2230,9 +2313,29 @@ export async function digLine(
         }
 
         // ── 安全门 4：没有镐时，只有徒手挖得动的方块才放行 ──
-        const guard = refreshTool();
+        //
+        // ⚠️ **"手上没有镐" ≠ "没有镐"**（真机 overnight_b：镐就在背包里、只是没握在手上，
+        // 回执却报"没有镐"，害得它掉头回去做一个已经有的工具）。所以先自己换上再判。
+        let guard = refreshTool();
         noteToolChange(guard.name);
-        const hasPickaxe = guard.name != null && guard.name.includes('pickaxe');
+        let hasPickaxe = guard.name != null && guard.name.includes('pickaxe');
+        if (!hasPickaxe) {
+            const spare = bestPickaxeInInventory(bot);
+            if (spare != null) {
+                try {
+                    await equip(bot, spare);
+                } catch {
+                    /* 换不上就按原样继续判 */
+                }
+                const after = refreshTool();
+                if (after.name != null && after.name.includes('pickaxe')) {
+                    hasPickaxe = true;
+                    guard = after;
+                    noteToolChange(after.name);
+                    outcome.progress.push(`- 镐在背包里没握在手上 → 已自动换上 ${after.name}`);
+                }
+            }
+        }
         const needDig = digBlocks.filter(({ block }) => !isAirBlockName(block?.name));
         if (!hasPickaxe) {
             const tooHard = needDig.find(({ block }) => {
@@ -2665,6 +2768,8 @@ export interface TravelOutcome {
     here: FlatPosition;
     /** 起手时离目标多远（用来算"推进了多少格"）。 */
     distanceBefore: number;
+    /** 出发前后的零碎事实（例如"镐在背包里 → 已自动换上"），**不许静默**。 */
+    notes?: string[];
     /** **实测位移**（起点 → 现在，3D 直线距离）——这是唯一能当"推进"用的数。 */
     progressed: number;
     /** 这一趟挖掉并验证变空气的方块数（和位移对照着看）。 */
@@ -2751,6 +2856,7 @@ export function travelReceipt(o: TravelOutcome): string {
         );
     }
     lines.push(`停止原因：${TRAVEL_STOP_TEXT[o.stop]}${o.detail === '' ? '' : `——${o.detail}`}。`);
+    for (const note of o.notes ?? []) lines.push(`- ${note}`);
     // **挖了 ≠ 走了**：三项证据不一致就摆在最前面几行。
     if (o.blocksDug > 0 && o.progressed < TUNNEL_MOVE_EPS) {
         lines.push(
@@ -2764,7 +2870,7 @@ export function travelReceipt(o: TravelOutcome): string {
     for (const leg of o.legs) lines.push(`- ${leg.text}`);
     for (const line of capLines(o.progress, 4, '进度')) lines.push(line);
     if (o.gate != null) lines.push(`⚠️ 安全门（来自隧道那一格一格的门，一步没放宽）：${o.gate}`);
-    if (o.handMining) lines.push('⚠️ 手上没有镐：这些方块是**徒手挖**的，很慢，能换镐就换。');
+    if (o.handMining) lines.push('⚠️ **手上和背包里都没有镐**：这些方块是**徒手挖**的，很慢，能找/做一把就先做。');
     if (o.toolName != null) {
         lines.push(
             o.toolRemaining == null
@@ -2908,12 +3014,21 @@ export async function travelToSkill(
         return travelReceipt(outcome);
     }
     if (needsDigging && !equippedPickaxe && sparePickaxe != null) {
-        // 有镐但没拿在手上：先换上（不然徒手挖，慢且危险）。
+        // **镐在背包里、只是没握在手上**：自己换上，不许因为"手上不是镐"就说没镐
+        // （真机 overnight_b 因此掉头回去做一个已经有的工具）。
+        const swap = deps.equip ?? ((b: any, item: string) => skills.equip(b, item));
         try {
-            await (deps as { equip?: (bot: any, item: string) => Promise<boolean> }).equip?.(bot, sparePickaxe);
+            await swap(bot, sparePickaxe);
         } catch {
-            /* 换不上就照旧挖，digLine 会按徒手规则判 */
+            /* 下面按"换上了没有"如实记 */
         }
+        const after = tool(bot);
+        const nowHeld = after.name != null && after.name.includes('pickaxe');
+        (outcome.notes ??= []).push(
+            nowHeld
+                ? `镐在背包里没握在手上 → 已自动换上 ${after.name}。`
+                : `背包里有 ${sparePickaxe}，但自动换镐没成功（手上还是 ${after.name ?? '空手'}）——会按徒手规则走，慢且更危险。`,
+        );
     }
 
     for (;;) {

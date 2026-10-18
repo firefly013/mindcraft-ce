@@ -14,8 +14,10 @@ import {
   createGetPlacesTool,
   createGoToRememberedPlaceTool,
   createRememberHereTool,
+  goToCoordinatesArgs,
   type PlacesDeps,
 } from '../src/brain/tools/control_tools.js';
+import { toolDeclarations } from '../src/body/commands/registry.js';
 import { formatSay } from '../src/brain/tools/validate.js';
 import { SAY_LINE_LIMIT } from '../src/shared/prompts.js';
 
@@ -60,6 +62,30 @@ describe('地点工具：参数签名', () => {
     const text = await run(tool, { name: '家' });
     expect(goto).toEqual([[1, 2, 3]]);
     expect(text).toContain('走到');
+  });
+
+  // 真机事故（overnight_a）：内部转成 `!goToCoordinates` 时漏了 `closeness`，
+  // 参数校验阶段就被拒（`missing required property 'closeness'`）——工具"文档里能用、
+  // 实际永远调不动"。这条把"内部调用必须满足 schema"钉成不变式，而不是只修一行。
+  it('内部转 `!goToCoordinates` 的参数**满足它的 schema**（必填项一个不少）', async () => {
+    const args = goToCoordinatesArgs(12, 64, -30);
+    expect(args.closeness).toBe(2); // 有合理默认
+    expect(args.closeness).toBeGreaterThan(0);
+
+    const declaration = toolDeclarations().find((d) => d.name === 'goToCoordinates');
+    expect(declaration, 'goToCoordinates 必须在工具目录里').toBeDefined();
+    const params = (declaration?.params ?? {}) as Record<string, { optional?: boolean }>;
+    const required = Object.entries(params)
+      .filter(([, spec]) => spec?.optional !== true)
+      .map(([name]) => name);
+    expect(required.length).toBeGreaterThan(0);
+    for (const name of required) {
+      expect(Object.keys(args), `内部调用漏了必填参数 ${name}`).toContain(name);
+    }
+    // 反向：不许塞 schema 里没有的参数（同样会被拒）
+    for (const name of Object.keys(args)) {
+      expect(Object.keys(params)).toContain(name);
+    }
   });
 });
 

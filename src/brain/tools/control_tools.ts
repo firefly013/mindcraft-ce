@@ -269,6 +269,22 @@ export function createRememberHereTool(deps: PlacesDeps): ToolRegistration {
   });
 }
 
+/**
+ * 内部调 `!goToCoordinates` 时用的参数。
+ *
+ * **必须补齐 schema 里的必填项**：`closeness` 没有 default，漏了它会在参数校验阶段就被拒
+ * （`missing required property 'closeness'`），于是上层工具"文档里能用、实际永远调不动"
+ * （真机 overnight_a 的 `goToRememberedPlace`）。默认 2 格 = "站到它旁边"。
+ */
+export function goToCoordinatesArgs(
+  x: number,
+  y: number,
+  z: number,
+  closeness = 2,
+): { x: number; y: number; z: number; closeness: number } {
+  return { x, y, z, closeness };
+}
+
 /** `goToRememberedPlace`：按地名走回去。 */
 export function createGoToRememberedPlaceTool(deps: PlacesDeps): ToolRegistration {
   return defineTool({

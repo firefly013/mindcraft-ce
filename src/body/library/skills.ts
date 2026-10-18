@@ -5146,7 +5146,17 @@ export async function digDown(bot: any, distance: number = 10): Promise<boolean>
         const verdict = classifyDigDownStep(blockAt, feet, i);
 
         if (verdict.kind === 'stop') {
-            log(bot, 'Dug down ' + (i - 1) + ' blocks, but stopped: ' + verdict.reason + '.');
+            // **停下必须给一个真能成功的下一步**（真机：模型只被告知"停了"，然后原样重试）。
+            // 水/岩浆这类挡住竖井的，正确动作是**横向绕开**再继续，而不是原地再挖一次。
+            const reason = verdict.reason;
+            const blockedByFluid = /water|lava|flowing_|not diggable/i.test(reason);
+            const advice = blockedByFluid
+                ? '水/岩浆挡在竖井下面，**原地重挖没有用**。绕行方案（按顺序试）：' +
+                  '① 先横向走 2-3 格再 digDown（水不会跟着你走）：goToCoordinates 到旁边再挖；' +
+                  '② 目标是往下的高度就用 stairUp/digDown 的斜台阶绕开水层；' +
+                  '③ 水面上方要下去，先 placeHere 垫一块方块站上去再挖，别直接挖穿含水层。'
+                : '';
+            log(bot, 'Dug down ' + (i - 1) + ' blocks, but stopped: ' + reason + '.' + (advice ? ' ' + advice : ''));
             return false;
         }
         if (verdict.kind === 'skip_air') {

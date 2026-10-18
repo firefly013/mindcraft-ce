@@ -18,6 +18,7 @@
  */
 
 import * as skills from './skills.js';
+import settings from '../../shared/settings.js';
 
 /** 玩家背包窗口里的护甲槽（和插件 `inventory.slots.slice(5, 9)` 同一套）。 */
 export const ARMOR_SLOTS: Readonly<Record<number, ArmorSlotName>> = Object.freeze({
@@ -109,6 +110,95 @@ export function armorSwapVerdict(input: {
     };
 }
 
+/**
+ * 护甲快照 / 差分 / "凭空消失"报告。
+ *
+ * 真机事故（overnight_b，2026-10-19）：模型按要求做了 `golden_helmet` 并穿上，
+ * 随后这件**从 armour 槽消失、背包 totals 里也没有**，无金盔 ⇒ 猪灵见即开火 ⇒
+ * 下界第 7 次死亡。旧守卫只处理"金甲被换成非金甲"，**没有处理"这件东西没了"**。
+ *
+ * 所以：槽位变化要**快照差分**（也覆盖整窗 `update`、死亡、重生这几条路），
+ * "原来有 → 现在空"必须单独吼出来，并说清后果与修法。
+ */
+export type ArmorSnapshot = Record<ArmorSlotName, string | null>;
+
+export function armorSnapshot(bot: any, worn?: (bot: any, slotName: ArmorSlotName) => any | null): ArmorSnapshot {
+    const read = worn ?? defaultWorn;
+    const out = {} as ArmorSnapshot;
+    for (const slotName of ['head', 'torso', 'legs', 'feet'] as ArmorSlotName[]) {
+        const item = read(bot, slotName);
+        out[slotName] = typeof item?.name === 'string' ? item.name : null;
+    }
+    return out;
+}
+
+export interface ArmorChange {
+    slotName: ArmorSlotName;
+    from: string | null;
+    to: string | null;
+}
+
+export function diffArmorSnapshot(before: ArmorSnapshot, after: ArmorSnapshot): ArmorChange[] {
+    const changes: ArmorChange[] = [];
+    for (const slotName of ['head', 'torso', 'legs', 'feet'] as ArmorSlotName[]) {
+        if (before[slotName] !== after[slotName]) {
+            changes.push({ slotName, from: before[slotName], to: after[slotName] });
+        }
+    }
+    return changes;
+}
+
+/** 这个部位的金甲该叫什么（用来给"重做一件"的具体建议）。 */
+export function goldArmorNameFor(slotName: ArmorSlotName): string {
+    switch (slotName) {
+        case 'head':
+            return 'golden_helmet';
+        case 'torso':
+            return 'golden_chestplate';
+        case 'legs':
+            return 'golden_leggings';
+        default:
+            return 'golden_boots';
+    }
+}
+
+export interface ArmorVanishContext {
+    dimension: string | null;
+    /** 这次变化是不是发生在死亡/重生前后。 */
+    deathHappened?: boolean;
+    /** 这个存档是否 keepInventory（true 时死亡不该掉甲）。 */
+    keepInventory?: boolean | null;
+    /** 背包里是否还有任何金装备。 */
+    goldLeft?: boolean;
+    /** 从哪条路发现的：updateSlot / update / death / spawn / unequip。 */
+    via?: string;
+}
+
+/**
+ * "原来有、现在空了"的吼叫。**必须带上后果和修法**，不能只说"变化了"。
+ * 返回一行文本（测试直接断言）。
+ */
+export function armorVanishReport(change: ArmorChange, ctx: ArmorVanishContext): string {
+    const { slotName, from } = change;
+    const nether = isInNetherDimension(ctx.dimension);
+    const parts: string[] = [];
+    parts.push(`⚠️ **护甲凭空消失**：${slotName} 上原本是 ${from ?? '空'}，现在**空了**（背包 totals 里也没有；触发路径：${ctx.via ?? '未知'}）。`);
+    parts.push('这**不是自动换甲**——换甲会走"护甲变化"报告，这里没有任何替换动作。');
+    if (ctx.deathHappened === true && ctx.keepInventory === true) {
+        parts.push('它发生在死亡/重生前后，而**这个存档 keepInventory=true：死亡不应该掉护甲**——所以这是**我们读取/同步的问题**，不是世界规则，不要接受这个结果。');
+    }
+    if (nether && isGoldArmorName(from)) {
+        parts.push(`**后果：下界没有金甲 ⇒ 猪灵见即开火**（这一条会直接致死）。修法：用 1 块金锭做一件 \`${goldArmorNameFor(slotName)}\`（craft output=${goldArmorNameFor(slotName)}），做好立刻穿上。`);
+    } else if (nether && ctx.goldLeft === false) {
+        parts.push('**后果：下界身上已经没有金装备 ⇒ 猪灵见即开火**。修法：用 1 块金锭做一件金盔（golden_helmet）立刻穿上，或先撤离下界。');
+    } else if (nether) {
+        parts.push('下界里先确认身上是否还有金装备（猪灵只认金）；没有就立刻做一件 golden_helmet。');
+    } else {
+        parts.push('下一步：先用 stats 核对背包；再从箱子/熔炉里找；找不到就重做一件。');
+    }
+    return parts.join('');
+}
+
 export interface ArmorGuardDeps {
     log?: (bot: any, text: string) => void;
     equip?: (bot: any, item: any, destination: ArmorSlotName) => Promise<boolean>;
@@ -116,6 +206,8 @@ export interface ArmorGuardDeps {
     /** 某个部位现在穿着什么（默认读 `inventory.slots[5..8]`）。 */
     worn?: (bot: any, slotName: ArmorSlotName) => any | null;
     inventoryItems?: (bot: any) => Array<{ name?: unknown; type?: unknown; count?: unknown }>;
+    /** 这个存档是否 keepInventory（用于"死亡后掉甲 = 我们的 bug"的判定）。 */
+    keepInventory?: boolean | null;
 }
 
 function defaultWorn(bot: any, slotName: ArmorSlotName): any | null {
@@ -200,7 +292,24 @@ export function installArmorGuard(
         const to = typeof newItem?.name === 'string' ? newItem.name : null;
         if (from === to) return;
         const verdict = armorSwapVerdict({ dimension: dimension(bot), slotName, from, to });
-        log(bot, verdict.report);
+        // **"原来有 → 现在空"不是换甲，是东西没了。** 这条要吼，且带后果与修法；
+        // 用 vanish 报告替换普通的"护甲变化"，免得同一件事说两遍而都不够响。
+        if (from != null && to == null) {
+            log(
+                bot,
+                armorVanishReport(
+                    { slotName, from, to },
+                    {
+                        dimension: dimension(bot),
+                        keepInventory: readKeepInventory(deps),
+                        goldLeft: inventoryItems(bot).some((item) => isGoldArmorName(item?.name)),
+                        via: 'updateSlot',
+                    },
+                ),
+            );
+        } else {
+            log(bot, verdict.report);
+        }
         if (verdict.action !== 'revert_gold' || reverting) return;
         reverting = true;
         void (async () => {
@@ -241,6 +350,44 @@ export function installArmorGuard(
         /* 假身体没有事件总线也不该炸 */
     }
 
+    // **快照差分**：整窗 `update`、死亡、重生这几条路都不走 `updateSlot`，
+    // 而金盔"消失"很可能就是被整窗同步覆盖掉的（旧守卫看不到这条路）。
+    // 冷启动时的一发读数是基线，不是"消失"。
+    let lastArmor = armorSnapshot(bot, worn);
+    let deathHappened = false;
+    const checkVanish = (via: string): void => {
+        const nowArmor = armorSnapshot(bot, worn);
+        for (const change of diffArmorSnapshot(lastArmor, nowArmor)) {
+            if (change.from == null || change.to != null) continue; // 只关心"有 → 空"
+            log(
+                bot,
+                armorVanishReport(change, {
+                    dimension: dimension(bot),
+                    deathHappened,
+                    keepInventory: readKeepInventory(deps),
+                    goldLeft: inventoryItems(bot).some((item) => isGoldArmorName(item?.name)),
+                    via,
+                }),
+            );
+        }
+        lastArmor = nowArmor;
+    };
+    const onInventoryUpdate = (): void => checkVanish('update');
+    const onDeath = (): void => {
+        deathHappened = true;
+    };
+    const onSpawn = (): void => {
+        checkVanish('spawn');
+        deathHappened = false;
+    };
+    try {
+        bot?.inventory?.on?.('update', onInventoryUpdate);
+        bot?.on?.('death', onDeath);
+        bot?.on?.('spawn', onSpawn);
+    } catch {
+        /* 同上 */
+    }
+
     // 插件自己的批量穿甲（`bot.armorManager.equipAll()`）也要过同一套判据。
     try {
         const manager = bot?.armorManager;
@@ -261,9 +408,25 @@ export function installArmorGuard(
         dispose: (): void => {
             try {
                 bot?.inventory?.off?.('updateSlot', handler);
+                bot?.inventory?.off?.('update', onInventoryUpdate);
+                bot?.off?.('death', onDeath);
+                bot?.off?.('spawn', onSpawn);
             } catch {
                 /* ignore */
             }
         },
     };
+}
+
+/** keepInventory 的运行时值（deps 优先，其次 settings；读不到 = null，别硬说）。 */
+function readKeepInventory(deps: ArmorGuardDeps): boolean | null {
+    if (deps.keepInventory === true || deps.keepInventory === false) return deps.keepInventory;
+    try {
+        const gameplay = (settings as any)?.gameplay ?? {};
+        const value = gameplay.keepInventoryOnDeath;
+        if (value === true || value === false) return value;
+    } catch {
+        /* 读不到就说读不到 */
+    }
+    return null;
 }
