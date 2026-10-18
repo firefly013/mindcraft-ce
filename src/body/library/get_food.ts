@@ -213,6 +213,14 @@ function clampInt(value: unknown, fallback: number, min: number, max: number): n
  */
 export const KNOWN_COBWEB_SITES: ReadonlyArray<FlatPosition> = Object.freeze([{ x: 71, y: 28, z: -76 }]);
 
+/**
+ * 已知蛛网**成片**的范围（Lead 从存档里核过）：(71,28,-76) 加上 ±40 格内十来个，
+ * **全部在 y=24~30**。也就是说这是个"浅差事"——**从侧面走进去**就行，
+ * 不要顺着水层往下挖竖井（真机：连续水层把 digDown 挡住，goToCoordinates 在水边干等 90 秒）。
+ */
+export const KNOWN_COBWEB_CLUSTER_RADIUS = 40;
+export const KNOWN_COBWEB_CLUSTER_Y: readonly [number, number] = Object.freeze([24, 30]);
+
 /** 已知蛛网点里最"省事"的一个：**先看竖直距离**（少爬少挖），再看水平距离。 */
 export function bestKnownCobwebSite(
     here: FlatPosition | null,
@@ -258,7 +266,9 @@ export function rodNextCall(options: {
         if (dimension.includes('overworld')) {
             const site = bestKnownCobwebSite(options.here ?? null);
             if (site != null) {
-                return `goToCoordinates(x=${Math.round(site.x)}, y=${Math.round(site.y)}, z=${Math.round(site.z)}, closeness=2)`;
+                // **用 travelTo，不用 goToCoordinates**：水层挡路时 travelTo 会自己规划斜台阶/横向
+                // 隧道绕过去（goToCoordinates 只会在水边干等，真机卡了 90 秒）。
+                return `travelTo(x=${Math.round(site.x)}, y=${Math.round(site.y)}, z=${Math.round(site.z)})`;
             }
         }
         return 'exploreFor(block="cobweb", max_steps=8, step=32)';
@@ -624,6 +634,31 @@ export async function getFoodSkill(
                 `${craftingTableCall('2 oak_planks, 2 stick', '1 wooden_hoe')} → 在水边泥土/草方块上锄地、播种；` +
                 `小麦要 **20~40 分钟**才熟（现实时间），**别在危机里站着等**，先去钓鱼/打猎。`;
             record('crops', `种地：有 ${assets.seeds} 个种子（长期方案，生长 20~40 分钟，不在这一趟里等）。`, 0);
+        }
+
+        // ── ⑥ **优先级**：主世界里的蛛网这条链是有界的浅差事，先做完它 ──
+        //
+        // 真机：这条链四个办法全撞墙（digDown 被连续水层挡、128 格内没蜘蛛、goToCoordinates
+        // 卡在水边 90 秒），而它解锁的是**弓**——弓又解锁恶魂之泪，并让末影人变得能打
+        // （overnight_a：末地主岛六只末影人，空手上去是送）。所以它该排在打猎/种地前面。
+        const dimension = (() => {
+            try {
+                return typeof bot?.game?.dimension === 'string' ? bot.game.dimension.toLowerCase() : '';
+            } catch {
+                return '';
+            }
+        })();
+        if (dimension.includes('overworld') && countOf(bot, 'string') < 2 && countOf(bot, 'fishing_rod') === 0) {
+            const site = bestKnownCobwebSite(position(bot) ?? null);
+            warnings.unshift(
+                `⑥ **优先做这条**：蛛网→线→弓（3 块蛛网 = 2 根线 = 1 把弓；弓解锁恶魂之泪，也让末影人能远打）。` +
+                    (site == null
+                        ? ''
+                        : `已知**最浅**的一片在主世界 (${Math.round(site.x)}, ${Math.round(site.y)}, ${Math.round(site.z)}) 一带` +
+                          `（±${KNOWN_COBWEB_CLUSTER_RADIUS} 格内十来个，全在 y=${KNOWN_COBWEB_CLUSTER_Y[0]}~${KNOWN_COBWEB_CLUSTER_Y[1]}）：` +
+                          `**从侧面进**（` + `travelTo(x=${Math.round(site.x)}, y=${Math.round(site.y)}, z=${Math.round(site.z)})` + `），` +
+                          `别顺着水层往下挖竖井（会被连续水层挡住）。`),
+            );
         }
 
         // ── ⑤ 最后手段：腐肉（会附带饥饿效果） ──

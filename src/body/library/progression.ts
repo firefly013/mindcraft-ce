@@ -1266,6 +1266,11 @@ function horizontalDistance(a: FlatPosition, b: FlatPosition): number {
     return Math.hypot(a.x - b.x, a.z - b.z);
 }
 
+/** 3D 距离（脚对脚）：走路停滞判定用它（竖直方向也算进步）。 */
+function distance3(a: FlatPosition, b: FlatPosition): number {
+    return Math.hypot(a.x - b.x, a.y - b.y, a.z - b.z);
+}
+
 function clampInt(raw: unknown, fallback: number, min: number, max: number): number {
     const value = typeof raw === 'number' ? raw : Number(raw);
     if (!Number.isFinite(value)) return fallback;
@@ -1808,6 +1813,90 @@ export const TUNNEL_MOVE_EPS = 0.5;
 export const TUNNEL_MAX_STALLS = 3;
 /** 搭桥时最多换几种材料（换依附面已经在里面循环了）。 */
 export const BRIDGE_MAX_MATERIALS = 3;
+
+/**
+ * **不许挖穿的方块**：容器与功能方块。
+ *
+ * 真机事故（overnight_b，2026-10-19）：`travelTo` 把基地的箱子 `chest(12,63,1)` 连承重方块
+ * 一起挖了，内容物撒地——而那是它们自己要用的补给点。挖存储不是这个工具该替模型做的决定。
+ * 直线隧道遇到它们应当**绕开**（抬/降一格通常就够），绕不开就停下说清楚。
+ */
+export const PROTECTED_BLOCK_NAMES: ReadonlySet<string> = new Set([
+    'chest',
+    'trapped_chest',
+    'ender_chest',
+    'barrel',
+    'furnace',
+    'blast_furnace',
+    'smoker',
+    'crafting_table',
+    'anvil',
+    'chipped_anvil',
+    'damaged_anvil',
+    'spawner',
+    'beacon',
+    'brewing_stand',
+    'enchanting_table',
+    'hopper',
+    'dropper',
+    'dispenser',
+    'lectern',
+    'composter',
+    'cauldron',
+    'water_cauldron',
+    'lava_cauldron',
+    'powder_snow_cauldron',
+    'jukebox',
+    'note_block',
+    'respawn_anchor',
+    'lodestone',
+    'conduit',
+    'bell',
+    'campfire',
+    'soul_campfire',
+    'flower_pot',
+    'decorated_pot',
+    'cartography_table',
+    'fletching_table',
+    'smithing_table',
+    'loom',
+    'stonecutter',
+    'grindstone',
+]);
+
+/** 名字后缀族：床 / 告示牌 / 旗帜 / 潜影盒（各种木头/颜色）。 */
+const PROTECTED_SUFFIXES: ReadonlyArray<string> = ['_bed', '_sign', '_wall_sign', '_hanging_sign', '_banner', '_wall_banner', '_shulker_box'];
+
+/** 是不是"不许挖穿"的方块（容器/功能方块）。 */
+export function isProtectedBlockName(name: unknown): boolean {
+    if (typeof name !== 'string') return false;
+    const value = name.trim().toLowerCase().replace(/^minecraft:/, '');
+    if (value === '') return false;
+    if (PROTECTED_BLOCK_NAMES.has(value)) return true;
+    return PROTECTED_SUFFIXES.some((suffix) => value.endsWith(suffix));
+}
+
+/** 是不是**容器**（里面有东西的那种）——回执要说"里面的东西没动"。 */
+export function isContainerBlockName(name: unknown): boolean {
+    if (typeof name !== 'string') return false;
+    const value = name.trim().toLowerCase().replace(/^minecraft:/, '');
+    if (value === '') return false;
+    return (
+        value === 'chest' ||
+        value === 'trapped_chest' ||
+        value === 'ender_chest' ||
+        value === 'barrel' ||
+        value === 'hopper' ||
+        value === 'dropper' ||
+        value === 'dispenser' ||
+        value.endsWith('_shulker_box') ||
+        value === 'furnace' ||
+        value === 'blast_furnace' ||
+        value === 'smoker' ||
+        value === 'brewing_stand'
+    );
+}
+
 /** 搭桥时依次尝试的依附面：先按常规从下方/侧面搭，再试上面。 */
 export const BRIDGE_FACES = ['bottom', 'side', 'top'] as const;
 export type BridgeFace = (typeof BRIDGE_FACES)[number];
@@ -1850,6 +1939,7 @@ export type TunnelStop =
     | 'unreadable'
     | 'bad_direction'
     | 'bridge_failed'
+    | 'protected_block'
     | 'stalled';
 
 const TUNNEL_STOP_TEXT: Record<TunnelStop, string> = {
@@ -1867,6 +1957,7 @@ const TUNNEL_STOP_TEXT: Record<TunnelStop, string> = {
     unreadable: '读不到方块（区块没加载？），不敢瞎挖',
     bad_direction: '方向认不出来，也不给读朝向',
     bridge_failed: '想垫一块桥过去，但没垫成',
+    protected_block: '前面是容器/功能方块（箱子、熔炉、工作台…），**不挖穿**，而且抬/降一格都绕不开',
     stalled: '连着几步既没挖到东西、人也没挪动（卡住了）',
 };
 
@@ -1889,6 +1980,10 @@ export interface TunnelOutcome {
     toolChanges: Array<{ from: string | null; to: string | null }>;
     /** 连续"既没挖到东西也没挪动"的步数（熔断用）。 */
     stalls: number;
+    /** 直线撞上的容器/功能方块（**一个都没挖**）：名字 + 坐标 + 是否被挖掉。 */
+    protectedHits: Array<{ name: string; position: FlatPosition; dug: boolean }>;
+    /** 为了绕开它们抬/降了几次。 */
+    detours: number;
     start: FlatPosition;
     here: FlatPosition;
     stop: TunnelStop;
@@ -1932,6 +2027,11 @@ export function tunnelNextAction(o: TunnelOutcome): string {
         case 'stalled':
             // **绝不把同一个会空转的调用原样丢回去**：先看清身体状态/手上工具。
             return o.hintEquip != null ? `equip(item_name="${o.hintEquip}")` : 'stats(type="body")';
+        case 'protected_block': {
+            // 直线上撞到箱子/熔炉这类方块：**横着挪开再继续**，别在原地再挖一次。
+            const sideways = o.dir.axis === 'x' ? '+z' : '+x';
+            return `mineTunnel(length=2, direction="${sideways}")`;
+        }
         default:
             // 正常可续：同一条线、剩下的长度。
             return `mineTunnel(length=${tunnelRemaining(o)}, direction="${o.dir.label}")`;
@@ -1969,8 +2069,19 @@ export function tunnelReceipt(o: TunnelOutcome): string {
     if (o.stalls > 0) {
         lines.push(`ℹ️ 有 ${o.stalls} 步既没挖到东西、人也没挪动（反复空转会被判"卡住了"并停手）。`);
     }
-    if ((o.toolChanges ?? []).length > 0) {
-        const changes = (o.toolChanges ?? [])
+    // **容器/功能方块**：一个都没挖，而且点名（真机：箱子被挖了、内容物撒地、回执里一个字都没有）。
+    for (const hit of (o.protectedHits ?? []).slice(0, 4)) {
+        lines.push(
+            `🛡️ ${formatPoint(hit.position)} 是 **${hit.name}**（容器/功能方块）——**没挖它**` +
+                (hit.dug ? '（记录时已经被挖掉了）' : '') +
+                (isContainerBlockName(hit.name) ? '，里面的东西原样没动；要拿就自己 useBlock 打开它' : '') +
+                '。',
+        );
+    }
+    if ((o.detours ?? 0) > 0) {
+        lines.push(`ℹ️ 为了绕开它们，抬/降了 ${o.detours} 次（横向隧道抬一格通常就够）。`);
+    }
+    if ((o.toolChanges ?? []).length > 0) {        const changes = (o.toolChanges ?? [])
             .slice(0, 3)
             .map((c) => `${c.from ?? '空手'} → ${c.to ?? '空手'}`)
             .join('、');
@@ -2168,6 +2279,8 @@ export async function digLine(
         moved: 0,
         toolChanges: [],
         stalls: 0,
+        protectedHits: [],
+        detours: 0,
         start,
         here: start,
         stop: 'done',
@@ -2225,7 +2338,52 @@ export async function digLine(
             break;
         }
 
-        const step = tunnelStep(position(bot), request.dir, height, index, request.rise ?? 0);
+        let step = tunnelStep(position(bot), request.dir, height, index, request.rise ?? 0);
+
+        // ── 安全门 0：**不许挖穿容器/功能方块** ──
+        //
+        // 真机（overnight_b）：`travelTo` 把基地的箱子 chest(12,63,1) 连承重方块一起挖了，
+        // 内容物撒地——那是它们自己要用的补给点。挖存储不是这个工具该替模型做的决定：
+        // 直线上撞到就**抬/降一格绕过去**（横向隧道抬一格通常就够），绕不开才停手说清楚。
+        const obstruction = step.dig
+            .map((cell) => ({ cell, block: blockAt(bot, cell.x, cell.y, cell.z) }))
+            .find(({ block }) => isProtectedBlockName(block?.name));
+        if (obstruction != null) {
+            const name = normalizeName(obstruction.block?.name) ?? '读不到';
+            const baseRise = request.rise ?? 0;
+            let detourStep: TunnelStep | null = null;
+            let detourRise = baseRise;
+            for (const delta of [1, -1]) {
+                const candidate = tunnelStep(position(bot), request.dir, height, index, baseRise + delta);
+                const blocked = candidate.dig.some((cell) => isProtectedBlockName(blockAt(bot, cell.x, cell.y, cell.z)?.name));
+                const wet = candidate.dig.some((cell) => isLiquidBlockName(blockAt(bot, cell.x, cell.y, cell.z)?.name));
+                if (!blocked && !wet) {
+                    detourStep = candidate;
+                    detourRise = baseRise + delta;
+                    break;
+                }
+            }
+            const already = outcome.protectedHits.some(
+                (hit) =>
+                    hit.position.x === obstruction.cell.x &&
+                    hit.position.y === obstruction.cell.y &&
+                    hit.position.z === obstruction.cell.z,
+            );
+            if (!already) outcome.protectedHits.push({ name, position: obstruction.cell, dug: false });
+            if (detourStep == null) {
+                outcome.stop = 'protected_block';
+                outcome.detail =
+                    `${formatPoint(obstruction.cell)} 是 ${name}（**容器/功能方块**，不该挖穿），抬一格、降一格都绕不开`;
+                break;
+            }
+            outcome.detours += 1;
+            outcome.progress.push(
+                `- 前方 ${formatPoint(obstruction.cell)} 是 ${name}（容器/功能方块）→ **不挖它**，` +
+                    `${detourRise > baseRise ? '抬' : '降'} 1 格绕过去` +
+                    (isContainerBlockName(name) ? `；**里面的东西原样没动**（要拿就用 useBlock 打开它）` : ''),
+            );
+            step = detourStep;
+        }
 
         // ── 安全门 1：前方（脚/头）与前方脚下都不许是液体 ──
         const feetBlock = blockAt(bot, step.feet.x, step.feet.y, step.feet.z);
@@ -2509,6 +2667,8 @@ export async function mineTunnelSkill(
             toolMax: g.max,
             handMining: false,
             bridges: 0,
+            protectedHits: [],
+            detours: 0,
         };
         return tunnelReceipt(outcome);
     }
@@ -2583,6 +2743,14 @@ export const TRAVEL_VERTICAL_BUDGET_MS = 90_000;
 export const TRAVEL_MIN_LEG_MS = 10_000;
 /** 水平距离 ≤ 这个值就算到了（站到目标旁边，不用严丝合缝）。 */
 export const TRAVEL_ARRIVE_RADIUS = 2;
+/** 推进少于这么多格就要在回执里**点名拦路的东西**（真机："只推进 2.3 格"却看不出被什么挡住）。 */
+export const TRAVEL_SMALL_ADVANCE = 5;
+/** 走路的停滞检查间隔（ms）。 */
+export const TRAVEL_WALK_STALL_POLL_MS = 5_000;
+/** 连续这么久没有靠近目标 ⇒ 判定"卡住了"（真机：水边干等 90 秒）。 */
+export const TRAVEL_WALK_STALL_MS = 15_000;
+/** 算"变近了"的最小幅度（格）：小于它不算进步（抖动/被顶开不算）。 */
+export const TRAVEL_WALK_STALL_MIN_GAIN = 0.5;
 export const TRAVEL_TUNNEL_HEIGHT = DEFAULT_TUNNEL_HEIGHT;
 
 /** 维度名的归一（模型可能写 nether / 下界 / the_nether）。 */
@@ -2857,6 +3025,13 @@ export function travelReceipt(o: TravelOutcome): string {
     }
     lines.push(`停止原因：${TRAVEL_STOP_TEXT[o.stop]}${o.detail === '' ? '' : `——${o.detail}`}。`);
     for (const note of o.notes ?? []) lines.push(`- ${note}`);
+    // **小推进必须点名拦路的东西**（真机："挖通了但寻路失败、只推进 2.3 格"，回执里看不出被什么挡住）。
+    if (o.stop !== 'arrived' && o.stop !== 'bad_target' && o.stop !== 'wrong_dimension' && o.stop !== 'no_pickaxe') {
+        if (o.progressed < TRAVEL_SMALL_ADVANCE) {
+            const why = o.detail !== '' ? o.detail : o.gate !== undefined ? o.gate : TRAVEL_STOP_TEXT[o.stop];
+            lines.push(`⚠️ 这一趟**只推进了 ${o.progressed.toFixed(1)} 格**（< ${TRAVEL_SMALL_ADVANCE} 格）：**卡在**「${why}」。`);
+        }
+    }
     // **挖了 ≠ 走了**：三项证据不一致就摆在最前面几行。
     if (o.blocksDug > 0 && o.progressed < TUNNEL_MOVE_EPS) {
         lines.push(
@@ -2895,6 +3070,8 @@ export interface TravelDeps extends TunnelDeps {
     stairUp?: (bot: any, distance: number) => Promise<boolean>;
     /** 往下挖（默认 `skills.digDown`）。 */
     digDown?: (bot: any, distance: number) => Promise<boolean>;
+    /** 让寻路器停手（默认 `bot.pathfinder.stop()`）：走路停滞熔断时用。 */
+    stopWalk?: (bot: any) => void;
     /** 当前维度（默认 `bot.game.dimension`）。 */
     dimension?: (bot: any) => string | null;
 }
@@ -2926,6 +3103,8 @@ export async function travelToSkill(
     const dig = deps.dig ?? ((b: any, x: number, y: number, z: number) => skills.mineBlockAt(b, x, y, z));
     const travelStep = deps.travel ?? ((b: any, x: number, y: number, z: number) => skills.goToPosition(b, x, y, z, 1));
     const walk = deps.walk ?? ((b: any, x: number, y: number, z: number) => skills.goToPosition(b, x, y, z, TRAVEL_ARRIVE_RADIUS));
+    /** 让寻路器停手（默认 `bot.pathfinder.stop()`）——停滞熔断时要真的停，不能跟下一腿抢身体。 */
+    const stopWalk = deps.stopWalk ?? ((b: any) => b?.pathfinder?.stop?.());
     const stairUp = deps.stairUp ?? ((b: any, distance: number) => skills.stairUp(b, distance));
     const digDown = deps.digDown ?? ((b: any, distance: number) => skills.digDown(b, distance));
     const dimension =
@@ -3073,14 +3252,76 @@ export async function travelToSkill(
         const before = position(bot);
         if (leg.kind === 'walk') {
             let arrived = false;
+            // **停滞熔断（用在移动上）**：真机「goToCoordinates 卡在水边 90 秒不动」——
+            // 寻路器没靠近就一直在那儿磨。这里盯着"离这一腿目标有没有变近"，
+            // 连续 `TRAVEL_WALK_STALL_MS` 没变近就**停手改挖隧道**（而不是继续等）。
+            const walkStart = position(bot);
+            let stalledMs = 0;
+            let stalled = false;
+            let walkDone = false;
+            let bestDistance = distance3(walkStart, target);
+            const walkPromise = (async (): Promise<boolean> => {
+                try {
+                    return await walk(bot, target.x, target.y, target.z);
+                } catch {
+                    return false;
+                } finally {
+                    walkDone = true;
+                }
+            })();
+            const watcher = (async (): Promise<void> => {
+                while (!walkDone) {
+                    await sleep(TRAVEL_WALK_STALL_POLL_MS);
+                    if (walkDone) return;
+                    const nowDistance = distance3(position(bot), target);
+                    if (nowDistance < bestDistance - TRAVEL_WALK_STALL_MIN_GAIN) {
+                        bestDistance = nowDistance;
+                        stalledMs = 0;
+                        continue;
+                    }
+                    stalledMs += TRAVEL_WALK_STALL_POLL_MS;
+                    if (stalledMs >= TRAVEL_WALK_STALL_MS) {
+                        stalled = true;
+                        try {
+                            stopWalk(bot);
+                        } catch {
+                            /* 停不下来也要如实说 */
+                        }
+                        return;
+                    }
+                }
+            })();
             try {
-                arrived = await walk(bot, target.x, target.y, target.z);
+                arrived = await Promise.race([walkPromise, watcher.then(() => false)]);
             } catch {
                 arrived = false;
             }
+            if (stalled) {
+                // 让寻路器有机会真的停下来，再确认"人不动了"（不然会跟下一腿抢身体）。
+                await sleep(TRAVEL_WALK_STALL_POLL_MS);
+                const settled = distance3(position(bot), walkStart) < 0.5;
+                outcome.legs.push({
+                    plan: leg,
+                    advanced: 0,
+                    text:
+                        `${leg.label} → **寻路 ${Math.round(TRAVEL_WALK_STALL_MS / 1000)} 秒没靠近**（卡在水边/墙边？）` +
+                        (settled ? '，已停手，下一腿改挖隧道（绕过去）' : '，而且人还在动——这次不再往下走，先确认身体状态'),
+                });
+                outcome.here = position(bot);
+                if (!settled) {
+                    outcome.stop = 'blocked';
+                    outcome.detail = `寻路卡住而且停不下来（现在 ${formatPoint(position(bot))}），先 stats 看清身体状态`;
+                    outcome.gate = '寻路没靠近、也没能停下';
+                    outcome.gateNextCall = 'stats(type="body")';
+                    break;
+                }
+                walkFailed = true;
+                await sleep(150);
+                continue;
+            }
             const after = position(bot);
             outcome.here = after;
-            const advanced = Math.max(0, horizontalDistance(before, target) - horizontalDistance(after, target));
+            const advanced = Math.max(0, horizontalDistance(walkStart, target) - horizontalDistance(after, target));
             if (advanced < 1 && !arrived) {
                 // 走不过去：换成隧道（下一次规划会切到 tunnel），这一腿如实说"没走动"。
                 walkFailed = true;

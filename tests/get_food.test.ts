@@ -15,6 +15,8 @@ import { describe, expect, it } from 'vitest';
 import {
     FOOD_ACCEPTABLE,
     GETFOOD_MAX_MS_LIMIT,
+    KNOWN_COBWEB_CLUSTER_RADIUS,
+    KNOWN_COBWEB_CLUSTER_Y,
     KNOWN_COBWEB_SITES,
     bestKnownCobwebSite,
     cookCallFor,
@@ -257,9 +259,31 @@ describe('getFood：打猎 → 钓鱼（含"自己弄竿"）', () => {
             here: { x: 0, y: 64, z: 0 },
             dimension: 'overworld',
         });
-        expect(next).toBe('goToCoordinates(x=71, y=28, z=-76, closeness=2)');
+        expect(next).toBe('travelTo(x=71, y=28, z=-76)'); // **从侧面进**：travelTo 会自己绕开水层
         expect(next).not.toContain('exploreFor');
+        expect(next).not.toContain('goToCoordinates'); // 那个只会在水边干等
         expect(KNOWN_COBWEB_SITES[0]).toEqual({ x: 71, y: 28, z: -76 });
+        expect(KNOWN_COBWEB_CLUSTER_RADIUS).toBe(40);
+        expect(KNOWN_COBWEB_CLUSTER_Y).toEqual([24, 30]);
+    });
+
+    it('主世界缺线 ⇒ 回执把这条链**提到优先**，并给"从侧面进"的具体调用', async () => {
+        const h = harness({ items: [stack('stone', 4)], food: 6, nearest: null, dimension: 'overworld' });
+        const receipt = await getFoodSkill(h.bot, 3, 300_000, h.deps as any);
+
+        expect(receipt).toContain('优先做这条');
+        expect(receipt).toContain('蛛网');
+        expect(receipt).toContain('弓');
+        expect(receipt).toContain('从侧面进');
+        expect(receipt).toContain('travelTo(x=71, y=28, z=-76)');
+        expect(receipt).toContain('y=24~30');
+        expect(receipt).not.toContain('goToCoordinates(x=71');
+    });
+
+    it('下界里不提这条链（蛛网是主世界的差事）', async () => {
+        const h = harness({ items: [stack('stone', 4)], food: 6, nearest: null, dimension: 'the_nether' });
+        const receipt = await getFoodSkill(h.bot, 3, 300_000, h.deps as any);
+        expect(receipt).not.toContain('优先做这条');
     });
 
     it('别的维度不照抄主世界的蛛网点（坐标是主世界的）', () => {

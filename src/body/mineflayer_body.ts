@@ -1625,6 +1625,46 @@ export class MineflayerBody {
         }
     }
 
+    /**
+     * 两次背包账目之间的差异（拾取路径用）。
+     *
+     * 只报**变化**；读数不可用（未同步/读失败）时说"读不到"，**绝不**把它当成"没变化"。
+     * 名字最多列 8 项，避免长跑进程里刷屏。
+     */
+    private describeInventoryDelta(
+        before: InventoryCounts | null,
+        after: InventoryCounts | null,
+        targetName: string,
+    ): { changed: boolean; gained: string[]; lost: string[]; note: string } {
+        if (before == null || after == null) {
+            return {
+                changed: false,
+                gained: [],
+                lost: [],
+                note: `读数不可用（${before == null ? '之前' : '之后'}读不到，可能是刚重连还没同步）——不能据此判断捡没捡到`,
+            };
+        }
+        const names = new Set<string>([...Object.keys(before), ...Object.keys(after)]);
+        const gained: string[] = [];
+        const lost: string[] = [];
+        for (const name of names) {
+            const delta = (after[name] ?? 0) - (before[name] ?? 0);
+            if (delta > 0) gained.push(`+${name}×${delta}`);
+            else if (delta < 0) lost.push(`-${name}×${-delta}`);
+        }
+        const changed = gained.length > 0 || lost.length > 0;
+        const targetGain = (after[targetName] ?? 0) - (before[targetName] ?? 0);
+        const parts: string[] = [];
+        if (gained.length > 0) parts.push(`增加 ${gained.slice(0, 8).join('、')}`);
+        if (lost.length > 0) parts.push(`**减少 ${lost.slice(0, 8).join('、')}**`);
+        if (lost.length > 0) {
+            parts.push('（**有物品减少**——这不是"没捡到"，是背包真的被改动了，先用 stats 核对再行动）');
+        } else if (targetGain <= 0) {
+            parts.push('（目标物品并没有增加）');
+        }
+        return { changed, gained, lost, note: parts.join('') };
+    }
+
     /** 最近的敌对生物距离（米）；读不到 / 没有 = null。 */
     private nearestHostileMeters(): number | null {
         try {
@@ -3217,6 +3257,11 @@ export class MineflayerBody {
         this.pickingUp = true;
         void (async (): Promise<void> => {
             const started = Date.now();
+            // **背包快照差分**（真机 2026-10-19：pickup 走到位置没入包，同时原有 dirt×6
+            // 消失——"背包变了却没人说"）。走路前后各读一次完整账目，走路期间**任何**
+            // 变化都留一行有界证据，这样下一次能直接区分：
+            //   ① 从没捡到（账目没变）；② 捡到了又丢（先 + 后 -）；③ 只是读错了（读数不可用）。
+            const invBeforeWalk = this.readInventoryCounts();
             let arrived: boolean;
             try {
                 arrived = await this.walkToPickup(target);
@@ -3230,6 +3275,22 @@ export class MineflayerBody {
                 // 模型动作的抢占标志由拾取任务收尾时清掉，确保它至少被本次
                 // walkToPickup/gotoPickupInterruptibly 看到一次。
                 this.pickupAbortRequested = false;
+            }
+            const invAfterWalk = this.readInventoryCounts();
+            const walkDiff = this.describeInventoryDelta(invBeforeWalk, invAfterWalk, target.name);
+            if (walkDiff.changed) {
+                try {
+                    this.log.with('lifecycle').info({
+                        event: 'pickup-inventory-diff',
+                        target: target.name,
+                        arrived,
+                        gained: walkDiff.gained,
+                        lost: walkDiff.lost,
+                        note: walkDiff.note,
+                    });
+                } catch {
+                    // 日志失败不影响拾取流程。
+                }
             }
             // 被抢占（模型动作 / 保命 / Stop）不算拾取失败：不累计退避，
             // 也不把通道算在拾取头上。
@@ -3263,18 +3324,24 @@ export class MineflayerBody {
                 {
                     reflex: 'pickup',
                     outcome: arrived ? 'ok' : 'failed',
-                    detail: arrived
-                        ? '走到了 ' + target.name + ' 的位置；是否入包由 playerCollect 核验后另行报告。'
-                        : preemptReason != null
-                            ? preemptReason
-                            : preempted
-                                ? '拾取被模型动作抢占，已释放身体通道（模型优先，本次不额外退避）。'
-                                : gaveUp
-                                    ? `连续 ${PICKUP_GIVE_UP_ATTEMPTS} 次没走到掉落物，**放弃这次拾取**` +
-                                        `（${Math.round(backoffMs / 1000)} 秒内不再自动捡；地上那件先放着，` +
-                                        '要就拿它当目标自己走过去踩）。'
-                                    : '没走到 ' + target.name + ' 的位置（超时）；' +
-                                        '已释放身体通道，退避 ' + Math.round(backoffMs / 1000) + ' 秒后再试。',
+                    detail:
+                        (arrived
+                            ? '走到了 ' + target.name + ' 的位置；是否入包由 playerCollect 核验后另行报告。'
+                            : preemptReason != null
+                                ? preemptReason
+                                : preempted
+                                    ? '拾取被模型动作抢占，已释放身体通道（模型优先，本次不额外退避）。'
+                                    : gaveUp
+                                        ? `连续 ${PICKUP_GIVE_UP_ATTEMPTS} 次没走到掉落物，**放弃这次拾取**` +
+                                            `（${Math.round(backoffMs / 1000)} 秒内不再自动捡；地上那件先放着，` +
+                                            '要就拿它当目标自己走过去踩）。'
+                                        : '没走到 ' + target.name + ' 的位置（超时）；' +
+                                            '已释放身体通道，退避 ' + Math.round(backoffMs / 1000) + ' 秒后再试。') +
+                        // **接上"走路期间背包发生了什么"**：没变化 ⇒ "没捡到"不等于"捡了又丢"；
+                        // 有变化 ⇒ 点名变化（含"原有物品减少"这种数据丢失形态），别让模型猜。
+                        (walkDiff.changed
+                            ? `；走路期间背包变化：${walkDiff.note}`
+                            : '；走路期间背包**没有变化**（没捡到 ≠ 捡了又丢）。'),
                     ms: Date.now() - started,
                     failures: arrived ? 0 : this.pickupFailures,
                     backoffMs,

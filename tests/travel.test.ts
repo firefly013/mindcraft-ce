@@ -388,6 +388,68 @@ describe('travelTo：诚实拒绝（不出发）', () => {
     });
 });
 
+describe('travelTo：不许挖穿容器 + 小推进必须点名拦路的东西（真机：挖了基地的箱子、只推进 2.3 格）', () => {
+    it('直线穿过 chest(1,70,0) ⇒ 箱子没被挖、绕过去、回执点名它', async () => {
+        const h = travelHarness({
+            pos: { x: 0, y: 70, z: 0 },
+            dimension: 'overworld',
+            inventory: [
+                { name: 'diamond_pickaxe', count: 1 },
+                { name: 'cobblestone', count: 8 },
+            ],
+            canWalk: false,
+            cells: { [key(1, 70, 0)]: 'chest' },
+        });
+        const receipt = await travelToSkill(h.bot, 8, 70, 0, 300_000, undefined, undefined, h.deps);
+
+        expect(receipt).toContain('chest');
+        expect(receipt).toContain('(1, 70, 0)');
+        expect(receipt).toContain('不挖它');
+        expect(receipt).toContain('里面的东西原样没动');
+        expect(h.bot.entity.position.y).toBe(71); // 抬一格绕过去
+        expect(displacementOf(receipt)).toBeGreaterThan(0);
+    });
+
+    it('拦路的是箱子且绕不开 ⇒ 停手，回执**点名它**并说"只推进了 N 格"', async () => {
+        const h = travelHarness({
+            pos: { x: 0, y: 70, z: 0 },
+            dimension: 'overworld',
+            inventory: [{ name: 'diamond_pickaxe', count: 1 }],
+            canWalk: false,
+            cells: { [key(1, 70, 0)]: 'chest', [key(1, 71, 0)]: 'chest', [key(1, 72, 0)]: 'chest' },
+        });
+        const receipt = await travelToSkill(h.bot, 8, 70, 0, 300_000, undefined, undefined, h.deps);
+
+        expect(displacementOf(receipt)).toBe(0);
+        expect(receipt).toContain('**只推进了 0.0 格**');
+        expect(receipt).toContain('卡在');
+        expect(receipt).toContain('chest');
+        expect(receipt).toContain('(1, 70, 0)');
+        expect(receipt.trimEnd().split('\n').at(-1)).toBe('下一步（照做即可）：mineTunnel(length=2, direction="+z")');
+    });
+
+    it('寻路卡住（一直不靠近）⇒ **15 秒熔断**、停手改挖隧道，而不是干等 90 秒', async () => {
+        const h = travelHarness({
+            pos: { x: 0, y: 70, z: 0 },
+            dimension: 'overworld',
+            inventory: [{ name: 'diamond_pickaxe', count: 1 }],
+            canWalk: true,
+        });
+        const stopped: number[] = [];
+        h.deps.walk = () => new Promise<boolean>(() => {}); // 永远不返回：卡住的那种
+        h.deps.stopWalk = () => stopped.push(1);
+        const startedAt = h.clockNow();
+        const receipt = await travelToSkill(h.bot, 40, 70, 0, 300_000, undefined, undefined, h.deps);
+        const elapsed = h.clockNow() - startedAt;
+
+        expect(stopped).toHaveLength(1); // 真的让寻路器停手了
+        expect(elapsed).toBeLessThan(60_000); // 远小于"干等 90 秒"
+        expect(receipt).toContain('没靠近');
+        expect(receipt).toContain('改挖隧道');
+        expect(displacementOf(receipt)).toBeGreaterThan(0); // 换成挖之后真的往前走了
+    });
+});
+
 describe('travelTo：搭桥（横向的 pillarUp）', () => {
     it('**真机那一幕**：洞里第一级台阶下面是空气 + 背包有方块 → 垫一块桥就往上走（不再原地打死结）', async () => {
         // overnight_b 在 (-29,46,8) 的洞里：想往上爬，第一级台阶的"脚下"是 air。

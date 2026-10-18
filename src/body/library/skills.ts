@@ -2080,7 +2080,23 @@ export async function placeBlock(bot: any, blockType: string, x: number, y: numb
         log(bot, `${blockType} already at ${targetBlock.position}.`);
         return false;
     }
+    /** 为了放置而拆掉的方块（失败时必须补回或如实报告）。 */
+    let clearedForPlacement: { name: string; x: number; y: number; z: number } | null = null;
     const empty_blocks: readonly string[] = PLACE_TARGET_EMPTY_BLOCKS;
+    // **绝不清掉自己的落脚点。**
+    // 真机 2026-10-19（overnight_b，虚空上方按我们的建议垫脚）：「placeBlock 把目标格的
+    // 承重方块挖掉后放置失败，没补回去」——工具亲手拆掉了自己的落脚点，离掉进虚空只差一步。
+    // 判定放在**任何破坏之前**：要清的那一格正好是（或正好托着）脚底 ⇒ 直接拒绝。
+    if (!empty_blocks.includes(targetBlock.name) && isFootingCell({ x: Math.floor(x), y: Math.floor(y), z: Math.floor(z) }, bot?.entity?.position)) {
+        log(
+            bot,
+            '拒绝清掉 ' + targetBlock.name + ' @' + targetBlock.position + '：**那一格正是你现在的落脚点（或它的承重块）**——' +
+                '把它挖掉再放失败，你就会踩空（虚空上方尤其致命）。' +
+                '换一个目标格（placeBlock 指定别的坐标），或先 goToCoordinates 站到旁边的实心处再放；' +
+                '要往上垫就先跳到下一格/站到稳固处，别从脚下拆。',
+        );
+        return false;
+    }
     if (!empty_blocks.includes(targetBlock.name)) {
         const risk = assessPlaceBlockRisk(
             (bx, by, bz) => bot.blockAt(new Vec3(bx, by, bz)),
@@ -2106,6 +2122,9 @@ export async function placeBlock(bot: any, blockType: string, x: number, y: numb
             log(bot, `Cannot place ${blockType} at ${targetBlock.position}: block in the way.`);
             return false;
         }
+        // **记下"为了放这一格拆了什么"**：后面的任何失败都必须先把它补回去，
+        // 补不回去也要在回执里说清"哪一格现在是空的"（见 restoreClearedBlock）。
+        clearedForPlacement = { name: String(targetBlock.name), x: Math.floor(x), y: Math.floor(y), z: Math.floor(z) };
         // 拆完要确认那一格真的空了：紧接着就要往那儿放方块，
         // 服务端还没把破坏落地时 placeBlock 会撞上"格子里还有东西"。
         await waitForBlockAt(bot, target_dest, (name) => empty_blocks.includes(name));
@@ -2144,6 +2163,7 @@ export async function placeBlock(bot: any, blockType: string, x: number, y: numb
     }
     if (!buildOffBlock) {
         log(bot, `Cannot place ${blockType} at ${targetBlock.position}: nothing to place on.`);
+        await failPlacementAfterClear(bot, clearedForPlacement, `放 ${blockType} 到 ${targetBlock.position}：周围没有可依托的面`);
         return false;
     }
 
@@ -2156,7 +2176,10 @@ export async function placeBlock(bot: any, blockType: string, x: number, y: numb
         const goal: any = new (pf as any).goals.GoalNear(targetBlock.position.x, targetBlock.position.y, targetBlock.position.z, 2);
         const inverted_goal: any = new (pf as any).goals.GoalInvert(goal);
         bot.pathfinder.setMovements(movementsFor(bot));
-        if (!(await runPathfindingInterruptibly(bot, inverted_goal))) return false;
+        if (!(await runPathfindingInterruptibly(bot, inverted_goal))) {
+            await failPlacementAfterClear(bot, clearedForPlacement, '让开目标格的寻路没走通');
+            return false;
+        }
     }
     if (bot.entity.position.distanceTo(targetBlock.position) > 4.5) {
         // too far
@@ -2189,9 +2212,72 @@ export async function placeBlock(bot: any, blockType: string, x: number, y: numb
         }
     } catch (err: unknown) {
         log(bot, `Failed to place ${blockType} at ${target_dest}.`);
+        await failPlacementAfterClear(bot, clearedForPlacement, `放 ${blockType} 到 ${target_dest} 失败`);
         return false;
     }
+    await failPlacementAfterClear(bot, clearedForPlacement, `放 ${blockType} 到 ${target_dest} 没成功`);
     return false;
+}
+
+/** 目标格是不是**自己的落脚点**（脚所在格）或**托着脚的承重格**。 */
+export function isFootingCell(
+    target: { x: number; y: number; z: number },
+    feet: { x: number; y: number; z: number } | null | undefined,
+): boolean {
+    if (feet == null) return false;
+    const fx = Math.floor(Number(feet.x));
+    const fy = Math.floor(Number(feet.y));
+    const fz = Math.floor(Number(feet.z));
+    if (!Number.isFinite(fx) || !Number.isFinite(fy) || !Number.isFinite(fz)) return false;
+    if (target.x !== fx || target.z !== fz) return false;
+    return target.y === fy || target.y === fy - 1;
+}
+
+/**
+ * 放置失败后**把为了放置而拆掉的方块补回去**，并如实写清世界的净变化。
+ *
+ * 真机 2026-10-19（虚空上方）：拆了落脚点、放置失败、没补回去 —— 一步之差就是坠入虚空。
+ * 补不回去时**绝不能沉默**：回执必须点名"哪一格现在是空的"，让模型别往前踩。
+ */
+export async function failPlacementAfterClear(
+    bot: any,
+    cleared: { name: string; x: number; y: number; z: number } | null,
+    reason: string,
+): Promise<void> {
+    if (cleared == null) return; // 没拆过东西：什么都不用补，也没什么可说
+    let restored = false;
+    try {
+        const target = new Vec3(cleared.x, cleared.y, cleared.z);
+        // 直接从相邻实心面把原来的方块放回去（不再走 placeBlock 的"清障"逻辑，
+        // 免得为了补一格又去拆别的东西）。
+        const dirs: any[] = [new Vec3(0, -1, 0), new Vec3(0, 1, 0), new Vec3(0, 0, -1), new Vec3(0, 0, 1), new Vec3(-1, 0, 0), new Vec3(1, 0, 0)];
+        for (const d of dirs) {
+            const neighbour: any = bot?.blockAt?.(target.plus(d));
+            if (neighbour == null || PLACE_TARGET_EMPTY_BLOCKS.includes(neighbour.name)) continue;
+            const item: any = bot?.inventory?.findInventoryItem?.(cleared.name);
+            if (item == null) break;
+            await bot.equip(item, 'hand');
+            await bot.placeBlock(neighbour, new Vec3(-d.x, -d.y, -d.z));
+            await waitForBlockAt(bot, target, (name) => name === cleared.name);
+            restored = String(bot?.blockAt?.(target)?.name ?? '') === cleared.name;
+            if (restored) break;
+        }
+    } catch {
+        restored = false;
+    }
+    if (restored) {
+        log(
+            bot,
+            `${reason}；**已经把你为了放置拆掉的 ${cleared.name} @(${cleared.x},${cleared.y},${cleared.z}) 补回去了**——` +
+                '世界净变化：拆了 1 格、放回 1 格（等于没变），没有留下空洞。',
+        );
+    } else {
+        log(
+            bot,
+            `${reason}；**注意：为了放置拆掉的 ${cleared.name} @(${cleared.x},${cleared.y},${cleared.z}) 现在是空的、没能补回**——` +
+                '世界净变化：那一格被移除了。**别往那一格踩**；先 goToCoordinates 站到实心处，或重新 placeBlock 把它填上。',
+        );
+    }
 }
 
 export async function equip(bot: any, itemName: string): Promise<boolean> {

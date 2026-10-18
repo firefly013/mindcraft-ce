@@ -603,9 +603,21 @@ describe('D5 放置 vs 清障的意图区分', () => {
     expect(PLACE_TARGET_EMPTY_BLOCKS).toContain('void_air');
   });
 
-  it('放置请求被清障安全规则拒绝：说"放置"、给别的落点，不再推荐 placeHere', async () => {
+  // **2026-10-19 收紧**：这一格的坐标 (0,63,0) 正是 bot 站着的承重块 —— 现在由
+  // "绝不清掉自己的落脚点"的守卫**先**拒绝（真机 overnight_b 在虚空上方就是这么被拆掉
+  // 落脚点的）。原来那条"清障意图"回执仍然存在，但只对**不是自己落脚点**的格子生效。
+  it('要清的那一格是自己的落脚点 ⇒ 由落脚点守卫拒绝（比清障规则更早）', async () => {
     const bot = placeBot((key) => (key === '0,63,0' ? 'deepslate' : key === '0,62,0' ? 'stone' : 'air'));
     await expect(placeBlock(bot, 'cobblestone', 0, 63, 0)).resolves.toBe(false);
+    expect(bot.output).toContain('拒绝清掉');
+    expect(bot.output).toContain('那一格正是你现在的落脚点');
+    expect(bot.output).toContain('换一个目标格');
+    expect(bot.output).not.toContain('或用 placeHere');
+  });
+
+  it('放置请求被清障安全规则拒绝（目标格不是自己脚下）：说"放置"、给别的落点，不再推荐 placeHere', async () => {
+    const bot = placeBot((key) => (key === '1,63,1' ? 'deepslate' : key === '0,62,0' ? 'stone' : 'air'));
+    await expect(placeBlock(bot, 'cobblestone', 1, 63, 1)).resolves.toBe(false);
     expect(bot.output).toContain('拒绝清障');
     expect(bot.output).toContain('**放置**请求');
     expect(bot.output).toContain('placeBlock 指定别的坐标');

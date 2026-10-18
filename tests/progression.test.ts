@@ -53,6 +53,8 @@ import {
     huntNextAction,
     huntReceipt,
     isPassiveFoodAnimal,
+    isProtectedBlockName,
+    isContainerBlockName,
     isUnsupportedFloorBlock,
     maxLegPerScan,
     mineTunnelSkill,
@@ -1136,6 +1138,56 @@ function tunnelHarness(
     };
     return { bot, deps, dugOrder, place };
 }
+
+describe('mineTunnel：**不许挖穿容器/功能方块**（真机：travelTo 挖了基地的箱子）', () => {
+    it('直线撞上 chest(1,70,0) ⇒ 箱子**一格都没挖**，抬一格绕过去，并在回执里点名', async () => {
+        const h = tunnelHarness({
+            cells: { '1,70,0': 'chest' }, // 正前方脚那一格就是箱子
+            inventory: [{ name: 'diamond_pickaxe', count: 1 }],
+        });
+        const receipt = await mineTunnelSkill(h.bot, 3, 2, '+x', h.deps);
+
+        // 箱子没被挖
+        expect(h.dugOrder.some((p) => p.x === 1 && p.y === 70 && p.z === 0)).toBe(false);
+        // 绕开了：人从上面过去了（抬 1 格）
+        expect(h.bot.entity.position.y).toBe(71);
+        expect(receipt).toContain('净前进 3/3 格');
+        // 回执按名字 + 坐标点名，并说明内容物没动
+        expect(receipt).toContain('(1, 70, 0)');
+        expect(receipt).toContain('chest');
+        expect(receipt).toContain('没挖它');
+        expect(receipt).toContain('里面的东西原样没动');
+        expect(receipt).toContain('抬/降了 1 次');
+    });
+
+    it('抬一格降一格都被挡住 ⇒ 停手说清楚（并给"横着挪开"的下一步）', async () => {
+        const h = tunnelHarness({
+            // 脚/头那两格上下都塞了箱子：抬一格撞 (1,71)，降一格撞 (1,70)
+            cells: { '1,70,0': 'chest', '1,71,0': 'chest', '1,72,0': 'chest' },
+            inventory: [{ name: 'diamond_pickaxe', count: 1 }],
+        });
+        const receipt = await mineTunnelSkill(h.bot, 3, 2, '+x', h.deps);
+
+        expect(h.dugOrder).toHaveLength(0); // 一个箱子都没挖
+        expect(receipt).toContain('净前进 0/3 格');
+        expect(receipt).toContain('容器/功能方块');
+        expect(receipt).toContain('绕不开');
+        expect(receipt.trimEnd().split('\n').at(-1)).toBe('下一步（照做即可）：mineTunnel(length=2, direction="+z")');
+    });
+
+    it('功能方块（工作台/熔炉/告示牌/床/潜影盒）同样不挖；普通方块照挖', () => {
+        for (const name of ['crafting_table', 'furnace', 'blast_furnace', 'smoker', 'barrel', 'oak_sign', 'red_bed', 'white_shulker_box', 'trapped_chest', 'spawner', 'beacon', 'anvil']) {
+            expect(isProtectedBlockName(name), name).toBe(true);
+            expect(isProtectedBlockName(`minecraft:${name}`), name).toBe(true);
+        }
+        for (const name of ['netherrack', 'cobblestone', 'stone', 'oak_log', 'chest_boat', 'air']) {
+            expect(isProtectedBlockName(name), name).toBe(false);
+        }
+        expect(isContainerBlockName('chest')).toBe(true);
+        expect(isContainerBlockName('crafting_table')).toBe(false);
+        expect(isProtectedBlockName(null)).toBe(false);
+    });
+});
 
 describe('mineTunnel：进度必须是**量出来的**，不是数出来的（真机 02:0x 事故）', () => {
     // 真机：回执「已挖 64 格」但**位移 0、背包 0 增量**。
