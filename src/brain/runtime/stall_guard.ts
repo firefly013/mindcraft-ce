@@ -167,6 +167,17 @@ export interface StallGuard {
   idleFor: () => number;
   /** 当前连续按回次数。 */
   continuesWithoutTool: () => number;
+  /**
+   * 来了**新的外部输入**（玩家说话 / 世界事件 / 开发者留言）——把按回次数清零。
+   *
+   * `maxContinues` 的本意是"**一轮之内**不要无限自动续跑"，而不是"这个 bot 一辈子
+   * 只有三次机会"。真机（2026-10-18 16:45，overnight_b）：它附近有蜘蛛，世界事件
+   * 每隔几十秒把它唤醒一次，每次都只回正文、`onYield` 因为计数早已到顶而拒绝续跑
+   * ——于是**26 分钟零工具调用，而护栏一次都没催**（日志里 `stall-nudges=0`）。
+   * 计数只在"工具执行"时复位是不够的：新事件带来的是**新信息、新的一轮**，本来就
+   * 该重新给三次机会。心跳（`wake`）不在此列——那是护栏自己的升级手段，不能自我复位。
+   */
+  noteExternalInput: () => void;
   /** 停掉心跳定时器。 */
   stop: () => void;
 }
@@ -304,6 +315,13 @@ export function createStallGuard(options: StallGuardOptions = {}): StallGuard {
     noteActivity,
     idleFor: () => now() - lastActivityAt,
     continuesWithoutTool: () => continuesWithoutTool,
+    noteExternalInput: () => {
+      // 新的一轮：按回次数清零，退避也回到初始间隔（刚有真事发生，别等半小时）。
+      continuesWithoutTool = 0;
+      watchdogAttempt = 0;
+      nextIdleMs = idleMs;
+      lastActivityAt = now();
+    },
     stop: () => {
       if (handle == null) return;
       if (options.clearInterval != null) options.clearInterval(handle);

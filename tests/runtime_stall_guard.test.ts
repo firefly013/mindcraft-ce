@@ -318,6 +318,23 @@ describe('心跳看门狗：连请求都没有时主动唤醒', () => {
     h.guard.stop();
   });
 
+  it('来了新的外部输入 → 按回次数清零，重新给三次机会', () => {
+    // 真机（2026-10-18 16:45，overnight_b）：附近有蜘蛛，世界事件每隔几十秒唤醒一次，
+    // 每次只回正文；计数早已到顶 → onYield 一律拒绝续跑 → 26 分钟零工具、护栏一次没催。
+    // 计数只在"工具执行"时复位不够：新事件 = 新信息 = 新的一轮。
+    const h = harness();
+    const genHooks = handlersWith(h.guard, 'onYield');
+    for (let i = 0; i < 3; i += 1) {
+      expect(genHooks['onYield']!({}, {}, {})).toBeDefined();
+    }
+    expect(genHooks['onYield']!({}, {}, {})).toBeUndefined(); // 上限到了
+    h.guard.noteExternalInput(); // 玩家说话 / 世界事件 / 开发者留言
+    expect(h.guard.continuesWithoutTool()).toBe(0);
+    const again = genHooks['onYield']!({}, {}, {}) as { continue?: unknown } | undefined;
+    expect(again?.continue).toBeDefined();
+    h.guard.stop();
+  });
+
   it('真的答过一轮之后退避复位（不会永远停在最大间隔）', () => {
     // 曾经的洞：退避只在 `noteActivity()` 里复位，而生产路径没人调用它 ⇒
     // 退避涨到上限后永远停在 30 分钟，健康跑了三小时的 bot 后来真卡住也要等满。

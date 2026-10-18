@@ -150,6 +150,10 @@ export async function openBotRuntime(options: BotRuntimeOptions): Promise<BotRun
     session,
     conversation,
     submit: (content, submitOptions) => {
+      // **外部输入 = 新的一轮**：把"连续只说话"的按回次数清零。
+      // 否则事件频繁的 bot 会死在"计数早已到顶 + 每次事件都被拒续跑"的组合上
+      // （真机 overnight_b 26 分钟零工具调用，见 stall_guard.ts 的 noteExternalInput）。
+      guard?.noteExternalInput();
       const draft: SubmissionDraft = {
         type: 'input',
         content,
