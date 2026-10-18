@@ -1659,7 +1659,8 @@ export type TunnelStop =
     | 'dig_failed'
     | 'travel_failed'
     | 'unreadable'
-    | 'bad_direction';
+    | 'bad_direction'
+    | 'bridge_failed';
 
 const TUNNEL_STOP_TEXT: Record<TunnelStop, string> = {
     done: '挖满了本次长度（可以接着挖同一条线）',
@@ -1675,6 +1676,7 @@ const TUNNEL_STOP_TEXT: Record<TunnelStop, string> = {
     travel_failed: '挖通了但没走进去（寻路失败）',
     unreadable: '读不到方块（区块没加载？），不敢瞎挖',
     bad_direction: '方向认不出来，也不给读朝向',
+    bridge_failed: '想垫一块桥过去，但没垫成',
 };
 
 export interface TunnelOutcome {
@@ -1697,6 +1699,8 @@ export interface TunnelOutcome {
     toolRemaining: number | null;
     toolMax: number | null;
     handMining: boolean;
+    /** 搭了几块桥（横向的 `pillarUp`：前方脚下是空洞就垫一块过去）。 */
+    bridges: number;
 }
 
 /** 挖了多少格 → 下一步还挖多少（原地接着挖同一条线）。 */
@@ -1709,7 +1713,11 @@ export function tunnelNextAction(o: TunnelOutcome): string {
         case 'liquid_ahead':
             return 'moveAway(distance=8)';
         case 'unsupported_floor':
-            return 'pillarUp(distance=2)';
+            // **别再给 pillarUp(distance=2)**：它也要方块，没方块时就是死循环
+            // （真机 overnight_b 在 (-29,46,8) 的洞里连撞两次）。先弄 1 个能垫的方块。
+            return `mineTunnel(length=2, direction="${o.dir.axis === 'x' ? (o.dir.sign > 0 ? '+z' : '-z') : o.dir.sign > 0 ? '+x' : '-x'}")`;
+        case 'bridge_failed':
+            return 'moveAway(distance=3)';
         case 'no_tool':
         case 'tool_low':
             return o.hintEquip != null ? `equip(item_name="${o.hintEquip}")` : 'stats(type="inventory")';
@@ -1744,6 +1752,7 @@ export function tunnelReceipt(o: TunnelOutcome): string {
               ? `镐：${o.toolName}（上限读不到，算不出还剩几次）`
               : `镐：${o.toolName} 还剩约 ${o.toolRemaining} 次（${o.toolMax ?? '?'} 上限）`;
     lines.push(toolText + '。');
+    if (o.bridges > 0) lines.push(`搭桥：这一趟垫了 ${o.bridges} 块（前方脚下是空洞时垫一块过去，横向的 pillarUp）。`);
     for (const line of capLines(o.progress, HUNT_MAX_PROGRESS_LINES, '进度')) lines.push(line);
     lines.push(`下一步（照做即可）：${tunnelNextAction(o)}`);
     // 同 huntReceipt：隧道很长时进度行也不能无限堆。
@@ -1765,6 +1774,10 @@ export interface TunnelDeps {
     health?: (bot: any) => number | null;
     /** 手上工具（默认走 skills.toolDurabilityGuard）。 */
     tool?: (bot: any) => { name: string | null; remaining: number | null; max: number | null; low: boolean };
+    /** 挑一块能垫的方块（默认走 `skills.choosePillarMaterial`，和 pillarUp 同一套偏好）。 */
+    scaffold?: (bot: any) => string | null;
+    /** 垫一块方块（默认 `skills.placeBlock`）。 */
+    place?: (bot: any, block: string, x: number, y: number, z: number) => Promise<boolean>;
     sleep?: (ms: number) => Promise<void>;
     now?: () => number;
 }
@@ -1824,6 +1837,25 @@ export async function digLine(
     const travel = deps.travel ?? ((b: any, x: number, y: number, z: number) => skills.goToPosition(b, x, y, z, 1));
     const health = deps.health ?? defaultTunnelHealth;
     const tool = deps.tool ?? ((b: any) => skills.toolDurabilityGuard(b));
+    // 垫脚材料：和 `pillarUp` / `applyScaffoldingBlocks` **同一套偏好**（圆石/泥土/下界岩…），
+    // 不另立一份"什么算能垫的方块"。
+    const scaffold =
+        deps.scaffold ??
+        ((b: any) => {
+            try {
+                return (
+                    skills.choosePillarMaterial(
+                        (b?.inventory?.items?.() ?? []) as Array<{ name?: unknown; count?: unknown }>,
+                        1,
+                        (b?.registry?.blocksByName ?? null) as Record<string, any> | null,
+                    ) ?? null
+                );
+            } catch {
+                return null;
+            }
+        });
+    const place =
+        deps.place ?? ((b: any, block: string, x: number, y: number, z: number) => skills.placeBlock(b, block, x, y, z, 'side'));
     const sleep = deps.sleep ?? sleepMs;
     const now = deps.now ?? Date.now;
 
@@ -1850,6 +1882,7 @@ export async function digLine(
         toolRemaining: null,
         toolMax: null,
         handMining: false,
+        bridges: 0,
     };
 
     /** 一手工具的描述（每次都重新读，因为挖着挖着就磨损了）。 */
@@ -1905,16 +1938,44 @@ export async function digLine(
             break;
         }
 
-        // ── 安全门 2：前方脚下必须是实心（否则会掉下去/掉进岩浆海） ──
+        // ── 安全门 2：前方脚下必须能踩；**是空洞就垫一块桥过去**（横向的 pillarUp） ──
         if (floorBlock == null) {
             outcome.stop = 'unreadable';
             outcome.detail = `读不到前方的支撑格 ${formatPoint(step.floor)}`;
             break;
         }
         if (isUnsupportedFloorBlock(floorBlock)) {
-            outcome.stop = 'unsupported_floor';
-            outcome.detail = `前方脚下 ${cellText(step.floor, normalizeName(floorBlock?.name))}（下一步会踩空）`;
-            break;
+            // 桥下就是岩浆 → **不搭**（照旧按液体门拒绝；绝不往岩浆上垫方块）。
+            const below = blockAt(bot, step.floor.x, step.floor.y - 1, step.floor.z);
+            if (isLiquidBlockName(below?.name)) {
+                outcome.stop = 'liquid_ahead';
+                outcome.detail = `${cellText(step.floor, normalizeName(below?.name))} 就是岩浆（桥下面），不能在上面搭桥`;
+                break;
+            }
+            const material = scaffold(bot);
+            if (material == null) {
+                outcome.stop = 'unsupported_floor';
+                outcome.detail =
+                    `${cellText(step.floor, normalizeName(floorBlock?.name))}（下一步会踩空），` +
+                    `**背包里没有能垫的方块**——先弄 1 个（挖两格就有下界岩/圆石）`;
+                break;
+            }
+            let placedOk = false;
+            try {
+                placedOk = await place(bot, material, step.floor.x, step.floor.y, step.floor.z);
+            } catch {
+                placedOk = false;
+            }
+            const afterPlace = blockAt(bot, step.floor.x, step.floor.y, step.floor.z);
+            if (afterPlace == null || isUnsupportedFloorBlock(afterPlace)) {
+                outcome.stop = 'bridge_failed';
+                outcome.detail =
+                    `想在 ${formatPoint(step.floor)} 垫一块 ${material} 搭桥，` +
+                    `但没成功（现在还是 ${normalizeName(afterPlace?.name) ?? '读不到'}）`;
+                break;
+            }
+            outcome.bridges += 1;
+            outcome.progress.push(`- 前方脚下 ${formatPoint(step.floor)} 是空洞 → 用 ${material} 垫了一块桥过去（第 ${outcome.bridges} 块）`);
         }
 
         // ── 安全门 3：要挖的格子必须读得到（读不到就不猜） ──
@@ -2050,6 +2111,7 @@ export async function mineTunnelSkill(
             toolRemaining: g.remaining,
             toolMax: g.max,
             handMining: false,
+            bridges: 0,
         };
         return tunnelReceipt(outcome);
     }
@@ -2142,6 +2204,8 @@ export interface TravelLegPlan {
     blocks: number;
     axis: 'x' | 'z' | null;
     sign: 1 | -1 | null;
+    /** 斜上(+1)/斜下(-1)台阶；平台隧道不带这个字段。 */
+    rise?: 1 | -1;
     /** 人类可读（进回执）。 */
     label: string;
 }
@@ -2209,13 +2273,28 @@ export function planTravelLegs(
                 });
             }
         } else {
-            legs.push({
-                kind: 'digDown',
-                blocks,
-                axis: null,
-                sign: null,
-                label: `竖直段：digDown ${blocks} 格（y ${Math.round(from.y)} → ${Math.round(from.y) - blocks}，目标 y=${Math.round(to.y)}）`,
-            });
+            if (horizontal >= 1) {
+                // **斜下台阶**：一边往前挖一边往下走（比 digDown 的 1×1 竖井稳，也能搭桥）。
+                const axis: 'x' | 'z' = Math.abs(dx0) >= Math.abs(dz0) ? 'x' : 'z';
+                const sign: 1 | -1 = (axis === 'x' ? dx0 : dz0) >= 0 ? 1 : -1;
+                const label = `${sign > 0 ? '+' : '-'}${axis}` as '+x' | '-x' | '+z' | '-z';
+                legs.push({
+                    kind: 'stairTunnel',
+                    blocks,
+                    axis,
+                    sign,
+                    rise: -1,
+                    label: `竖直段：沿 ${label} 挖**斜下台阶** ${blocks} 格（y ${Math.round(from.y)} → ${Math.round(from.y) - blocks}，目标 y=${Math.round(to.y)}）`,
+                });
+            } else {
+                legs.push({
+                    kind: 'digDown',
+                    blocks,
+                    axis: null,
+                    sign: null,
+                    label: `竖直段：digDown ${blocks} 格（y ${Math.round(from.y)} → ${Math.round(from.y) - blocks}，目标 y=${Math.round(to.y)}）`,
+                });
+            }
         }
         return legs;
     }
@@ -2638,7 +2717,7 @@ export async function travelToSkill(
                 height: TRAVEL_TUNNEL_HEIGHT,
                 budgetMs: Math.max(5_000, left - 5_000),
                 deadline,
-                ...(leg.kind === 'stairTunnel' ? { rise: 1 } : {}),
+                rise: leg.kind === 'stairTunnel' ? (leg.rise ?? 1) : 0,
             },
             deps,
             { progressEvery: TRAVEL_PROGRESS_EVERY },
@@ -2651,7 +2730,8 @@ export async function travelToSkill(
             plan: leg,
             advanced,
             text:
-                `${leg.label} → 挖了 ${tunnel.dug}/${leg.blocks} 格（共挖掉 ${tunnel.blocksDug} 个方块），` +
+                `${leg.label} → 挖了 ${tunnel.dug}/${leg.blocks} 格（共挖掉 ${tunnel.blocksDug} 个方块` +
+                `${tunnel.bridges > 0 ? `，其中搭桥 ${tunnel.bridges} 块` : ''}），` +
                 `实际推进 ${advanced.toFixed(1)} 格，现在 ${formatPoint(tunnel.here)}`,
             ...(tunnel.stop === 'done' ? {} : { tunnel }),
         });

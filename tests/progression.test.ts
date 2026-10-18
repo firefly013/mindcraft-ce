@@ -1083,6 +1083,7 @@ function tunnelHarness(
 ) {
     const key = (x: number, y: number, z: number): string => `${x},${y},${z}`;
     const special = new Map<string, string>(Object.entries(options.cells ?? {}));
+    const placed = new Map<string, string>();
     const dug = new Set<string>();
     const dugOrder: FlatPosition[] = [];
     let travels = 0;
@@ -1097,7 +1098,7 @@ function tunnelHarness(
         position: () => ({ ...bot.entity.position }),
         blockAt: (_b: any, x: number, y: number, z: number) => {
             if ((options.unreadable ?? []).includes(key(x, y, z))) return null;
-            const name = dug.has(key(x, y, z)) ? 'air' : (special.get(key(x, y, z)) ?? 'netherrack');
+            const name = placed.get(key(x, y, z)) ?? (dug.has(key(x, y, z)) ? 'air' : (special.get(key(x, y, z)) ?? 'netherrack'));
             return {
                 name,
                 // obsidian 徒手挖不动；下界岩徒手挖得动
@@ -1128,7 +1129,11 @@ function tunnelHarness(
         sleep: async (): Promise<void> => {},
         now: () => 0,
     };
-    return { bot, deps, dugOrder };
+    /** 垫一块方块（模拟 placeBlock 成功）：之后 blockAt 就当作实心。 */
+    const place = (x: number, y: number, z: number, name: string): void => {
+        placed.set(key(x, y, z), name);
+    };
+    return { bot, deps, dugOrder, place };
 }
 
 describe('mineTunnel：直线隧道', () => {
@@ -1191,12 +1196,52 @@ describe('mineTunnel：直线隧道', () => {
     });
 
     it('前方脚下不是实心 → 停手（走过去就是岩浆海/悬崖）', async () => {
+        // 背包里没有能垫的方块 → 只能停；而且**不许再给 pillarUp(distance=2)**（它也要方块，
+        // 没方块时就是真机那个死循环）。先弄 1 个能垫的方块。
         const h = tunnelHarness({ cells: { '1,69,0': 'air' } });
         const receipt = await mineTunnelSkill(h.bot, 4, 2, '+x', h.deps);
         expect(h.dugOrder).toEqual([]);
         expect(receipt).toContain('会掉下去');
         expect(receipt).toContain('(1, 69, 0)');
-        expect(receipt.trimEnd().split('\n').at(-1)).toBe('下一步（照做即可）：pillarUp(distance=2)');
+        expect(receipt).toContain('没有能垫的方块');
+        expect(receipt.trimEnd().split('\n').at(-1)).toBe('下一步（照做即可）：mineTunnel(length=2, direction="+z")');
+    });
+
+    it('前方脚下是空洞 + 背包里有方块 → **垫一块桥过去**（横向的 pillarUp）', async () => {
+        const h = tunnelHarness({ cells: { '1,69,0': 'air' }, inventory: [{ name: 'cobblestone', count: 8 }] });
+        const placed: string[] = [];
+        const receipt = await mineTunnelSkill(h.bot, 3, 2, '+x', {
+            ...h.deps,
+            place: async (_b: any, block: string, x: number, y: number, z: number) => {
+                placed.push(`${block}@${x},${y},${z}`);
+                h.place(x, y, z, 'cobblestone');
+                return true;
+            },
+        });
+
+        expect(placed).toEqual(['cobblestone@1,69,0']);
+        expect(receipt).toContain('垫了一块桥过去');
+        expect(receipt).toContain('cobblestone');
+        expect(h.dugOrder.length).toBeGreaterThan(0); // 桥搭完继续挖，没有被卡住
+        expect(receipt).toContain('搭桥：这一趟垫了 1 块');
+    });
+
+    it('桥下就是岩浆 → 拒绝搭桥（沿用液体门的措辞），一块都不垫', async () => {
+        const h = tunnelHarness({ cells: { '1,69,0': 'air', '1,68,0': 'lava' }, inventory: [{ name: 'cobblestone', count: 8 }] });
+        let placeCalls = 0;
+        const receipt = await mineTunnelSkill(h.bot, 3, 2, '+x', {
+            ...h.deps,
+            place: async () => {
+                placeCalls += 1;
+                return true;
+            },
+        });
+
+        expect(placeCalls).toBe(0);
+        expect(h.dugOrder).toEqual([]);
+        expect(receipt).toContain('就是岩浆（桥下面）');
+        expect(receipt).toContain('不能在上面搭桥');
+        expect(receipt.trimEnd().split('\n').at(-1)).toBe('下一步（照做即可）：moveAway(distance=8)');
     });
 
     it('"不是实心"不只是 air：没有碰撞箱的方块也算踩空（纯函数）', () => {

@@ -59,8 +59,10 @@ function travelHarness(
     } = {},
 ) {
     const special = new Map<string, string>(Object.entries(options.cells ?? {}));
+    const placed = new Map<string, string>();
     const dug = new Set<string>();
     let clock = 0;
+    const bridgeCalls: Array<{ block: string; x: number; y: number; z: number }> = [];
     const bot: any = {
         interrupt_code: false,
         health: options.health ?? 20,
@@ -71,7 +73,7 @@ function travelHarness(
         output: '',
     };
     const blockName = (x: number, y: number, z: number): string =>
-        dug.has(key(x, y, z)) ? 'air' : (special.get(key(x, y, z)) ?? 'netherrack');
+        placed.get(key(x, y, z)) ?? (dug.has(key(x, y, z)) ? 'air' : (special.get(key(x, y, z)) ?? 'netherrack'));
 
     const deps: any = {
         now: () => clock,
@@ -100,6 +102,17 @@ function travelHarness(
         travel: async (_b: any, x: number, y: number, z: number) => {
             if (options.canStep === false) return false;
             bot.entity.position = { x, y, z };
+            return true;
+        },
+        // 搭桥：只有背包里真有垫脚料才搭得成（和真机 placeBlock 的约束一致）
+        scaffold: () => {
+            const items: Array<{ name: string; count: number }> =
+                options.inventory ?? [{ name: 'diamond_pickaxe', count: 1 }];
+            return items.find((item) => item.name === 'cobblestone' || item.name === 'netherrack')?.name ?? null;
+        },
+        place: async (_b: any, block: string, x: number, y: number, z: number) => {
+            bridgeCalls.push({ block, x, y, z });
+            placed.set(key(x, y, z), block);
             return true;
         },
         walk: async (_b: any, x: number, _y: number, z: number) => {
@@ -131,7 +144,14 @@ function travelHarness(
         },
         tool: () => options.tool ?? { name: 'diamond_pickaxe', remaining: 900, max: 1561, low: false },
     };
-    return { bot, deps, clockNow: () => clock, setClock: (v: number) => (clock = v), dugCount: () => dug.size };
+    return {
+        bot,
+        deps,
+        clockNow: () => clock,
+        setClock: (v: number) => (clock = v),
+        dugCount: () => dug.size,
+        bridgeCalls,
+    };
 }
 
 describe('travelTo：路线规划（纯函数）', () => {
@@ -146,7 +166,7 @@ describe('travelTo：路线规划（纯函数）', () => {
         expect(long[0]?.sign).toBe(1);
     });
 
-    it('有高差：先竖直段（上=stairUp / 下=digDown），一次只走一条腿', () => {
+    it('有高差：先竖直段（上=台阶 / 下=台阶），纯竖直才用 pillarUp/digDown', () => {
         const up = planTravelLegs({ x: 0, y: 70, z: 0 }, { x: 0, y: 116, z: 0 }, { walkAllowed: true });
         expect(up).toHaveLength(1);
         expect(up[0]?.kind).toBe('stairUp');
@@ -176,6 +196,14 @@ describe('travelTo：路线规划（纯函数）', () => {
         expect(next[0]?.kind).toBe('walk'); // 只剩 44 格水平 → 先试走路
         const tunnelNext = planTravelLegs({ x: 256, y: 70, z: 0 }, { x: 300, y: 70, z: 400 }, { walkAllowed: true });
         expect(tunnelNext[0]?.axis).toBe('z');
+    });
+
+    it('下坡（终点在下方）也用斜下台阶，不是 1×1 竖井', () => {
+        const legs = planTravelLegs({ x: 0, y: 116, z: 0 }, { x: 300, y: 52, z: 0 }, { walkAllowed: true });
+        expect(legs[0]?.kind).toBe('stairTunnel');
+        expect(legs[0]?.rise).toBe(-1);
+        expect(legs[0]?.blocks).toBe(64); // 单腿竖直上限
+        expect(legs[0]?.label).toContain('斜下台阶');
     });
 
     it('已经在目标旁边 ⇒ 不再规划腿', () => {
@@ -328,6 +356,116 @@ describe('travelTo：诚实拒绝（不出发）', () => {
         expect(receipt).toContain('**没出发**');
         expect(receipt).toContain('坐标读不出来');
         expect(h.bot.entity.position.x).toBe(5);
+    });
+});
+
+describe('travelTo：搭桥（横向的 pillarUp）', () => {
+    it('**真机那一幕**：洞里第一级台阶下面是空气 + 背包有方块 → 垫一块桥就往上走（不再原地打死结）', async () => {
+        // overnight_b 在 (-29,46,8) 的洞里：想往上爬，第一级台阶的"脚下"是 air。
+        const h = travelHarness({
+            pos: { x: -29, y: 46, z: 8 },
+            dimension: 'the_nether',
+            inventory: [
+                { name: 'diamond_pickaxe', count: 1 },
+                { name: 'netherrack', count: 12 },
+            ],
+            // 第一级台阶的支撑格 = 当前层往前一格：air（洞里就是这样）
+            cells: { [key(-28, 46, 8)]: 'air' },
+        });
+        const receipt = await travelToSkill(h.bot, 100, 46, 8, 300_000, undefined, undefined, h.deps);
+
+        // 桥垫上了，而且**真的往前/往上走了**
+        expect(h.bridgeCalls.length).toBeGreaterThan(0);
+        expect(h.bridgeCalls[0]?.block).toBe('netherrack');
+        expect(receipt).toContain('垫了一块桥');
+        expect(h.bot.entity.position.x).toBeGreaterThan(-29);
+        const advanced = Number(/(?:推进了|净推进) (\d+) 格/.exec(receipt)?.[1] ?? '0');
+        expect(advanced).toBeGreaterThan(0);
+        expect(receipt).not.toContain('**没出发**');
+    });
+
+    it('洞里但背包里没有方块 → 停手并点名问题（不再是 pillarUp(distance=2) 那个死循环）', async () => {
+        const h = travelHarness({
+            pos: { x: 0, y: 70, z: 0 },
+            dimension: 'overworld',
+            inventory: [{ name: 'diamond_pickaxe', count: 1 }],
+            cells: { [key(1, 69, 0)]: 'air' },
+        });
+        const receipt = await travelToSkill(h.bot, 400, 70, 0, 300_000, undefined, undefined, h.deps);
+
+        expect(h.bridgeCalls).toHaveLength(0);
+        expect(h.bot.entity.position.x).toBe(0);
+        expect(receipt).toContain('没有能垫的方块');
+        const next = receipt.trimEnd().split('\n').at(-1) ?? '';
+        expect(next).not.toContain('pillarUp');
+        expect(next).toContain('mineTunnel(length=2');
+    });
+
+    it('**连续两次调用都不许"推进 0 格 + 同一个门"**（有方块就必须走出这个洞）', async () => {
+        const h = travelHarness({
+            pos: { x: 0, y: 70, z: 0 },
+            dimension: 'overworld',
+            inventory: [
+                { name: 'diamond_pickaxe', count: 1 },
+                { name: 'cobblestone', count: 8 },
+            ],
+            // 走不过去（洞/寻路失败）→ 只能挖；而且第一格脚下是空洞 → 必须搭桥
+            canWalk: false,
+            msPerDig: 500,
+            cells: { [key(1, 69, 0)]: 'air' },
+        });
+        // 预算只够挖一小段：第一趟必然是"部分推进 + 续跑"
+        const first = await travelToSkill(h.bot, 60, 70, 0, 25_000, undefined, undefined, h.deps);
+        const advanced1 = Number(/(?:推进了|净推进) (\d+) 格/.exec(first)?.[1] ?? '0');
+        const stop1 = h.bot.entity.position.x;
+
+        const second = await travelToSkill(h.bot, 60, 70, 0, 25_000, undefined, undefined, h.deps);
+        const advanced2 = Number(/(?:推进了|净推进) (\d+) 格/.exec(second)?.[1] ?? '0');
+
+        expect(advanced1).toBeGreaterThan(0); // 第一次就不能是 0（桥搭过去了）
+        expect(advanced2).toBeGreaterThan(0); // 第二次接着走，也不会是 0
+        expect(h.bot.entity.position.x).toBeGreaterThan(stop1);
+        // 两次都不能拿"脚下悬空"当结论（桥已经搭过去了）
+        expect(second).not.toContain('下一步脚下不是实心');
+    });
+
+    it('桥下是岩浆 → 拒绝搭桥（沿用液体门的措辞，一块都不垫）', async () => {
+        const h = travelHarness({
+            pos: { x: 0, y: 70, z: 0 },
+            dimension: 'overworld',
+            inventory: [
+                { name: 'diamond_pickaxe', count: 1 },
+                { name: 'cobblestone', count: 8 },
+            ],
+            cells: { [key(1, 69, 0)]: 'air', [key(1, 68, 0)]: 'lava' },
+        });
+        const receipt = await travelToSkill(h.bot, 400, 70, 0, 300_000, undefined, undefined, h.deps);
+
+        expect(h.bridgeCalls).toHaveLength(0);
+        expect(receipt).toContain('就是岩浆（桥下面）');
+        expect(receipt.trimEnd().split('\n').at(-1)).toBe('下一步（照做即可）：moveAway(distance=8)');
+    });
+
+    it('搭桥之后继续正常挖：**没有重复挖、也没有漏步**（连续性不变式）', async () => {
+        const h = travelHarness({
+            pos: { x: 0, y: 70, z: 0 },
+            dimension: 'overworld',
+            inventory: [
+                { name: 'diamond_pickaxe', count: 1 },
+                { name: 'cobblestone', count: 8 },
+            ],
+            canWalk: false,
+            cells: { [key(1, 69, 0)]: 'air' },
+        });
+        const receipt = await travelToSkill(h.bot, 20, 70, 0, 300_000, undefined, undefined, h.deps);
+
+        // 推进行程是一条直线：x 从 0 连续走到 20，没有跳格/回头
+        expect(h.bot.entity.position.x).toBe(20);
+        const advanced = Number(/(?:推进了|净推进) (\d+) 格/.exec(receipt)?.[1] ?? '0');
+        expect(advanced).toBe(20);
+        // 桥只垫在需要的那一格，不会把整条路铺满
+        expect(h.bridgeCalls).toHaveLength(1);
+        expect(h.bridgeCalls[0]).toMatchObject({ block: 'cobblestone', x: 1, y: 69, z: 0 });
     });
 });
 
