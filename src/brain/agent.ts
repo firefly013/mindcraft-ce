@@ -22,7 +22,7 @@ import { createToolCatalog, EMPTY_TOOL_CATALOG, type ToolCatalog } from './tools
 import type { ToolDeclaration } from '../shared/tools.js';
 import { CliJobTracker } from './cli_jobs.js';
 import { log } from './connection_handler.js';
-import { STOP_WORDS } from '../shared/chat.js';
+import { classifyChat } from '../shared/chat.js';
 import { EVENT_LOG_LIMIT, eventTextFor, renderEventText } from '../shared/event_stream.js';
 import { renderLiveState } from '../shared/live_state.js';
 import type { LiveState } from '../shared/live_state.js';
@@ -531,27 +531,34 @@ export class Agent {
             }
 
             // 全中文：不再做英文翻译，直接处理原文。
-            // 聊天默认 L3 唤醒；喊急停词的直接抢占当前请求。
-            const lower = message.toLowerCase();
-            const urgent = STOP_WORDS.some((w) => lower.includes(w.toLowerCase()));
-            const level = urgent ? LEVEL.PREEMPT : LEVEL.WAKE;
-            if (!this.teammateNames.has(username)) {
+            // 投递力度由 `classifyChat` 决定（纯函数，有单测）：玩家=唤醒+要求回话，
+            // 队友=默认只记录（见那里的真机教训：队友消息曾经的 expectReply: true
+            // 让两个 bot 陷入「报坐标 → 收到 → 再报坐标」的无限乒乓）。
+            const isTeammate = this.teammateNames.has(username);
+            const delivery = classifyChat({
+                message,
+                fromTeammate: isTeammate,
+                whisper: whisper === true,
+                selfName: this.name,
+            });
+            const level: Level = delivery.level;
+            if (!isTeammate) {
                 const text =
                     '玩家 ' + username + ' 对你说：' + message +
                     (whisper ? '（这是私聊，别人听不到）' : '') +
                     '\n**有人在直接跟你说话，先用 Say（或正文）回一句，再继续手上的活。**';
                 this.handleMessage(username, text, KIND.USER, level, {
                     whisper,
-                    mention: lower.includes(this.name.toLowerCase()),
-                    expectReply: true,
+                    mention: delivery.addressed,
+                    expectReply: delivery.expectReply,
                 });
                 return;
             }
 
             this.handleMessage(username, message, KIND.USER, level, {
                 whisper,
-                mention: lower.includes(this.name.toLowerCase()),
-                expectReply: true,
+                mention: delivery.addressed,
+                expectReply: delivery.expectReply,
             });
         } catch (error: unknown) {
             console.error('Error handling message:', error);
@@ -668,6 +675,16 @@ export class Agent {
                 // 动作通道锁：L5 的反射开始跑就锁上，最后一个报告完成才解开。
                 beginEmergency: () => this.scheduler.beginEmergency(),
                 endEmergency: () => this.scheduler.endEmergency(),
+                // 空转护栏：**必须留痕**。它是"模型不调工具时替它踩一脚油门"，
+                // 夜里复盘时唯一能回答"bot 是真在干活还是被护栏拖着走"的证据。
+                stallGuard: {
+                    onContinue: (attempt: number): void => {
+                        this.log.with('stall').info({ phase: 'continue', attempt });
+                    },
+                    onWatchdog: (idleMs: number, attempt: number): void => {
+                        this.log.with('stall').warn({ phase: 'watchdog', idleMs, attempt });
+                    },
+                },
                 extensions: [
                     defineExtension({
                         name: 'request-log',
