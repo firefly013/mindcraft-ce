@@ -45,3 +45,10 @@
 - 关联：模型 Feedback「digDown(115) 只挖 18 格就停、不给原因」应是同一处（撞水后进程被杀，而非正常结束）。
 - 影响：进度反复重置（回出生点、丢竖井），但未丢关键道具；整夜会持续浪费时间与上下文。
 - 建议：digDown 遇到水/岩浆/落差自行停止并回执；`stop()` 先做身体侧硬中断再考虑杀进程。
+
+## F-7（严重，运行态）模型退化成"只输出正文、不调用工具"
+- 现象：overnight_a 最后一次 tool_call 23:18:21、最后 action 23:18:30，但 provider 请求持续到 00:00:25（stopReason=stop、thinking+text）。~45 分钟内模型一直在回复，却零工具调用 → bot 原地不动；inbox 开发者指令能被读到但不会被执行。
+- 对比：overnight_b 同期仍正常调工具（move/equip 等）。
+- 诱因猜测：上下文很长（a 的 totalTokens ~58 万）或压缩后行为漂移；也可能是"等待玩家/开发者回复"的语境把模型带成纯聊天。
+- 处置：Lead 授权 CLI 代跑救援（见 tmp/overnight/RUNLOG.md 的 RESCUE-1）——equip→走门→enterNether→分段寻路→discard 交接，成功让 b 拿到 stone_pickaxe。
+- 待观察：模型接管后是否恢复 tool_call；若再次退化，建议清/压缩 a 的 session 或加"必须调用工具"的强约束。
