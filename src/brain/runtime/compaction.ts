@@ -31,13 +31,37 @@ function positiveNumber(value: unknown, fallback: number): number {
   return typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : fallback;
 }
 
+/**
+ * reserve 至少要占上下文窗口的这个比例。**这是防死锁的硬底线。**
+ *
+ * 真实事故（2026-10-18 16:49，overnight_b）：触发线 = `1_000_000 − 16_384 = 983_616`，
+ * 而 pi-durable 判断"超没超"用的是 `estimateContext()` **估算**值——实测它比真实
+ * token 数**低 14% 以上**（真实 1.14M 时估算仍未过 983K）。于是阈值压缩永不触发；
+ * 等到请求被上游以 `maximum context length is 1048576` 拒绝时，走的是"溢出"路径：
+ * 先压缩再重试——**而压缩要总结的那段前缀本身就是 1.1M，总结请求同样 400**。
+ * 结果：生成永远失败、压缩永远做不完、prompt 还在长——bot 卡死 20 分钟，
+ * 只有重置会话才能救回来（`summarize` 检查点一直停在那里）。
+ *
+ * 留 20% 余量后，触发线降到窗口的 80%，即使估算偏低 20% 也能在硬上限之前先压缩；
+ * 而压缩时的前缀 ≈ 窗口的 80% − keepRecent，仍装得进一次总结请求。宁可多压缩几次，
+ * 也不能让 bot 变成砖。
+ */
+export const MIN_RESERVE_RATIO = 0.2;
+
 /** 从 profile 解析上下文压缩策略。缺字段一律落回 pi-durable 的默认值。 */
-export function compactionPolicyFromProfile(profile: unknown): CompactionPolicy {
+export function compactionPolicyFromProfile(profile: unknown, contextWindow?: number): CompactionPolicy {
   const source = (profile ?? {}) as Record<string, unknown>;
   const compaction = (source['compaction'] ?? {}) as Record<string, unknown>;
+  const configured = positiveNumber(compaction['reserveTokens'], DEFAULT_RESERVE_TOKENS);
+  // 窗口已知时，把 reserve 抬到安全底线之上（profile 配得更保守就听 profile 的）。
+  const floor =
+    typeof contextWindow === 'number' && Number.isFinite(contextWindow) && contextWindow > 0
+      ? Math.round(contextWindow * MIN_RESERVE_RATIO)
+      : 0;
+  const reserveTokens = Math.max(configured, floor);
   return {
     enabled: compaction['enabled'] !== false,
-    reserveTokens: positiveNumber(compaction['reserveTokens'], DEFAULT_RESERVE_TOKENS),
+    reserveTokens,
     keepRecentTokens: positiveNumber(compaction['keepRecentTokens'], DEFAULT_KEEP_RECENT_TOKENS),
     // 后台压缩的提前量。主线还没这个参数，落回 pi-durable 默认。
     backgroundTokens: positiveNumber(compaction['backgroundTokens'], DEFAULT_BACKGROUND_TOKENS),

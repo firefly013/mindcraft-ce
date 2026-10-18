@@ -105,6 +105,31 @@ describe('profile → CompactionPolicy', () => {
     expect(policy.keepRecentTokens).toBe(DEFAULT_KEEP_RECENT_TOKENS);
     expect(policy.backgroundTokens).toBe(DEFAULT_BACKGROUND_TOKENS);
   });
+
+  /**
+   * 真实事故（2026-10-18 16:49，overnight_b）：触发线 = 1_000_000 − 16_384 = 983_616，
+   * 而 pi-durable 用**估算** token 数判断超没超，实测比真实值低 14% 以上（真实 1.14M
+   * 时估算仍没过线）→ 阈值压缩永不触发 → 请求被上游 400 拒绝后走"溢出"路径，
+   * 而**总结请求的前缀本身就是 1.1M，同样 400** → 生成与压缩互相卡死，bot 变砖 20 分钟。
+   */
+  describe('reserve 底线：不许让触发线贴着窗口上限', () => {
+    it('配得太小（16K）会被抬到窗口的 20%', () => {
+      const policy = compactionPolicyFromProfile({ compaction: { reserveTokens: 16_384 } }, 1_000_000);
+      expect(policy.reserveTokens).toBe(200_000);
+      // 触发线必须明显低于硬上限：估算哪怕偏低 20% 也还来得及先压缩。
+      expect(compactionTriggerTokens(1_000_000, policy)).toBeLessThanOrEqual(800_000);
+    });
+
+    it('配得比底线更保守时听 profile 的（400K 不被改小）', () => {
+      const policy = compactionPolicyFromProfile({ compaction: { reserveTokens: 400_000 } }, 1_000_000);
+      expect(policy.reserveTokens).toBe(400_000);
+    });
+
+    it('窗口未知时保持向后兼容（不凭空抬高）', () => {
+      const policy = compactionPolicyFromProfile({ compaction: { reserveTokens: 16_384 } });
+      expect(policy.reserveTokens).toBe(16_384);
+    });
+  });
 });
 
 describe('8.7 倍阈值 bug', () => {

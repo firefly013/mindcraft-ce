@@ -132,7 +132,9 @@ export function eventEntryDraft(events: readonly GameEvent[]): EntryDraft {
 
 export async function openBotWiring(options: BotWiringOptions): Promise<BotWiring> {
   const provider = options.provider ?? resolveProvider(options.profile);
-  const compaction = compactionPolicyFromProfile(options.profile);
+  // 把窗口一起传进去：**reserve 有硬底线**（窗口的 20%），否则"估算偏低 + 余量太小"
+  // 会让阈值压缩永不触发，溢出后连总结请求本身都超限 → 死锁。见 compaction.ts。
+  const compaction = compactionPolicyFromProfile(options.profile, provider.contextWindow);
 
   // 事件接入：**先建**（或接上调用方给的），这样下面那个请求生命周期的 hook
   // 能闭包住它——L3 整流的闸门就挂在那里。
