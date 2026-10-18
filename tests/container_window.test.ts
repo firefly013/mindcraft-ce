@@ -111,10 +111,10 @@ describe('openBlockUi：先清残留、再开、失败重试一次', () => {
       openContainer: vi.fn(() => new Promise(() => {})),   // 永远等不到窗口事件
     });
     await expect(openBlockUi(bot, chest, { timeoutMs: 30 })).rejects.toThrow(/打开 chest 失败/);
-    await expect(openBlockUi(bot, chest, { timeoutMs: 30 })).rejects.toThrow(/服务端没回窗口事件/);
-    await expect(openBlockUi(bot, chest, { timeoutMs: 30 })).rejects.toThrow(/上一次重启留下的窗口/);
+    await expect(openBlockUi(bot, chest, { timeoutMs: 30 })).rejects.toThrow(/一个窗口包都没发/);
+    await expect(openBlockUi(bot, chest, { timeoutMs: 30 })).rejects.toThrow(/不是站位或角度问题/);
     const err = await openBlockUi(bot, chest, { timeoutMs: 30 }).catch((e: Error) => e.message);
-    expect(String(err)).toContain('下一步');
+    expect(String(err)).toContain('下一步（照做即可）');
     expect(String(err)).toContain('Event windowOpen did not fire');   // 原始错误如实附上
     expect(String(err)).not.toBe('Event windowOpen did not fire within timeout of 20000ms');
     expect(bot.openContainer).toHaveBeenCalledTimes(2 * 4);           // 每次调用最多 attempts+1
@@ -181,7 +181,7 @@ describe('craftWithStaleWindowGuard：合成也吃同一套守卫', () => {
       .catch((e: Error) => e.message);
     expect(String(err)).toContain('合成失败');
     expect(String(err)).toContain('工作台窗口事件');
-    expect(String(err)).toContain('下一步');
+    expect(String(err)).toContain('下一步（照做即可）');
     expect(String(err)).toContain('Event windowOpen did not fire');
     expect(bot.craft).toHaveBeenCalledTimes(2);   // 重试了一次
   });

@@ -5563,40 +5563,115 @@ export async function openBlockUi(
     // 下限 100ms：允许调用方"快点失败"（重试策略/测试），但 0 会变成不等待。
     const timeoutMs = Math.max(100, Number(options.timeoutMs ?? CONTAINER_OPEN_TIMEOUT_MS) || CONTAINER_OPEN_TIMEOUT_MS);
     const retries = Math.max(0, Math.floor(Number(options.retries ?? CONTAINER_OPEN_RETRIES) || 0));
+    // **开界面前先松开 sneak、收起手上的东西。**
+    // 真机 2026-10-19（overnight_a 的对照实验）：`crafting_table` 的 useBlock 完全正常，
+    // 而 **chest / furnace 100% windowOpen 超时**，换方块/换位置/重启都一样。
+    // 两者唯一的差别就是"要不要服务端开一个带槽位的界面"，而**潜行状态下用方块是
+    // 放置而不是打开**（原版行为）——所以一条卡住的 sneak（搭桥/挖竖井留下的）
+    // 正好只会打断这条路径，crafting_table 那条自己实现的路径完全不受影响。
+    try {
+        bot.setControlState?.('sneak', false);
+    } catch {
+        // 拿不到控制键就继续（这不是唯一原因，只是最可能的那条）。
+    }
+    try {
+        bot.deactivateItem?.();
+    } catch {
+        // 同上。
+    }
+    // 诊断计数：**这次尝试里到底有没有窗口包到达**（0 = 服务端根本没发；>0 = 到了没接住）。
+    let windowPackets = 0;
+    const onWindowOpen = (): void => {
+        windowPackets += 1;
+    };
+    const onWindowClose = (): void => {
+        windowPackets += 1;
+    };
+    try {
+        bot.on?.('windowOpen', onWindowOpen);
+        bot.on?.('windowClose', onWindowClose);
+    } catch {
+        // 挂不上监听就少一条证据，不影响打开。
+    }
+    const hadWindowOpenAlready = (bot as { currentWindow?: unknown } | null)?.currentWindow != null;
     let lastError: unknown = null;
-    for (let attempt = 0; attempt <= retries; attempt++) {
-        // 每次尝试前先把残留界面清掉（重启/上一次动作留下的那个）。
-        const hadStale = closeStaleWindow(bot);
-        if (hadStale) {
-            log(bot, `开 ${name} 之前先关掉了残留的界面（上一次会话/动作留下的），这次从干净状态开始。`);
-        }
-        try {
-            const opened = await openWithTimeout(bot, block, furnaceLike, timeoutMs);
-            if (attempt > 0) log(bot, `清掉残留界面后重试成功，${name} 打开正常。`);
-            return opened;
-        } catch (err: unknown) {
-            lastError = err;
-            // 超时之后也清一次：别把脏状态留给下一个动作。
-            closeStaleWindow(bot);
-            // **不是"窗口事件没来"的错误原样抛**（例如方块类型不对）：
-            // 重试没有意义，更不能把它包装成"残留窗口"的故事。
-            if (!isWindowOpenTimeout(err)) throw err;
-            if (attempt < retries) {
-                log(
-                    bot,
-                    `打开 ${name} 没等到窗口事件（${Math.round(timeoutMs / 1000)} 秒上限）；已清掉残留界面，重试一次。`,
-                );
+    try {
+        for (let attempt = 0; attempt <= retries; attempt++) {
+            // 每次尝试前先把残留界面清掉（重启/上一次动作留下的那个）。
+            const hadStale = closeStaleWindow(bot);
+            if (hadStale) {
+                log(bot, `开 ${name} 之前先关掉了残留的界面（上一次会话/动作留下的），这次从干净状态开始。`);
             }
+            try {
+                const opened = await openWithTimeout(bot, block, furnaceLike, timeoutMs);
+                if (attempt > 0) log(bot, `清掉残留界面后重试成功，${name} 打开正常。`);
+                recordContainerOpenResult(name, true);
+                return opened;
+            } catch (err: unknown) {
+                lastError = err;
+                // 超时之后也清一次：别把脏状态留给下一个动作。
+                closeStaleWindow(bot);
+                // **不是"窗口事件没来"的错误原样抛**（例如方块类型不对）：
+                // 重试没有意义，更不能把它包装成"残留窗口"的故事。
+                if (!isWindowOpenTimeout(err)) throw err;
+                if (attempt < retries) {
+                    log(
+                        bot,
+                        `打开 ${name} 没等到窗口事件（${Math.round(timeoutMs / 1000)} 秒上限）；已清掉残留界面，重试一次。`,
+                    );
+                }
+            }
+        }
+    } finally {
+        try {
+            bot.removeListener?.('windowOpen', onWindowOpen);
+            bot.removeListener?.('windowClose', onWindowClose);
+        } catch {
+            // 摘不掉监听不影响结果。
         }
     }
     const raw = lastError instanceof Error ? lastError.message : String(lastError);
+    const consecutive = recordContainerOpenResult(name, false);
+    const position = (block as { position?: { x?: number; y?: number; z?: number } })?.position;
+    const where = position == null ? '位置读不到' : `(${Math.round(Number(position.x))},${Math.round(Number(position.y))},${Math.round(Number(position.z))})`;
+    // **诊断第一句先把"锅在谁身上"说清**，然后才给下一步。真机里模型被同一套
+    // "换个位置再试"的建议喂了 18 次，白耗一整晚。
+    const diagnosis =
+        windowPackets === 0
+            ? `服务端**一个窗口包都没发**（${timeoutMs >= 1000 ? `${Math.round(timeoutMs / 1000)} 秒` : `${timeoutMs} 毫秒`}内 windowOpen/windowClose 计数 = 0）：这不是站位或角度问题，是"带槽位容器"这条交互路径本身没走通`
+            : `窗口包**到过 ${windowPackets} 次**但没接住（大概率是残留界面/竞态），不是服务端没响应`;
+    const nextStep =
+        consecutive >= 2
+            ? `下一步（照做即可）：这已经是连续第 ${consecutive} 次打不开容器了——**别再重发同一个 useBlock**（同样的调用只会得到同样的结果）。` +
+              `改走非容器路径：让队友把东西丢在约定点后自己捡（或互相用 takeFromChest 由**能开箱的那一方**去取），` +
+              `并把这条现象告诉人类（这是代码级故障）。`
+            : `下一步（照做即可）：换**另一个**容器方块试一次（不同坐标或不同种类），仍然失败就别再试了；` +
+              `同一个箱子重复 useBlock 不会变好。`;
     throw new Error(
-        `打开 ${name} 失败（服务端没回窗口事件，可能被上一次重启留下的窗口占着）。` +
+        `打开 ${name} 失败：${diagnosis}。` +
+            `现场：方块 ${name} @${where}，开之前${hadWindowOpenAlready ? '**已经有一个界面开着**' : '没有界面开着'}。` +
             `已经清掉残留界面并重试 ${retries} 次都没成。` +
-            `下一步：先离开这一格再回来重新 useBlock（或换一个同类方块试试）；` +
-            `还不行就等几秒——服务端那边的窗口状态要一次新交互才会刷新。` +
+            nextStep +
             `（原始错误：${raw}）`,
     );
+}
+
+/** 连续失败次数（按方块名）；用来让回执**换形状**，而不是第 18 次还劝它再试一遍。 */
+const containerOpenFailures = new Map<string, number>();
+
+function recordContainerOpenResult(name: string, ok: boolean): number {
+    if (ok) {
+        containerOpenFailures.delete(name);
+        return 0;
+    }
+    const next = (containerOpenFailures.get(name) ?? 0) + 1;
+    containerOpenFailures.set(name, next);
+    return next;
+}
+
+/** 给测试/诊断用：清掉连续失败计数。 */
+export function resetContainerOpenFailures(): void {
+    containerOpenFailures.clear();
 }
 
 /** 这个错误是不是"窗口事件没来"那一类（只有这一类才值得重试 + 用残留窗口解释）。 */
@@ -5678,7 +5753,7 @@ export async function craftWithStaleWindowGuard(
     throw new Error(
         `合成失败（服务端没回工作台窗口事件，可能被上一次重启留下的窗口占着）。` +
             `已经清掉残留界面并重试 ${retries} 次都没成。` +
-            `下一步：走到工作台旁边重新 craftRecipe（或先 placeHere 一个新工作台）；` +
+            `下一步（照做即可）：走到工作台旁边重新 craftRecipe（或先 placeHere 一个新工作台）；` +
             `还不行就等几秒再试。（原始错误：${raw}）`,
     );
 }
