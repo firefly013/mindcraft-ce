@@ -48,6 +48,7 @@ import type { SampleContext } from './live_state.js';
 import { nearestThreat, runEmergency, FOOD_VALUE, shouldTriggerEmergency } from './safety/emergency.js';
 import type { EmergencyIntent, EmergencyResult, ThreatEntity } from './safety/emergency.js';
 import {
+    closeStaleWindow,
     consume,
     forceExitWater,
     stopPvp,
@@ -690,11 +691,35 @@ export class MineflayerBody {
 
         this.bot.on('login', () => {
             console.log(this.name, 'logged in');
+            // **重连之后先把界面状态清干净。** 我们一晚上要重启十几次，旧进程
+            // 来不及发 `close_window` 就没了，客户端/服务端都可能还记着一个窗口；
+            // 这种状态下再开箱子，`windowOpen` 可能永远不来（真机 18:18：
+            // `Event windowOpen did not fire within timeout of 20000ms`，
+            // 紧接着身体才在空闲时清掉 `leaked-open-window`）。
+            try {
+                if (closeStaleWindow(this.bot)) {
+                    this.log.with('lifecycle').info({ event: 'container-window-reset', why: 'relogin' });
+                }
+            } catch {
+                // 清不掉不影响登录流程（每次开界面前还会再清一次）。
+            }
             // 皮肤是身体的事（要发 /skin 命令）。主线的 `serverProxy.login()`
             // 是给 MindServer 看的，留在大脑。
             const skin = settings.profile?.['skin'] as { model: string; path: string } | undefined;
             if (skin) this.bot.chat(`/skin set URL ${skin.model} ${skin.path}`);
             else this.bot.chat(`/skin clear`);
+        });
+
+        // 每次复活（spawn）也清一次：死亡会让服务端关掉界面，客户端那个对象
+        // 却可能还留着——留着就会让后续的 useBlock/placeBlock 全废。
+        this.bot.on('spawn', () => {
+            try {
+                if (closeStaleWindow(this.bot)) {
+                    this.log.with('lifecycle').info({ event: 'container-window-reset', why: 'spawn' });
+                }
+            } catch {
+                // 同上。
+            }
         });
 
         const spawnTimeoutDuration = settings.spawn_timeout;

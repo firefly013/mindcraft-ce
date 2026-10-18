@@ -34,10 +34,13 @@ import {
     exploreForSkill,
     exploreNextAction,
     exploreReceipt,
+    foodRouteLines,
+    foodRoutePrimary,
     hasFireResistance,
     hazardHere,
     huntForSkill,
     huntNextAction,
+    isPassiveFoodAnimal,
     isUnsupportedFloorBlock,
     maxLegPerScan,
     mineTunnelSkill,
@@ -45,6 +48,7 @@ import {
     resolveBlockName,
     resolveEntityName,
     resolveTunnelDirection,
+    scanFoodRouteAssets,
     spiralReach,
     spiralScanPath,
     spiralWaypoints,
@@ -54,6 +58,7 @@ import {
     worstCoverageDistance,
     type ExploreOutcome,
     type FlatPosition,
+    type FoodRouteAssets,
     type HuntOutcome,
 } from '../src/body/library/progression.js';
 import {
@@ -690,6 +695,122 @@ describe('huntFor：刷到够数 / 只认真实增量', () => {
         expect(receipt.trimEnd().split('\n').at(-1)).toBe(
             '下一步（照做即可）：exploreFor(block="nether_bricks", max_steps=4)',
         );
+    });
+
+    // ── 被动动物被打光：死胡同 → 可再生食物路线 ──
+    // 真机原话（overnight_b）："世界几乎没有食物来源：找不到任何被动动物/村庄/农田，
+    // 掉血后无法回血（卡在 2.7 血）"。所以 no_target 必须是出路，不是终点。
+    it('被动动物找不到 → 给三条可再生路线 + 最近的水，且**主行动只有一条**', async () => {
+        const bot = makeBot({
+            items: [stack('stick', 3), stack('string', 2), stack('wheat_seeds', 12)],
+            blocks: [{ name: 'water', x: 20, y: 63, z: 0 }],
+        });
+        const receipt = await huntForSkill(bot, 'chicken', 2, 48, 60_000, {
+            findEntity: () => null,
+            sleep: noSleep,
+        });
+
+        expect(receipt).toContain('这一带（半径 48 格内）确实没有 chicken');
+        expect(receipt).toContain('被动动物被打光之后不会很快回来');
+        expect(receipt).toContain('可再生食物路线');
+        // ① 钓鱼 ② 种地 ③ 腐肉：三条都要在回执里，别让模型自己想去
+        expect(receipt).toContain('fishing_rod');
+        expect(receipt).toContain('3 木棍 + 2 线');
+        expect(receipt).toContain('种小麦');
+        expect(receipt).toContain('12 个种子');
+        // ③ 腐肉：背包里没有时就只说"这是最后手段"，不编一条做不出来的调用
+        expect(receipt).toContain('腐肉');
+        expect(receipt).toContain('最后手段');
+        // ③ 鱼在哪：水的位置要写清楚（钓鱼路线才可执行）
+        expect(receipt).toContain('最近的水在 (20, 63, 0)');
+        expect(receipt).toContain('离你约 20.0 格');
+        // **只有一条**下一步
+        const nextLines = receipt.split('\n').filter((line) => line.startsWith('下一步（照做即可）：'));
+        expect(nextLines).toHaveLength(1);
+        expect(nextLines[0]).toBe(
+            '下一步（照做即可）：useBlock(type="crafting_table", input="3 stick, 2 string", output="1 fishing_rod")',
+        );
+    });
+
+    it('没有材料时主行动仍然可执行：腐肉 → 水边 → 去找水（逐级降级）', async () => {
+        const rottenBot = makeBot({ items: [stack('rotten_flesh', 2)] });
+        const rotten = await huntForSkill(rottenBot, 'cow', 2, 48, 60_000, {
+            findEntity: () => null,
+            sleep: noSleep,
+        });
+        expect(rotten).toContain('腐肉');
+        expect(rotten.trimEnd().split('\n').at(-1)).toBe('下一步（照做即可）：consume(item_name="rotten_flesh")');
+
+        const bareBot = makeBot({ items: [] });
+        const bare = await huntForSkill(bareBot, 'cow', 2, 48, 60_000, {
+            findEntity: () => null,
+            sleep: noSleep,
+        });
+        expect(bare).toContain('没扫到');
+        expect(bare.trimEnd().split('\n').at(-1)).toBe(
+            '下一步（照做即可）：searchForBlock(type="water", search_range=256)',
+        );
+    });
+
+    it('非被动目标（烈焰人）不塞食物路线：原来的口径不变', async () => {
+        const bot = makeBot({ dimension: 'the_nether' });
+        const receipt = await huntForSkill(bot, 'blaze', 4, 48, 60_000, {
+            findEntity: () => null,
+            sleep: noSleep,
+        });
+        expect(receipt).not.toContain('可再生食物路线');
+        expect(receipt).toContain('烈焰人只在要塞里刷');
+    });
+
+    it('只认会被打光的被动动物（怪物不在名单里）', () => {
+        for (const animal of ['chicken', 'cow', 'pig', 'sheep', 'rabbit', 'cod', 'minecraft:Chicken']) {
+            expect(isPassiveFoodAnimal(animal), animal).toBe(true);
+        }
+        for (const monster of ['blaze', 'zombie', 'creeper', 'enderman', 'warden']) {
+            expect(isPassiveFoodAnimal(monster), monster).toBe(false);
+        }
+        expect(isPassiveFoodAnimal(undefined)).toBe(false);
+    });
+
+    it('主行动优先级：能钓鱼先做竿 → 有竿去水边 → 有种子先做锄 → 腐肉 → 找水', () => {
+        const base: FoodRouteAssets = {
+            edibles: 0,
+            sticks: 0,
+            string: 0,
+            seeds: 0,
+            planks: 0,
+            rottenFlesh: 0,
+            hasHoe: false,
+            hasFishingRod: false,
+            hasCraftingTable: false,
+            water: null,
+            waterScanRadius: 64,
+        };
+        expect(foodRoutePrimary({ ...base, sticks: 3, string: 2 })).toContain('fishing_rod');
+        expect(
+            foodRoutePrimary({
+                ...base,
+                hasFishingRod: true,
+                water: { position: { x: 10, y: 63, z: 5 }, distance: 11.2 },
+            }),
+        ).toBe('goToCoordinates(x=10, y=63, z=5, closeness=3)');
+        expect(foodRoutePrimary({ ...base, seeds: 12, planks: 4, sticks: 4 })).toContain('wooden_hoe');
+        expect(foodRoutePrimary({ ...base, seeds: 12, hasHoe: true, water: { position: { x: 1, y: 62, z: 1 }, distance: 1.4 } })).toContain('goToCoordinates');
+        expect(foodRoutePrimary({ ...base, rottenFlesh: 1 })).toBe('consume(item_name="rotten_flesh")');
+        expect(foodRoutePrimary(base)).toBe('searchForBlock(type="water", search_range=256)');
+    });
+
+    it('种子算"资产"不算"能吃"：盘点只走 foodValueOf，主行动指向种地', () => {
+        const bot = makeBot({
+            items: [stack('wheat_seeds', 12), stack('oak_planks', 4), stack('stick', 4), stack('bread', 1)],
+        });
+        const assets = scanFoodRouteAssets(bot, { x: 0, y: 64, z: 0 });
+        expect(assets.edibles).toBe(1); // 只有 bread 能吃，种子/木板/木棍都不算
+        expect(assets.seeds).toBe(12);
+        expect(assets.planks).toBe(4);
+        expect(assets.sticks).toBe(4);
+        expect(foodRouteLines(assets).join('\n')).toContain('12 个种子');
+        expect(foodRoutePrimary(assets)).toContain('wooden_hoe');
     });
 
     it('下界刷烈焰人且没有抗火 Buff → 回执里必须先提醒（不静默送死）', async () => {

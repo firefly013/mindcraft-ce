@@ -26,7 +26,7 @@ import { applyScaffoldingBlocks, movementsFor, MAX_DROP_DOWN } from "../safety/m
 import { deepWaterAllowed } from "../safety/permits.js";
 import { assessStandingSpot, chooseSafeFleeTarget } from "../safety/flee.js";
 import { safeguards } from "../safety/safeguards.js";
-import { foodValueOf, normalizeFoodName } from "../safety/emergency.js";
+import { cookedCounterpartOf, foodValueOf, normalizeFoodName } from "../safety/emergency.js";
 
 export function log(bot: any, ...messages: any[]): void {
     bot.output += messages.join(' ') + '\n';
@@ -632,7 +632,9 @@ export async function craftRecipe(bot: any, itemName: string, num: number = 1): 
         return false;
     }
 
-    await bot.craft(recipe, crafts, craftingTable);
+    // 合成也要走"先清残留窗口 + 有界等待"：mineflayer 的 `craftOnce` 自己
+    // `await once(bot, 'windowOpen')`（默认 20 秒硬等），残留窗口会让它同样卡死。
+    await craftWithStaleWindowGuard(bot, recipe, crafts, craftingTable);
     const got = world.getInventoryCounts(bot)[itemName];
     if (crafts < craftsWanted) {
         log(bot, `材料不够：想做 ${num} 个 ${itemName}（需跑 ${craftsWanted} 遍配方，每遍出 ${perCraft} 个），只够跑 ${crafts} 遍；限料是 ${craftLimit.limitingResource}。现在背包里有 ${got} 个 ${itemName}。`);
@@ -716,7 +718,7 @@ export async function smeltItem(bot: any, itemName: string, num: number = 1): Pr
     await bot.lookAt(furnaceBlock.position.offset(0.5, 0.5, 0.5), true);
 
     console.log('smelting...');
-    const furnace: any = await bot.openFurnace(furnaceBlock);
+    const furnace: any = await openBlockUi(bot, furnaceBlock);
     // check if the furnace is already smelting something
     const input_item: any = furnace.inputItem();
     if (input_item && input_item.type !== (mc as any).getItemId(itemName) && input_item.count > 0) {
@@ -825,7 +827,7 @@ export async function clearNearestFurnace(bot: any): Promise<boolean> {
     }
 
     console.log('clearing furnace...');
-    const furnace: any = await bot.openFurnace(furnaceBlock);
+    const furnace: any = await openBlockUi(bot, furnaceBlock);
     console.log('opened furnace...');
     // take the items out of the furnace
     let smelted_item: any, intput_item: any, fuel_item: any;
@@ -2049,7 +2051,7 @@ export async function putInChest(bot: any, itemName: string, num: number = -1): 
     }
     const to_put: number = num === -1 ? item.count : Math.min(num, item.count);
     await goToPosition(bot, chest.position.x, chest.position.y, chest.position.z, 2);
-    const chestContainer: any = await bot.openContainer(chest);
+    const chestContainer: any = await openBlockUi(bot, chest);
     await chestContainer.deposit(item.type, null, to_put);
     await chestContainer.close();
     log(bot, `Successfully put ${to_put} ${itemName} in the chest.`);
@@ -2072,7 +2074,7 @@ export async function takeFromChest(bot: any, itemName: string, num: number = -1
         return false;
     }
     await goToPosition(bot, chest.position.x, chest.position.y, chest.position.z, 2);
-    const chestContainer: any = await bot.openContainer(chest);
+    const chestContainer: any = await openBlockUi(bot, chest);
 
     // Find all matching items in the chest
     const matchingItems: any[] = chestContainer.containerItems().filter((item: any) => item.name === itemName);
@@ -2145,7 +2147,7 @@ export async function viewChest(bot: any): Promise<boolean> {
         return false;
     }
     await goToPosition(bot, chest.position.x, chest.position.y, chest.position.z, 2);
-    const chestContainer: any = await bot.openContainer(chest);
+    const chestContainer: any = await openBlockUi(bot, chest);
     const contents = containerContents(chestContainer);
     if (!contents.readable) {
         log(bot, contents.lines.join('\n'));
@@ -2179,6 +2181,16 @@ const CONSUME_RESYNC_MS = 700;
 const CONSUME_RETRY_BACKOFF_MS = 800;
 /** 最多试几次（1 次正常 + 1 次重试）。 */
 const CONSUME_MAX_ATTEMPTS = 2;
+
+/**
+ * 存粮下限：背包里能直接吃的 ≤ 这个数，就进入"别乱吃"模式。
+ *
+ * 真机教训：两个 bot 边打边吃，五小时吃光 1000 格内所有能吃的东西，最后 food 2 / 血 1.68、
+ * 连箱子都是空的。**"现在就吃"和"一小时后饿死"之间只差这个判断。**
+ */
+export const FOOD_RESERVE_MIN = 2;
+/** 不饿的界线：food ≥ 这个值时不值得动存粮（低于它才算真饿，可以吃）。 */
+export const FOOD_RESERVE_COMFORT = 14;
 
 export interface ConsumeOptions {
     /** 等数值同步的时间（测试里给 0）。 */
@@ -2355,6 +2367,28 @@ export async function consume(bot: any, itemName: string = "", options: ConsumeO
         return false;
     }
 
+    // ── 存粮规则：**别把最后一口吃掉** ──
+    // 真机教训（2026-10-18 晚）：两个 bot 边打边吃，五小时把 1000 格内能吃的东西全吃光，
+    // 之后 food 2 / 血 1.68、背包和所有箱子里都没有食物——"现在吃了，一小时后饿死"。
+    // 所以：包里能直接吃的只剩 ≤2 份、而自己并不饿（food ≥ 14）时，**拒绝动存粮**。
+    const edibleTotal = edibles.reduce((sum, edible) => sum + edible.count, 0);
+    const rawInPack = edibles.filter((edible) => cookedCounterpartOf(edible.name) != null);
+    if (edibleTotal > 0 && edibleTotal <= FOOD_RESERVE_MIN && before.food != null && before.food >= FOOD_RESERVE_COMFORT) {
+        const keep = edibles.map((edible) => `${edible.name}x${edible.count}`).join('、');
+        const rawHint =
+            rawInPack.length > 0
+                ? ` 生肉只有熟食的一半左右：有熔炉就先 useBlock(type="furnace", input="1 ${rawInPack[0].name}", output="1 ${cookedCounterpartOf(rawInPack[0].name)}") 再吃。`
+                : '';
+        log(
+            bot,
+            `consume ${wanted}：**先留着——你现在不饿**（${formatFoodState(before)}）。` +
+                `背包里只剩 ${edibleTotal} 份能吃的（${keep}），这是低血期的救命粮：饿到 food ≤ ${FOOD_RESERVE_COMFORT - 1} 再吃。` +
+                `${rawHint} 趁现在去补：钓鱼（工作台做 fishing_rod）／打猎／种小麦。`,
+        );
+        log(bot, `下一步（照做即可）：searchForBlock(type="water", search_range=128)`);
+        return false;
+    }
+
     let failures: string[] = [];
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
         const item = findItem();
@@ -2397,6 +2431,17 @@ export async function consume(bot: any, itemName: string = "", options: ConsumeO
                       : `${countText}（饱食度读数没变，服务端可能还没同步——别再连吃）`;
             const retryNote = retried ? `第 ${attempt - 1} 次同步超时（${failures.join('；')}），退避后重试成功——` : '';
             log(bot, `${retryNote}吃成了：${wanted}（${how}）。`);
+            // 生肉只有熟食的一半左右：吃都吃了，但把"下次先烤"说清楚（有熔炉就直接给调用）。
+            const cooked = cookedCounterpartOf(wanted);
+            const rawValue = foodValueOf(wanted);
+            const cookedValue = cooked == null ? null : foodValueOf(cooked);
+            if (cooked != null && rawValue != null && cookedValue != null) {
+                log(
+                    bot,
+                    `⚠️ ${wanted} 是生的：只有 ${rawValue[0]} 点食物，烤成 ${cooked} 是 ${cookedValue[0]} 点` +
+                        `（约一倍）。下次先 useBlock(type="furnace", input="1 ${wanted}", output="1 ${cooked}") 再吃。`,
+                );
+            }
             return true;
         }
 
@@ -5114,6 +5159,47 @@ export const CONTAINER_BLOCKS_OPENABLE = Object.freeze([
 export const FURNACE_LIKE_BLOCKS = Object.freeze(['furnace', 'blast_furnace', 'smoker']);
 
 /**
+ * 打开容器的**单次等待上限**（毫秒）。
+ *
+ * mineflayer 自己的上限是 20 秒（`promise_utils.once(..., 20000)`），而且**只等一次**：
+ * 真机 2026-10-18 18:18（overnight_a）`useBlock(type=chest)` 就这么干等了 20 秒，
+ * 回执只有一句英文 `Event windowOpen did not fire within timeout of 20000ms`，
+ * 模型既不知道发生了什么，也没有第二次机会——紧接着身体才在空闲时清掉那个
+ * **残留界面**（`screen-closed: leaked-open-window`）。等待窗口内的状态本来
+ * 一清就能开，所以这里把上限压到 6 秒，失败立刻清理 + 重试。
+ */
+export const CONTAINER_OPEN_TIMEOUT_MS = 6_000;
+
+/** 打开失败后的重试次数（清掉残留界面再试一次，通常就成了）。 */
+export const CONTAINER_OPEN_RETRIES = 1;
+
+/**
+ * 关掉"客户端以为还开着"的界面，并把引用清掉。
+ *
+ * **为什么每次开界面前都要做这一下**：进程重启（我们一晚上重启十几次）时，
+ * 旧进程来不及发 `close_window` 就没了，服务端/客户端两边都可能还记着一个
+ * 窗口；这种状态下再开箱子，`windowOpen` 事件可能永远不来，于是一路等到超时。
+ * 真机日志的顺序正是这样：失败回执 → 0.26 秒后 `screen-closed: leaked-open-window`。
+ *
+ * @returns 是否真的清掉了一个残留界面（调用方据此上报）。
+ */
+export function closeStaleWindow(bot: any): boolean {
+    const win = (bot as { currentWindow?: unknown } | null | undefined)?.currentWindow ?? null;
+    if (win == null) return false;
+    try {
+        bot.closeWindow?.(win);
+    } catch {
+        // 关不掉（窗口早就无效）也要继续把引用清掉。
+    }
+    try {
+        bot.currentWindow = null;
+    } catch {
+        // 只读实现也要能继续。
+    }
+    return true;
+}
+
+/**
  * 打开一个方块的界面。**必须按类型分路**——这是这条链上最要紧的一件事。
  *
  * ## 为什么非要有这个函数（被错误信息骗了两次）
@@ -5140,23 +5226,153 @@ export const FURNACE_LIKE_BLOCKS = Object.freeze(['furnace', 'blast_furnace', 's
  *
  * 工作台**没有"打开"这一说**——合成要经 `bot.craft(recipe, n, tableBlock)`，
  * 也就是 `craftRecipe`。所以这里如实报错，而不是让调用方去开一个开不了的界面。
+ *
+ * ## 残留界面（重启后箱子打不开）
+ *
+ * 每次尝试**之前**都先 `closeStaleWindow`；超时也再清一次。失败**重试一次**，
+ * 最后抛的是说人话的回执（原因 + 下一步 + 原始错误），不再是 mineflayer 那句
+ * 英文超时。
  */
-export async function openBlockUi(bot: any, block: any): Promise<any> {
+export async function openBlockUi(
+    bot: any,
+    block: any,
+    options: { timeoutMs?: number; retries?: number } = {},
+): Promise<any> {
     const name = String(block?.name ?? '');
     if (name === '') throw new Error('要打开的那一格读不到方块类型。');
-    if (FURNACE_LIKE_BLOCKS.includes(name)) {
-        if (typeof bot?.openFurnace !== 'function') {
-            throw new Error(`这个 mineflayer 版本没有 openFurnace，开不了 ${name}。`);
+    const furnaceLike = FURNACE_LIKE_BLOCKS.includes(name);
+    const containerLike = CONTAINER_BLOCKS_OPENABLE.includes(name) || name.endsWith('shulker_box');
+    if (!furnaceLike && !containerLike) {
+        throw new Error(
+            `${name} 没有"打开界面"这个操作。能打开的只有箱子/陷阱箱/木桶/末影箱/漏斗/发射器/投掷器/潜影盒；`
+                + `熔炉/高炉/烟熏炉走 useBlock 的 input/output（投料、取货）。`
+                + `工作台合成用 craft。`,
+        );
+    }
+    if (furnaceLike && typeof bot?.openFurnace !== 'function') {
+        throw new Error(`这个 mineflayer 版本没有 openFurnace，开不了 ${name}。`);
+    }
+
+    // 下限 100ms：允许调用方"快点失败"（重试策略/测试），但 0 会变成不等待。
+    const timeoutMs = Math.max(100, Number(options.timeoutMs ?? CONTAINER_OPEN_TIMEOUT_MS) || CONTAINER_OPEN_TIMEOUT_MS);
+    const retries = Math.max(0, Math.floor(Number(options.retries ?? CONTAINER_OPEN_RETRIES) || 0));
+    let lastError: unknown = null;
+    for (let attempt = 0; attempt <= retries; attempt++) {
+        // 每次尝试前先把残留界面清掉（重启/上一次动作留下的那个）。
+        const hadStale = closeStaleWindow(bot);
+        if (hadStale) {
+            log(bot, `开 ${name} 之前先关掉了残留的界面（上一次会话/动作留下的），这次从干净状态开始。`);
         }
-        return await bot.openFurnace(block);
+        try {
+            const opened = await openWithTimeout(bot, block, furnaceLike, timeoutMs);
+            if (attempt > 0) log(bot, `清掉残留界面后重试成功，${name} 打开正常。`);
+            return opened;
+        } catch (err: unknown) {
+            lastError = err;
+            // 超时之后也清一次：别把脏状态留给下一个动作。
+            closeStaleWindow(bot);
+            // **不是"窗口事件没来"的错误原样抛**（例如方块类型不对）：
+            // 重试没有意义，更不能把它包装成"残留窗口"的故事。
+            if (!isWindowOpenTimeout(err)) throw err;
+            if (attempt < retries) {
+                log(
+                    bot,
+                    `打开 ${name} 没等到窗口事件（${Math.round(timeoutMs / 1000)} 秒上限）；已清掉残留界面，重试一次。`,
+                );
+            }
+        }
     }
-    if (CONTAINER_BLOCKS_OPENABLE.includes(name) || name.endsWith('shulker_box')) {
-        return await bot.openContainer(block);
-    }
+    const raw = lastError instanceof Error ? lastError.message : String(lastError);
     throw new Error(
-        `${name} 没有"打开界面"这个操作。能打开的只有箱子/陷阱箱/木桶/末影箱/漏斗/发射器/投掷器/潜影盒；`
-            + `熔炉/高炉/烟熏炉走 useBlock 的 input/output（投料、取货）。`
-            + `工作台合成用 craft。`,
+        `打开 ${name} 失败（服务端没回窗口事件，可能被上一次重启留下的窗口占着）。` +
+            `已经清掉残留界面并重试 ${retries} 次都没成。` +
+            `下一步：先离开这一格再回来重新 useBlock（或换一个同类方块试试）；` +
+            `还不行就等几秒——服务端那边的窗口状态要一次新交互才会刷新。` +
+            `（原始错误：${raw}）`,
+    );
+}
+
+/** 这个错误是不是"窗口事件没来"那一类（只有这一类才值得重试 + 用残留窗口解释）。 */
+export function isWindowOpenTimeout(err: unknown): boolean {
+    const msg = err instanceof Error ? err.message : String(err);
+    return /windowOpen did not fire|did not fire within timeout/i.test(msg);
+}
+
+/**
+ * 用一个**有界的**等待包住打开/合成：超时抛"窗口事件没来"，其余错误原样抛。
+ */
+async function withWindowTimeout<T>(
+    promise: Promise<T>,
+    timeoutMs: number,
+): Promise<T> {
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    // 把底层 promise 接住：它在超时之后仍可能自己 reject（mineflayer 20 秒上限），
+    // 不接就会变成 unhandledRejection。
+    const settled = Promise.resolve(promise).then(
+        (value) => ({ kind: 'ok' as const, value }),
+        (error: unknown) => ({ kind: 'error' as const, error }),
+    );
+    const timedOut = new Promise<{ kind: 'timeout' }>((resolve) => {
+        timer = setTimeout(() => resolve({ kind: 'timeout' }), timeoutMs);
+    });
+    try {
+        const raced = await Promise.race([settled, timedOut]);
+        if (raced.kind === 'ok') return raced.value;
+        if (raced.kind === 'error') throw raced.error;
+        throw new Error(`Event windowOpen did not fire within timeout of ${timeoutMs}ms`);
+    } finally {
+        if (timer != null) clearTimeout(timer);
+    }
+}
+
+/**
+ * 单次打开（内部用）：超时口径统一在 `withWindowTimeout`。
+ */
+async function openWithTimeout(bot: any, block: any, furnaceLike: boolean, timeoutMs: number): Promise<any> {
+    return withWindowTimeout(furnaceLike ? bot.openFurnace(block) : bot.openContainer(block), timeoutMs);
+}
+
+/**
+ * `bot.craft` 的**残留窗口守卫**。
+ *
+ * 为什么不能直接 `await bot.craft(...)`：mineflayer 的 `craftOnce` 在工作台那一步
+ * 自己做 `bot.activateBlock(table)` + `await once(bot, 'windowOpen')`——**默认 20 秒
+ * 硬等**，一个残留窗口就能让它卡到超时（和开箱子同一个病）。
+ * 这里合成前先清残留窗口；把 `craft` 放进有界等待里，**只有"窗口事件没来"才**
+ * 清理 + 重试一次；别的错误（配方本身不对之类）原样抛，不许被包装成窗口问题。
+ */
+export async function craftWithStaleWindowGuard(
+    bot: any,
+    recipe: any,
+    count: number,
+    craftingTable: any,
+    options: { timeoutMs?: number; retries?: number } = {},
+): Promise<void> {
+    if (typeof bot?.craft !== 'function') throw new Error('这个 mineflayer 版本没有 craft。');
+    const timeoutMs = Math.max(100, Number(options.timeoutMs ?? CONTAINER_OPEN_TIMEOUT_MS) || CONTAINER_OPEN_TIMEOUT_MS);
+    const retries = Math.max(0, Math.floor(Number(options.retries ?? CONTAINER_OPEN_RETRIES) || 0));
+    let lastError: unknown = null;
+    for (let attempt = 0; attempt <= retries; attempt++) {
+        if (closeStaleWindow(bot)) {
+            log(bot, '合成之前先关掉了残留的界面（上一次会话/动作留下的）。');
+        }
+        try {
+            await withWindowTimeout(Promise.resolve(bot.craft(recipe, count, craftingTable)), timeoutMs);
+            return;
+        } catch (err: unknown) {
+            lastError = err;
+            closeStaleWindow(bot);
+            // **别的错误不是窗口问题**：原样抛（重试也没有意义）。
+            if (!isWindowOpenTimeout(err)) throw err;
+            if (attempt < retries) log(bot, `合成没等到工作台窗口事件（${Math.round(timeoutMs / 1000)} 秒上限）；已清残留，重试一次。`);
+        }
+    }
+    const raw = lastError instanceof Error ? lastError.message : String(lastError);
+    throw new Error(
+        `合成失败（服务端没回工作台窗口事件，可能被上一次重启留下的窗口占着）。` +
+            `已经清掉残留界面并重试 ${retries} 次都没成。` +
+            `下一步：走到工作台旁边重新 craftRecipe（或先 placeHere 一个新工作台）；` +
+            `还不行就等几秒再试。（原始错误：${raw}）`,
     );
 }
 

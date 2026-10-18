@@ -131,6 +131,42 @@ export function foodValueOf(name: unknown): readonly [number, number] | null {
   return FOOD_VALUE[key] ?? null;
 }
 
+/**
+ * 生食 → 熟食（同一个"生肉只有一半价值"的真源，别再各处抄）。
+ *
+ * 用途：生存报告与 consume 回执要推"先烤再吃"（生牛排 3 点 vs 熟牛排 8 点），
+ * 而判断"这是不是生的"必须和食物表同源——两代名字（`mutton` / `raw_mutton`）都认。
+ */
+export const COOKED_COUNTERPART: Readonly<Record<string, string>> = Object.freeze({
+  raw_beef: 'cooked_beef',
+  beef: 'cooked_beef',
+  raw_porkchop: 'cooked_porkchop',
+  porkchop: 'cooked_porkchop',
+  raw_chicken: 'cooked_chicken',
+  chicken: 'cooked_chicken',
+  raw_mutton: 'cooked_mutton',
+  mutton: 'cooked_mutton',
+  raw_rabbit: 'cooked_rabbit',
+  rabbit: 'cooked_rabbit',
+  raw_cod: 'cooked_cod',
+  cod: 'cooked_cod',
+  raw_salmon: 'cooked_salmon',
+  salmon: 'cooked_salmon',
+  raw_fish: 'cooked_cod',
+});
+
+/** 生的（需要烤）→ 返回熟食名；本来就是熟食/不是肉 → null。 */
+export function cookedCounterpartOf(name: unknown): string | null {
+  const key = normalizeFoodName(name);
+  if (key === '') return null;
+  return COOKED_COUNTERPART[key] ?? null;
+}
+
+/** 是不是"生的"（能烤出更高价值的那种）。 */
+export function isRawFood(name: unknown): boolean {
+  return cookedCounterpartOf(name) != null;
+}
+
 /** 血量掉到 max*0.3 以下就触发。死了（0）不逃：上报，不跑。 */
 export function shouldTriggerEmergency(
   health: unknown,

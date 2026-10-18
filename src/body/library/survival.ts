@@ -18,7 +18,7 @@ import { Vec3 } from 'vec3';
 import * as skills from './skills.js';
 import type { MoveDirection } from './skills.js';
 import * as world from './world.js';
-import { FOOD_VALUE, isHostile, pickBestFood } from '../safety/emergency.js';
+import { FOOD_VALUE, cookedCounterpartOf, isHostile, pickBestFood } from '../safety/emergency.js';
 
 /** 与 edges / live_state 同一套夜晚阈值（12542 起怪物可刷，23460 天亮）。 */
 export const NIGHT_START = 12542;
@@ -302,6 +302,8 @@ export interface SurvivalAssessment {
     health: number | null;
     food: number | null;
     foodCount: number;
+    /** 食物储备资产（种子/线/木棍/木板/生肉）：算"可再生路线"用。 */
+    foodAssets?: FoodReserveAssets;
     bedCount: number;
     fireResistSeconds: number | null;
     fireResistPotionCount: number;
@@ -316,6 +318,122 @@ export interface SurvivalAssessment {
     missing: string[];
     advice: string;
     dimension: string | null;
+}
+
+// ───────────────────────── 食物储备（存粮规则 + 可再生路线） ─────────────────────────
+//
+// 背景（2026-10-18 晚的真机）：两个 bot 边打边吃，五小时把 1000 格内所有能吃的东西
+// 吃光——`overnight_b` 血 1.68 / food 2 / 背包空，`overnight_a` 背包全空（东西都存箱子），
+// 世界存档里连箱子里都没有一块食物。饿到 food < 18 就不能回血，一次挨打就是终局。
+//
+// 所以这里补两条**纯规则**（都能离线钉死）：
+//   - 告急线：血低 + food < 回血线 + 背包没有能吃的 → 明说"先别打，去钓鱼/种地"；
+//   - 存粮线：还有吃的但只剩 ≤2 份 + food < 14 → 现在就去补，别等饿了再找。
+
+/** 回血线：食物低于它就无法自然回血（原版：≥18 才慢回血）。 */
+export const FOOD_REGEN_THRESHOLD = 18;
+/** 血量低于它就算"低血"（3 颗心以下，一次失误就没了）。 */
+export const FOOD_EMERGENCY_HEALTH = 12;
+/** 存粮下限：能直接吃的 ≤ 这个数就算"只剩一点"。 */
+export const FOOD_RESERVE_LOW = 2;
+/** 不饿的界线：food ≥ 它就别动存粮（consume 会拒绝，报告也不催）。 */
+export const FOOD_RESERVE_COMFORT = 14;
+
+export interface FoodReserveAssets {
+    seeds: number;
+    sticks: number;
+    string: number;
+    planks: number;
+    /** 背包里的生肉（可以烤成更高价值）。 */
+    rawItems: Array<{ name: string; count: number; cooked: string }>;
+}
+
+/**
+ * 从背包计数表里挑出"能不能自己造食物"的资产（纯函数）。
+ *
+ * **不含"能吃的份数"**：那是 `SurvivalAssessment.foodCount`（生产里由 `countFood(inventory)`
+ * 算出来）——同一个概念只留一个真源，免得报告里两行互相打架。
+ */
+export function foodReserveAssets(inventory: Record<string, number>): FoodReserveAssets {
+    const entries = Object.entries(inventory ?? {}).filter(([, count]) => Number.isFinite(count) && count > 0);
+    const sumBy = (predicate: (name: string) => boolean): number =>
+        entries.filter(([name]) => predicate(name)).reduce((sum, [, count]) => sum + count, 0);
+    const rawItems = entries
+        .map(([name, count]) => ({ name, count, cooked: cookedCounterpartOf(name) }))
+        .filter((item): item is { name: string; count: number; cooked: string } => item.cooked != null)
+        .map((item) => ({ name: item.name, count: item.count, cooked: item.cooked }));
+    return {
+        seeds: sumBy((name) => name.endsWith('_seeds')),
+        sticks: sumBy((name) => name === 'stick'),
+        string: sumBy((name) => name === 'string'),
+        planks: sumBy((name) => name.endsWith('_planks')),
+        rawItems,
+    };
+}
+
+/** 从资产里挑一句"你能自己造食物"的具体路线（没有材料就如实说没有）。 */
+export function renewableFoodHint(assets: FoodReserveAssets | undefined): string {
+    const a = assets ?? { seeds: 0, sticks: 0, string: 0, planks: 0, rawItems: [] };
+    const hints: string[] = [];
+    if (a.sticks >= 3 && a.string >= 2) {
+        hints.push('钓鱼最稳（可再生）：useBlock(type="crafting_table", input="3 stick, 2 string", output="1 fishing_rod")');
+    }
+    if (a.seeds > 0) {
+        hints.push(`种小麦：背包有 ${a.seeds} 个种子 → 木锄 → 锄地 → 播种，3 小麦做面包`);
+    }
+    if (a.planks >= 2 && a.sticks >= 2) {
+        hints.push('做木锄：useBlock(type="crafting_table", input="2 oak_planks, 2 stick", output="1 wooden_hoe")');
+    }
+    if (hints.length === 0) {
+        return '（背包里没有种子/线/木棍这类材料：先去水边或找动物，别在原地耗）';
+    }
+    return `（${hints.join('；')}）`;
+}
+
+/** 生肉提示：有熔炉就先烤，熟食值约一倍。 */
+function rawFoodHint(rawItems: ReadonlyArray<{ name: string; count: number; cooked: string }>): string {
+    if (rawItems.length === 0) return '';
+    const worst = rawItems[0];
+    return `背包里的 ${worst.name}x${worst.count} 是生的（熟食值约一倍）：先 useBlock(type="furnace", input="1 ${worst.name}", output="1 ${worst.cooked}") 再吃。`;
+}
+
+/**
+ * 食物告急：**三个条件同时成立**才说——血低 + food 低于回血线 + 背包没有能吃的。
+ * 否则返回 null（有吃的、或还能回血、或血还够，都不该拿这条去吵模型）。
+ */
+export function foodEmergencyLine(input: {
+    health: number | null;
+    food: number | null;
+    edibles: number;
+    assets?: FoodReserveAssets;
+}): string | null {
+    if (input.edibles > 0) return null;
+    if (input.food == null || input.food >= FOOD_REGEN_THRESHOLD) return null;
+    if (input.health == null || input.health > FOOD_EMERGENCY_HEALTH) return null;
+    return (
+        `- ⚠️ 食物告急：血 ${input.health}、食物 ${input.food}（低于回血线 ${FOOD_REGEN_THRESHOLD}）、**背包没有能吃的东西** → ` +
+        `**先别打**：去钓鱼或种地${renewableFoodHint(input.assets)}。现在这个血量挨一下就没了。`
+    );
+}
+
+/**
+ * 存粮告急：**还有吃的但只剩 ≤2 份** + food < 14 → 现在就补，别等饿到 18 以下。
+ * （与 consume 的"别吃最后一口"互补：那边管 food ≥ 14 时不许动存粮，这边管 food < 14 时催你去补。）
+ */
+export function foodReserveLine(input: {
+    health: number | null;
+    food: number | null;
+    edibles: number;
+    assets?: FoodReserveAssets;
+}): string | null {
+    if (input.edibles <= 0 || input.edibles > FOOD_RESERVE_LOW) return null;
+    if (input.food == null || input.food >= FOOD_RESERVE_COMFORT) return null;
+    const raw = rawFoodHint(input.assets?.rawItems ?? []);
+    return (
+        `- ⚠️ 存粮只剩 ${input.edibles} 份（食物 ${input.food} < ${FOOD_RESERVE_COMFORT}）：` +
+        `**趁现在去补**（钓鱼/打猎/种地），别等饿到 ${FOOD_REGEN_THRESHOLD} 以下再找——那时已经不能回血了。` +
+        `${renewableFoodHint(input.assets)}${raw === '' ? '' : ` ${raw}`}`
+    );
 }
 
 function fireResistSecondsOf(effects: EffectInfo[]): number | null {
@@ -389,6 +507,7 @@ export function assessSurvival(signals: SurvivalSignals): SurvivalAssessment {
         health,
         food,
         foodCount,
+        foodAssets: foodReserveAssets(signals.inventory ?? {}),
         bedCount,
         fireResistSeconds,
         fireResistPotionCount,
@@ -428,6 +547,11 @@ export function formatSurvivalReport(a: SurvivalAssessment): string {
         `抗火药水：Buff ${a.fireResistSeconds == null ? '无' : `${a.fireResistSeconds}s`}，库存 ${a.fireResistPotionCount} 瓶`;
     const readyLine =
         `就绪：地下庇护 ${a.sheltered ? '是' : '否'}；烈焰人准备 ${a.blazeReady ? '是' : `否（缺 ${a.missing.join('、') || '未知'}）`}`;
+    // 食物两条线（见上方 FOOD_REGEN_THRESHOLD 那段的注释）：告急线只在该告急时出现，
+    // 存粮线只在"还有一点但快没了"时出现；两条都不会在"食物充足"时来吵模型。
+    const foodInput = { health: a.health, food: a.food, edibles: a.foodCount, assets: a.foodAssets };
+    const foodEmergency = foodEmergencyLine(foodInput);
+    const foodReserve = foodReserveLine(foodInput);
     return [
         '生存检查：',
         `- ${timeLine}`,
@@ -435,6 +559,8 @@ export function formatSurvivalReport(a: SurvivalAssessment): string {
         `- ${shelterLine}`,
         `- ${threatLine}`,
         `- ${supplyLine}`,
+        ...(foodEmergency == null ? [] : [foodEmergency]),
+        ...(foodReserve == null ? [] : [foodReserve]),
         `- ${readyLine}`,
         `- 建议：${a.advice}`,
     ].join('\n');
@@ -683,7 +809,18 @@ export async function prepareBlazeSkill(bot: any): Promise<string> {
         const best = pickBestFood(Object.keys(foodSignals.inventory).filter((name) => (foodSignals.inventory[name] ?? 0) > 0));
         if (best != null) {
             const ate = await skills.consume(bot, best);
-            notes.push(ate ? `吃了 ${best} 补饱食度。` : `想吃 ${best} 但没吃成。`);
+            if (ate) {
+                notes.push(`吃了 ${best} 补饱食度。`);
+            } else {
+                // 没吃上要分清是"没吃成"还是**存粮规则拦下的**（后者不是故障，别让它去重试）。
+                const fresh = sampleSurvivalSignals(bot);
+                const kept = (fresh.food ?? 0) >= FOOD_RESERVE_COMFORT && countFood(fresh.inventory) <= FOOD_RESERVE_LOW;
+                notes.push(
+                    kept
+                        ? `存粮先留着（food ${fresh.food}、背包只剩 ${countFood(fresh.inventory)} 份）：**打烈焰人之前先补食物**，别把最后两份吃掉。`
+                        : `想吃 ${best} 但没吃成。`,
+                );
+            }
         }
     } else {
         notes.push(`饱食度 ${a.food}，够。`);

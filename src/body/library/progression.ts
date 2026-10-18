@@ -22,6 +22,7 @@ import * as skills from './skills.js';
 import * as world from './world.js';
 import { Vec3 } from 'vec3';
 import { nearestDropWithin } from '../auto_pickup.js';
+import { foodValueOf } from '../safety/emergency.js';
 
 // ────────────────────────────── 默认参数 ──────────────────────────────
 
@@ -638,6 +639,11 @@ export interface HuntOutcome {
     want: number;
     /** 找怪用的半径（回执里要写清"这一带确实没有"的范围）。 */
     radius?: number;
+    /**
+     * 被动动物 `no_target` 时的"家底"（种子/线/木棍/腐肉 + 最近的水）。
+     * 有它 = 回执要给可再生食物路线，主行动也从这里挑（不是"换个地方再找找"）。
+     */
+    assets?: FoodRouteAssets;
     /** 计数的物品；空数组 = 不知道掉什么，用背包总件数核对。 */
     items: string[];
     gained: number;
@@ -675,12 +681,22 @@ export function huntReceipt(o: HuntOutcome): string {
         // 和 exploreFor 同一个口径：**"这一带没有"不是"工具坏了"**，换地方才有用。
         // 真机里模型会把"没找到"读成工具问题，然后在原地反复调同一个工具。
         const scope = o.radius == null ? '这一带' : `这一带（半径 ${Math.round(o.radius)} 格内）`;
-        lines.push(
-            `**${scope}确实没有 ${o.entity}——不是工具坏了，是真没有。**` +
-                (o.netherBlaze
-                    ? '烈焰人只在要塞里刷：先在附近 exploreFor(nether_bricks) 找到要塞再回来刷。'
-                    : '同一片区域反复刷不会出怪：换地方、走远一点再来。'),
-        );
+        if (o.assets != null) {
+            // **被动动物**：这一带被反复猎杀之后不会很快回来 —— 必须给可再生路线，
+            // 否则模型只会换个圆心继续空跑（"世界几乎没有食物来源"就是这么来的）。
+            lines.push(
+                `**${scope}确实没有 ${o.entity}——不是工具坏了，是真没有。**` +
+                    `被动动物被打光之后不会很快回来（你们在这一带已经打了很久），**别换个圆心继续空跑**。`,
+            );
+            for (const line of foodRouteLines(o.assets)) lines.push(line);
+        } else {
+            lines.push(
+                `**${scope}确实没有 ${o.entity}——不是工具坏了，是真没有。**` +
+                    (o.netherBlaze
+                        ? '烈焰人只在要塞里刷：先在附近 exploreFor(nether_bricks) 找到要塞再回来刷。'
+                        : '同一片区域反复刷不会出怪：换地方、走远一点再来。'),
+            );
+        }
     }
     for (const warning of o.warnings) lines.push(warning);
     if (o.progress.length > 0) {
@@ -702,6 +718,8 @@ export function huntNextAction(o: HuntOutcome): string {
         case 'gone':
             return `huntFor(entity="${o.entity}", want=${remaining}, max_ms=300000)`;
         case 'no_target':
+            // 被动动物被打光了：给**一条**可再生路线（钓鱼/种地/腐肉），别让它换圆心空跑。
+            if (o.assets != null) return foodRoutePrimary(o.assets);
             // 下界刷烈焰人：没怪 = 这附近没有堡垒房间，回去继续找要塞。
             return o.netherBlaze
                 ? 'exploreFor(block="nether_bricks", max_steps=4)'
@@ -713,6 +731,167 @@ export function huntNextAction(o: HuntOutcome): string {
         default:
             return `huntFor(entity="${o.entity}", want=${remaining})`;
     }
+}
+
+// ───────────────── 可再生食物路线（"世界被打光了"之后的出路） ─────────────────
+//
+// 背景（overnight_b 的原话）：`世界几乎没有食物来源：找不到任何被动动物/村庄/农田，
+// 掉血后无法回血（卡在 2.7 血）`。这两个 bot 在 1000 格内打了五小时，动物被清空、
+// 村民/农田本来就没有——`huntFor(entity="chicken")` 一小时前还能成，现在什么都找不到。
+// 所以 `no_target` **不能是死胡同**：必须给出"不依赖野生动物"的可再生路线。
+
+/** 被动/可猎食的动物（被打光后不会马上回来；怪物是持续刷的，不在这个名单里）。 */
+export const PASSIVE_FOOD_ANIMALS: ReadonlySet<string> = new Set([
+    'cow',
+    'mooshroom',
+    'pig',
+    'sheep',
+    'chicken',
+    'rabbit',
+    'goat',
+    'hoglin',
+    'turtle',
+    'cod',
+    'salmon',
+    'tropical_fish',
+    'pufferfish',
+    'squid',
+    'glow_squid',
+]);
+
+export function isPassiveFoodAnimal(entity: unknown): boolean {
+    return typeof entity === 'string' && PASSIVE_FOOD_ANIMALS.has(normalizeName(entity));
+}
+
+/** 找水时扫多大半径（只扫已加载区块，和 exploreFor 同一个口径）。 */
+export const FOOD_WATER_SCAN_RADIUS = 64;
+
+export interface FoodRouteAssets {
+    /** 能直接吃的份数。 */
+    edibles: number;
+    sticks: number;
+    string: number;
+    seeds: number;
+    planks: number;
+    rottenFlesh: number;
+    hasHoe: boolean;
+    hasFishingRod: boolean;
+    hasCraftingTable: boolean;
+    /** 最近的水（钓鱼要水）；没扫到就是 null。 */
+    water: { position: FlatPosition; distance: number } | null;
+    waterScanRadius: number;
+}
+
+function countInventoryBy(bot: any, predicate: (name: string) => boolean): number {
+    let items: Array<{ name?: unknown; count?: unknown }>;
+    try {
+        items = (bot?.inventory?.items?.() ?? []) as Array<{ name?: unknown; count?: unknown }>;
+    } catch {
+        return 0;
+    }
+    if (!Array.isArray(items)) return 0;
+    let total = 0;
+    for (const item of items) {
+        const name = normalizeName(item?.name);
+        if (name === '' || !predicate(name)) continue;
+        total += typeof item?.count === 'number' && Number.isFinite(item.count) ? item.count : 1;
+    }
+    return total;
+}
+
+/** 最近的水（只扫已加载区块）。读不到/没有 → null。 */
+export function nearestWater(
+    bot: any,
+    position: FlatPosition,
+    radius: number = FOOD_WATER_SCAN_RADIUS,
+): { position: FlatPosition; distance: number } | null {
+    try {
+        const found = world.getNearestBlocksWhere(bot, (b: any) => normalizeName(b?.name) === 'water', radius, 1);
+        const p = found[0]?.position;
+        if (p == null) return null;
+        const point = { x: Number(p.x), y: Number(p.y), z: Number(p.z) };
+        return { position: point, distance: horizontalDistance(position, point) };
+    } catch {
+        return null;
+    }
+}
+
+/**
+ * 盘一遍"能不能自己造食物"的家底（种子/线/木棍/木板/腐肉 + 最近的水）。
+ *
+ * 为什么要它：`no_target` 时模型需要的是**可执行**的替代路线，而不是"换个地方再找找"——
+ * 这一带的动物已经被它自己打光了，再找也是空跑。
+ */
+export function scanFoodRouteAssets(
+    bot: any,
+    position: FlatPosition,
+    radius: number = FOOD_WATER_SCAN_RADIUS,
+): FoodRouteAssets {
+    return {
+        edibles: countInventoryBy(bot, (name) => foodValueOf(name) != null),
+        sticks: countInventoryBy(bot, (name) => name === 'stick'),
+        string: countInventoryBy(bot, (name) => name === 'string'),
+        seeds: countInventoryBy(bot, (name) => name.endsWith('_seeds')),
+        planks: countInventoryBy(bot, (name) => name.endsWith('_planks')),
+        rottenFlesh: countInventoryBy(bot, (name) => name === 'rotten_flesh'),
+        hasHoe: countInventoryBy(bot, (name) => name.endsWith('_hoe')) > 0,
+        hasFishingRod: countInventoryBy(bot, (name) => name === 'fishing_rod') > 0,
+        hasCraftingTable: countInventoryBy(bot, (name) => name === 'crafting_table') > 0,
+        water: nearestWater(bot, position, radius),
+        waterScanRadius: radius,
+    };
+}
+
+function waterLine(a: FoodRouteAssets): string {
+    if (a.water == null) {
+        return `最近的水：半径 ${a.waterScanRadius} 格内**没扫到**（只扫已加载区块）——钓鱼先得找到水，用 searchForBlock(type="water", search_range=256)，或沿一个方向走远点。`;
+    }
+    const p = a.water.position;
+    return `最近的水在 ${formatPoint(p)}，离你约 ${a.water.distance.toFixed(1)} 格（只扫已加载区块）。鱼就在水里：到岸边钓鱼，或者 huntFor(entity="cod")。`;
+}
+
+/** 三条可再生路线（回执里逐条列出来；主行动只挑一条，见 `foodRoutePrimary`）。 */
+export function foodRouteLines(a: FoodRouteAssets): string[] {
+    const rod = a.hasFishingRod
+        ? '① **钓鱼**（最稳、可再生）：你已经有 fishing_rod → 到水边 useOn(tool_name="fishing_rod", target="water")；一条鱼 2 点食物。'
+        : '① **钓鱼**（最稳、可再生）：先做竿 useBlock(type="crafting_table", input="3 stick, 2 string", output="1 fishing_rod")（3 木棍 + 2 线）→ 到水边 useOn(tool_name="fishing_rod", target="water")；一条鱼 2 点食物。';
+    const farm =
+        a.seeds > 0
+            ? `② **种小麦**（背包里有 ${a.seeds} 个种子）：木锄 → 在泥土/草方块上锄地 → 播种；3 个小麦做 1 个面包。`
+            : '② **种小麦**：背包里没有种子（打草会掉 wheat_seeds）——有种子就能自给：木锄 → 锄地 → 播种，3 小麦做面包。';
+    const rotten =
+        a.rottenFlesh > 0
+            ? `③ **腐肉**（最后手段，你有 ${a.rottenFlesh} 个）：consume(item_name="rotten_flesh")——会附带饥饿效果，**只当应急**，别当主食。`
+            : '③ **腐肉**：僵尸掉的，会附带饥饿效果，只当最后手段（背包里现在没有）。';
+    return ['可再生食物路线（别再空跑找动物）：', rod, farm, rotten, waterLine(a)];
+}
+
+/**
+ * **一条**主行动（和 exploreFor/huntFor 的规矩一致：只给一条能照抄的调用）。
+ *
+ * 选路顺序按"多快能吃上"排：能做竿就先做竿（钓的鱼可再生、不靠运气）→ 已有竿就去水边 →
+ * 有种子就先做锄头 → 有腐肉先顶一口 → 有水就去水边 → 都没有就去找水。
+ */
+export function foodRoutePrimary(a: FoodRouteAssets): string {
+    if (!a.hasFishingRod && a.sticks >= 3 && a.string >= 2) {
+        return 'useBlock(type="crafting_table", input="3 stick, 2 string", output="1 fishing_rod")';
+    }
+    if (a.hasFishingRod && a.water != null) {
+        return `goToCoordinates(x=${Math.round(a.water.position.x)}, y=${Math.round(a.water.position.y)}, z=${Math.round(a.water.position.z)}, closeness=3)`;
+    }
+    if (a.seeds > 0) {
+        if (!a.hasHoe && a.planks >= 2 && a.sticks >= 2) {
+            return 'useBlock(type="crafting_table", input="2 oak_planks, 2 stick", output="1 wooden_hoe")';
+        }
+        if (a.water != null) {
+            return `goToCoordinates(x=${Math.round(a.water.position.x)}, y=${Math.round(a.water.position.y)}, z=${Math.round(a.water.position.z)}, closeness=3)`;
+        }
+    }
+    if (a.rottenFlesh > 0) return 'consume(item_name="rotten_flesh")';
+    if (a.water != null) {
+        return `goToCoordinates(x=${Math.round(a.water.position.x)}, y=${Math.round(a.water.position.y)}, z=${Math.round(a.water.position.z)}, closeness=3)`;
+    }
+    return 'searchForBlock(type="water", search_range=256)';
 }
 
 // ─────────────────────────── 探索（技能） ───────────────────────────
@@ -1087,10 +1266,17 @@ export async function huntForSkill(
     }
 
     const gained = currentGain(bot, items, baselineAtStart);
+    // 被动动物这一带没有了：**顺手把"能不能自己造食物"的家底盘出来**（含最近的水），
+    // 让回执给的是可执行路线，而不是"换个地方再找找"。
+    const assets =
+        stopReason === 'no_target' && isPassiveFoodAnimal(entity)
+            ? scanFoodRouteAssets(bot, defaultPosition(bot))
+            : undefined;
     return huntReceipt({
         entity,
         want,
         radius,
+        ...(assets == null ? {} : { assets }),
         items,
         gained,
         baseline: baselineAtStart,

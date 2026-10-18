@@ -635,7 +635,9 @@ function consumeBot(
   const items = options.held ?? [];
   return {
     output: '',
-    food: options.food ?? 14,
+    // 默认 food=10（有点饿）：新规矩下 food ≥ 14 且背包只剩 ≤2 份时 consume 会**拒绝动存粮**，
+    // 所以"吃"的机制用例用默认值就能走到真正的吃；存粮规则单独有用例。
+    food: options.food ?? 10,
     foodSaturation: options.saturation ?? 0,
     inventory: {
       items: () => items,
@@ -661,7 +663,7 @@ describe('consume：失败也要给事实，不给堆栈', () => {
     await expect(consume(bot, 'mutton', NO_WAIT)).resolves.toBe(true);
     expect(bot.output).toContain('吃成了');
     expect(bot.output).toContain('手上 1 → 0');
-    expect(bot.output).toContain('food 14/sat 0 → food 20/sat 9.6');
+    expect(bot.output).toContain('food 10/sat 0 → food 20/sat 9.6');
   });
 
   it('同步超时且东西还在 → "没吃成/还在手上/可重试"，且回执里没有堆栈', async () => {
@@ -675,7 +677,7 @@ describe('consume：失败也要给事实，不给堆栈', () => {
     expect(bot.output).toContain('还在手上');
     expect(bot.output).toContain('可以重试');
     expect(bot.output).toContain('等待服务端回应超时');
-    expect(bot.output).toContain('food 14/sat 0 → food 14/sat 0（没有变化）');
+    expect(bot.output).toContain('food 10/sat 0 → food 10/sat 0（没有变化）');
     // **绝不把原始异常/堆栈当回执**
     expect(bot.output).not.toContain('!!Action threw exception!!');
     expect(bot.output).not.toContain('Stack trace');
@@ -700,7 +702,7 @@ describe('consume：失败也要给事实，不给堆栈', () => {
     expect(calls).toBe(2);
     expect(bot.output).toContain('重试');
     expect(bot.output).toContain('吃成了');
-    expect(bot.output).toContain('food 14/sat 0 → food 20/sat 9.6');
+    expect(bot.output).toContain('food 10/sat 0 → food 20/sat 9.6');
     // 重试前确认食物还在手上 → 再 equip 一次
     expect(bot.equip).toHaveBeenCalledTimes(2);
   });
@@ -722,7 +724,7 @@ describe('consume：失败也要给事实，不给堆栈', () => {
     expect(bot.output).toContain('没生效');
     expect(bot.output).not.toContain('吃成了');
     expect(bot.output).toContain('手上 2 → 2');
-    expect(bot.output).toContain('food 14/sat 0 → food 14/sat 0（没有变化）');
+    expect(bot.output).toContain('food 10/sat 0 → food 10/sat 0（没有变化）');
     // 没报错就不重试：重复吃会白白浪费食物
     expect(bot.consume).toHaveBeenCalledTimes(1);
   });
@@ -749,6 +751,62 @@ describe('consume：失败也要给事实，不给堆栈', () => {
     await expect(consume(bot, 'mutton', NO_WAIT)).resolves.toBe(true);
     expect(bot.output).toContain('手上 1 → 0');
     expect(bot.output).toContain('饱食度读数没变');
+  });
+
+  // ── 存粮规则：别把最后一口吃掉（真机：五小时吃光全世界，然后血 1.68 无法回血） ──
+  it('**只剩 ≤2 份且不饿（food ≥ 14）→ 拒绝吃**，并说明这是救命粮', async () => {
+    const bot = consumeBot({ held: [{ name: 'cooked_beef', count: 2 }], food: 16 });
+
+    await expect(consume(bot, 'cooked_beef', NO_WAIT)).resolves.toBe(false);
+    expect(bot.output).toContain('先留着');
+    expect(bot.output).toContain('你现在不饿');
+    expect(bot.output).toContain('food 16/sat 0');
+    expect(bot.output).toContain('2 份能吃的');
+    expect(bot.output).toContain('cooked_beefx2');
+    expect(bot.output).toContain('救命粮');
+    expect(bot.consume).not.toHaveBeenCalled(); // 一口都没动
+    expect(bot.output.trimEnd().split('\n').at(-1)).toBe('下一步（照做即可）：searchForBlock(type="water", search_range=128)');
+  });
+
+  it('真饿（food < 14）时照吃：存粮规则不该把人饿死', async () => {
+    const bot = consumeBot({ held: [{ name: 'cooked_beef', count: 2 }], food: 13 });
+    bot.consume = vi.fn(async () => {
+      bot.food = 21;
+    });
+
+    await expect(consume(bot, 'cooked_beef', NO_WAIT)).resolves.toBe(true);
+    expect(bot.output).toContain('吃成了');
+    expect(bot.consume).toHaveBeenCalledTimes(1);
+  });
+
+  it('还有 3 份以上时照常吃（存粮规则只管"最后两口"）', async () => {
+    const bot = consumeBot({ held: [{ name: 'cooked_beef', count: 3 }], food: 16 });
+    bot.consume = vi.fn(async () => {
+      bot.food = 20;
+    });
+
+    await expect(consume(bot, 'cooked_beef', NO_WAIT)).resolves.toBe(true);
+    expect(bot.output).toContain('吃成了');
+  });
+
+  it('吃生肉会提醒"下次先烤"（熟食值约一倍）', async () => {
+    const bot = consumeBot({ held: [{ name: 'raw_beef', count: 5 }], food: 6 });
+    bot.consume = vi.fn(async () => {
+      bot.food = 9;
+    });
+
+    await expect(consume(bot, 'raw_beef', NO_WAIT)).resolves.toBe(true);
+    expect(bot.output).toContain('是生的');
+    expect(bot.output).toContain('cooked_beef');
+    expect(bot.output).toContain('furnace');
+  });
+
+  it('拒绝动存粮时，如果存粮是生肉就顺带说"先烤"', async () => {
+    const bot = consumeBot({ held: [{ name: 'raw_beef', count: 1 }], food: 18 });
+
+    await expect(consume(bot, 'raw_beef', NO_WAIT)).resolves.toBe(false);
+    expect(bot.output).toContain('先留着');
+    expect(bot.output).toContain('cooked_beef');
   });
 });
 

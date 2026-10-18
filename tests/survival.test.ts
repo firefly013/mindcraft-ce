@@ -13,11 +13,19 @@ import {
   countBeds,
   countFood,
   findNearbyCoveredSpot,
+  FOOD_EMERGENCY_HEALTH,
+  FOOD_REGEN_THRESHOLD,
+  FOOD_RESERVE_COMFORT,
+  FOOD_RESERVE_LOW,
+  foodEmergencyLine,
+  foodReserveAssets,
+  foodReserveLine,
   formatSurvivalReport,
   isFireResistancePotion,
   isNightTime,
   normalizeEffectName,
   prepareBlazeSkill,
+  renewableFoodHint,
   sampleSurvivalSignals,
   sleepUndergroundSkill,
   waitForDawn,
@@ -731,5 +739,133 @@ describe('floatUpSkill：危险时先向上挖，不往前下方游', () => {
         expect(mineCalls[0].y).toBe(62);
         expect(forwardPresses.n).toBe(0);
         expect(res.ok).toBe(false);
+    });
+});
+
+// ---------------------------------------------------------------
+// 食物储备：告急线 + 存粮线（真机：血 1.68 / food 2 / 全世界没有食物）
+// ---------------------------------------------------------------
+describe('食物储备：告急与存粮', () => {
+    it('资产盘点：种子/线/木棍/木板/生肉分开算（"能吃的份数"不在这里——那是 foodCount）', () => {
+        const assets = foodReserveAssets({
+            wheat_seeds: 12,
+            string: 2,
+            stick: 5,
+            oak_planks: 4,
+            raw_beef: 3,
+            cooked_beef: 2,
+            stone: 64,
+        });
+        expect(assets.seeds).toBe(12);
+        expect(assets.string).toBe(2);
+        expect(assets.sticks).toBe(5);
+        expect(assets.planks).toBe(4);
+        expect(assets.rawItems).toEqual([{ name: 'raw_beef', count: 3, cooked: 'cooked_beef' }]);
+        // 种子/线/木棍都不是"能吃的"：同一个概念只走 foodValueOf / countFood
+        expect(countFood({ wheat_seeds: 12, string: 2, stick: 5, oak_planks: 4 })).toBe(0);
+    });
+
+    it('路线提示：有材料就说得出来怎么做，没材料就如实说', () => {
+        const rich = foodReserveAssets({ stick: 3, string: 2, wheat_seeds: 4, oak_planks: 2 });
+        const hint = renewableFoodHint(rich);
+        expect(hint).toContain('fishing_rod');
+        expect(hint).toContain('4 个种子');
+        expect(renewableFoodHint(foodReserveAssets({}))).toContain('没有种子/线/木棍');
+    });
+
+    it('告急线：**三个条件同时成立**才说（血低 + food < 18 + 背包没有能吃的）', () => {
+        const base = { health: 8, food: 6, edibles: 0 };
+        const line = foodEmergencyLine(base);
+        expect(line).toContain('食物告急');
+        expect(line).toContain(`低于回血线 ${FOOD_REGEN_THRESHOLD}`);
+        expect(line).toContain('背包没有能吃的东西');
+        expect(line).toContain('先别打');
+        // 少任何一个条件都不说
+        expect(foodEmergencyLine({ ...base, edibles: 1 })).toBeNull(); // 有吃的
+        expect(foodEmergencyLine({ ...base, food: FOOD_REGEN_THRESHOLD })).toBeNull(); // 还能回血
+        expect(foodEmergencyLine({ ...base, health: FOOD_EMERGENCY_HEALTH + 0.5 })).toBeNull(); // 血还够
+        expect(foodEmergencyLine({ health: null, food: 6, edibles: 0 })).toBeNull(); // 读不到就不猜
+        expect(foodEmergencyLine({ health: 8, food: null, edibles: 0 })).toBeNull();
+    });
+
+    it('告急线按家底给出具体路线（有线和木棍就点名钓鱼竿）', () => {
+        const line = foodEmergencyLine({
+            health: 2,
+            food: 0,
+            edibles: 0,
+            assets: foodReserveAssets({ stick: 3, string: 2, wheat_seeds: 9 }),
+        });
+        expect(line).toContain('fishing_rod');
+        expect(line).toContain('9 个种子');
+    });
+
+    it('存粮线：还有吃的但 ≤2 份 + food < 14 才提醒', () => {
+        const line = foodReserveLine({ health: 20, food: 10, edibles: FOOD_RESERVE_LOW });
+        expect(line).toContain(`存粮只剩 ${FOOD_RESERVE_LOW} 份`);
+        expect(line).toContain('趁现在去补');
+        expect(line).toContain(`别等饿到 ${FOOD_REGEN_THRESHOLD} 以下`);
+        expect(foodReserveLine({ health: 20, food: 10, edibles: 3 })).toBeNull(); // 还够
+        expect(foodReserveLine({ health: 20, food: FOOD_RESERVE_COMFORT, edibles: 1 })).toBeNull(); // 不饿
+        expect(foodReserveLine({ health: 20, food: 10, edibles: 0 })).toBeNull(); // 没吃的走告急线
+    });
+
+    it('生肉提醒"先烤"（熟食值约一倍）', () => {
+        const line = foodReserveLine({
+            health: 20,
+            food: 10,
+            edibles: 1,
+            assets: foodReserveAssets({ raw_beef: 1 }),
+        });
+        expect(line).toContain('是生的');
+        expect(line).toContain('cooked_beef');
+        expect(line).toContain('furnace');
+    });
+
+    it('打烈焰人前被存粮规则拦下 → 说"存粮先留着"，不谎报"没吃成"', async () => {
+        const blocks: BlockMap = { '0,64,0': { name: 'stone' } };
+        const bot = fakeBody(blocks, {
+            y: 60,
+            effects: [{ id: 12, amplifier: 0, duration: 3600 }], // 已有抗火 Buff：只看吃
+            slots: [{ name: 'cooked_beef', count: 1 }],
+            items: [{ name: 'cooked_beef', count: 1 }],
+        });
+        // food 16（≥ 存粮线 14）+ 背包只剩 1 份 → consume 会按存粮规则拒绝
+        bot.food = 16;
+        const text = await prepareBlazeSkill(bot);
+        expect(text).toContain('存粮先留着');
+        const refresh = assessSurvival(sampleSurvivalSignals(bot));
+        expect(refresh.foodCount).toBe(1);
+        expect(text).not.toContain('没吃成');
+    });
+
+    it('**不该吵人的情况**：满血 + 8 块牛排 → 两条线都不出现', () => {
+        const report = formatSurvivalReport(
+            assessSurvival(baseSignals({ health: 20, food: 20, inventory: { cooked_beef: 8 }, foodCount: 8 })),
+        );
+        expect(report).not.toContain('食物告急');
+        expect(report).not.toContain('存粮只剩');
+    });
+
+    it('端到端：报告里真的会出现那两条线（各出现一次）', () => {
+        const emergency = formatSurvivalReport(
+            assessSurvival(baseSignals({ health: 3, food: 2, inventory: { wheat_seeds: 4 }, foodCount: 0 })),
+        );
+        expect(emergency).toContain('食物告急');
+        expect(emergency).toContain('先别打');
+        // 背包 → 资产 → 路线提示，这条链路要在报告里真的通（有种子就点名种小麦）
+        expect(emergency).toContain('4 个种子');
+
+        const reserve = formatSurvivalReport(
+            assessSurvival(baseSignals({ health: 20, food: 10, inventory: { bread: 1 }, foodCount: 1 })),
+        );
+        expect(reserve).toContain('存粮只剩 1 份');
+        expect(reserve).not.toContain('食物告急');
+
+        // 有 5 份 + 不饿：两条都不出现
+        const fine = formatSurvivalReport(
+            assessSurvival(baseSignals({ health: 20, food: 16, inventory: { bread: 5 }, foodCount: 5 })),
+        );
+        expect(fine).not.toContain('存粮只剩');
+        expect(fine).not.toContain('食物告急');
     });
 });

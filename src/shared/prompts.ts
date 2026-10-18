@@ -110,7 +110,9 @@ export const TOOL_TEXT: Record<string, { description: string; params: Record<str
     params: { name: '要去的位置名字。' },
   },
   consume: {
-    description: '吃/喝指定物品。',
+    description:
+      '吃/喝指定物品。**存粮规则**：背包里能直接吃的只剩 ≤2 份、而你现在并不饿（food ≥ 14）时会**拒绝**并说明——那几份是低血期的救命粮，' +
+      '现在吃掉就是一小时后饿死。真饿（food < 14）时照吃不误。生肉吃成后会提醒"下次先烤"（熟食值约一倍）。',
     params: { item_name: '要吃喝的物品名字。' },
   },
   equip: {
@@ -326,7 +328,11 @@ export const TOOL_TEXT: Record<string, { description: string; params: Record<str
     },
   },
   huntFor: {
-    description: '刷怪刷到够数：找最近的这类怪 → 打 → 自己走过去把掉落物踩掉 → 按背包真实增量核对；够了（want）或时间到（max_ms）就停，并逐次报进度。烈焰棒用 blaze，末影珍珠用 enderman。血量过低/岩浆/被 Stop 会立刻收手并说明原因。',
+    description:
+      '刷怪刷到够数：找最近的这类怪 → 打 → 自己走过去把掉落物踩掉 → 按背包真实增量核对；够了（want）或时间到（max_ms）就停，并逐次报进度。' +
+      '烈焰棒用 blaze，末影珍珠用 enderman。血量过低/岩浆/被 Stop 会立刻收手并说明原因。' +
+      '**被动动物（鸡/牛/猪/羊/兔/鱼）找不到时不是死胡同**：回执会说清"这一带多半被你们打光了"，并给三条**可再生**出路——钓鱼（3 木棍+2 线做竿）、' +
+      '种小麦（种子撒到锄过的地上）、腐肉（只当应急，会附带饥饿效果），以及最近的水在哪，最后只给**一条**能照抄的调用。',
     params: {
       entity: '要刷的实体 id（英文），例如 blaze（烈焰人）/ enderman（末影人）/ cow。也认中文俗称。',
       want: '要几个掉落物（默认 4，1~64）。烈焰棒推荐 7，末影珍珠推荐 12。',
