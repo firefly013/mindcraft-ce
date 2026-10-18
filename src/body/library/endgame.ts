@@ -1378,7 +1378,10 @@ export function nextEndgameStep(state: EndgameState): EndgameStepAdvice {
             phase: 'done',
             action: '龙死了：进 (0,64,0) 的出口传送门回主世界（会放终末之诗），记得捡龙蛋和 12000 经验。',
             nextPhase: 'done',
-            reason: 'Boss 已经打完。',
+            reason:
+                state.dragonHealth === 0
+                    ? 'Boss 已经打完（血量 0）。'
+                    : '龙实体和 boss bar 都不在了，按"打完"处理；**如果还能看见它在飞，先调 endFightStatus 复核**再走。',
         };
     }
     return {

@@ -3721,21 +3721,33 @@ export function planStairStep(
     if (verticalHazard(headName)) return { kind: 'blocked', reason: '头顶就是' + String(headName) };
     if (verticalHazard(head2Name)) return { kind: 'blocked', reason: '头顶上方是' + String(head2Name) };
     if (!isVerticalPassable(headName)) return { kind: 'mine', target: { x: fx, y: fy + 1, z: fz } };
+    // **原地起跳要 3 格净空**：脚、头、头顶。真机（overnight_b 2026-10-18）在
+    // 2 格高的通道里反复报 "第 1 格失败：跳不上去"——垫脚方块放好了，但头顶
+    // 第 2 格是实心，起跳被天花板削掉高度，跳不上任何台阶。所以先把头顶挖开。
+    // 读不到（null）时不预判：宁可跳一次试试，也不要凭缺数据乱挖。
+    if (head2Name != null && !isVerticalPassable(head2Name)) {
+        return { kind: 'mine', target: { x: fx, y: fy + 2, z: fz } };
+    }
 
     const frontHead = blockAt(stepX, fy + 1, stepZ);
     const frontFeet = blockAt(stepX, fy, stepZ);
+    const frontHead2 = blockAt(stepX, fy + 2, stepZ);
     const frontHeadName = verticalName(frontHead);
     const frontFeetName = verticalName(frontFeet);
+    const frontHead2Name = verticalName(frontHead2);
     if (verticalHazard(frontHeadName)) return { kind: 'blocked', reason: '前方头顶是' + String(frontHeadName) };
     if (verticalHazard(frontFeetName)) return { kind: 'blocked', reason: '前方脚下是' + String(frontFeetName) };
     if (!isVerticalPassable(frontHeadName)) return { kind: 'mine', target: { x: stepX, y: fy + 1, z: stepZ } };
+    // 落点上方那一格也要通：站上去之后人占 fy+1、fy+2 两格。
+    if (frontHead2Name != null && !isVerticalPassable(frontHead2Name)) {
+        return { kind: 'mine', target: { x: stepX, y: fy + 2, z: stepZ } };
+    }
     if (frontFeetName == null) return { kind: 'blocked', reason: '前方区块读不到' };
     if (!isVerticalPassable(frontFeetName)) return { kind: 'step_forward', target: { x: stepX, y: fy, z: stepZ } };
     return { kind: 'place_step', target: { x: stepX, y: fy, z: stepZ } };
 }
 
 function forwardDelta(yaw: number): { dx: number; dz: number } {
-    // 与项目其它地方一致：yaw=0 面朝南(+Z)，90 面朝西(-X)。
     const dx = -Math.round(Math.sin(yaw));
     const dz = Math.round(Math.cos(yaw));
     if (dx === 0 && dz === 0) return { dx: 0, dz: 1 };
@@ -3877,7 +3889,11 @@ export async function stairUp(bot: any, blocks: number = 1): Promise<boolean> {
             }
             const placed = await placeBlock(bot, material, plan.target.x, plan.target.y, plan.target.z, 'bottom', true);
             if (!placed) {
-                log(bot, 'stairUp 停止：前方垫脚失败。');
+                log(
+                    bot,
+                    'stairUp 停止：往 (' + plan.target.x + ',' + plan.target.y + ',' + plan.target.z + ') 垫 ' + material +
+                        ' 失败（那一格周围没有可依附的实心方块，或已经被占）。先 mineBlock 挖开它，或改用 pillarUp 直着往上垫。',
+                );
                 return false;
             }
         }
@@ -3888,7 +3904,7 @@ export async function stairUp(bot: any, blocks: number = 1): Promise<boolean> {
         bot.setControlState('jump', false);
         bot.setControlState('forward', false);
         if (Number(bot.entity.position.y) <= beforeY + 0.4) {
-            log(bot, 'stairUp 第 ' + (done + 1) + ' 格失败：跳不上去（前方可能被挡或高度太大）。');
+            log(bot, 'stairUp 第 ' + (done + 1) + ' 格失败：' + describeStairJumpFailure(blockAt, feet, dir.dx, dir.dz));
             return false;
         }
         done++;

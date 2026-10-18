@@ -327,6 +327,77 @@ describe('交互动作的统一结局', () => {
   });
 });
 
+describe('D1 collectBlocks 缺工具的回执', () => {
+  it('缺工具：报"没有能挖 X 的工具（手持 Y）"，不再甩锅给掉落/不可达', () => {
+    const text = annotateCollectBlocks(
+      '没有能挖 netherrack 的工具（手持 flint_and_steel）；先换正确的工具（对应镐/铲/斧）再来；急着清路可以用 mineBlock 徒手挖软方块。\n' +
+        'Collected 0 netherrack.\n' +
+        '采集结束：netherrack 数量没变（仍是 97）。移动 0 格——没挖到，可能目标太远或不可及。',
+    );
+    expect(text).toContain('没有能挖 netherrack 的工具（手持 flint_and_steel）');
+    expect(text).toContain('背包 97 → 97');
+    expect(text).toContain('不是掉落被抢');
+    expect(text).toContain('equip');
+    expect(text).not.toContain('掉落可能还在附近');
+  });
+
+  it('没有缺工具标记时，仍按原来的背包口径报', () => {
+    const text = annotateCollectBlocks('采集结束：iron_ore 数量没变（仍是 0）。移动 9.4 格——没挖到，可能目标太远或不可及。');
+    expect(text).toContain('没有采集到 iron_ore');
+    expect(text).toContain('以背包账目为准');
+  });
+});
+
+describe('D6 searchForBlock 每条回执都以结论收尾', () => {
+  it('被中断：结论写明"无法确认 + 原因：被中断"', () => {
+    const text = annotateSearchForBlock(
+      'searchForBlock：**被中断**（Stop / 保命反射 / autoPickup 抢走了身体），没有做完，也没有结论。',
+      { type: 'nether_bricks', search_range: 192 },
+      { x: 128.4, y: 53, z: -9.5 },
+      { x: 128.4, y: 53, z: -9.5 },
+    );
+    expect(text).toContain('被中断');
+    expect(text).toContain('结论：无法确认');
+    expect(text).toContain('搜索被中断');
+    expect(text).toContain('没有移动');
+  });
+
+  it('超时：结论写明原因，而不是只给"重试"', () => {
+    const text = annotateSearchForBlock(
+      'searchForBlock：**超时**（2 分钟没做完），已释放身体通道。\n已经做了的：Searching for nether_bricks within 192 blocks...',
+      { type: 'nether_bricks', search_range: 192 },
+      { x: 0, y: 64, z: 0 },
+      { x: 0, y: 64, z: 0 },
+    );
+    expect(text).toContain('结论：无法确认');
+    expect(text).toContain('搜索超时');
+  });
+
+  it('空日志：说明是日志为空/读取失败，而不是"可能还在搜"就算了', () => {
+    const text = annotateSearchForBlock('', { type: 'oak_log', search_range: 32 }, null, null);
+    expect(text).toContain('结论：无法确认');
+    expect(text).toContain('身体日志是空的');
+  });
+
+  it('找到 / 未找到也以结论收尾', () => {
+    const found = annotateSearchForBlock(
+      'Found obsidian at (100, 40, 200). Navigating...',
+      { type: 'obsidian', search_range: 384 },
+      { x: 0, y: 64, z: 0 },
+      { x: 0, y: 64, z: 0 },
+    );
+    expect(found).toContain('结论：范围内找到了 obsidian @(100,40,200)');
+
+    const missing = annotateSearchForBlock(
+      'Could not find any obsidian in 384 blocks.（搜完了，范围内确实没有）',
+      { type: 'obsidian', search_range: 384 },
+      { x: 0, y: 64, z: 0 },
+      { x: 0, y: 64, z: 0 },
+    );
+    expect(missing).toContain('结论：范围内的确定没有 obsidian');
+  });
+});
+
 describe('目标方块不可站立时找相邻落脚点', () => {
   it('返回空气且脚下实心的相邻格', () => {
     const blocks: Record<string, { name: string }> = {

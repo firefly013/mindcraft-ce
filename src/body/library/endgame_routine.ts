@@ -171,12 +171,12 @@ export const endgameToolSpecs: EndgameToolSpec[] = [
         name: 'throwHeld',
         kind: 'action',
         description:
-            '把手里的东西扔出去（先 equip）：末影之眼指路找要塞（飞约 12 格，每次 20% 概率碎），' +
-            '末影珍珠位移/免摔伤（下坠时会自动往脚下扔）。扔完会核对手里那一叠的数量有没有真的减少，' +
-            '没减少就如实报"没扔成"，不假装成功。',
+            '把手里的东西扔出去（先 equip）：末影之眼指路找要塞——**扔完会盯它 1~2 秒量出飞行方向**（8 方位 + 方位角 + 飞了多远），' +
+            '并把最后看到的位置记进 Memory Bank（last_eye_of_ender）；没采到就如实说"没看清"，绝不编方向。' +
+            '末影珍珠是位移/免摔伤（下坠时会自动往脚下扔）。扔完会核对手里那一叠的数量有没有真的减少，没减少就如实报"没扔成"。',
         params: {},
         timeoutMinutes: 1,
-        backing: '原子原语 throwHeld 在 library/endgame_routine.ts（瞄准 + activateItem + 数量核对），已实现。',
+        backing: '原子原语 throwHeld + throwEyeAndTrack 都在 library/endgame_routine.ts（瞄准 + activateItem + 数量核对 + 眼实体采样）；方向几何是 endgame.compassBearing/trackEyeFlight（纯函数，已单测）。',
     },
 ];
 

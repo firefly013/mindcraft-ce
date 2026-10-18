@@ -212,6 +212,32 @@ const online = {};
 let mindserverFails = 0;
 let lastNoFeedbackAlert = 0;
 
+/**
+ * 「两个 bot 同时不在线」的计时起点。
+ *
+ * 原来这里的判定是 `onlineCount === 0 && Date.now() - startedAt > 5 分钟`，
+ * 而 `startedAt` 是 **watcher 自己的启动时刻**——于是只要 watcher 跑了 5 分钟
+ * 以上，任何一次"两个 bot 恰好都不在线"的瞬间（尤其是 supervisor 主动重启后
+ * 那 60 秒的重新登录窗口）都会立刻触发一次整树重启，重启又制造新的离线窗口
+ * → 重启风暴（实测 12:56 刚起来的 main 只活了 22 秒就被这种请求杀掉）。
+ *
+ * 正确语义是"**持续**都不在线 5 分钟"，所以要自己记起点：一旦有人在线就清零。
+ */
+let allOfflineSince = null;
+/** supervisor 换过 main 进程之后给的宽限期（新进程要重新登录，别急着判死）。 */
+let freshMainUntil = 0;
+let lastMainPid = null;
+
+/** 读 supervisor 写的 main.pid；读不到返回 null。 */
+function readMainPid() {
+    try {
+        const raw = readFileSync(join(RUN, 'main.pid'), 'utf8').trim();
+        return raw === '' ? null : raw;
+    } catch {
+        return null;
+    }
+}
+
 async function tick() {
     for (const f of [join(RUN, 'stdout.log'), join(RUN, 'stderr.log')]) {
         for (const line of readNew(f)) processLine(f.includes('stderr') ? 'stderr' : 'stdout', line);
@@ -225,10 +251,25 @@ async function tick() {
     }
     collectFeedback();
 
+    // supervisor 拉起新 main 了：把"掉线/全掉线"的计时全部清零，并给一段宽限。
+    // 不这么做的话，重启前积累的掉线时长会被算到新进程头上（新进程刚起来
+    // 40-60 秒内 bot 必然还没登录），于是"掉线 ≥150s"立刻再触发一次重启。
+    const mainPid = readMainPid();
+    if (mainPid != null && mainPid !== lastMainPid) {
+        if (lastMainPid != null) {
+            for (const agent of AGENTS) offlineSince[agent] = null;
+            allOfflineSince = null;
+            freshMainUntil = Date.now() + STARTUP_GRACE_MS;
+            alert('info', 'main-restarted', `supervisor 换了 main 进程（pid ${mainPid}），掉线计时清零并宽限 ${Math.round(STARTUP_GRACE_MS / 1000)}s`, { pid: mainPid });
+        }
+        lastMainPid = mainPid;
+    }
+    const inGrace = Date.now() - startedAt < STARTUP_GRACE_MS || Date.now() < freshMainUntil;
+
     const probe = await probeBots();
     if (!probe.connected) {
         mindserverFails++;
-        if (Date.now() - startedAt > STARTUP_GRACE_MS) {
+        if (!inGrace) {
             alert('critical', 'mindserver-down', `MindServer ${PORT} 连不上（第 ${mindserverFails} 次）：${probe.err}`, { fails: mindserverFails });
             if (mindserverFails >= 3) requestRestart(`MindServer ${PORT} 连续 ${mindserverFails} 次连不上：${probe.err}`, 'mindserver');
         }
@@ -243,14 +284,14 @@ async function tick() {
         if (!up) {
             if (!offlineSince[agent]) offlineSince[agent] = Date.now();
             const sec = Math.round((Date.now() - offlineSince[agent]) / 1000);
-            if (sec >= 90 && Date.now() - startedAt > STARTUP_GRACE_MS) {
+            if (sec >= 90 && !inGrace) {
                 alert('critical', `bot-offline:${agent}`, `${agent} 掉线 ${sec}s（MindServer：${res?.error ?? 'unreachable'}）`, { agent, sec });
                 if (sec >= 150) requestRestart(`${agent} 掉线 ${sec}s`, `offline:${agent}`);
             }
             continue;
         }
         if (offlineSince[agent]) {
-            if (Date.now() - startedAt > STARTUP_GRACE_MS) alert('info', `bot-back:${agent}`, `${agent} 恢复在线（掉线约 ${Math.round((Date.now() - offlineSince[agent]) / 1000)}s）`, { agent });
+            if (!inGrace) alert('info', `bot-back:${agent}`, `${agent} 恢复在线（掉线约 ${Math.round((Date.now() - offlineSince[agent]) / 1000)}s）`, { agent });
             offlineSince[agent] = null;
         }
         lastProgressAt[agent] ??= Date.now();
@@ -261,13 +302,22 @@ async function tick() {
         if ((res.events ?? []).length > 0) state.cliSince[agent] = Math.max(...res.events.map((e) => e.at));
         const idleMin = (Date.now() - (lastProgressAt[agent] ?? Date.now())) / 60000;
         if (idleMin > 30) alert('warn', `stalled:${agent}`, `${agent} 在线但 ${idleMin.toFixed(0)} 分钟无日志/事件活动`, { agent, idleMin: Math.round(idleMin) });
-        if (idleMin > 45) requestRestart(`${agent} 停滞 ${idleMin.toFixed(0)} 分钟`, `stall:${agent}`);
+        if (idleMin > 45 && !inGrace) requestRestart(`${agent} 停滞 ${idleMin.toFixed(0)} 分钟`, `stall:${agent}`);
         const dbs = dbInfo(agent);
         if (dbs.length === 0) alert('warn', `no-db:${agent}`, `${agent} 还没有 session.db（会话未落盘？）`, { agent });
     }
 
+    // **持续**都不在线才算停摆：一有人回来就把起点清掉。
     const onlineCount = AGENTS.filter((a) => online[a]).length;
-    if (onlineCount === 0 && Date.now() - startedAt > 5 * 60e3) requestRestart('两个 bot 都不在线超过 5 分钟', 'all-offline');
+    if (onlineCount === 0) {
+        allOfflineSince ??= Date.now();
+        const allOfflineSec = Math.round((Date.now() - allOfflineSince) / 1000);
+        if (allOfflineSec > 5 * 60 && !inGrace) {
+            requestRestart(`两个 bot 都不在线超过 5 分钟（连续 ${allOfflineSec}s）`, 'all-offline');
+        }
+    } else {
+        allOfflineSince = null;
+    }
     if (onlineCount === 2 && feedbackCount === 0 && Date.now() - startedAt > 30 * 60e3 && Date.now() - lastNoFeedbackAlert > 60 * 60e3) {
         lastNoFeedbackAlert = Date.now();
         alert('warn', 'no-feedback', '两个 bot 在线 30 分钟仍无任何 Feedback（提示词要求频繁反馈）', {});
