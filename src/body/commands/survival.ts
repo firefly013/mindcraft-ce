@@ -20,7 +20,11 @@ export const SURVIVAL_TOOL_TEXT: Record<string, { description: string; params: R
     survivalCheck: {
         description:
             '生存状态检查：一次给全「天黑还有多久 / 头顶有没有顶、算不算地下掩体 / 周围有没有敌对生物 / 有没有床和食物 / 抗火 Buff 还剩多久」，并直接给出建议。' +
-            '**进夜晚、下矿、打烈焰人之前先调它**，不要靠心算时间或翻背包。只读，不占身体通道。',
+            '**进夜晚、下矿、打烈焰人之前先调它**，不要靠心算时间或翻背包。只读，不占身体通道。' +
+            '**食物两条线会直接写在报告里**（和报告打印的措辞一致）：' +
+            '① 告急——血低（≤12）+ 食物低于回血线 18 + 背包没有能吃的，三者同时成立时打印「食物告急：… → 先别打：去钓鱼或种地」，并按背包家底给具体做法（有线和木棍=能做钓鱼竿、有种子=能种小麦）；' +
+            '② 存粮——还有吃的但只剩 ≤2 份且食物 <14 时打印「存粮只剩 N 份：趁现在去补（钓鱼/打猎/种地），别等饿到 18 以下再找」；背包里有生肉时附带「先 useBlock(type="furnace", …) 烤熟再吃」。' +
+            '食物充足（≥3 份且不饿）时这两条都不出现，不会来吵。',
         params: {},
     },
     seekShelter: {
@@ -69,6 +73,17 @@ export const SURVIVAL_TOOL_TEXT: Record<string, { description: string; params: R
             '**Buff 快没了（剩不到 45 秒）就再调一次保持不断**；没有药水会告诉你需要「烈焰粉 + 岩浆膏 + 酿造台」自制。',
         params: {},
     },
+    fish: {
+        description:
+            '钓鱼（**唯一可再生的食物来源**）：抛竿 → **盯着浮标判断咬钩**（速度/位置信号，不是傻等固定时间）→ 收竿 → **按背包真实增量核对**。' +
+            '钓到才算数：背包没多出鱼就说「这一竿没钓到」，绝不拿"我抛了竿"冒充"我钓到了"。' +
+            '缺竿会说清要做 fishing_rod（3 木棍 + 2 线，**必须在工作台上做**，2×2 放不下）；够不到水、竿断了、背包已经够吃（≥4 份）都会**早停**并说明。' +
+            '每一竿都有上限（默认 30 秒等不到就收），不会挂着不动。回来会报这一趟的净增量，并提醒生鱼要烤（生鳕鱼 2 点 vs 熟鳕鱼 5 点），附一条能照抄的熔炉调用。',
+        params: {
+            max_ms: '整趟时间预算（毫秒，默认 90000，10000~300000）。到点收手。',
+            max_casts: '最多抛几竿（默认 3，1~10）。',
+        },
+    },
 };
 
 export { SURVIVAL_POLICY } from '../../shared/survival_policy.js';
@@ -88,6 +103,23 @@ export function parseFluidArgs(
     const n = typeof rawRadius === 'number' ? rawRadius : Number(rawRadius);
     const radius = Number.isFinite(n) ? Math.max(1, Math.min(128, Math.round(n))) : 32;
     return { kind, radius };
+}
+
+/** 归一 `fish` 的 max_ms / max_casts（越界就夹住，不报错）。 */
+export function parseFishArgs(
+    rawMaxMs: unknown,
+    rawMaxCasts: unknown,
+): { maxMs: number; maxCasts: number } {
+    const ms = typeof rawMaxMs === 'number' ? rawMaxMs : Number(rawMaxMs);
+    const casts = typeof rawMaxCasts === 'number' ? rawMaxCasts : Number(rawMaxCasts);
+    return {
+        maxMs: Number.isFinite(ms)
+            ? Math.max(10_000, Math.min(survival.FISH_MAX_MS_LIMIT, Math.round(ms)))
+            : survival.FISH_TIMEOUT_MS,
+        maxCasts: Number.isFinite(casts)
+            ? Math.max(1, Math.min(survival.FISH_MAX_CASTS_LIMIT, Math.round(casts)))
+            : survival.FISH_MAX_CASTS,
+    };
 }
 
 /**
@@ -166,6 +198,31 @@ export const survivalActionList: AgentCommand[] = [
         description: DESCRIPTION('prepareBlaze'),
         params: {},
         perform: runSurvivalAction('prepareBlaze', 2, (agent) => survival.prepareBlazeSkill(agent.bot)),
+    },
+    {
+        name: '!fish',
+        description: DESCRIPTION('fish'),
+        params: {
+            max_ms: {
+                type: 'float',
+                description: SURVIVAL_TOOL_TEXT.fish.params.max_ms,
+                optional: true,
+                default: survival.FISH_TIMEOUT_MS,
+                domain: [10_000, survival.FISH_MAX_MS_LIMIT],
+            },
+            max_casts: {
+                type: 'int',
+                description: SURVIVAL_TOOL_TEXT.fish.params.max_casts,
+                optional: true,
+                default: survival.FISH_MAX_CASTS,
+                domain: [1, survival.FISH_MAX_CASTS_LIMIT],
+            },
+        },
+        // 整趟最多 90 秒默认 + 收竿余量，给 3 分钟足够；超时兜底照旧。
+        perform: runSurvivalAction('fish', 3, async (agent, rawMaxMs?: unknown, rawMaxCasts?: unknown) => {
+            const args = parseFishArgs(rawMaxMs, rawMaxCasts);
+            skills.log(agent.bot, await survival.fishSkill(agent.bot, args.maxMs, args.maxCasts));
+        }),
     },
     {
         name: '!escapeWater',

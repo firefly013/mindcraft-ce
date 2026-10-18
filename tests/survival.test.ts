@@ -470,11 +470,11 @@ describe('registry 接入契约（不依赖共享入口改动）', () => {
 
   it('四个声明都能建进工具目录，且 channel 归属正确', () => {
     expect(declarations.map((d) => d.name).sort()).toEqual(
-      ['escapeWater', 'fillBucketFromSource', 'findFluidSource', 'prepareBlaze', 'seekShelter', 'sleepUnderground', 'survivalCheck'].sort(),
+      ['escapeWater', 'fillBucketFromSource', 'findFluidSource', 'fish', 'prepareBlaze', 'seekShelter', 'sleepUnderground', 'survivalCheck'].sort(),
     );
     expect(isActionTool(catalog, 'survivalCheck')).toBe(false);
     expect(isActionTool(catalog, 'findFluidSource')).toBe(false);
-    for (const name of ['escapeWater', 'fillBucketFromSource', 'seekShelter', 'sleepUnderground', 'prepareBlaze']) {
+    for (const name of ['escapeWater', 'fillBucketFromSource', 'seekShelter', 'sleepUnderground', 'prepareBlaze', 'fish']) {
       expect(isActionTool(catalog, name), name).toBe(true);
     }
   });

@@ -18,7 +18,10 @@ import { Vec3 } from 'vec3';
 import * as skills from './skills.js';
 import type { MoveDirection } from './skills.js';
 import * as world from './world.js';
-import { FOOD_VALUE, cookedCounterpartOf, isHostile, pickBestFood } from '../safety/emergency.js';
+// 找水只留一份实现（`nearestWater` 在 progression 里，只扫已加载区块）：
+// progression 不 import survival，所以这条依赖不会成环。
+import { nearestWater } from './progression.js';
+import { FOOD_VALUE, cookedCounterpartOf, foodValueOf, isHostile, pickBestFood } from '../safety/emergency.js';
 
 /** 与 edges / live_state 同一套夜晚阈值（12542 起怪物可刷，23460 天亮）。 */
 export const NIGHT_START = 12542;
@@ -1498,4 +1501,568 @@ export async function fillBucketFromSourceSkill(
             `${filledItem} ${before} → ${after}，空桶还剩 ${countItemSafe(bot, 'bucket')} 个。`);
     }
     return logLine(bot, `装填动作执行了，但背包里没出现 ${filledItem}（before ${before} → after ${countItemSafe(bot, filledItem)}）。先 stats 核对，可能是同步延迟；确认没装到就换个站位重试。`);
+}
+
+// ─────────────────────────── 钓鱼：唯一可再生的食物来源 ───────────────────────────
+//
+// 为什么要有这个原语（2026-10-18 晚的真机）：两个 bot 把 1000 格内的动物打光、血掉到 1.68，
+// 背包和所有箱子里一块食物都没有——世界里唯一能再生的食物就是鱼。而 `useOn(fishing_rod,
+// target="water")` 只是**抛竿**：抛出去之后要**等浮标下沉（咬钩）再收竿**。把这套时序交给
+// 弱模型（"等一会儿再收"）等于没做——收早了钓不到，收晚了鱼跑了，所以做成一个动作原语：
+//
+//   抛竿 → **按浮标信号判咬钩**（速度/位置，不是固定计时器） → 收竿 → **按背包增量核对**
+//
+// 规矩和 consume/mineTunnel 一致：**没钓到就说没钓到**，绝不用"我抛了竿"冒充"我钓到了鱼"。
+
+/** 默认总预算（毫秒）。 */
+export const FISH_TIMEOUT_MS = 90_000;
+/** 默认抛竿次数。 */
+export const FISH_MAX_CASTS = 3;
+export const FISH_MAX_MS_LIMIT = 5 * 60 * 1000;
+export const FISH_MAX_CASTS_LIMIT = 10;
+/** 抛竿后浮标最多多久该出现。 */
+export const FISH_BOBBER_APPEAR_MS = 3_000;
+/** 浮标落水后最多花多久等它"稳定"（之后才 armed 咬钩判定，否则飞出去那一下会被误判成咬钩）。 */
+export const FISH_SETTLE_MS = 2_000;
+/** "稳定"的判据：竖直速度小于这个值。 */
+export const FISH_SETTLE_QUIET_VY = 0.02;
+/** 单竿最多等多久（原版没饵大约 5~30 秒咬钩；等不到就收竿，绝不挂死）。 */
+export const FISH_CAST_WAIT_MS = 30_000;
+export const FISH_POLL_MS = 100;
+/** 收竿后等背包同步的时间。 */
+export const FISH_LOOT_SYNC_MS = 400;
+/** 站在多远内才抛得到水面。 */
+export const FISH_WATER_REACH = 16;
+/** 找水的扫描半径（只扫已加载区块）。 */
+export const FISH_WATER_SCAN_RADIUS = 64;
+/** 背包里能吃的 ≥ 这个数就别钓了：钓鱼是为了补缺口，不是爱好。 */
+export const FISH_FOOD_ENOUGH = 4;
+/** 咬钩判据①：浮标竖直速度向下穿过这个值。 */
+export const FISH_BITE_VELOCITY = -0.05;
+/** 咬钩判据②：浮标 y 比静止水位低这么多。 */
+export const FISH_BITE_DROP = 0.15;
+/** 竿耐久低到这个比例就在回执里提醒（快断了）。 */
+export const FISH_ROD_LOW_FRACTION = 0.85;
+/** 钓上来的东西里哪些算"鱼"（垃圾/宝藏不参与"钓到几条"）。 */
+export const FISH_ITEMS = ['raw_cod', 'raw_salmon', 'raw_tropical_fish', 'raw_pufferfish'] as const;
+
+export type FishStopReason =
+    | 'casts_used'
+    | 'budget'
+    | 'food_enough'
+    | 'no_rod'
+    | 'no_water'
+    | 'rod_broke'
+    | 'interrupted';
+
+export interface FishSample {
+    y: number;
+    vy: number;
+    id?: number | null;
+}
+
+/** 咬钩判据（纯函数，可单测）：浮标突然往下——速度向下，或 y 掉下静止水位。 */
+export function bobberDipped(sample: FishSample, restingY: number): boolean {
+    if (!Number.isFinite(sample.y)) return false;
+    if (Number.isFinite(sample.vy) && sample.vy <= FISH_BITE_VELOCITY) return true;
+    return Number.isFinite(restingY) && sample.y <= restingY - FISH_BITE_DROP;
+}
+
+export interface FishCastRecord {
+    index: number;
+    /** 这一竿等了多久（毫秒）。 */
+    waitedMs: number;
+    /** 有没有看到咬钩信号。 */
+    bite: boolean;
+    /** 这一竿净上来的鱼（按背包增量）。 */
+    caught: { name: string; count: number } | null;
+    /** 上来的不是鱼（垃圾/宝藏）——如实记录，不含糊。 */
+    junk: boolean;
+    /** 明细备注（浮标没出现/咬钩但没收到鱼/竿断了…）。 */
+    note: string | null;
+}
+
+export interface FishOutcome {
+    stopReason: FishStopReason;
+    casts: FishCastRecord[];
+    caught: Array<{ name: string; count: number }>;
+    caughtTotal: number;
+    /** 这一趟开始前背包里已有的鱼数（用来核对增量）。 */
+    baselineFish: number;
+    foodCount: number;
+    elapsedMs: number;
+    maxMs: number;
+    maxCasts: number;
+    rod: { present: boolean; durabilityUsed: number | null; maxDurability: number | null; broke: boolean };
+    water: { position: { x: number; y: number; z: number }; distance: number } | null;
+    /** 浮标没出现（抛竿没成功）的竿数。 */
+    failedCasts: number;
+    warnings: string[];
+}
+
+const FISH_STOP_TEXT: Record<FishStopReason, string> = {
+    casts_used: '抛竿次数用完了',
+    budget: '时间预算用完了',
+    food_enough: `背包里的食物够了（≥${FISH_FOOD_ENOUGH} 份）`,
+    no_rod: '背包里没有钓鱼竿',
+    no_water: '够不到水面',
+    rod_broke: '钓鱼竿断了/没了',
+    interrupted: '被 Stop 打断',
+};
+
+/** 停手的理由 → 人类可读。 */
+export function fishStopText(reason: FishStopReason): string {
+    return FISH_STOP_TEXT[reason] ?? reason;
+}
+
+/** 一条能照抄的下一步（规矩同 exploreFor/huntFor：只给一条）。 */
+export function fishNextAction(o: FishOutcome): string {
+    if (o.stopReason === 'no_rod' || o.stopReason === 'rod_broke') {
+        // **要用工作台**：fishing_rod 是 3×3 配方，2×2 的 craft 放不下（真机踩过）。
+        return 'useBlock(type="crafting_table", input="3 stick, 2 string", output="1 fishing_rod")';
+    }
+    if (o.caughtTotal > 0) {
+        const first = o.caught[0];
+        const cooked = cookedCounterpartOf(first.name) ?? first.name;
+        return `useBlock(type="furnace", input="${first.count} ${first.name}", output="${first.count} ${cooked}")`;
+    }
+    if (o.stopReason === 'food_enough') return 'stats(type="inventory")';
+    if (o.stopReason === 'no_water') {
+        if (o.water == null) return 'searchForBlock(type="water", search_range=256)';
+        return `goToCoordinates(x=${Math.round(o.water.position.x)}, y=${Math.round(o.water.position.y)}, z=${Math.round(o.water.position.z)}, closeness=3)`;
+    }
+    if (o.stopReason === 'interrupted') return 'stats(type="body")';
+    return `fish(max_ms=${o.maxMs}, max_casts=${o.maxCasts})`;
+}
+
+/**
+ * 钓鱼回执（纯函数）：逐竿事实 + 净增量 + 生鱼要烤的提醒 + **一条**下一步。
+ */
+export function fishReceipt(o: FishOutcome): string {
+    const lines: string[] = [];
+    const seconds = (o.elapsedMs / 1000).toFixed(1);
+    const catchText =
+        o.caughtTotal > 0
+            ? `钓到 ${o.caughtTotal} 条（${o.caught.map((c) => `${c.name} x${c.count}`).join('、')}）`
+            : '一条都没钓到';
+    lines.push(
+        `fish：${catchText}；抛竿 ${o.casts.length} 次、用了 ${seconds} 秒；停止原因：${fishStopText(o.stopReason)}。`,
+    );
+    if (o.rod.durabilityUsed != null || o.rod.maxDurability != null) {
+        lines.push(
+            `竿：${o.rod.durabilityUsed ?? '?'}/${o.rod.maxDurability ?? '?'} 耐久` +
+                (o.rod.durabilityUsed != null &&
+                o.rod.maxDurability != null &&
+                o.rod.maxDurability > 0 &&
+                o.rod.durabilityUsed / o.rod.maxDurability >= FISH_ROD_LOW_FRACTION
+                    ? '（**快断了**：再钓几竿就没了，先备一根新的）'
+                    : ''),
+        );
+    }
+    for (const cast of o.casts) {
+        if (cast.note === 'no_bobber') {
+            lines.push(`- #${cast.index} 浮标没出现（抛竿可能没成功）——对准水面再试。`);
+            continue;
+        }
+        if (cast.caught != null) {
+            lines.push(
+                `- #${cast.index} 第 ${(cast.waitedMs / 1000).toFixed(1)} 秒咬钩 → 收竿：+${cast.caught.count} ${cast.caught.name}`,
+            );
+            continue;
+        }
+        if (cast.bite) {
+            lines.push(
+                `- #${cast.index} 咬钩了但**背包没多出鱼**${cast.junk ? '（上来的可能是垃圾/宝藏）' : '（可能是收竿时机不对/同步延迟）'}——别当钓到了。`,
+            );
+            continue;
+        }
+        lines.push(
+            `- #${cast.index} 等了 ${(cast.waitedMs / 1000).toFixed(1)} 秒**没咬钩**，收竿了——这一竿没钓到（收早了钓不到，等不到也别挂死）。`,
+        );
+    }
+    if (o.caughtTotal > 0) {
+        const first = o.caught[0];
+        const cooked = cookedCounterpartOf(first.name) ?? first.name;
+        const rawValue = foodValueOf(first.name);
+        const cookedValue = foodValueOf(cooked);
+        lines.push(
+            `⚠️ **生鱼先烤再吃**：${first.name} ${rawValue == null ? '' : `${rawValue[0]} 点`}、` +
+                `${cooked} ${cookedValue == null ? '' : `${cookedValue[0]} 点`}（差一倍）。` +
+                `useBlock(type="furnace", input="${first.count} ${first.name}", output="${first.count} ${cooked}")`,
+        );
+    }
+    for (const warning of o.warnings) lines.push(warning);
+    lines.push(`下一步（照做即可）：${fishNextAction(o)}`);
+    return lines.join('\n');
+}
+
+export interface FishDeps {
+    position?: (bot: any) => { x: number; y: number; z: number };
+    hasRod?: (bot: any) => boolean;
+    rodDurability?: (bot: any) => { used: number | null; max: number | null };
+    equip?: (bot: any, item: string) => Promise<boolean>;
+    findWater?: (
+        bot: any,
+        from: { x: number; y: number; z: number },
+        radius: number,
+    ) => { position: { x: number; y: number; z: number }; distance: number } | null;
+    lookAtWater?: (bot: any, water: { x: number; y: number; z: number }) => Promise<void>;
+    cast?: (bot: any) => Promise<void>;
+    reel?: (bot: any) => Promise<void>;
+    bobber?: (bot: any) => FishSample | null;
+    /** 逐种鱼的份数。 */
+    fishCount?: (bot: any) => Record<string, number>;
+    /** 背包总件数（用来区分"上来的是垃圾"和"什么都没上来"）。 */
+    inventoryTotal?: (bot: any) => number | null;
+    foodCount?: (bot: any) => number;
+    sleep?: (ms: number) => Promise<void>;
+    now?: () => number;
+}
+
+export interface FishOptions {
+    castWaitMs?: number;
+    appearMs?: number;
+    settleMs?: number;
+    pollMs?: number;
+    /** 收竿后等背包同步多久。 */
+    lootSyncMs?: number;
+}
+
+function clampFishInt(value: unknown, fallback: number, min: number, max: number): number {
+    const n = typeof value === 'number' ? value : Number(value);
+    if (!Number.isFinite(n)) return fallback;
+    return Math.max(min, Math.min(max, Math.round(n)));
+}
+
+function defaultRodDurability(bot: any): { used: number | null; max: number | null } {
+    try {
+        const items = (bot?.inventory?.items?.() ?? []) as Array<{ name?: unknown; durabilityUsed?: unknown; maxDurability?: unknown }>;
+        const rod = items.find((item) => typeof item?.name === 'string' && item.name.includes('fishing_rod'));
+        if (rod == null) return { used: null, max: null };
+        const used = typeof rod.durabilityUsed === 'number' ? rod.durabilityUsed : null;
+        const max = typeof rod.maxDurability === 'number' ? rod.maxDurability : null;
+        return { used, max };
+    } catch {
+        return { used: null, max: null };
+    }
+}
+
+/** 浮标实体名几种可能（版本差异）：只认"浮标/鱼钩"这一类。 */
+export function isBobberName(name: unknown): boolean {
+    const key = typeof name === 'string' ? name.trim().toLowerCase().replace(/^minecraft:/, '') : '';
+    return key.includes('bobber') || key.includes('fishing_hook') || key === 'hook';
+}
+
+function defaultBobber(bot: any): FishSample | null {
+    try {
+        const entities = (bot?.entities ?? {}) as Record<string, any>;
+        for (const entity of Object.values(entities)) {
+            if (entity == null || !isBobberName(entity.name)) continue;
+            const y = Number(entity?.position?.y);
+            const vy = Number(entity?.velocity?.y);
+            return { id: typeof entity.id === 'number' ? entity.id : null, y, vy: Number.isFinite(vy) ? vy : Number.NaN };
+        }
+        return null;
+    } catch {
+        return null;
+    }
+}
+
+function inventoryCountsSafe(bot: any): Record<string, number> {
+    try {
+        return (world.getInventoryCounts(bot) ?? {}) as Record<string, number>;
+    } catch {
+        return {};
+    }
+}
+
+/**
+ * 钓鱼：`fish(max_ms, max_casts)`。
+ *
+ * 抛竿 → **按浮标信号判咬钩** → 收竿 → **按背包增量核对**；每一竿都有界（等不到就收竿）。
+ * 缺竿/够不到水/竿断了/背包已经够吃，都会**早停**并说清原因。
+ */
+export async function fishSkill(
+    bot: any,
+    rawMaxMs?: unknown,
+    rawMaxCasts?: unknown,
+    deps: FishDeps = {},
+    options: FishOptions = {},
+): Promise<string> {
+    const maxMs = clampFishInt(rawMaxMs, FISH_TIMEOUT_MS, 10_000, FISH_MAX_MS_LIMIT);
+    const maxCasts = clampFishInt(rawMaxCasts, FISH_MAX_CASTS, 1, FISH_MAX_CASTS_LIMIT);
+    const pollMs = options.pollMs ?? FISH_POLL_MS;
+    const castWaitMs = options.castWaitMs ?? FISH_CAST_WAIT_MS;
+    const appearMs = options.appearMs ?? FISH_BOBBER_APPEAR_MS;
+    const settleMs = options.settleMs ?? FISH_SETTLE_MS;
+    const lootSyncMs = options.lootSyncMs ?? FISH_LOOT_SYNC_MS;
+
+    const position = deps.position ?? ((b: any) => {
+        const p = b?.entity?.position ?? {};
+        return { x: Number(p.x ?? 0), y: Number(p.y ?? 0), z: Number(p.z ?? 0) };
+    });
+    const hasRod = deps.hasRod ?? ((b: any) => (skills.inventoryCountOf(b, 'fishing_rod') ?? 0) > 0);
+    const rodDurability = deps.rodDurability ?? defaultRodDurability;
+    const equip = deps.equip ?? ((b: any, item: string) => skills.equip(b, item));
+    const findWater = deps.findWater ?? ((b: any, from: any, radius: number) => nearestWater(b, from, radius));
+    const lookAtWater = deps.lookAtWater ?? ((b: any, water: any) => b.lookAt(new Vec3(water.x + 0.5, water.y + 0.9, water.z + 0.5), true));
+    const cast = deps.cast ?? ((b: any) => b.activateItem());
+    const reel = deps.reel ?? ((b: any) => b.deactivateItem());
+    const bobber = deps.bobber ?? defaultBobber;
+    const fishCount =
+        deps.fishCount ??
+        ((b: any) => {
+            const out: Record<string, number> = {};
+            for (const name of FISH_ITEMS) out[name] = skills.inventoryCountOf(b, name) ?? 0;
+            return out;
+        });
+    const inventoryTotal = deps.inventoryTotal ?? ((b: any) => {
+        const counts = inventoryCountsSafe(b);
+        const values = Object.values(counts).filter((n) => Number.isFinite(n));
+        return values.length === 0 ? null : values.reduce((sum, n) => sum + n, 0);
+    });
+    const foodCount = deps.foodCount ?? ((b: any) => countFood(inventoryCountsSafe(b)));
+    const sleep = deps.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
+    const now = deps.now ?? Date.now;
+
+    const startedAt = now();
+    const casts: FishCastRecord[] = [];
+    const warnings: string[] = [];
+    const before = fishCount(bot);
+    const baselineFish = Object.values(before).reduce((sum, n) => (Number.isFinite(n) ? sum + n : sum), 0);
+    const foodCountNow = foodCount(bot);
+    const rodAtStart = hasRod(bot);
+    const rodAtStartDurability = rodDurability(bot);
+    let rodState = {
+        present: rodAtStart,
+        durabilityUsed: rodAtStartDurability.used,
+        maxDurability: rodAtStartDurability.max,
+        broke: false,
+    };
+    let water = findWater(bot, position(bot), FISH_WATER_SCAN_RADIUS);
+    let failedCasts = 0;
+    let stopReason: FishStopReason = 'casts_used';
+
+    const sumFish = (): number => {
+        const counts = fishCount(bot);
+        return Object.values(counts).reduce((sum, n) => (Number.isFinite(n) ? sum + n : sum), 0);
+    };
+
+    if (!rodAtStart) {
+        stopReason = 'no_rod';
+        warnings.push(
+            `没有钓鱼竿：**要在工作台上做**（3 木棍 + 2 线）——2×2 的 craft 放不下这个配方：` +
+                `useBlock(type="crafting_table", input="3 stick, 2 string", output="1 fishing_rod")。`,
+        );
+    } else if (foodCountNow >= FISH_FOOD_ENOUGH) {
+        stopReason = 'food_enough';
+        warnings.push(
+            `背包里已经有 ${foodCountNow} 份能吃的（≥${FISH_FOOD_ENOUGH}）：**不用钓**，去干正事；` +
+                `存粮规则也不许现在把它们吃掉，留着低血期用。`,
+        );
+    } else if (water == null || water.distance > FISH_WATER_REACH) {
+        stopReason = 'no_water';
+        warnings.push(
+            water == null
+                ? `够不到水：半径 ${FISH_WATER_SCAN_RADIUS} 格内**没扫到水面**（只扫已加载区块）——抛竿最多 ${FISH_WATER_REACH} 格。`
+                : `水太远：最近的水在 (${Math.round(water.position.x)}, ${Math.round(water.position.y)}, ${Math.round(water.position.z)})` +
+                      `，约 ${water.distance.toFixed(1)} 格（抛竿最多 ${FISH_WATER_REACH} 格）——先走过去。`,
+        );
+    } else {
+        const equipped = await equip(bot, 'fishing_rod');
+        if (!equipped) {
+            stopReason = 'no_rod';
+            warnings.push('钓鱼竿没拿到手上（装备失败）：先 equip(item_name="fishing_rod") 再钓。');
+        } else if (water == null) {
+            stopReason = 'no_water';
+        } else {
+            try {
+                await lookAtWater(bot, water.position);
+            } catch {
+                warnings.push('对准水面时读不到朝向（不致命）：抛竿可能偏，钓不到就调一下站位。');
+            }
+            for (let index = 1; index <= maxCasts; index++) {
+                if (bot?.interrupt_code === true) {
+                    stopReason = 'interrupted';
+                    break;
+                }
+                if (now() - startedAt >= maxMs) {
+                    stopReason = 'budget';
+                    break;
+                }
+                if (foodCount(bot) >= FISH_FOOD_ENOUGH) {
+                    stopReason = 'food_enough';
+                    break;
+                }
+                if (!hasRod(bot)) {
+                    rodState = { ...rodState, present: false, broke: true };
+                    stopReason = 'rod_broke';
+                    break;
+                }
+
+                const fishBeforeCast = sumFish();
+                const fishBeforeCastByName = fishCount(bot);
+                const totalBeforeCast = inventoryTotal(bot);
+                const castStartedAt = now();
+                try {
+                    await cast(bot);
+                } catch (err) {
+                    casts.push({
+                        index,
+                        waitedMs: 0,
+                        bite: false,
+                        caught: null,
+                        junk: false,
+                        note: 'no_bobber',
+                    });
+                    failedCasts += 1;
+                    warnings.push(`第 ${index} 竿抛竿报错：${err instanceof Error ? err.message : String(err)}`);
+                    continue;
+                }
+
+                // ① 等浮标出现（有界）。
+                const appearDeadline = Math.min(castStartedAt + appearMs, startedAt + maxMs);
+                let sample = bobber(bot);
+                while (sample == null && now() < appearDeadline) {
+                    if (bot?.interrupt_code === true) break;
+                    await sleep(pollMs);
+                    sample = bobber(bot);
+                }
+                if (sample == null) {
+                    casts.push({ index, waitedMs: now() - castStartedAt, bite: false, caught: null, junk: false, note: 'no_bobber' });
+                    failedCasts += 1;
+                    try {
+                        await reel(bot);
+                    } catch {
+                        /* 收不回来也要往下走 */
+                    }
+                    continue;
+                }
+
+                // ② 等浮标稳定（飞出去那一下不算咬钩）。
+                const settleDeadline = Math.min(now() + settleMs, castStartedAt + appearMs + settleMs, startedAt + maxMs);
+                let quietPolls = 0;
+                let restingY = sample.y;
+                while (now() < settleDeadline && quietPolls < 2) {
+                    if (bot?.interrupt_code === true) break;
+                    const current = bobber(bot);
+                    if (current == null) break;
+                    sample = current;
+                    restingY = Number.isFinite(current.y) ? current.y : restingY;
+                    quietPolls = Number.isFinite(current.vy) && Math.abs(current.vy) <= FISH_SETTLE_QUIET_VY ? quietPolls + 1 : 0;
+                    await sleep(pollMs);
+                }
+
+                // ③ 等咬钩（有界）：**信号驱动**，不是固定计时器。
+                //
+                // **只有浮标稳定之后才 armed**。首版在这里犯过一个真错：稳定窗口结束时
+                // 不管有没有静下来都拿"最后一次看到的 y"当水位——如果那一下还在飞出去的
+                // 抛物线上，浮标正常落水就被判成"咬钩"（粗粒度轮询下每一竿都假报咬钩）。
+                // 所以未静下来就继续在咬钩循环里等静：静了才把它当水位，再判下沉。
+                const biteDeadline = Math.min(now() + castWaitMs, startedAt + maxMs);
+                let bite = false;
+                let armed = quietPolls >= 2;
+                while (now() < biteDeadline) {
+                    if (bot?.interrupt_code === true) break;
+                    const current = bobber(bot);
+                    if (current == null) break; // 浮标没了（被收/被拉走）
+                    sample = current;
+                    if (!armed) {
+                        if (Number.isFinite(current.vy) && Math.abs(current.vy) <= FISH_SETTLE_QUIET_VY) {
+                            quietPolls += 1;
+                            restingY = Number.isFinite(current.y) ? current.y : restingY;
+                            if (quietPolls >= 2) armed = true;
+                        } else {
+                            quietPolls = 0;
+                        }
+                        await sleep(pollMs);
+                        continue;
+                    }
+                    if (bobberDipped(current, restingY)) {
+                        bite = true;
+                        break;
+                    }
+                    await sleep(pollMs);
+                }
+                const waitedMs = now() - castStartedAt;
+
+                try {
+                    await reel(bot);
+                } catch {
+                    /* 收竿失败：下面按"没钓到"如实报，不假装 */
+                }
+                await sleep(lootSyncMs);
+                const fishAfterCast = sumFish();
+                const gained = fishAfterCast - fishBeforeCast;
+                const byName = fishCount(bot);
+                let caught: { name: string; count: number } | null = null;
+                for (const name of FISH_ITEMS) {
+                    const delta = (byName[name] ?? 0) - (fishBeforeCastByName[name] ?? 0);
+                    if (delta > 0) {
+                        caught = { name, count: delta };
+                        break;
+                    }
+                }
+                const totalAfterCast = inventoryTotal(bot);
+                const junk =
+                    caught == null &&
+                    totalBeforeCast != null &&
+                    totalAfterCast != null &&
+                    totalAfterCast > totalBeforeCast;
+                casts.push({
+                    index,
+                    waitedMs,
+                    bite,
+                    caught,
+                    junk,
+                    note: null,
+                });
+                if (!hasRod(bot)) {
+                    rodState = { ...rodState, present: false, broke: true };
+                    stopReason = 'rod_broke';
+                    warnings.push(
+                        `第 ${index} 竿之后钓鱼竿没了（耐久用完断了）：这一竿之后钓不了了，先做新的竿。`,
+                    );
+                    break;
+                }
+                if (foodCount(bot) >= FISH_FOOD_ENOUGH) {
+                    stopReason = 'food_enough';
+                    break;
+                }
+                if (now() - startedAt >= maxMs) {
+                    stopReason = 'budget';
+                    break;
+                }
+            }
+        }
+    }
+
+    const after = fishCount(bot);
+    const caught = FISH_ITEMS.map((name) => ({ name, count: (after[name] ?? 0) - (before[name] ?? 0) })).filter(
+        (entry) => entry.count > 0,
+    );
+    const caughtTotal = caught.reduce((sum, entry) => sum + entry.count, 0);
+    const rodAtEnd = rodDurability(bot);
+    rodState = {
+        present: hasRod(bot),
+        durabilityUsed: rodAtEnd.used,
+        maxDurability: rodAtEnd.max,
+        broke: rodState.broke || (!hasRod(bot) && rodAtStart),
+    };
+
+    return fishReceipt({
+        stopReason,
+        casts,
+        caught,
+        caughtTotal,
+        baselineFish,
+        foodCount: foodCountNow,
+        elapsedMs: now() - startedAt,
+        maxMs,
+        maxCasts,
+        rod: rodState,
+        water,
+        failedCasts,
+        warnings,
+    });
 }

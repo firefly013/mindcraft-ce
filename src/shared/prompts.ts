@@ -264,6 +264,14 @@ export const TOOL_TEXT: Record<string, { description: string; params: Record<str
     description: '走到最近的流体源旁边，用空桶装水/岩浆，并核对手上是否真的出现对应桶。只认源头，不对流动水装桶。',
     params: { type: 'water / lava / any，默认 water', radius: '搜索半径（1~128，默认 32）' },
   },
+  fish: {
+    description:
+      '钓鱼（唯一可再生的食物来源）：抛竿 → 盯浮标判咬钩（速度/位置信号）→ 收竿 → 按背包真实增量核对；没钓到就说没钓到。缺竿会说清要工作台做 fishing_rod，够不到水/竿断了/背包已经够吃都会早停并说明。',
+    params: {
+      max_ms: '整趟时间预算（毫秒，默认 90000，10000~300000）。',
+      max_casts: '最多抛几竿（默认 3，1~10）。',
+    },
+  },
   makeObsidian: {
     description:
       '获取黑曜石：检查水桶/空桶和钻石镐，找到安全可站的岩浆源，用空桶装水 -> 水桶浇岩浆 -> 钻石镐挖取，默认补到 10 块。' +
