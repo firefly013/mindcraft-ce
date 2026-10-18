@@ -13,6 +13,7 @@
  */
 import * as skills from '../library/skills.js';
 import * as survival from '../library/survival.js';
+import * as food from '../library/get_food.js';
 import type { AgentCommand, CommandPerform } from './actions.js';
 
 /** 工具描述与参数描述。键为去 `!` 的工具名，形状与 `TOOL_TEXT` 一致。 */
@@ -84,6 +85,18 @@ export const SURVIVAL_TOOL_TEXT: Record<string, { description: string; params: R
             max_casts: '最多抛几竿（默认 3，1~10）。',
         },
     },
+    getFood: {
+        description:
+            '**一条调用把"找吃的"做完**（不必自己走五步链）：① 包里有吃的且真饿 → 先吃（走 consume 的规矩，**不违反存粮规则**）；' +
+            '② 附近有被动动物 → 打猎；③ 没有就去钓鱼——**没竿会自己去弄**（打蜘蛛/挖蛛网拿线 → 在**工作台**上做竿 → 找水 → 抛竿）；' +
+            '④ 有种子就说清种地是长期方案（小麦要 20~40 分钟，别站着等）；⑤ 最后手段腐肉（会附带饥饿效果）。' +
+            '**背包增量是唯一证据**：没多出能吃的就明说"没拿到"并告诉你卡在哪一步；停下来时给**一条**能照抄的"接着做"调用' +
+            '（再做一次 getFood 会重新盘点，自然续上）。背包已经有 ≥4 份能吃的时它**什么都不做**。',
+        params: {
+            want: '目标：背包里想有几份能吃的（默认 3，1~32）。到数就停，不会过度捕猎。',
+            max_ms: '整趟时间预算（毫秒，默认 300000，10000~360000）。到点给断点与下一步。',
+        },
+    },
 };
 
 export { SURVIVAL_POLICY } from '../../shared/survival_policy.js';
@@ -119,6 +132,27 @@ export function parseFishArgs(
         maxCasts: Number.isFinite(casts)
             ? Math.max(1, Math.min(survival.FISH_MAX_CASTS_LIMIT, Math.round(casts)))
             : survival.FISH_MAX_CASTS,
+    };
+}
+
+/**
+ * `!getFood` 的命令超时（分钟）。
+ * 内部预算最大 6 分钟 → 命令 7 分钟 → 保险丝 8.5 分钟（内部必须最短）。
+ */
+export const GETFOOD_TIMEOUT_MIN = 7;
+
+/** 归一 `getFood` 的 want / max_ms（越界就夹住，不报错）。 */
+export function parseGetFoodArgs(
+    rawWant: unknown,
+    rawMaxMs: unknown,
+): { want: number; maxMs: number } {
+    const want = typeof rawWant === 'number' ? rawWant : Number(rawWant);
+    const ms = typeof rawMaxMs === 'number' ? rawMaxMs : Number(rawMaxMs);
+    return {
+        want: Number.isFinite(want) ? Math.max(1, Math.min(32, Math.round(want))) : food.DEFAULT_GETFOOD_WANT,
+        maxMs: Number.isFinite(ms)
+            ? Math.max(10_000, Math.min(food.GETFOOD_MAX_MS_LIMIT, Math.round(ms)))
+            : food.DEFAULT_GETFOOD_BUDGET_MS,
     };
 }
 
@@ -222,6 +256,31 @@ export const survivalActionList: AgentCommand[] = [
         perform: runSurvivalAction('fish', 3, async (agent, rawMaxMs?: unknown, rawMaxCasts?: unknown) => {
             const args = parseFishArgs(rawMaxMs, rawMaxCasts);
             skills.log(agent.bot, await survival.fishSkill(agent.bot, args.maxMs, args.maxCasts));
+        }),
+    },
+    {
+        name: '!getFood',
+        description: DESCRIPTION('getFood'),
+        params: {
+            want: {
+                type: 'int',
+                description: SURVIVAL_TOOL_TEXT.getFood.params.want,
+                optional: true,
+                default: food.DEFAULT_GETFOOD_WANT,
+                domain: [1, 32],
+            },
+            max_ms: {
+                type: 'float',
+                description: SURVIVAL_TOOL_TEXT.getFood.params.max_ms,
+                optional: true,
+                default: food.DEFAULT_GETFOOD_BUDGET_MS,
+                domain: [10_000, food.GETFOOD_MAX_MS_LIMIT],
+            },
+        },
+        // 内部预算 5 分钟（上限 6），命令给 7 分钟，保险丝 8.5 分钟。
+        perform: runSurvivalAction('getFood', GETFOOD_TIMEOUT_MIN, async (agent, rawWant?: unknown, rawMaxMs?: unknown) => {
+            const args = parseGetFoodArgs(rawWant, rawMaxMs);
+            skills.log(agent.bot, await food.getFoodSkill(agent.bot, args.want, args.maxMs));
         }),
     },
     {
