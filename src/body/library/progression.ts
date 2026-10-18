@@ -73,8 +73,9 @@ export const HUNT_MAX_ATTEMPTS = 12;
 export const HUNT_MAX_ATTEMPTS_CAP = 64;
 /** 连续失败这么多次 → 认定"内部动作坏了"，立刻停手（不再空转）。**只对"快失败"计数**（见下）。 */
 export const HUNT_MAX_CONSECUTIVE_FAILURES = 3;
-/**
- * "快失败"的界线（毫秒）：一次攻击**几秒内**就返回 false = 调用本身被拒/解析错/服务端拒绝，
+/** 同一个目标连续这么多"打不死"就熔断（真机：同一只末影人打了 12 轮、0 个珍珠）。 */
+export const HUNT_MAX_SAME_TARGET_FAILURES = 5;
+/** "快失败"的界线（毫秒）：一次攻击**几秒内**就返回 false = 调用本身被拒/解析错/服务端拒绝，
  * 这类才可能意味着内部动作坏了。
  *
  * 真机反例（独立复核探针）：`attackEntity` 的击杀死等预算耗尽（90 秒）也返回 false——
@@ -520,6 +521,12 @@ export function isInNether(bot: any): boolean {
     return typeof dimension === 'string' && dimension.includes('nether');
 }
 
+/** 末影人（含被改名/带 id 后缀的写法）：它们的"消失又出现"是瞬移，不是死亡。 */
+export function isEndermanName(name: unknown): boolean {
+    if (typeof name !== 'string') return false;
+    return normalizeName(name).replace(/#.*$/, '').trim() === 'enderman';
+}
+
 /**
  * 身上有没有抗火效果。
  *
@@ -724,7 +731,7 @@ export interface HuntOutcome {
     baseline: number;
     kills: number;
     attacks: number;
-    stopReason: 'reached' | 'budget' | 'no_target' | 'interrupted' | 'low_health' | 'danger' | 'gone' | 'attack_failed' | 'attempts' | 'cannot_kill';
+    stopReason: 'reached' | 'budget' | 'no_target' | 'interrupted' | 'low_health' | 'danger' | 'gone' | 'attack_failed' | 'attempts' | 'cannot_kill' | 'same_target';
     elapsedMs: number;
     /** 在下界刷烈焰人（"没怪了"的下一步建议要用它）。 */
     netherBlaze: boolean;
@@ -734,6 +741,14 @@ export interface HuntOutcome {
     slowFailures?: number;
     /** 背包里最能打的武器（`cannot_kill` 时给一条 equip 建议）。 */
     betterWeapon?: string | null;
+    /** 包里有没有弓（被瞬移怪耗住时的换打法建议）。 */
+    bowInPack?: boolean;
+    /** 当场发现"攻击说死了但实体还在"的次数（瞬移）。 */
+    teleportFailures?: number;
+    /** 事后被同一个 id 证伪的"击杀"次数（已从击杀数里扣掉）。 */
+    retractions?: number;
+    /** 攻击说死了但读不到实体表的次数（没证据，不算击杀）。 */
+    unverifiedKills?: number;
     warnings: string[];
     progress: HuntProgressLine[];
 }
@@ -749,6 +764,7 @@ const STOP_REASON_TEXT: Record<HuntOutcome['stopReason'], string> = {
     attack_failed: '内部打怪动作连续失败，已熔断停手',
     attempts: '尝试次数到上限了',
     cannot_kill: '打不死（每次都耗完击杀预算），已收手',
+    same_target: '同一个目标连续打不死，已熔断停手',
 };
 
 export function huntReceipt(o: HuntOutcome): string {
@@ -808,6 +824,45 @@ export function huntReceipt(o: HuntOutcome): string {
                 } ③ 打之前先吃饱/回血。`,
         );
     }
+    if (o.stopReason === 'same_target') {
+        lines.push(
+            (o.teleportFailures ?? 0) > 0
+                ? `**同一个目标连续打不死（${o.teleportFailures} 次"消失又出现"= 瞬移）**：` +
+                  `这不是"这一带没有 ${o.entity}"，也不是工具坏了——**是它每次都能跑掉，近战追着打没意义**。`
+                : `**同一个目标连续打不死**：每次攻击都没有"它真死了"的证据（${o.unverifiedKills ?? 0} 次连实体表都读不到），` +
+                  `不算击杀、也不说是工具坏了——先核对实体表再决定。`,
+        );
+        if ((o.teleportFailures ?? 0) > 0) {
+            lines.push(
+                isEndermanName(o.entity)
+                    ? '**末影人提示**：① 用**船**把它困住（坐进船里的生物不能瞬移）再打；② 用**弓**在远处耗；' +
+                      '③ 珍珠不一定要杀——要塞/末地城的箱子里也有 ender_pearl，可以顺路拿。'
+                    : '换个打法：远程（弓）/把它逼进死角，或者换个目标——别在同一只身上反复耗。',
+            );
+        }
+    }
+    if ((o.unverifiedKills ?? 0) > 0) {
+        lines.push(
+            `ℹ️ 有 ${o.unverifiedKills} 次攻击**返回成功但读不到实体表**（没证据）：**没有证据就不算击杀**。` +
+                '先用 stats(type="entities") 核对一次，再决定要不要继续。',
+        );
+    }
+    if ((o.retractions ?? 0) > 0 || (o.teleportFailures ?? 0) > 0) {
+        lines.push(
+            `⚠️ 本轮有 **${(o.retractions ?? 0) + (o.teleportFailures ?? 0)} 次"击杀"是假的**` +
+                `（同一个实体 id 又出现了 = 瞬移，不是死亡），已经从击杀数里扣掉；` +
+                `现在的击杀数 ${o.kills} 只算**验证过、尸体真的没了**的。`,
+        );
+    }
+    // **击杀数 vs 掉落数对不上就是信号**：真机那次是"12 次击杀、0 个珍珠"。
+    // 必掉/高概率掉的怪打了 ≥5 只还一个没涨，更可能是"没真死"，不是运气差。
+    if (o.kills >= 5 && o.items.length > 0 && o.gained === 0) {
+        lines.push(
+            `⚠️ 击杀 ${o.kills} 只但 **${o.items[0]} 一个都没涨**：这种怪掉率不低，` +
+                `打了 ${o.kills} 只还是 0 更可能是"它们其实没真死"（被打飞/瞬移/脱战）。` +
+                '**别把这当战果**——先 stats(type="entities") 核对，再决定换地方还是换打法。',
+        );
+    }
     lines.push(`下一步（照做即可）：${huntNextAction(o)}`);
     // **硬长度上限**：循环里拼出来的字符串必须有天花板（真机教训：1.35 亿字符把上下文打爆）。
     return capReceipt(lines.join('\n'));
@@ -841,6 +896,11 @@ export function huntNextAction(o: HuntOutcome): string {
             // **打不死 ≠ 工具坏了**：换打法，别让模型去调 attack 那个正常的工具。
             if (o.netherBlaze) return 'prepareBlaze';
             if (o.betterWeapon != null && o.betterWeapon !== '') return `equip(item_name="${o.betterWeapon}")`;
+            return 'stats(type="inventory")';
+        case 'same_target':
+            // 同一只打不死（末影人瞬移）：换打法而不是再来一次 huntFor。
+            if (o.bowInPack === true) return 'equip(item_name="bow")';
+            if (o.netherBlaze) return 'prepareBlaze';
             return 'stats(type="inventory")';
         case 'attempts':
             return 'stats(type="entities")';
@@ -1229,6 +1289,11 @@ export interface HuntDeps {
     now?: () => number;
     /** 血量。 */
     health?: (bot: any) => number;
+    /**
+     * 某个实体 id 是否还在世界里（`true` = 还在 = 没死；`false` = 没了；`null` = 读不到）。
+     * 默认走 `skills.entityPresentById`（**全局实体表**，不是 24 格扫描——瞬移出扫描 ≠ 死）。
+     */
+    entityPresent?: (bot: any, id: number) => boolean | null;
 }
 
 function defaultFindEntity(bot: any, entity: string, radius: number): any | null {
@@ -1283,6 +1348,10 @@ export async function huntForSkill(
     const sleep = deps.sleep ?? sleepMs;
     const now = deps.now ?? Date.now;
     const health = deps.health ?? ((b: any) => Number(b?.health ?? 20));
+    // **击杀的证据**：这个实体 id 还在不在**全局实体表**里（不是 24 格扫描——瞬移出扫描 ≠ 死）。
+    // 默认走 skills 的同款实现，保证"两条路看同一份证据"。
+    const entityPresent =
+        deps.entityPresent ?? ((b: any, id: number) => skills.entityPresentById(b, id));
 
     const dropSpec = dropForEntity(entity);
     const items = dropSpec.items.slice(0, 1);
@@ -1297,6 +1366,16 @@ export async function huntForSkill(
     let consecutiveFailures = 0;
     let fastFailures = 0;
     let slowFailures = 0;
+    // 假击杀的账：`retractions` = 事后被同一个 id 证伪的次数；
+    // `teleportFailures` = 当场发现"攻击说死了但实体还在"的次数；
+    // `unverifiedKills` = 攻击说死了但读不到实体表（没证据，不算）；
+    // `sameTargetFailures` = 同一个 id 连续打不死的次数（≥HUNT_MAX_SAME_TARGET_FAILURES 就熔断）。
+    let retractions = 0;
+    let teleportFailures = 0;
+    let unverifiedKills = 0;
+    let sameTargetFailures = 0;
+    let lastKilledTargetId: number | null = null;
+    let lastFailedTargetId: number | null = null;
     const maxAttempts = huntMaxAttempts(want);
     let stopReason: HuntOutcome['stopReason'] = 'budget';
 
@@ -1376,10 +1455,53 @@ export async function huntForSkill(
         idlePolls = 0;
         attempts += 1;
         const before = currentGain(bot, items, baselineAtStart);
+        const targetId = Number.isFinite(Number((target as any)?.id)) ? Number((target as any).id) : null;
+        // **回溯更正**：上一轮"击杀"的 id 这一轮又出现了 → 那次根本没死（末影人瞬移）。
+        // 真机事故：12 次 `Successfully killed enderman#286831`、0 个珍珠——同一个 id 反复出现
+        // 就是铁证：击杀是假的。这里当场把击杀数扣回去，并如实记一行。
+        if (targetId != null && targetId === lastKilledTargetId) {
+            if (kills > 0) kills -= 1;
+            retractions += 1;
+            lastKilledTargetId = null;
+            progress.push({
+                attempt: attempts,
+                text:
+                    `⚠️ 更正：上一次"击杀 ${entity}#${targetId}"**是假的**——同一个实体又出现了` +
+                    `${isEndermanName(entity) ? '（末影人被打就瞬移）' : ''}，击杀数 -1。`,
+            });
+            if (progress.length > HUNT_MAX_PROGRESS_LINES) progress.splice(0, progress.length - HUNT_MAX_PROGRESS_LINES);
+        }
         const attackStartedAt = now();
-        const killed = await attack(bot, entity);
+        const claimedKill = await attack(bot, entity);
         const attackMs = Math.max(0, now() - attackStartedAt);
-        if (killed) kills += 1;
+        // **`attack` 说打死了不算数**：独立复核一次——同一个 id 还在实体表里就不是击杀。
+        // （`attackEntity` 那一层也修了，这里是第二张网；两侧都只看证据。）
+        let killed = claimedKill === true;
+        let teleported = false;
+        if (killed && targetId != null) {
+            const present = entityPresent(bot, targetId);
+            if (present === true) {
+                killed = false;
+                teleported = true;
+                teleportFailures += 1;
+            } else if (present == null) {
+                // 读不到实体表：**不许声称击杀**（没证据），当没打死处理，但不说它瞬移了。
+                killed = false;
+                unverifiedKills += 1;
+            }
+        }
+        const unverified = claimedKill === true && !killed && !teleported;
+        if (killed) {
+            kills += 1;
+            lastKilledTargetId = targetId;
+            sameTargetFailures = 0;
+        } else {
+            // 同一个目标连续打不死（瞬移 / 攻击说成功但没证据）：**任何非击杀都算一次**，
+            // 因为模型看到的就是"它没死"。
+            sameTargetFailures = targetId != null && targetId === lastFailedTargetId ? sameTargetFailures + 1 : 1;
+            lastFailedTargetId = targetId;
+        }
+        void lastFailedTargetId;
         // 掉落物要自己走过去踩（模型动作期间自动拾取是停的）。
         const looted = await collectDrops(bot, radius, HUNT_LOOT_BUDGET_MS, {
             findDrop,
@@ -1392,17 +1514,40 @@ export async function huntForSkill(
         const after = looted.total;
         const delta = after - before;
         const counter = items.length > 0 ? `${items[0]} ${after}/${want}` : `背包总件数 ${after}/${want}`;
+        // **每一步只说真话**：没有证据的击杀一律不写成"击杀"。
+        const outcomeText = killed
+            ? `击杀 ${entity}（已验证：实体没了）`
+            : teleported
+              ? `打了 ${entity} 一下，**它瞬移了**（同一个实体 #${targetId} 还在，不是击杀）`
+              : claimedKill === true
+                ? `攻击返回成功但**没证据**（读不到实体表），不算击杀`
+                : `没打死 ${entity}`;
         progress.push({
             attempt: attempts,
-            text: `${killed ? '击杀' : '没打死'} ${entity}；捡到 ${looted.picked} 个掉落物；${counter}${delta > 0 ? '' : '（这次没涨）'}`,
+            text: `${outcomeText}；捡到 ${looted.picked} 个掉落物；${counter}${delta > 0 ? '' : '（这次没涨）'}`,
         });
         if (progress.length > HUNT_MAX_PROGRESS_LINES) progress.splice(0, progress.length - HUNT_MAX_PROGRESS_LINES);
+
+        // 同一个目标连续 N 次"打不死"（每次都瞬移/消失又出现）→ 熔断，别再骗自己。
+        if (sameTargetFailures >= HUNT_MAX_SAME_TARGET_FAILURES) {
+            warnings.push(
+                `⚠️ 同一个目标（${entity}${targetId != null ? `#${targetId}` : ''}）连续 ${sameTargetFailures} 次都没打死` +
+                    `${teleportFailures > 0 ? '——它每次都**瞬移走**' : ''}：这不是"工具坏了"，是**打不死**，已熔断停手。`,
+            );
+            stopReason = 'same_target';
+            break;
+        }
 
         // 失败分两种（真机复核的教训）：**快失败**（几秒内被拒/解析错/服务端拒绝）才可能是
         // "工具坏了"；**慢失败**（耗完击杀预算）是"打不死"——坦克怪/回血/输出不够。
         // 混在一起数，就会让三只耐打的怪把模型骗去 debug 一个正常的工具。
         if (killed) {
             consecutiveFailures = 0;
+        } else if (teleported || unverified) {
+            // **不是"工具坏了"**：攻击调用本身成功了（只是没证据/它瞬移了）。
+            // 单独记账，交给"同一目标连续打不死"那条熔断，绝不喂给快失败熔断。
+            consecutiveFailures = 0;
+            await sleep(huntBackoffMs(1));
         } else if (attackMs < HUNT_FAST_FAILURE_MS) {
             consecutiveFailures += 1;
             fastFailures += 1;
@@ -1415,6 +1560,10 @@ export async function huntForSkill(
                 break;
             }
             await sleep(huntBackoffMs(consecutiveFailures));
+        } else if (teleported) {
+            // 瞬移不是"工具坏了"，也不是"慢失败"：单独记在 `teleportFailures` 里，
+            // 由"同一目标连续打不死"那条熔断管（见上）。
+            await sleep(huntBackoffMs(1));
         } else {
             // 慢失败 = 耗完击杀预算还没打死。**不计数进熔断，而且把快失败连击清零**：
             // 中间发生过一次"打了 90 秒"就说明工具是通的，"连续 N 次几秒内被拒"这句话必须字面为真。
@@ -1424,6 +1573,22 @@ export async function huntForSkill(
     }
 
     const gained = currentGain(bot, items, baselineAtStart);
+    // **收尾复核**：最后一次"击杀"如果还能在实体表里找到，同样撤回——不能指望"下一轮才发现"
+    // （真机那次就是循环结束时还挂着一笔假击杀）。
+    if (lastKilledTargetId != null) {
+        const present = entityPresent(bot, lastKilledTargetId);
+        if (present === true) {
+            if (kills > 0) kills -= 1;
+            retractions += 1;
+            teleportFailures += 1;
+            lastKilledTargetId = null;
+            progress.push({
+                attempt: attempts,
+                text: `⚠️ 收尾复核：最后那次"击杀 ${entity}#${attempts}"**也是假的**——它还在实体表里，击杀数 -1。`,
+            });
+            if (progress.length > HUNT_MAX_PROGRESS_LINES) progress.splice(0, progress.length - HUNT_MAX_PROGRESS_LINES);
+        }
+    }
     // 全程一次都没打死、而且**每一次失败都是慢失败**（没有任何"快失败"）→ 结论是"打不死"，
     // 不是"工具坏了"：换成 cannot_kill 的说法与下一步（两者措辞与出路都不同）。
     // 混着快失败时不下这个结论（那可能是真有问题），只在回执里如实补一句"其中几次是打不死"。
@@ -1431,6 +1596,7 @@ export async function huntForSkill(
         stopReason = 'cannot_kill';
     }
     const betterWeapon = stopReason === 'cannot_kill' ? skills.bestWeaponInInventory(bot) : null;
+    const bowInPack = stopReason === 'same_target' ? countItem(bot, 'bow') > 0 : false;
     // 被动动物这一带没有了：**顺手把"能不能自己造食物"的家底盘出来**（含最近的水），
     // 让回执给的是可执行路线，而不是"换个地方再找找"。
     const assets =
@@ -1453,6 +1619,10 @@ export async function huntForSkill(
         consecutiveFailures,
         slowFailures,
         ...(stopReason === 'cannot_kill' ? { betterWeapon } : {}),
+        ...(stopReason === 'same_target' ? { bowInPack } : {}),
+        teleportFailures,
+        retractions,
+        unverifiedKills,
         warnings,
         progress,
     });

@@ -30,6 +30,7 @@ import {
     HUNT_MAX_ATTEMPTS,
     HUNT_MAX_ATTEMPTS_CAP,
     HUNT_MAX_CONSECUTIVE_FAILURES,
+    HUNT_MAX_SAME_TARGET_FAILURES,
     HUNT_RECEIPT_MAX_CHARS,
     blockNameAt,
     capLines,
@@ -1495,6 +1496,124 @@ describe('blockAt 契约：参数必须是 Vec3（替身照真实 API 苛刻）'
     });
 });
 
+describe('huntFor：击杀必须有证据（真机事故 01:20，overnight_a）', () => {
+    // 真机：`huntFor(enderman)` 输出 12 次 `Successfully killed enderman.`——同一个实体 id
+    // `enderman#286831`、0 个珍珠。末影人被打就瞬移，"离开 24 格扫描"被当成了死亡。
+    // 现在的规矩：击杀只认"实体真的没了"（全局实体表 / 血量归零），同一个 id 又出现 = 瞬移 = 没死。
+    const enderman = (id = 286831): any => ({
+        id,
+        name: 'enderman',
+        health: 40,
+        position: { x: 2, y: 64, z: 0, distanceTo: () => 2 },
+    });
+
+    it('同一个实体"消失又出现" → **击杀数不涨**，回执说它瞬移了', async () => {
+        const bot = makeBot({ health: 20, items: [stack('iron_sword', 1)] });
+        let clock = 0;
+        const receipt = await huntForSkill(bot, 'enderman', 4, 48, 300_000, {
+            findEntity: () => enderman(), // 永远是同一个 id
+            attack: async () => true, // 攻击"说"打死了
+            findDrop: () => null,
+            sleep: async (): Promise<void> => {},
+            now: () => (clock += 1_000),
+            entityPresent: () => true, // 它还在世界里（= 瞬移走又回来）
+        });
+
+        expect(receipt).toMatch(/击杀 0 只/);
+        expect(receipt).toContain('它瞬移了');
+        expect(receipt).toContain('同一个实体 #286831 还在，不是击杀');
+        expect(receipt).not.toContain('击杀 enderman（已验证');
+        expect(receipt).toContain('同一个目标连续打不死');
+    });
+
+    it('**回溯更正**：上一轮"击杀"的同一个 id 又出现 → 击杀数被扣回去，并写明是假的', async () => {
+        const bot = makeBot({ health: 20, items: [stack('iron_sword', 1)] });
+        let clock = 0;
+        const receipt = await huntForSkill(bot, 'enderman', 4, 48, 300_000, {
+            findEntity: () => enderman(),
+            attack: async () => true, // 每次都说打死了（而且当场"看起来"没了）
+            findDrop: () => null,
+            sleep: async (): Promise<void> => {},
+            now: () => (clock += 1_000),
+            entityPresent: () => false, // 当场看是没了……
+        });
+
+        // ……但同一个 id 下一轮又出现 ⇒ 必须撤回，不许累计成 4-12 个战果
+        expect(receipt).toContain('是假的');
+        expect(receipt).toContain('同一个实体又出现了');
+        expect(receipt).toMatch(/击杀 [01] 只/); // 最多只剩最后一笔没来得及复核的
+        expect(receipt).not.toMatch(/击杀 (?:[2-9]|\d\d+) 只/);
+    });
+
+    it('实体**真的**消失 → 击杀计数（只在有证据时）', async () => {
+        const bot = makeBot({ health: 20, items: [stack('iron_sword', 1)] });
+        let clock = 0;
+        let calls = 0;
+        const receipt = await huntForSkill(bot, 'enderman', 1, 48, 300_000, {
+            // 每次给不同的 id（上一只真的死了，这一只是新的）
+            findEntity: () => enderman(286831 + calls),
+            attack: async () => {
+                calls += 1;
+                return true;
+            },
+            findDrop: () => null,
+            sleep: async (): Promise<void> => {},
+            now: () => (clock += 1_000),
+            entityPresent: () => false,
+        });
+
+        expect(receipt).toMatch(/击杀 \d+ 只/);
+        expect(receipt).toContain('击杀 enderman（已验证');
+        expect(receipt).not.toContain('是假的');
+    });
+
+    it('同一个 id 连续打不死 → **熔断**（不是 12 次假成功），并给末影人打法', async () => {
+        const bot = makeBot({ health: 20, items: [stack('iron_sword', 1)] });
+        let clock = 0;
+        let attacks = 0;
+        const receipt = await huntForSkill(bot, 'enderman', 4, 48, 300_000, {
+            findEntity: () => enderman(),
+            attack: async () => {
+                attacks += 1;
+                return true; // 每次都"说"打死，但实体还在
+            },
+            findDrop: () => null,
+            sleep: async (): Promise<void> => {},
+            now: () => (clock += 1_000),
+            entityPresent: () => true, // 还在 = 没死
+        });
+
+        expect(attacks).toBeLessThanOrEqual(HUNT_MAX_SAME_TARGET_FAILURES); // 早早熔断，不刷满
+        expect(receipt).toContain('停止原因：同一个目标连续打不死');
+        expect(receipt).toContain('**同一个目标连续打不死');
+        expect(receipt).toContain('末影人提示');
+        expect(receipt).toContain('船'); // 具体打法
+        expect(receipt).toMatch(/击杀 0 只/);
+        expect(receipt).not.toContain('Successfully');
+        // 每行如实写"瞬移"，不写击杀
+        expect(receipt).toContain('它瞬移了');
+        expect(receipt).not.toContain('击杀 enderman（已验证');
+        expect(receipt.trimEnd().split('\n').at(-1)).toMatch(/^下一步（照做即可）：/);
+    });
+
+    it('攻击"说"打死了但**读不到实体表** → 不算击杀（没证据就不许报战果）', async () => {
+        const bot = makeBot({ health: 20, items: [stack('iron_sword', 1)] });
+        let clock = 0;
+        const receipt = await huntForSkill(bot, 'enderman', 1, 48, 60_000, {
+            findEntity: () => enderman(),
+            attack: async () => true,
+            findDrop: () => null,
+            sleep: async (): Promise<void> => {},
+            now: () => (clock += 1_000),
+            entityPresent: () => null, // 读不到
+        });
+
+        expect(receipt).toMatch(/击杀 0 只/);
+        expect(receipt).toContain('没证据');
+        expect(receipt).not.toContain('击杀 enderman（已验证');
+    });
+});
+
 // ─────────────────────────────────────────────────────────────────────────────
 // 真机事故回归（2026-10-18 19:19，overnight_a）：
 //   huntFor 内部 attack 传了 `'entity'`（真实只认 id / player / mob）→ 每次攻击都被拒，
@@ -1745,9 +1864,11 @@ describe('huntFor 失控回执：参数名 / 熔断 / 下一步 / 长度上限',
             let attacks = 0;
             // 慢失败会把"快失败连击"清零：所以这一串里最快的连击只有 1 次，永远到不了 3。
             const durations = [90_000, 90_000, 10, 90_000];
+            let ticket = 0;
             const bot = makeBot({ health: 20, items: [stack('iron_sword', 1)] });
             const receipt = await huntForSkill(bot, 'zombie', 2, 48, 300_000, {
-                findEntity: () => salmonEntity(),
+                // 每次换一个 id（每次都在打不同的怪）：否则会被"同一目标连续打不死"提前熔断
+                findEntity: () => ({ ...salmonEntity(), id: 7 + ticket++ }),
                 attack: async () => {
                     clock += durations[Math.min(attacks, durations.length - 1)] ?? 10;
                     attacks += 1;
@@ -1770,9 +1891,10 @@ describe('huntFor 失控回执：参数名 / 熔断 / 下一步 / 长度上限',
             let clock = 0;
             let attacks = 0;
             const durations = [10, 10, 90_000, 10, 10, 10, 10];
+            let ticket = 0;
             const bot = makeBot({ health: 20, items: [stack('iron_sword', 1)] });
             const receipt = await huntForSkill(bot, 'zombie', 2, 48, 300_000, {
-                findEntity: () => salmonEntity(),
+                findEntity: () => ({ ...salmonEntity(), id: 7 + ticket++ }),
                 attack: async () => {
                     clock += durations[Math.min(attacks, durations.length - 1)] ?? 10;
                     attacks += 1;
@@ -1794,7 +1916,8 @@ describe('huntFor 失控回执：参数名 / 熔断 / 下一步 / 长度上限',
             let attacks = 0;
             const bot = makeBot({ health: 20, items: [stack('iron_sword', 1)] });
             const receipt = await huntForSkill(bot, 'zombie', 1, 48, 300_000, {
-                findEntity: () => salmonEntity(),
+                // 每次换一个 id：真的打死了一只，然后遇到两只打不动的
+                findEntity: () => ({ ...salmonEntity(), id: 7 + attacks }),
                 attack: async () => {
                     attacks += 1;
                     clock += attacks === 1 ? 10 : 90_000; // 先杀一只，再慢失败
@@ -1803,6 +1926,8 @@ describe('huntFor 失控回执：参数名 / 熔断 / 下一步 / 长度上限',
                 findDrop: () => null,
                 sleep: async (): Promise<void> => {},
                 now: () => clock,
+                // 这一条只测"慢失败不诬告打不死"：击杀按"实体真的没了"算（默认实体表是空的 = 没了）
+                entityPresent: () => false,
             });
 
             expect(receipt).not.toContain('**打不死**');

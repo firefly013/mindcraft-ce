@@ -1060,8 +1060,18 @@ export function stopPvp(bot: any): void {
 export const KILL_WAIT_BUDGET_MS = 90_000;
 /** 击杀等待的轮询间隔（原逻辑就是 1 秒一次）。 */
 export const KILL_WAIT_POLL_MS = 1_000;
-/** "目标还在附近"的判定半径（原逻辑就是 24 格；离开列表 = 认为打完了）。 */
+/** "目标还在附近"的判定半径（原逻辑就是 24 格；**但"离开这个半径"不等于死**，见下）。 */
 export const KILL_WAIT_NEARBY_RADIUS = 24;
+/**
+ * "确认死了"要连续多少轮看到它消失。
+ *
+ * 真机事故（2026-10-19 01:20，overnight_a）：`huntFor(enderman)` 输出了 **12 次**
+ * `Successfully killed enderman.`、同一个实体 id `enderman#286831`、0 个珍珠。
+ * 原因就是这里原来只要目标离开 24 格扫描就宣布击杀——而**末影人被打会瞬移**，
+ * 瞬移出扫描范围看起来就和"死了"一模一样。现在要求：消失必须**连续**几轮都成立，
+ * 中途再出现（同一个 id）就算瞬移、不算死。
+ */
+export const KILL_CONFIRM_POLLS = 2;
 
 export interface KillWaitOptions {
     /** 击杀死等的预算（毫秒，默认 90 秒；测试用小值）。 */
@@ -1070,6 +1080,56 @@ export interface KillWaitOptions {
     pollMs?: number;
     /** 取当前时间（测试注入假时钟）。 */
     now?: () => number;
+    /** "确认死亡"需要连续消失几轮（默认 `KILL_CONFIRM_POLLS`）。 */
+    confirmPolls?: number;
+}
+
+/** 实体是否还在**全局实体表**里（`bot.entities`，不是 24 格扫描）。读不到返回 null。 */
+export function entityPresentById(bot: any, id: unknown): boolean | null {
+    if (id == null) return null;
+    try {
+        const table = bot?.entities;
+        if (table == null) return null;
+        const key = String(id);
+        if (typeof table === 'object') {
+            if (Object.prototype.hasOwnProperty.call(table, key)) return (table as any)[key] != null;
+            const get = (table as any).get;
+            if (typeof get === 'function') {
+                const found = get.call(table, Number(id));
+                return found != null;
+            }
+            return false;
+        }
+        return null;
+    } catch {
+        return null;
+    }
+}
+
+/**
+ * 一次攻击之后，目标的证据是什么（纯函数，可单测）。
+ *
+ * - `dead`：血量读到 0/负（最硬的证据）
+ * - `alive`：还在全局实体表里，或还在 24 格扫描里
+ * - `gone`：两处都看不见了——**还要连续几轮都是 gone 才能算死**（瞬移也会 gone）
+ * - `unknown`：什么都读不到（不猜）
+ */
+export type KillEvidence = 'dead' | 'alive' | 'gone' | 'unknown';
+
+export function classifyKillEvidence(bot: any, entity: any): KillEvidence {
+    const health = readEntityHealth(entity);
+    if (health != null && health <= 0) return 'dead';
+    const present = entityPresentById(bot, entity?.id);
+    if (present === true) return 'alive';
+    let nearby = false;
+    try {
+        nearby = world.getNearbyEntities(bot, KILL_WAIT_NEARBY_RADIUS).includes(entity);
+    } catch {
+        nearby = false;
+    }
+    if (nearby) return 'alive';
+    if (present === false) return 'gone';
+    return 'unknown';
 }
 
 function readEntityHealth(entity: any): number | null {
@@ -1091,7 +1151,7 @@ function readEntityHealth(entity: any): number | null {
 export function describeKillGiveUp(
     bot: any,
     entity: any,
-    info: { waitedMs: number; polls: number; healthBefore: number | null },
+    info: { waitedMs: number; polls: number; healthBefore: number | null; teleports?: number },
 ): string {
     const name = entity?.name ?? '目标';
     const after = readEntityHealth(entity);
@@ -1109,28 +1169,35 @@ export function describeKillGiveUp(
     const seconds = (info.waitedMs / 1000).toFixed(1);
     const distanceText = distance == null ? '距离读不到' : `现在距离 ${distance.toFixed(1)} 米`;
     const head = `打了 ${seconds} 秒还没打死 ${name}（轮询 ${info.polls} 次）；${distanceText}。`;
+    const teleportNote =
+        (info.teleports ?? 0) > 0
+            ? `\n**它在这段时间里消失了又出现 ${info.teleports} 次——那是瞬移，不是死亡**（同一个实体 id 还在）。` +
+              (name === 'enderman'
+                  ? '\n末影人一被打就瞬移，**近战反复追是打不死的**；能用的打法是：① 用**船**把它困住（坐进船里的生物不能瞬移）再打 ② 用**弓**在远处耗。'
+                  : '')
+            : '';
 
     if (info.healthBefore == null || after == null) {
         return (
-            `${head}\n血量读不到（服务端没给），**看不出掉没掉血**——先看一眼实体表再决定。` +
+            `${head}${teleportNote}\n血量读不到（服务端没给），**看不出掉没掉血**——先看一眼实体表再决定。` +
             `\n下一步（照做即可）：stats(type="entities")`
         );
     }
     if (after < info.healthBefore) {
         return (
-            `${head}\n血量 ${info.healthBefore} → ${after}（**在掉血，只是慢**）：不是打不到，是没打死（护甲/回血/你输出不够）。` +
+            `${head}${teleportNote}\n血量 ${info.healthBefore} → ${after}（**在掉血，只是慢**）：不是打不到，是没打死（护甲/回血/你输出不够）。` +
             `\n下一步（照做即可）：attack(target="${name}", type="mob")`
         );
     }
     if (distance != null && distance > 6) {
         const target = entity?.position ?? {};
         return (
-            `${head}\n血量 ${info.healthBefore} → ${after}（**一点没掉**）：**你打不到它**——太远/隔着方块，或者它在水里、在飞。` +
+            `${head}${teleportNote}\n血量 ${info.healthBefore} → ${after}（**一点没掉**）：**你打不到它**——太远/隔着方块，或者它在水里、在飞。` +
             `\n下一步（照做即可）：goToCoordinates(x=${Math.round(Number(target.x ?? 0))}, y=${Math.round(Number(target.y ?? 0))}, z=${Math.round(Number(target.z ?? 0))}, closeness=2)`
         );
     }
     return (
-        `${head}\n血量 ${info.healthBefore} → ${after}（**一点没掉**，而且就在手边）：它可能是无敌/被方块挡着/根本不在射程内。` +
+        `${head}${teleportNote}\n血量 ${info.healthBefore} → ${after}（**一点没掉**，而且就在手边）：它可能是无敌/被方块挡着/根本不在射程内。` +
         `换个目标，别对着它耗。\n下一步（照做即可）：stats(type="entities")`
     );
 }
@@ -1173,24 +1240,60 @@ export async function attackEntity(
         // 模型只会拿到一句"已强制释放动作通道"。现在到点放弃并给诊断。
         const budgetMs = options.budgetMs ?? KILL_WAIT_BUDGET_MS;
         const pollMs = options.pollMs ?? KILL_WAIT_POLL_MS;
+        const confirmPolls = Math.max(1, options.confirmPolls ?? KILL_CONFIRM_POLLS);
         const now = options.now ?? Date.now;
         const startedAt = now();
         let polls = 0;
-        while (world.getNearbyEntities(bot, KILL_WAIT_NEARBY_RADIUS).includes(entity)) {
+        // **击杀必须由证据确认**（真机事故：末影人瞬移出 24 格扫描 → 12 次假的
+        // "Successfully killed"、0 个珍珠）。证据规则见 `classifyKillEvidence`：
+        // 血量归零 = 死；还在实体表/扫描里 = 活；两处都消失 = 待确认（连续 confirmPolls 轮）；
+        // 消失过又回来 = **瞬移**，重新开始等，绝不算击杀。
+        let goneStreak = 0;
+        let teleports = 0;
+        let verified = false;
+        for (;;) {
             // Stop / 保命反射语义**原样**：立刻停手、立刻返回 false。
             if (bot.interrupt_code) {
                 stopPvp(bot);
                 return false;
             }
             if (now() - startedAt >= budgetMs) {
-                log(bot, describeKillGiveUp(bot, entity, { waitedMs: now() - startedAt, polls, healthBefore }));
+                log(
+                    bot,
+                    describeKillGiveUp(bot, entity, {
+                        waitedMs: now() - startedAt,
+                        polls,
+                        healthBefore,
+                        ...(teleports > 0 ? { teleports } : {}),
+                    }),
+                );
                 stopPvp(bot);
                 return false;
+            }
+            const evidence = classifyKillEvidence(bot, entity);
+            if (evidence === 'dead') {
+                verified = true;
+                break;
+            }
+            if (evidence === 'gone') {
+                goneStreak += 1;
+                if (goneStreak >= confirmPolls) {
+                    verified = true;
+                    break;
+                }
+            } else {
+                if (goneStreak > 0) teleports += 1; // 消失过又回来 = 瞬移，不是死
+                goneStreak = 0;
             }
             await new Promise(resolve => setTimeout(resolve, pollMs));
             polls += 1;
         }
-        log(bot, `Successfully killed ${entity.name}.`);
+        log(
+            bot,
+            teleports > 0
+                ? `Successfully killed ${entity.name}.（击杀已验证；不过在打的过程中它**瞬移了 ${teleports} 次**，不是一次打死的）`
+                : `Successfully killed ${entity.name}.（击杀已验证：实体从世界里消失并保持消失）`,
+        );
         await pickupNearbyItems(bot);
         return true;
     }

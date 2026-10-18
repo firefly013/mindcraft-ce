@@ -42,6 +42,8 @@ import {
   toolBreakNotice,
   toolDurabilityGuard,
   warnLowDurabilityOnce,
+  entityPresentById,
+  classifyKillEvidence,
 } from '../src/body/library/skills.js';
 
 function blockOf(overrides: Record<string, unknown> = {}): any {
@@ -992,15 +994,58 @@ describe('attackEntity 击杀等待：有界 + 诊断', () => {
 
   it('最后一刻打死了：仍然算击杀（返回 true、写 Successfully killed）', async () => {
     const h = fightBot({ health: 20 });
-    // 60ms 后从实体表移除（预算 120ms）——"最后关头死了"
+    // 60ms 后从实体表移除（预算 300ms，但要连续几轮确认——见 KILL_CONFIRM_POLLS）
     setTimeout(() => {
       delete h.bot.entities[7];
     }, 60);
-    const killed = await attackEntity(h.bot, h.entity, true, FAST);
+    const killed = await attackEntity(h.bot, h.entity, true, { budgetMs: 300, pollMs: 20 });
 
     expect(killed).toBe(true);
     expect(h.bot.output).toContain('Successfully killed zombie');
     expect(h.bot.output).not.toContain('还没打死');
+  });
+
+  it('**瞬移不算死**：消失一轮又回来 → 不判击杀，继续等（真机 enderman 事故）', async () => {
+    const h = fightBot({ health: 20 });
+    // 20ms 消失、45ms 又出现、100ms 起永久消失
+    setTimeout(() => {
+      delete h.bot.entities[7];
+    }, 20);
+    setTimeout(() => {
+      h.bot.entities[7] = h.entity;
+    }, 45);
+    setTimeout(() => {
+      delete h.bot.entities[7];
+    }, 100);
+    const killed = await attackEntity(h.bot, h.entity, true, { budgetMs: 400, pollMs: 20 });
+
+    expect(killed).toBe(true);
+    expect(h.bot.output).toContain('Successfully killed zombie');
+    expect(h.bot.output).toContain('瞬移了'); // 如实记录中途瞬移过
+  });
+
+  it('**瞬移 30 格：离开 24 格扫描但还在全局实体表里 → 不算击杀**（旧逻辑在这里撒谎）', async () => {
+    const h = fightBot({ health: 20 });
+    // 还在 bot.entities 里，但已经瞬移到 30 格外（= 离开 24 格扫描）
+    h.entity.position = { x: 30, y: 64, z: 0, distanceTo: () => 30 };
+    const killed = await attackEntity(h.bot, h.entity, true, { budgetMs: 200, pollMs: 20 });
+
+    expect(killed).toBe(false);
+    expect(h.bot.output).toContain('还没打死');
+    expect(h.bot.output).not.toContain('Successfully killed');
+  });
+
+  it('击杀证据是纯函数：血量 0 = 死；还在表里 = 活；两处都没有 = 待确认；读不到 = 不知道', () => {
+    const bot: any = { entities: { 7: { id: 7 } } };
+    expect(entityPresentById(bot, 7)).toBe(true);
+    expect(entityPresentById({ entities: {} }, 7)).toBe(false);
+    expect(entityPresentById({}, 7)).toBeNull(); // 没有全局实体表 = 读不到，不猜
+    expect(entityPresentById(bot, null)).toBeNull();
+
+    expect(classifyKillEvidence({ entities: { 7: { id: 7 } } }, { id: 7, health: 0 })).toBe('dead');
+    expect(classifyKillEvidence({ entities: { 7: { id: 7 } } }, { id: 7, health: 12 })).toBe('alive');
+    expect(classifyKillEvidence({ entities: {} }, { id: 7, health: 12 })).toBe('gone');
+    expect(classifyKillEvidence({}, { id: 7, health: 12 })).toBe('unknown'); // 读不到 ≠ 死
   });
 
   it('目标离开 24 格列表：行为与今天一致（算打完，返回 true）', async () => {
