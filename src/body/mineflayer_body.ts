@@ -1087,6 +1087,20 @@ export class MineflayerBody {
     private containerDumpInbound: string[] = [];
     private containerDumpRestore: (() => void) | null = null;
 
+    /**
+     * **开窗之后紧跟着来的包**（按顺序，不受 24 条上限影响）。
+     *
+     * 为什么单独记这一串：mineflayer 收到 `open_window` 之后**不会立刻**发 `windowOpen`，
+     * 它要等槽位数据（`window_items` → 内部事件 `setWindowItems:<id>`）才发（源码
+     * `inventory.js` 的 `prepareWindow`："don't emit windowOpen until we have the slot data"）。
+     * 真机（2026-10-19 03:54）已经确证：服务端**发了** `open_window(windowId=1)`，我们**收到了**，
+     * 但 `displayWindow`/`openContainer` 仍然超时——所以问题在"槽位包到没到"。
+     * 而 `lines`/`inboundNames` 都有 24 条上限（那次 `inboundCount` 是 2549），
+     * **"没看到 window_items"根本不能当证据**。这一串就是为它准备的：小、定序、不截断。
+     */
+    private containerDumpAfterOpen: string[] = [];
+    private containerDumpSawOpen = false;
+
     /** 武装一次转储（重复调用无害；已经在录就不重开）。 */
     armContainerPacketDump(reason: string): void {
         if (this.containerDumpArmed) return;
@@ -1095,6 +1109,8 @@ export class MineflayerBody {
         this.containerDumpArmed = true;
         this.containerDumpLines = [`reason=${reason}`];
         this.containerDumpInbound = [];
+        this.containerDumpAfterOpen = [];
+        this.containerDumpSawOpen = false;
         const record = (line: string): void => {
             if (!this.containerDumpArmed) return;
             if (this.containerDumpLines.length >= 24) return;
@@ -1109,10 +1125,19 @@ export class MineflayerBody {
                 const name = String(meta?.name ?? '');
                 if (name === '') return;
                 this.containerDumpInbound.push(name);
+                // **开窗之后的头 12 个包按顺序单独留一份**（见 containerDumpAfterOpen 的注释：
+                // 这是判断"槽位包到没到"的唯一可靠证据，不能被 24 条上限吃掉）。
+                if (/open_window|open_screen/i.test(name)) this.containerDumpSawOpen = true;
+                else if (this.containerDumpSawOpen && this.containerDumpAfterOpen.length < 12) {
+                    this.containerDumpAfterOpen.push(name);
+                }
                 if (WINDOW_PACKET_RE.test(name)) {
                     record(`in:${name}${summarizeInboundWindowPacket(name, data)}`);
-                    // 来了开界面包 ⇒ 服务端认了这次交互，立刻收尾。
-                    if (/open_screen|window_items/i.test(name)) this.finishContainerPacketDump('window-arrived');
+                    // 槽位包到了才算真"开窗成功"——**别用 open_window 收尾**，否则恰好会
+                    // 把紧接着要看的 window_items 挡在门外（那正是要诊断的东西）。
+                    if (/window_items|set_content|container_set_content/i.test(name)) {
+                        this.finishContainerPacketDump('window-arrived');
+                    }
                     return;
                 }
                 // **catch-all：只记名字，不记载荷**（有界 + 脱敏，但"服务端回过话"
@@ -1180,14 +1205,20 @@ export class MineflayerBody {
         this.containerDumpRestore = null;
         try {
             const inbound = this.containerDumpInbound.filter((n) => n !== '');
-            const windowInbound = inbound.filter((n) => WINDOW_PACKET_RE.test(n));
-            // **一句话结论**，让读日志的人不必自己数：
-            //   no-reply          = 服务端**从头到尾一个字都没回**（锅在我们这一侧/交互本身没生效）
+            // **"开窗成功"必须由槽位包判定，不能由开窗包判定。**
+            // 真机教训（2026-10-19 03:54）：服务端发了 `open_window(windowId=1)`、我们收到了，
+            // 但 `openContainer` 仍然超时——因为 mineflayer 要等槽位数据（`window_items`）
+            // 才发 `windowOpen`。旧口径把"开窗包到了"叫 window-arrived，等于**把故障说成成功**。
+            const hasSlots = inbound.some((n) => /window_items|set_content|container_set_content/i.test(n));
+            const hasOpen = inbound.some((n) => /open_window|open_screen/i.test(n));
+            //   window-arrived    = 槽位包到了（mineflayer 真的会发 windowOpen）——问题才可能在我们接包
+            //   opened-no-slots   = **服务端开了窗但没给槽位数据** ⇒ 我们必然超时（真机就是这个）
             //   replied-no-window = 回了别的（block_change / ack…）= 它**不认**这次交互
-            //   window-arrived    = 它认了、开了界面（那问题就在我们接包）
-            const verdict =
-                windowInbound.length > 0
-                    ? 'window-arrived'
+            //   no-reply          = 从头到尾一个字都没回
+            const verdict = hasSlots
+                ? 'window-arrived'
+                : hasOpen
+                    ? 'opened-no-slots'
                     : inbound.length === 0
                         ? 'no-reply'
                         : 'replied-no-window';
@@ -1197,6 +1228,11 @@ export class MineflayerBody {
                 verdict,
                 inboundNames: [...new Set(inbound)].slice(0, 24),
                 inboundCount: inbound.length,
+                // **开窗之后紧跟着来的包（定序、不截断）**：`sawOpen=false` ⇒ 服务端没发开窗包；
+                // `sawOpen=true` 而这一串里没有 `window_items`/`container_set_content` ⇒
+                // 服务端开了窗却没发槽位数据（mineflayer 因此永不发 windowOpen，我们必然超时）。
+                sawOpen: this.containerDumpSawOpen,
+                afterOpen: this.containerDumpAfterOpen,
                 lines: this.containerDumpLines,
             });
         } catch {
@@ -1204,6 +1240,8 @@ export class MineflayerBody {
         }
         this.containerDumpLines = [];
         this.containerDumpInbound = [];
+        this.containerDumpAfterOpen = [];
+        this.containerDumpSawOpen = false;
     }
 
     private onContainerIncoming: ((data: unknown, meta: { name?: unknown }) => void) | null = null;    /** 背包数据到过一次了（服务端 window_items / heldItemChanged 触发）。 */

@@ -54,13 +54,38 @@ describe('容器包转储：失败时才留证据，落一行', () => {
     expect(line.lines.join(' | ')).not.toContain('in:');
   });
 
-  it('服务端真的发了 open_screen ⇒ 立刻收尾（outcome=window-arrived），不再等超时', () => {
+  it('**只有开窗包、没有槽位包 ⇒ 不许叫 window-arrived**（真机就是这样超时的）', () => {
     const body = bareBody();
     body.armContainerPacketDump('useBlock chest');
-    body.onContainerIncoming?.({}, { name: 'open_screen' });
+    body.onContainerIncoming?.({}, { name: 'open_window' });   // 1.20.2+ 的名字
+    // 开窗包本身不收尾——收尾会把紧接着要看的槽位包挡在门外。
+    expect(body._logs).toHaveLength(0);
+    body.finishContainerPacketDump('window-expired');
+    expect(body._logs).toHaveLength(1);
+    expect(body._logs[0].verdict).toBe('opened-no-slots');
+    expect(body._logs[0].sawOpen).toBe(true);
+    // 开窗之后的包按顺序单独留一份（证明"槽位包真的没来"，而不是被 24 条上限吃掉）。
+    expect(Array.isArray(body._logs[0].afterOpen)).toBe(true);
+    expect(body._logs[0].lines.join(' | ')).toContain('in:open_window');
+  });
+
+  it('开窗包 + 槽位包 ⇒ 才叫 window-arrived，并立刻收尾', () => {
+    const body = bareBody();
+    body.armContainerPacketDump('useBlock chest');
+    body.onContainerIncoming?.({}, { name: 'open_window' });
+    body.onContainerIncoming?.({ windowId: 1, items: [] }, { name: 'window_items' });
     expect(body._logs).toHaveLength(1);
     expect(body._logs[0].outcome).toBe('window-arrived');
-    expect(body._logs[0].lines.join(' | ')).toContain('in:open_screen');
+    expect(body._logs[0].verdict).toBe('window-arrived');
+  });
+
+  it('开窗之后紧跟的包按顺序记（不受 24 条上限影响）', () => {
+    const body = bareBody();
+    body.armContainerPacketDump('useBlock chest');
+    body.onContainerIncoming?.({}, { name: 'open_window' });
+    for (const n of ['a', 'b', 'c', 'd']) body.onContainerIncoming?.({}, { name: n });
+    body.finishContainerPacketDump('window-expired');
+    expect(body._logs[0].afterOpen).toEqual(['a', 'b', 'c', 'd']);
   });
 
   it('不武装就什么都不记（正常游戏不许常开）', () => {
@@ -163,3 +188,4 @@ describe('接线：openBlockUi 只在开容器时武装、成功即解除', () =
     });
   });
 });
+
