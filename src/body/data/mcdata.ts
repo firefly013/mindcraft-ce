@@ -238,6 +238,26 @@ export function getItemName(itemId: number | string): string | null {
     return null;
 }
 
+/**
+ * 物品的耐久上限（mcData 静态表）。
+ *
+ * 为什么需要：真机上 `stone_pickaxe` 的手持物品读数是 `used=95 max=1`——
+ * mineflayer 在 Fabric/模组注册表下给出的 `maxDurability` 可能不是耐久上限
+ * （1 明显是错的，石头镐应为 131）。快照里宁可回退到 mcData 的静态表，
+ * 也不要拿一个假上限去算"还剩几次"（模型会据此判断要不要换工具）。
+ * 读不到 / 不是耐用品 / 上限 <=1 都返回 null，由调用方如实说"算不出剩余"。
+ */
+export function getItemMaxDurability(itemName: string): number | null {
+    try {
+        const item: any = mcdata?.itemsByName?.[itemName];
+        const max = item?.maxDurability;
+        return typeof max === 'number' && max > 1 ? max : null;
+    } catch {
+        // mcdata 还没初始化（bot 没连上）：如实返回读不到。
+        return null;
+    }
+}
+
 export function getBlockId(blockName: string): number | null {
     const block: any = mcdata.blocksByName[blockName];
     if (block) {

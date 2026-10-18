@@ -174,6 +174,10 @@ export class ActionManager {
             this.currentActionLabel = actionLabel;
             this.currentActionFn = actionFn;
             this.currentStartedAt = Date.now();
+            // **超时标记只属于当前动作。** 以前只在构造时置 false，一次真超时之后
+            // 每个动作都会被读成 timedout=true：回执全走"超时"分支（真消息被吞）、
+            // 身体日志的保留策略也跟着反过来。这里每次开跑都复位。
+            this.timedout = false;
 
             // timeout in minutes
             if (timeout > 0) {
@@ -247,7 +251,11 @@ export class ActionManager {
     }
 
     _startTimeout(TIMEOUT_MINS = 10): ReturnType<typeof setTimeout> {
+        // 这次超时属于**哪一次动作**：动作已经换人之后，旧定时器不许再把
+        // timedout 贴到新动作头上（它可能是刚启动的正常动作）。
+        const ownerStartedAt = this.currentStartedAt;
         return setTimeout(async () => {
+            if (!this.executing || this.currentStartedAt !== ownerStartedAt) return;
             try {
                 console.warn(MESSAGES.actionTimeout(TIMEOUT_MINS));
                 this.timedout = true;

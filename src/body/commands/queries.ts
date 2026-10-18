@@ -53,6 +53,43 @@ function blocksExtras(bot: any): string {
     return lines.join('\n');
 }
 
+/**
+ * `stats` 的"这一段和上次一模一样"收尾提示。
+ *
+ * 真机：overnight_b 15 分钟里调了 **26 次** `stats`、overnight_a 15 次——模型在
+ * 轮询而不是行动，每一次都烧掉一整轮请求。这里只在**渲染后的整段文本逐字相同**
+ * 时追加一句"没变化，去做个动作"，其余情况（含任何异常、读不到）一律照旧发全量：
+ * **失败开放**，绝不因为"以为没变"而扣掉状态。
+ */
+const STATS_REPEAT_HINT =
+    '（这一段和上次调用完全相同：坐标/血量/背包都没有变化。）' +
+    '如果你这一轮没有新的信息要拿，就把它用来做一个动作：move / goToCoordinates / mineBlock / collectBlocks / exploreFor / huntFor / craft —— 只查不做等于原地停摆；' +
+    '如果快照的 Meta 里已经有动作在跑，就等它的回执，别重复发同一个动作。';
+
+/**
+ * 每个 agent、每种 `type` 上一次发出的段落文本。
+ *
+ * 用 `WeakMap` 挂在 agent 上、且只活在身体进程里：**bot 重启即清空**，
+ * 不会拿上一个进程的快照来判"没变化"。
+ */
+const lastStatsText = new WeakMap<object, Map<string, string>>();
+
+function withRepeatHint(agent: any, key: string, text: string): string {
+    try {
+        let perAgent = lastStatsText.get(agent);
+        if (perAgent == null) {
+            perAgent = new Map<string, string>();
+            lastStatsText.set(agent, perAgent);
+        }
+        const previous = perAgent.get(key);
+        perAgent.set(key, text);
+        return previous != null && previous === text ? `${text}\n${STATS_REPEAT_HINT}` : text;
+    } catch {
+        // 缓存出任何问题都照旧把状态给出去（失败开放）。
+        return text;
+    }
+}
+
 /** 拍一张状态照片。type 选要看哪一方面；不给就是整份（等同 Live State 那份）。 */
 function runStats(agent: any, rawType: unknown): string {
     const given = typeof rawType === 'string' && rawType.trim() !== '' ? rawType.trim().toLowerCase() : 'all';
@@ -61,7 +98,8 @@ function runStats(agent: any, rawType: unknown): string {
         return pad(`stats 的 type 只认这些：${STATS_TYPES.join(' / ')}（收到 "${String(rawType)}"）。不给就是 all。`);
     }
     if (type === 'all') {
-        return pad(`SNAPSHOT (留在上下文里，可和上一次对比)\n${agent.liveStateText()}`);
+        const text = `SNAPSHOT (留在上下文里，可和上一次对比)\n${agent.liveStateText()}`;
+        return pad(withRepeatHint(agent, 'all', text));
     }
     const snapshot = sampleLiveState(agent.sampleContext());
     const sections = STATS_SECTIONS[type];
@@ -72,7 +110,7 @@ function runStats(agent: any, rawType: unknown): string {
         if (type === 'inventory' && agent.bot?.game?.gameMode === 'creative') {
             out += '\n(You have infinite items in creative mode. You do not need to gather resources!!)';
         }
-        return pad(out);
+        return pad(withRepeatHint(agent, type, out));
     }
     // `places` 的真源在**大脑侧会话**里（身体这份只装死亡位置那类瞬时信息），
     // 所以这里读不到——如实指过去，别返回一个永远是空的清单（那是 Feedback #6

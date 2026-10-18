@@ -55,25 +55,28 @@ export const ACTION_PROGRESS_NOTICE_MS = 60_000;
 /**
  * 身体侧单个动作的**最长**超时（分钟）。
  *
- * `collectBlocks` 是 6 分钟（`body/commands/actions.ts` 里 `runAsAction(..., 6)`）、
- * `goToCoordinates` / `enterNether` 5 分钟、`pillarUp` / `stairUp` 4 分钟，
- * 其余默认 2 分钟（`DEFAULT_ACTION_TIMEOUT_MIN`）。
+ * 现在最长的是 `exploreFor` 8 分钟（`body/commands/progression.ts` 的
+ * `runProgressionAction('exploreFor', 8, …)`）；`huntFor` 的 `max_ms` 自带
+ * 7 分钟上限（progression.ts 注释写明"避免撞上动作通道的 8 分钟超时"）；
+ * `collectBlocks` 6 分钟、`goToCoordinates` / `enterNether` 5 分钟、
+ * `pillarUp` / `stairUp` 4 分钟，其余默认 2 分钟（`DEFAULT_ACTION_TIMEOUT_MIN`）。
+ * **哪个动作的超时调大了，这里必须跟着抬。**
  */
-const BODY_ACTION_TIMEOUT_MAX_MIN = 6;
+export const BODY_ACTION_TIMEOUT_MAX_MIN = 8;
 
 /**
  * 动作在脑侧的最长挂起时间；到点强制释放动作通道。
  *
- * **推导：必须略长于身体侧最长的一个动作超时。** 目前最长是
- * `collectBlocks` 6 分钟（`body/commands/actions.ts` 的 `runAsAction(..., 6)`），
- * 所以取 6 分 30 秒。这是"身体彻底没回来"（幽灵锁）的最后保险丝，不是常规收尾
+ * **推导：必须略长于身体侧最长的一个动作超时。** 目前最长是 `exploreFor` 8 分钟，
+ * 所以取 8 分 30 秒。这是"身体彻底没回来"（幽灵锁）的最后保险丝，不是常规收尾
  * 手段——身体侧自己会在超时时带原因回来。
- * ⚠️ **哪个动作的超时调大了（>6 分钟），这里必须跟着抬**，否则大脑会把它判成
- * 泄漏：大脑释放通道、身体还在挖，正是"快照 idle 但动作被拒"那类幽灵锁的来源。
- * 反过来说，也不能往 2~3 分钟压：那同样会误伤 collectBlocks。
+ * ⚠️ **真实事故（2026-10-18 13:12，overnight_b）**：这里曾按 collectBlocks 的
+ * 6 分钟取 6.5 分钟，结果 `exploreFor`（文档写最长 8 分钟）在 6.5 分钟被强退，
+ * 模型收到"超过 6.5 分钟没有返回，已强制释放"——它以为工具坏了，而且拿不到
+ * 阶段性结论。保险丝**低于**身体超时就是在制造幽灵锁：大脑释放通道、身体还在跑。
+ * 所以：涨身体超时 → 必须同步涨这里；宁可保险丝长一点，也不要误杀正常动作。
  * 长期修法是让身体在握手声明里带上自己的超时、大脑按动作推导保险丝（接口变更，
- * 记为设计债，不在本批做）。
- * 以前写死 10 分钟：幽灵锁要卡满 10 分钟才自愈，现在 6.5 分钟。
+ * 记为设计债）。
  */
 export const ACTION_MAX_MS = (BODY_ACTION_TIMEOUT_MAX_MIN * 60 + 30) * 1000;
 

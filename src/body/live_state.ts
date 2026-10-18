@@ -6,6 +6,7 @@
  * 缺字段就写 null/unknown，一个请求不能因为快照失败而发不出去。
  */
 import { Vec3 } from 'vec3';
+import { getItemMaxDurability } from './data/mcdata.js';
 import { estimateTokens } from '../shared/utils/tokens.js';
 import {
   KEY_BLOCK_SET,
@@ -42,6 +43,31 @@ import { getVillagerProfession } from './library/world.js';
  * TypeError，被外层的 try/catch 吞掉后所有方块感知静默变成 null/unknown。
  */
 const Vec3Of = (p: { x: number; y: number; z: number }): unknown => new Vec3(p.x, p.y, p.z);
+
+/**
+ * 解析主手物品的耐久上限：mineflayer 读数 → bot 自己的注册表 → mcData 静态表。
+ *
+ * `<=1` 的读数一律视为"这不是耐久上限"（真机 `stone_pickaxe` 拿到 `max=1`；
+ * 石头镐应为 131），继续往下退；三级都拿不到才返回 null，由渲染层如实说
+ * "上限读不到——算不出剩余"。**绝不把一个假上限当真值用**。
+ */
+function resolveMaxDurability(
+  bot: Record<string, unknown>,
+  heldItem: { name?: unknown; maxDurability?: unknown } | null | undefined,
+): number | null {
+  const raw = num(heldItem?.maxDurability);
+  if (raw != null && raw > 1) return raw;
+  const name = str(heldItem?.name);
+  if (name == null) return null;
+  try {
+    const registry = (bot['registry'] ?? {}) as { itemsByName?: Record<string, { maxDurability?: unknown }> };
+    const fromRegistry = num(registry.itemsByName?.[name]?.maxDurability);
+    if (fromRegistry != null && fromRegistry > 1) return fromRegistry;
+  } catch {
+    // 注册表读不到就继续退到静态表。
+  }
+  return getItemMaxDurability(name);
+}
 
 const ROMAN = ['I', 'II', 'III', 'IV', 'V'] as const;
 
@@ -208,7 +234,12 @@ export function sampleLiveState(ctx: SampleContext): LiveState {
       | { name?: unknown; count?: unknown; durabilityUsed?: unknown; maxDurability?: unknown }
       | undefined;
     const usedDurability = num(heldItem?.durabilityUsed);
-    const maxDurability = num(heldItem?.maxDurability);
+    // **上限要能自证。** 真机（overnight_b 2026-10-18 13:00）报 `used=95 max=1`：
+    // mineflayer 在 Fabric/模组注册表下给出的 `maxDurability` 可能不是耐久上限
+    // （石头镐应为 131）。<=1 一律当"读不到"，先回退 bot 自己的注册表，
+    // 再回退 mcData 静态表；都拿不到就写 null，由渲染层如实说"算不出剩余"。
+    const rawMax = num(heldItem?.maxDurability);
+    const maxDurability = resolveMaxDurability(bot, heldItem);
     empty.held = {
       mainHand: heldItem ? `${str(heldItem.name) ?? 'unknown'}x${num(heldItem.count) ?? 1}` : null,
       offHand: slotName(45),
@@ -218,6 +249,7 @@ export function sampleLiveState(ctx: SampleContext): LiveState {
       mainHandDurability: durabilityFraction(usedDurability, maxDurability),
       mainHandDurabilityUsed: usedDurability,
       mainHandDurabilityMax: maxDurability,
+      mainHandDurabilityMaxInvalid: rawMax != null && rawMax <= 1,
     };
 
     const packItems: string[] = [];

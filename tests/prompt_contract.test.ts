@@ -23,6 +23,13 @@ describe('conversing 提示词契约', () => {
     expect(conversing).toContain('一轮可以调多个');
   });
 
+  it('把"写正文＝结束这一轮"这条机制讲清楚（真机最常见的卡死）', () => {
+    // 现象：模型写完一段进度汇报就停住（正文之后不会再有机会调工具），
+    // 两个 bot 实测里各卡了十几分钟。所以必须显式告诉它：汇报要写成 Say 调用。
+    expect(conversing).toContain('你一旦写正文，这一轮就结束了');
+    expect(conversing).toContain('要报进度就调 **Say** 工具');
+  });
+
   it('双通道是**有意设计**，必须保留', () => {
     // 散文 = 正文自动发出（干活的动静）；Say = 专门说话的工具
     expect(conversing).toContain('Say');

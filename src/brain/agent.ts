@@ -113,6 +113,14 @@ export class Agent {
      * 而**玩家（人）在跟你说话是必须回应的**，得投成真正的用户回合。
      */
     private teammateNames: Set<string> = new Set();
+    /**
+     * 每个队友**上一次真的把我叫醒**的时刻（`classifyChat` 的预算用）。
+     *
+     * 为什么需要：状态汇报里天然带对方名字（"overnight_a：等你来"），只看
+     * "有没有点名"在实测里等于"每条都唤醒"——overnight_a 每 4 分钟被叫起来回
+     * 一句话，自己的活一直没推进。见 `shared/chat.ts` 的 `TEAMMATE_WAKE_MIN_GAP_MS`。
+     */
+    private teammateWakeAt: Map<string, number> = new Map();
 
     /** 从 profile 文件里读队友名字（读不到就当没有，不影响主流程）。 */
     private loadTeammateNames(): void {
@@ -535,12 +543,17 @@ export class Agent {
             // 队友=默认只记录（见那里的真机教训：队友消息曾经的 expectReply: true
             // 让两个 bot 陷入「报坐标 → 收到 → 再报坐标」的无限乒乓）。
             const isTeammate = this.teammateNames.has(username);
+            // 队友"点名唤醒"的预算：上一次真的叫醒我到现在过了多久。
+            // 状态汇报里天然带对方名字，没有预算的话"点名才唤醒"等于"每条都唤醒"。
+            const lastWake = this.teammateWakeAt.get(username) ?? null;
             const delivery = classifyChat({
                 message,
                 fromTeammate: isTeammate,
                 whisper: whisper === true,
                 selfName: this.name,
+                sinceLastWakeMs: lastWake == null ? null : Date.now() - lastWake,
             });
+            if (delivery.level >= LEVEL.WAKE) this.teammateWakeAt.set(username, Date.now());
             const level: Level = delivery.level;
             if (!isTeammate) {
                 const text =

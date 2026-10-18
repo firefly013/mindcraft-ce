@@ -7,7 +7,7 @@
  */
 import { describe, expect, it } from 'vitest';
 import { actionsList } from '../src/body/commands/actions.js';
-import { ACTION_MAX_MS } from '../src/brain/action_runner.js';
+import { ACTION_MAX_MS, BODY_ACTION_TIMEOUT_MAX_MIN } from '../src/brain/action_runner.js';
 import { KEY_BLOCKS } from '../src/shared/live_state.js';
 import { renderSections } from '../src/shared/live_state.js';
 import { sampleLiveState } from '../src/body/live_state.js';
@@ -22,9 +22,12 @@ describe('B 关键方块清单覆盖通关路线', () => {
 });
 
 describe('D 大脑侧动作保险丝', () => {
-  it('比身体侧最长超时（collectBlocks 6 分钟）长，又比旧的 10 分钟短', () => {
-    expect(ACTION_MAX_MS).toBeGreaterThan(6 * 60_000);
-    expect(ACTION_MAX_MS).toBeLessThanOrEqual(7 * 60_000);
+  it('覆盖身体侧最长超时（exploreFor 8 分钟），不是把正常动作误杀在 6.5 分钟', () => {
+    // 事故：exploreFor（8 分钟）曾在 6.5 分钟被强退。
+    expect(ACTION_MAX_MS).toBeGreaterThan(8 * 60_000);
+    expect(ACTION_MAX_MS).toBeLessThanOrEqual(9 * 60_000);
+    // 推导关系：保险丝 = 最长身体超时 + 30 秒缓冲。
+    expect(ACTION_MAX_MS).toBe((BODY_ACTION_TIMEOUT_MAX_MIN * 60 + 30) * 1000);
   });
 });
 
@@ -64,7 +67,7 @@ describe('D6 被中断的动作回执必须有结论', () => {
 });
 
 describe('D7 快照 Held 行给出耐久绝对读数', () => {
-  function botWithHeld(held: unknown): any {
+  function botWithHeld(held: unknown, extra: Record<string, unknown> = {}): any {
     return {
       entity: { position: { x: 0, y: 64, z: 0 }, velocity: { x: 0, y: 0, z: 0 } },
       health: 20,
@@ -74,25 +77,47 @@ describe('D7 快照 Held 行给出耐久绝对读数', () => {
       game: {},
       time: { timeOfDay: 6000 },
       blockAt: () => ({ name: 'air' }),
+      ...extra,
     };
   }
+  const heldLine = (bot: any): string => renderSections(sampleLiveState({ bot }), ['held']);
 
   it('写着 used/max 和还剩几次（不是只有百分比）', () => {
-    const text = renderSections(
-      sampleLiveState({ bot: botWithHeld({ name: 'iron_pickaxe', count: 1, durabilityUsed: 37, maxDurability: 251 }) }),
-      ['held'],
-    );
+    const text = heldLine(botWithHeld({ name: 'iron_pickaxe', count: 1, durabilityUsed: 37, maxDurability: 251 }));
     expect(text).toContain('iron_pickaxex1');
     expect(text).toContain('耐久 37/251');
     expect(text).toContain('还剩 214');
   });
 
-  it('上限读不到时不编数字，只如实报读数', () => {
-    const text = renderSections(
-      sampleLiveState({ bot: botWithHeld({ name: 'stone_pickaxe', count: 1, durabilityUsed: 35, maxDurability: 1 }) }),
-      ['held'],
+  it('maxDurability 缺失：明说算不出剩余，不印假上限', () => {
+    const text = heldLine(botWithHeld({ name: 'stone_pickaxe', count: 1, durabilityUsed: 95 }));
+    expect(text).toContain('算不出剩余');
+    expect(text).toContain('used=95');
+    expect(text).not.toContain('max=');
+  });
+
+  it('maxDurability=0：同样明说算不出剩余', () => {
+    const text = heldLine(botWithHeld({ name: 'stone_pickaxe', count: 1, durabilityUsed: 95, maxDurability: 0 }));
+    expect(text).toContain('算不出剩余');
+    expect(text).not.toContain('max=');
+  });
+
+  it('maxDurability=1（真机读数）：不把 1 当总耐久印出来', () => {
+    const text = heldLine(botWithHeld({ name: 'stone_pickaxe', count: 1, durabilityUsed: 95, maxDurability: 1 }));
+    expect(text).toContain('算不出剩余');
+    expect(text).toContain('无效值，已忽略');
+    expect(text).not.toContain('max=1');
+    expect(text).not.toContain('/1');
+  });
+
+  it('回退 bot 注册表拿到真上限（stone_pickaxe → 131）', () => {
+    const text = heldLine(
+      botWithHeld(
+        { name: 'stone_pickaxe', count: 1, durabilityUsed: 95, maxDurability: 1 },
+        { registry: { itemsByName: { stone_pickaxe: { maxDurability: 131 } } } },
+      ),
     );
-    expect(text).toContain('上限读不到');
-    expect(text).not.toContain('还剩');
+    expect(text).toContain('耐久 95/131');
+    expect(text).toContain('还剩 36');
   });
 });

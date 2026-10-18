@@ -60,3 +60,62 @@ describe('队友消息：默认是情报，不是提问', () => {
     expect(d.level).toBe(4);
   });
 });
+
+describe('队友点名唤醒的预算：状态刷屏不许每条都叫醒', () => {
+  it('刚被叫醒过（<90s）又点名 → 压回 L2，且不要求回话', () => {
+    const d = classifyChat({
+      message: 'overnight_a：我在 (124,39,18) 等你',
+      fromTeammate: true,
+      whisper: false,
+      selfName: self,
+      sinceLastWakeMs: 10_000,
+    });
+    expect(d).toEqual({ addressed: true, level: 2, expectReply: false, rateLimited: true });
+  });
+
+  it('超过 90s 再点名 → 正常唤醒', () => {
+    const d = classifyChat({
+      message: 'overnight_a：过来拿镐子',
+      fromTeammate: true,
+      whisper: false,
+      selfName: self,
+      sinceLastWakeMs: 91_000,
+    });
+    expect(d).toEqual({ addressed: true, level: 3, expectReply: true });
+  });
+
+  it('从没叫过（null）→ 正常唤醒', () => {
+    const d = classifyChat({
+      message: 'overnight_a 在吗',
+      fromTeammate: true,
+      whisper: false,
+      selfName: self,
+      sinceLastWakeMs: null,
+    });
+    expect(d.level).toBe(3);
+  });
+
+  it('急停词**不走**预算：刚叫醒过也照样抢占', () => {
+    const d = classifyChat({
+      message: 'overnight_a 救命！',
+      fromTeammate: true,
+      whisper: false,
+      selfName: self,
+      sinceLastWakeMs: 1_000,
+    });
+    expect(d.level).toBe(4);
+    expect(d.rateLimited).toBeUndefined();
+  });
+
+  it('私聊走同一条预算（同样是队友消息）', () => {
+    const d = classifyChat({
+      message: '我在门边等你',
+      fromTeammate: true,
+      whisper: true,
+      selfName: self,
+      sinceLastWakeMs: 5_000,
+    });
+    expect(d.level).toBe(2);
+    expect(d.rateLimited).toBe(true);
+  });
+});

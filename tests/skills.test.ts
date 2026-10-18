@@ -13,6 +13,7 @@ import {
   breakBlockAt,
   choosePillarMaterial,
   choosePillarMaterialChoice,
+  describeStairJumpFailure,
   equip,
   heldToolState,
   isHandMineable,
@@ -20,6 +21,7 @@ import {
   pathfindDigPolicy,
   pathfindingDigAbort,
   placeBlock,
+  planStairStep,
   runPathfindingInterruptibly,
   toolBreakNotice,
   toolDurabilityGuard,
@@ -238,6 +240,27 @@ describe('D7 工具坏了要有一句话', () => {
     };
     expect(heldToolState(bot)).toEqual({ name: 'iron_pickaxe', used: 10, max: 251, count: 2 });
   });
+
+  it('max=1（真机读数）回退注册表拿到真上限，保护不静默失效', () => {
+    const bot = {
+      heldItem: { name: 'stone_pickaxe', count: 1, durabilityUsed: 95, maxDurability: 1 },
+      inventory: { items: () => [{ name: 'stone_pickaxe', count: 1 }] },
+      registry: { itemsByName: { stone_pickaxe: { maxDurability: 131 } } },
+    };
+    expect(heldToolState(bot).max).toBe(131);
+    expect(toolDurabilityGuard(bot).remaining).toBe(36);
+    expect(toolDurabilityGuard(bot).low).toBe(false);
+  });
+
+  it('max 完全读不到：不编数，低耐久保护也不误报', () => {
+    const bot = {
+      heldItem: { name: 'stone_pickaxe', count: 1, durabilityUsed: 95 },
+      inventory: { items: () => [] },
+    };
+    expect(heldToolState(bot).max).toBeNull();
+    expect(toolDurabilityGuard(bot).remaining).toBeNull();
+    expect(toolDurabilityGuard(bot).low).toBe(false);
+  });
 });
 
 describe('E 破坏性寻路别烧光工具', () => {
@@ -343,6 +366,56 @@ describe('E 破坏性寻路别烧光工具', () => {
     await expect(runPathfindingInterruptibly(bot, {})).resolves.toBe(true);
     expect(bot.output).not.toContain('耐久耗尽');
     expect(bot.output).not.toContain('坏掉');
+  });
+});
+
+describe('F-10 垂直上行：2 格高通道里为什么跳不上去', () => {
+  const accessor = (blocks: Record<string, string>) => (x: number, y: number, z: number) =>
+    blocks[x + ',' + y + ',' + z] ? { name: blocks[x + ',' + y + ',' + z] } : null;
+
+  it('原地头顶第 2 格是实心：先挖开自己的天花板腾跳跃空间', () => {
+    const plan = planStairStep(
+      accessor({ '0,1,0': 'air', '0,2,0': 'netherrack', '1,1,0': 'air', '1,0,0': 'air' }),
+      { x: 0, y: 0, z: 0 },
+      1,
+      0,
+    );
+    expect(plan).toEqual({ kind: 'mine', target: { x: 0, y: 2, z: 0 } });
+  });
+
+  it('落点上方那一格是实心：挖它（站上去要占两格）', () => {
+    const plan = planStairStep(
+      accessor({ '0,1,0': 'air', '0,2,0': 'air', '1,1,0': 'air', '1,0,0': 'stone', '1,2,0': 'netherrack' }),
+      { x: 0, y: 0, z: 0 },
+      1,
+      0,
+    );
+    expect(plan).toEqual({ kind: 'mine', target: { x: 1, y: 2, z: 0 } });
+  });
+
+  it('头顶读不到（null）时不预判，照原样继续', () => {
+    const plan = planStairStep(
+      accessor({ '0,1,0': 'air', '1,1,0': 'air', '1,0,0': 'air' }),
+      { x: 0, y: 0, z: 0 },
+      1,
+      0,
+    );
+    expect(plan.kind).toBe('place_step');
+  });
+
+  it('失败回执说出真原因：天花板不够高，而不是"可能被挡"', () => {
+    const twoHigh = describeStairJumpFailure(
+      accessor({ '0,2,0': 'netherrack', '1,2,0': 'netherrack' }),
+      { x: 0, y: 0, z: 0 },
+      1,
+      0,
+    );
+    expect(twoHigh).toContain('头顶第 2 格是 netherrack');
+    expect(twoHigh).toContain('3 格净空');
+    expect(twoHigh).toContain('mineBlock');
+
+    const open = describeStairJumpFailure(accessor({}), { x: 0, y: 0, z: 0 }, 1, 0);
+    expect(open).toContain('前方被挡或落差太大');
   });
 });
 

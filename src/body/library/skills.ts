@@ -121,8 +121,38 @@ export function heldToolState(bot: any): HeldToolState {
     const held = bot?.heldItem ?? null;
     const name = typeof held?.name === 'string' ? held.name : null;
     const used = typeof held?.durabilityUsed === 'number' ? held.durabilityUsed : null;
-    const max = typeof held?.maxDurability === 'number' ? held.maxDurability : null;
+    const max = resolveToolMaxDurability(bot, held);
     return { name, used, max, count: name == null ? null : inventoryCountOf(bot, name) };
+}
+
+/**
+ * 主手工具耐久上限：mineflayer 读数 → bot 注册表 → mcData 静态表。
+ *
+ * `<=1` 的读数一律当"不是耐久上限"（真机 `stone_pickaxe` 报 `max=1`，实际 131）。
+ * 拿假上限去算"还能挖几次"，会让 E 的低耐久保护要么乱报、要么静默失效。
+ */
+function resolveToolMaxDurability(
+    bot: any,
+    held: { name?: unknown; maxDurability?: unknown } | null | undefined,
+): number | null {
+    const raw = typeof held?.maxDurability === 'number' && Number.isFinite(held.maxDurability)
+        ? held.maxDurability
+        : null;
+    if (raw != null && raw > 1) return raw;
+    const name = typeof held?.name === 'string' ? held.name : null;
+    if (name == null) return null;
+    try {
+        const fromRegistry = bot?.registry?.itemsByName?.[name]?.maxDurability;
+        if (typeof fromRegistry === 'number' && fromRegistry > 1) return fromRegistry;
+    } catch {
+        // 注册表读不到就退到静态表。
+    }
+    try {
+        return mc.getItemMaxDurability(name);
+    } catch {
+        // mcdata 还没初始化：如实返回读不到。
+        return null;
+    }
 }
 
 /** 背包（含快捷栏与手上）里某个物品的总数；读不到返回 null。 */
@@ -185,10 +215,9 @@ export function toolDurabilityGuard(bot: any): ToolDurabilityGuard {
     const held = bot?.heldItem ?? null;
     const name = typeof held?.name === 'string' ? held.name : null;
     const used = typeof held?.durabilityUsed === 'number' ? held.durabilityUsed : null;
-    const max = typeof held?.maxDurability === 'number' ? held.maxDurability : null;
-    // max <= 1 是 stackSize 误读（见 shared/live_state.ts 的 durabilityFraction）。
-    const usable = used != null && max != null && max > 1;
-    const remaining = usable ? Math.max(0, (max as number) - (used as number)) : null;
+    // 上限走同一套回退（<=1 视为读不到）：否则 Fabric 下 max=1 会让低耐久保护静默失效。
+    const max = resolveToolMaxDurability(bot, held);
+    const remaining = used != null && max != null ? Math.max(0, max - used) : null;
     const low =
         remaining != null &&
         (remaining <= LOW_DURABILITY_USES || remaining / (max as number) < LOW_DURABILITY_FRACTION);
@@ -3747,7 +3776,44 @@ export function planStairStep(
     return { kind: 'place_step', target: { x: stepX, y: fy, z: stepZ } };
 }
 
+/**
+ * "跳不上去"的原因诊断（stairUp 失败回执用）。
+ *
+ * 真机（overnight_b 2026-10-18）：2 格高的通道里 stairUp 垫好方块却反复报
+ * 「第 1 格失败：跳不上去（前方可能被挡或高度太大）」——它连"是天花板不够高"
+ * 都说不出来，模型只能自己猜。这里把三个真实原因分开报：原地头顶第 2 格、
+ * 落点上方那一格、前方脚下那一格。
+ */
+export function describeStairJumpFailure(
+    blockAt: (x: number, y: number, z: number) => { name?: unknown } | null,
+    feet: { x: number; y: number; z: number },
+    dx: number,
+    dz: number,
+): string {
+    const fx = Math.floor(feet.x);
+    const fy = Math.floor(feet.y);
+    const fz = Math.floor(feet.z);
+    const stepX = fx + Math.sign(dx);
+    const stepZ = fz + Math.sign(dz);
+    const name = (x: number, y: number, z: number): string | null => verticalName(blockAt(x, y, z));
+    const reasons: string[] = [];
+    const hereTop = name(fx, fy + 2, fz);
+    if (hereTop != null && !isVerticalPassable(hereTop)) {
+        reasons.push('你头顶第 2 格是 ' + hereTop + '（原地起跳要 3 格净空，天花板会把跳跃削掉）');
+    }
+    const frontTop = name(stepX, fy + 2, stepZ);
+    if (frontTop != null && !isVerticalPassable(frontTop)) reasons.push('落点上方是 ' + frontTop);
+    const frontFeet = name(stepX, fy, stepZ);
+    if (frontFeet != null && !isVerticalPassable(frontFeet)) reasons.push('前方脚下是 ' + frontFeet);
+    if (reasons.length === 0) reasons.push('前方被挡或落差太大');
+    return (
+        '跳不上去：' + reasons.join('；') +
+        '。先 mineBlock 挖开头顶/落点上方那一格腾出跳跃空间，或用 pillarUp 直着往上垫。'
+    );
+}
+
 function forwardDelta(yaw: number): { dx: number; dz: number } {
+    // 与项目其它地方一致：yaw=0 面朝南(+Z)，90 面朝西(-X)。
     const dx = -Math.round(Math.sin(yaw));
     const dz = Math.round(Math.cos(yaw));
     if (dx === 0 && dz === 0) return { dx: 0, dz: 1 };

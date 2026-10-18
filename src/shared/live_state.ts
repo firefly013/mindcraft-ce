@@ -43,6 +43,14 @@ export interface LiveHeld {
    */
   mainHandDurabilityUsed: number | null;
   mainHandDurabilityMax: number | null;
+  /**
+   * 读到过一个**无效**的耐久上限（真机 `stone_pickaxe max=1`）。
+   *
+   * 只用于诚实标注：渲染时绝不把那个假数字印出来（模型会把 `max=1` 当成
+   * "总耐久 1 次"），但也不能假装什么都没读到——所以要能说
+   * "上限读不到（读到的值无效，已忽略）——算不出剩余"。
+   */
+  mainHandDurabilityMaxInvalid?: boolean;
 }
 
 export interface LiveBackpack {
@@ -319,10 +327,11 @@ export type LiveSectionKey = (typeof LIVE_SECTION_KEYS)[number];
 
 /**
  * 主手耐久后缀。**绝对读数必须给出来**：只有百分比时，模型要自己乘上限
- * 才知道还能挖几格；上限读不到（`max <= 1`，读到的是 stackSize）时百分比
- * 是 null、整段后缀消失——「铁镐用了几百格无声消失」就是这么来的
+ * 才知道还能挖几格；上限读不到（`max <= 1`，真机拿到过 `stone_pickaxe max=1`）
+ * 时百分比是 null、整段后缀消失——「铁镐用了几百格无声消失」就是这么来的
  * （Feedback #40）。现在能算就写 `耐久 37/251，还剩 214，85%`；
- * 只有原始读数就写明"上限读不到"，不假装能算。
+ * **上限无效时绝不把那个假数字印出来**（模型会把 `max=1` 当成"总耐久 1 次"），
+ * 只如实说"上限读不到——算不出剩余"。
  */
 function heldDurabilitySuffix(h: LiveHeld): string {
   const used = h.mainHandDurabilityUsed;
@@ -332,8 +341,12 @@ function heldDurabilitySuffix(h: LiveHeld): string {
     const pct = h.mainHandDurability != null ? `，${Math.round(h.mainHandDurability * 100)}%` : '';
     return `（耐久 ${used}/${max}，还剩 ${remain}${pct}）`;
   }
-  if (used != null || max != null) {
-    return `（耐久读数 used=${used ?? '?'} max=${max ?? '?'}——上限读不到，算不出剩余）`;
+  if (used != null) {
+    const bogus = h.mainHandDurabilityMaxInvalid === true ? '（读到的上限是无效值，已忽略）' : '';
+    return `（耐久读数 used=${used}，上限读不到${bogus}——算不出剩余次数）`;
+  }
+  if (max != null) {
+    return `（耐久上限 ${max}，但已用读数读不到——算不出剩余次数）`;
   }
   return '';
 }
