@@ -248,3 +248,68 @@ describe('协议解析失败（真机 04:10 的最终根因）：抓得到、说
     expect(text).not.toContain('一个窗口包都没发')
   });
 });
+
+describe('"hook 没触发"要能区分：错误没发生 / 错误走了别的出口', () => {
+  it('deserializer 的 error 出口（prependListener，排在 nmp 自己 handler 之前）也抓得到', () => {
+    const body = bareBody();
+    const handlers: Record<string, Array<(...a: any[]) => void>> = {};
+    const deserializer: any = {
+      prependListener: (event: string, cb: (...a: any[]) => void) => {
+        handlers[event] = [...(handlers[event] ?? []), cb];
+      },
+    };
+    body.bot._client.deserializer = deserializer;
+    body.faultCaptureInstalled = false;
+    body.installProtocolFaultCapture();
+    const err: any = new Error('Read error for undefined : undefined');
+    err.name = 'PartialReadError';
+    err.partialReadError = { buffer: Buffer.from([0x3e]) };
+    for (const cb of handlers.error ?? []) cb(err);
+    expect(body._logs[0].event).toBe('container-protocol-fault');
+    expect(body._logs[0].via).toBe('deserializer-error');
+  });
+
+  it('同一条错误重复上报只记一次（1 秒内去重），但计数仍能说明"发生了几次"', () => {
+    const body = bareBody();
+    const err: any = new Error('Read error for undefined : undefined');
+    err.name = 'PartialReadError';
+    err.partialReadError = { buffer: Buffer.from([0x3e]) };
+    body.onProtocolFault(err, 'client-error');
+    body.onProtocolFault(err, 'deserializer-error');
+    expect(body._logs).toHaveLength(1);
+    expect(body.protocolFaultCount).toBe(1);
+  });
+
+  it('收尾行带上"这次尝试期间到底有没有解析错误"与"距 open_window 多少毫秒"', () => {
+    const body = bareBody();
+    body.armContainerPacketDump('useBlock chest');
+    // 开窗包到了
+    body.onContainerIncoming?.({ windowId: 1 }, { name: 'open_window' });
+    expect(body.containerSawOpenAt).toBeGreaterThan(0);
+    // 然后在尝试窗口内崩了解析
+    const err: any = new Error('Read error for undefined : undefined');
+    err.name = 'PartialReadError';
+    err.partialReadError = { buffer: Buffer.from([0x3e]) };
+    body.onProtocolFault(err, 'deserializer-error');
+    const dump = body._logs.find((l: any) => l.event === 'container-packet-dump');
+    expect(dump.outcome).toBe('protocol-parse-error');
+    expect(dump.protocolFaultsDuringAttempt).toBe(1);
+    expect(dump.protocolFaultsTotal).toBe(1);
+    expect(dump.lastFault.via).toBe('deserializer-error');
+    expect(dump.lastFault.packetId).toBe(0x3e);
+  });
+
+  it('尝试**之前**发生的错误不算"这次尝试期间的错误"（相关性由时间戳判定，不靠叙事）', () => {
+    const body = bareBody();
+    const err: any = new Error('Read error for undefined : undefined');
+    err.name = 'PartialReadError';
+    err.partialReadError = { buffer: Buffer.from([0x3e]) };
+    body.onProtocolFault(err, 'client-error'); // 先前的错误
+    body.protocolFault.at = Date.now() - 60_000; // 一分钟前
+    body.armContainerPacketDump('useBlock chest');
+    body.finishContainerPacketDump('window-expired');
+    const dump = body._logs.find((l: any) => l.event === 'container-packet-dump');
+    expect(dump.protocolFaultsDuringAttempt).toBe(0);
+    expect(dump.protocolFaultsTotal).toBe(1); // 计数器仍会说出真话：进程里确实崩过一次
+  });
+});

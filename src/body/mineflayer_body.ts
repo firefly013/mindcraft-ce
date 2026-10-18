@@ -835,13 +835,9 @@ export class MineflayerBody {
             this.finishContainerPacketDump(outcome);
         (this.bot as { __containerProtocolFault?: unknown }).__containerProtocolFault = (withinMs?: number) =>
             this.recentProtocolFault(withinMs);
-        // **协议解析失败的唯一入口**：protodef 的 PartialReadError 只会走 client 'error'，
-        // 那条路径不触发 'packet'，所以只能在错误事件上抓（见 onProtocolFault）。
-        try {
-            (this.bot as { _client?: any })._client?.on?.('error', (err: unknown) => this.onProtocolFault(err));
-        } catch {
-            // 挂不上就少一条症状证据，不影响开容器。
-        }
+        // **抓错点铺到所有出口**（client-error / deserializer-error / uncaught）；
+        // 见 installProtocolFaultCapture 的注释：一次没触发，不等于错误没发生。
+        this.installProtocolFaultCapture();
         // 背包在登录后才会由服务端推下来；在此之前"空"是不可信的（见 inventorySynced）。
         this.inventorySynced = false;
         try {
@@ -1116,6 +1112,8 @@ export class MineflayerBody {
         const client = (this.bot as { _client?: any } | null)?._client;
         if (client == null || typeof client.on !== 'function') return;
         this.containerDumpArmed = true;
+        this.containerAttemptArmedAt = Date.now();
+        this.containerSawOpenAt = 0;
         this.containerDumpLines = [`reason=${reason}`];
         this.containerDumpInbound = [];
         this.containerDumpAfterOpen = [];
@@ -1136,7 +1134,10 @@ export class MineflayerBody {
                 this.containerDumpInbound.push(name);
                 // **开窗之后的头 12 个包按顺序单独留一份**（见 containerDumpAfterOpen 的注释：
                 // 这是判断"槽位包到没到"的唯一可靠证据，不能被 24 条上限吃掉）。
-                if (/open_window|open_screen/i.test(name)) this.containerDumpSawOpen = true;
+                if (/open_window|open_screen/i.test(name)) {
+                    this.containerDumpSawOpen = true;
+                    this.containerSawOpenAt = Date.now();
+                }
                 else if (this.containerDumpSawOpen && this.containerDumpAfterOpen.length < 12) {
                     this.containerDumpAfterOpen.push(name);
                 }
@@ -1241,6 +1242,18 @@ export class MineflayerBody {
                 // `sawOpen=true` 而这一串里没有 `window_items`/`container_set_content` ⇒
                 // 服务端开了窗却没发槽位数据（mineflayer 因此永不发 windowOpen，我们必然超时）。
                 sawOpen: this.containerDumpSawOpen,
+                // **错误有没有真的发生、发生在这段时间里没有**（回答 Lead 的 ①）：
+                //   protocolFaultsTotal        = 本进程一共抓到几条解析类错误（含开容器之外的）
+                //   protocolFaultsDuringAttempt= 落在这次开容器尝试窗口里的条数（>0 才是"这次真的崩了解析"）
+                //   lastFault                   = 最近一条（via/包id/距 open_window 多少毫秒）
+                protocolFaultsTotal: this.protocolFaultCount,
+                protocolFaultsDuringAttempt:
+                    this.protocolFault == null || this.containerAttemptArmedAt === 0
+                        ? 0
+                        : this.protocolFault.at >= this.containerAttemptArmedAt
+                            ? 1
+                            : 0,
+                lastFault: this.protocolFault,
                 afterOpen: this.containerDumpAfterOpen,
                 lines: this.containerDumpLines,
             });
@@ -1269,16 +1282,66 @@ export class MineflayerBody {
         message: string;
         packetId: number | null;
         bytesHex: string;
+        /** 从哪条路抓到的：client-error / deserializer-error / uncaught。 */
+        via: string;
     } | null = null;
+    /** 本进程里一共抓到几条解析类错误（**不管有没有在开容器**）。 */
+    private protocolFaultCount = 0;
+    /** 最近一次"开容器尝试"的武装时刻；用来回答"错误是不是发生在这次尝试期间"。 */
+    private containerAttemptArmedAt = 0;
+    /** `open_window` 到达时刻（武装期间），用于时间关联。 */
+    private containerSawOpenAt = 0;
+    private faultCaptureInstalled = false;
+
+    /**
+     * **把抓错点铺到所有可能的出口上**（真机 2026-10-19 04:20：hook 在一个新尝试里
+     * 一次都没触发，但那不等于"错误没发生"——先要排除"错误没走这条路"）。
+     *
+     * 三条独立出口，任何一条先到都算：
+     *   1. `client.on('error')`（nmp `client.js` 的 deserializer handler 会 `emit('error')`）；
+     *   2. `client.deserializer.prependListener('error')`——**在 nmp 自己的 handler 之前**，
+     *      万一 nmp 的 handler 自己抛（比如 `e.field` 为 undefined 时 `.split` 崩），这条仍有记录；
+     *   3. `process.on('uncaughtExceptionMonitor')`——只在监听、绝不吞异常，用来抓
+     *      "错误被打印到 stdout 但没经过我们 hook"的那种形态。
+     * 同一错误（同 message 且 1 秒内）只记一次。
+     */
+    installProtocolFaultCapture(): void {
+        if (this.faultCaptureInstalled) return;
+        const client = (this.bot as { _client?: any } | null)?._client;
+        if (client == null) return;
+        this.faultCaptureInstalled = true;
+        const capture = (err: unknown, via: string): void => this.onProtocolFault(err, via);
+        try {
+            client.on?.('error', (err: unknown) => capture(err, 'client-error'));
+        } catch {
+            // 这条挂不上还有别的。
+        }
+        try {
+            const deserializer = client.deserializer;
+            // prependListener：排在 nmp 自己的 handler **之前**，它抛也影响不到这条。
+            deserializer?.prependListener?.('error', (err: unknown) => capture(err, 'deserializer-error'));
+        } catch {
+            // 同上。
+        }
+        try {
+            // 只监听不处理：绝不影响进程崩溃语义（monitor 不会被被吞掉）。
+            process.on('uncaughtExceptionMonitor', (err: unknown) => capture(err, 'uncaught'));
+        } catch {
+            // 某些沙箱不允许挂 process 监听，忽略。
+        }
+    }
 
     /** 客户端 deserializer 抛错时调用：只留**一行**、有界、脱敏。 */
-    onProtocolFault(err: unknown): void {
+    onProtocolFault(err: unknown, via = 'client-error'): void {
         try {
             const e = err as { name?: unknown; message?: unknown; partialReadError?: any; id?: unknown; packetId?: unknown };
             const message = String(e?.message ?? err ?? '');
             const isPartial =
-                /PartialReadError|Read error for/i.test(String(e?.name ?? '')) || /Read error for/i.test(message);
+                /PartialReadError|Read error for|Parse error for/i.test(String(e?.name ?? '')) ||
+                /Read error for|Parse error for|PartialReadError/i.test(message);
             if (!isPartial) return;
+            const last = this.protocolFault;
+            if (last != null && last.message === message.slice(0, 160) && Date.now() - last.at < 1_000) return;
             const detail = e?.partialReadError ?? {};
             const buffer: unknown = detail?.buffer ?? (e as { buffer?: unknown })?.buffer;
             let bytesHex = '';
@@ -1310,11 +1373,13 @@ export class MineflayerBody {
                 idGuess = null;
             }
             const idRaw = Number(e?.packetId ?? e?.id ?? detail?.packetId ?? detail?.id ?? idGuess);
+            this.protocolFaultCount = (Number(this.protocolFaultCount) || 0) + 1;
             this.protocolFault = {
                 at: Date.now(),
                 message: message.slice(0, 160),
                 packetId: Number.isFinite(idRaw) ? idRaw : null,
                 bytesHex,
+                via,
             };
             try {
                 this.log.with('lifecycle').info({
@@ -1322,6 +1387,11 @@ export class MineflayerBody {
                     error: this.protocolFault.message,
                     packetId: this.protocolFault.packetId,
                     firstBytesHex: this.protocolFault.bytesHex,
+                    via,
+                    total: this.protocolFaultCount,
+                    duringContainerAttempt:
+                        this.containerAttemptArmedAt > 0 && this.protocolFault.at >= this.containerAttemptArmedAt,
+                    msAfterOpenWindow: this.containerSawOpenAt > 0 ? this.protocolFault.at - this.containerSawOpenAt : null,
                 });
             } catch {
                 // 日志失败不影响判定。
