@@ -101,6 +101,11 @@ async function openHarness(intake?: EventIntake): Promise<Harness> {
     }),
     tools: [Look],
     onSay: (text) => said.push(text),
+    // 这一组测的是**装配层语义**（尾巴、事件分流、Say 双通道），断言按
+    // "几次请求 = 几次调用"来数。空转护栏会在 yield 之后追加请求，把计数
+    // 搅乱，所以这里显式关掉；护栏本身的行为由 `runtime_stall_guard.test.ts`
+    // 单独钉（那条测试的第一例就是本文件的对照反证）。
+    stallGuard: false,
     ...(intake != null ? { intake } : {}),
   });
 

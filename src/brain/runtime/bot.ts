@@ -20,6 +20,7 @@ import { createHandlerLookup, type EventHandler } from './handlers.js';
 import { intakeLifecycleHook } from './log_hooks.js';
 import { resolveProvider, type ResolvedProvider } from './provider.js';
 import { openBotRuntime, type BotRuntime } from './runtime.js';
+import type { StallGuardOptions } from './stall_guard.js';
 import { createStateAccess, type BotStateAccess } from './state_access.js';
 
 export interface BotWiringOptions {
@@ -79,6 +80,15 @@ export interface BotWiringOptions {
    * 不给就纯文本。拍不到返回 null 即可，hook 会安静降级。
    */
   liveImage?: () => Promise<string | null>;
+  /**
+   * 空转护栏。**这里是默认打开的地方**（`openBotRuntime` 的原语默认关，
+   * 免得把"几次请求 = 几次调用"的单测语义搅乱）。
+   *
+   * 真机必须开：2026-10-18 实测两个 bot 各发一次纯正文请求后就原地停了
+   * 10 分钟（`FINDINGS.md` F-7），根因就是"yield 之后只能靠事件唤醒"。
+   * 传 `false` 可关（想精确数调用次数的集成测试用），传对象覆盖阈值。
+   */
+  stallGuard?: StallGuardOptions | false;
 }
 
 export interface BotWiring {
@@ -137,6 +147,8 @@ export async function openBotWiring(options: BotWiringOptions): Promise<BotWirin
     systemPrompt: options.systemPrompt,
     liveTail: options.liveTail,
     ...(options.liveImage != null ? { liveImage: options.liveImage } : {}),
+    // 真机默认开空转护栏；装配层是唯一决定这件事的地方。
+    stallGuard: options.stallGuard ?? {},
     tools: options.tools ?? [],
     extensions: [
       ...(options.extensions ?? []),

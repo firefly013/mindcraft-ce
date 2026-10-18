@@ -22,6 +22,7 @@ import {
 import { createSayTool, liveTailHook, systemSection } from './loop.js';
 import type { ResolvedProvider } from './provider.js';
 import { openBotSession, type BotSession } from './session.js';
+import { createStallGuard, type StallGuardOptions } from './stall_guard.js';
 
 /** 提交一条输入时的排队策略（对应 pi-durable 的 `whenBusy`）。 */
 export interface SubmitOptions {
@@ -64,6 +65,18 @@ export interface BotRuntimeOptions {
   onSay?: (text: string) => void;
   /** 额外扩展（状态文档等，后续阶段接）。 */
   extensions?: readonly Extension[];
+  /**
+   * 空转护栏（模型只说话不调工具 → 按回去继续）。**默认不开**，由装配层决定。
+   *
+   * 为什么默认关：`run 的结束 = 模型不再调工具` 是 pi-durable 的**回合语义**，
+   * 一批单测正是靠"几次请求 = 几次调用"来钉它（`runtime_steer_vs_followup`、
+   * `runtime_inbox_semantics` 等）。护栏会在 yield 之后**追加一次请求**，把那
+   * 些断言全变成噪声。所以这里保持原语纯净，真机在 `openBotWiring` 里默认打开
+   * （见 `bot.ts`）——那里才是"要一个整夜不停的 bot"的策略层。
+   *
+   * 传 `{}` 打开、传对象覆盖阈值、传 `false` 显式关掉。见 `stall_guard.ts`。
+   */
+  stallGuard?: StallGuardOptions | false;
 }
 
 export interface BotRuntime {
@@ -87,6 +100,19 @@ export interface BotRuntime {
 }
 
 export async function openBotRuntime(options: BotRuntimeOptions): Promise<BotRuntime> {
+  // 空转护栏：先造状态、装 hook；`wake` 出口在会话建好之后再接上
+  // （装配顺序：extension 必须早于 session，而 submit 只有 session 才有）。
+  let wake: ((text: UserInput) => Promise<unknown>) | null = null;
+  const guard =
+    options.stallGuard == null || options.stallGuard === false
+      ? null
+      : createStallGuard({
+          ...options.stallGuard,
+          wake: (text) => (wake == null ? Promise.resolve() : wake(text)),
+        });
+  const guardExtension =
+    guard == null ? null : defineExtension({ name: 'mc.stall-guard', hooks: guard.hooks });
+
   const core = defineExtension({
     name: 'mc.core',
     // 静态提示词走 section：只发增量，保 prompt cache。
@@ -100,6 +126,7 @@ export async function openBotRuntime(options: BotRuntimeOptions): Promise<BotRun
 
   const registry = createRegistry();
   registry.install(core);
+  if (guardExtension != null) registry.install(guardExtension);
   for (const extension of options.extensions ?? []) registry.install(extension);
 
   const session = await openBotSession({
@@ -113,6 +140,11 @@ export async function openBotRuntime(options: BotRuntimeOptions): Promise<BotRun
   });
 
   const conversation = session.conversation;
+
+  // 心跳出口：直接提交一条 user 消息。用 `followUp` —— 正在跑就排在本轮之后，
+  // 空闲就立刻开一轮，两种情况下都不会把当前工具轮打断。
+  wake = (text: UserInput) =>
+    conversation.submit({ type: 'input', content: text, whenBusy: 'followUp' }, BACKGROUND_CONTEXT);
 
   return {
     session,
@@ -129,6 +161,9 @@ export async function openBotRuntime(options: BotRuntimeOptions): Promise<BotRun
     abort: () => conversation.abort(BACKGROUND_CONTEXT),
     write: (entry) => conversation.submit({ type: 'write', entry }, BACKGROUND_CONTEXT),
     watch: () => conversation.watch(BACKGROUND_CONTEXT),
-    close: () => session.close(),
+    close: async () => {
+      guard?.stop();
+      await session.close();
+    },
   };
 }
