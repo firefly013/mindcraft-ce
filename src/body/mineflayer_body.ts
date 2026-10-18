@@ -621,6 +621,25 @@ export const FLAG_DANGER_TYPES: ReadonlySet<string> = new Set(
     DETECTORS.filter((detector) => detector.kind === 'flag').map((detector) => detector.type),
 );
 
+/** 容器包转储关心的"开界面"包（只有这些记载荷）。 */
+const WINDOW_PACKET_RE = /open_screen|window_items|window_properties|close_window|set_content|container_set_content|open_sign_editor|merchant_offers/i;
+
+/** 六个窗口包的一行摘要（只留判定字段；读不到就留空，绝不 dump 整包）。 */
+function summarizeInboundWindowPacket(name: string, data: unknown): string {
+    try {
+        const d = (data ?? {}) as Record<string, unknown>;
+        const bits: string[] = [];
+        if (d.windowId != null) bits.push(`windowId=${String(d.windowId)}`);
+        if (d.windowType != null) bits.push(`type=${String(d.windowType)}`);
+        if (Array.isArray(d.items)) bits.push(`items=${d.items.length}`);
+        if (d.title != null) bits.push(`title=${String(d.title).slice(0, 24)}`);
+        return bits.length > 0 ? `(${bits.join(' ')})` : '';
+    } catch {
+        return '';
+    }
+    void name;
+}
+
 /**
  * 工具回执看起来是不是**失败**。
  *
@@ -1055,6 +1074,7 @@ export class MineflayerBody {
     private containerDumpArmed = false;
     private containerDumpTimer: ReturnType<typeof setTimeout> | null = null;
     private containerDumpLines: string[] = [];
+    private containerDumpInbound: string[] = [];
     private containerDumpRestore: (() => void) | null = null;
 
     /** 武装一次转储（重复调用无害；已经在录就不重开）。 */
@@ -1064,6 +1084,7 @@ export class MineflayerBody {
         if (client == null || typeof client.on !== 'function') return;
         this.containerDumpArmed = true;
         this.containerDumpLines = [`reason=${reason}`];
+        this.containerDumpInbound = [];
         const record = (line: string): void => {
             if (!this.containerDumpArmed) return;
             if (this.containerDumpLines.length >= 24) return;
@@ -1071,14 +1092,22 @@ export class MineflayerBody {
             if (joined.length >= 1800) return;
             this.containerDumpLines.push(line);
         };
-        // 收包：只关心"开界面"这一族。
+        // 收包：**所有**入站包都记名字（这才回答"服务端到底说没说话"），
+        // 六个窗口包额外记判定字段。
         try {
-            this.onContainerIncoming = (_data: unknown, meta: { name?: unknown }): void => {
+            this.onContainerIncoming = (data: unknown, meta: { name?: unknown }): void => {
                 const name = String(meta?.name ?? '');
-                if (!/open_screen|window_items|window_properties|close_window|set_content|container_set_content|open_sign_editor|merchant_offers/i.test(name)) return;
+                if (name === '') return;
+                this.containerDumpInbound.push(name);
+                if (WINDOW_PACKET_RE.test(name)) {
+                    record(`in:${name}${summarizeInboundWindowPacket(name, data)}`);
+                    // 来了开界面包 ⇒ 服务端认了这次交互，立刻收尾。
+                    if (/open_screen|window_items/i.test(name)) this.finishContainerPacketDump('window-arrived');
+                    return;
+                }
+                // **catch-all：只记名字，不记载荷**（有界 + 脱敏，但"服务端回过话"
+                // 必须看得见——block_change / ack 这类正是"它不认这次交互"的证据）。
                 record(`in:${name}`);
-                // 只要真的来了开界面包，就说明服务端认了这次交互——立刻收尾。
-                if (/open_screen|window_items/i.test(name)) this.finishContainerPacketDump('window-arrived');
             };
             client.on('packet', this.onContainerIncoming);
         } catch {
@@ -1140,20 +1169,34 @@ export class MineflayerBody {
         this.containerDumpRestore?.();
         this.containerDumpRestore = null;
         try {
+            const inbound = this.containerDumpInbound.filter((n) => n !== '');
+            const windowInbound = inbound.filter((n) => WINDOW_PACKET_RE.test(n));
+            // **一句话结论**，让读日志的人不必自己数：
+            //   no-reply          = 服务端**从头到尾一个字都没回**（锅在我们这一侧/交互本身没生效）
+            //   replied-no-window = 回了别的（block_change / ack…）= 它**不认**这次交互
+            //   window-arrived    = 它认了、开了界面（那问题就在我们接包）
+            const verdict =
+                windowInbound.length > 0
+                    ? 'window-arrived'
+                    : inbound.length === 0
+                        ? 'no-reply'
+                        : 'replied-no-window';
             this.log.with('lifecycle').info({
                 event: 'container-packet-dump',
                 outcome,
+                verdict,
+                inboundNames: [...new Set(inbound)].slice(0, 24),
+                inboundCount: inbound.length,
                 lines: this.containerDumpLines,
             });
         } catch {
             // 日志失败不能影响动作。
         }
         this.containerDumpLines = [];
+        this.containerDumpInbound = [];
     }
 
-    private onContainerIncoming: ((data: unknown, meta: { name?: unknown }) => void) | null = null;
-
-    /** 背包数据到过一次了（服务端 window_items / heldItemChanged 触发）。 */
+    private onContainerIncoming: ((data: unknown, meta: { name?: unknown }) => void) | null = null;    /** 背包数据到过一次了（服务端 window_items / heldItemChanged 触发）。 */
     private markInventorySynced(): void {
         if (this.inventorySynced) return;
         this.inventorySynced = true;

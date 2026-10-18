@@ -90,6 +90,53 @@ describe('容器包转储：失败时才留证据，落一行', () => {
   });
 });
 
+describe('decisive question：服务端到底说没说话（catch-all + verdict）', () => {
+  it('服务端一个字都没回 ⇒ verdict=no-reply、inboundCount=0', () => {
+    const body = bareBody();
+    body.armContainerPacketDump('useBlock chest');
+    body.bot._client.write('block_place', { location: { x: 9, y: 62, z: 0 }, direction: 1, hand: 0, sequence: 0 });
+    body.finishContainerPacketDump('window-expired');
+    const line = body._logs[0];
+    expect(line.verdict).toBe('no-reply');
+    expect(line.inboundCount).toBe(0);
+    expect(line.inboundNames).toEqual([]);
+  });
+
+  it('服务端回了别的包（block_change / ping）⇒ 只记名字 + verdict=replied-no-window', () => {
+    const body = bareBody();
+    body.armContainerPacketDump('useBlock chest');
+    body.onContainerIncoming?.({ location: { x: 9, y: 62, z: 0 }, type: 0 }, { name: 'block_change' });
+    body.onContainerIncoming?.({}, { name: 'ping' });
+    body.finishContainerPacketDump('window-expired');
+    const line = body._logs[0];
+    expect(line.verdict).toBe('replied-no-window');
+    expect(line.inboundNames).toEqual(['block_change', 'ping']);
+    expect(line.inboundCount).toBe(2);
+    const lines = line.lines.join(' | ');
+    expect(lines).toContain('in:block_change');
+    expect(lines).toContain('in:ping');
+    // catch-all 只记名字：不许把 block_change 的坐标/类型带进来
+    expect(lines).not.toContain('type=0');
+  });
+
+  it('窗口包仍记载荷判定字段（windowId/items），verdict=window-arrived', () => {
+    const body = bareBody();
+    body.armContainerPacketDump('useBlock chest');
+    body.onContainerIncoming?.({ windowId: 5, items: [1, 2, 3] }, { name: 'window_items' });
+    const line = body._logs[0];
+    expect(line.verdict).toBe('window-arrived');
+    expect(line.lines.join(' | ')).toContain('in:window_items(windowId=5 items=3)');
+  });
+
+  it('inboundNames 有界（去重 + 最多 24 个）', () => {
+    const body = bareBody();
+    body.armContainerPacketDump('useBlock chest');
+    for (let i = 0; i < 60; i++) body.onContainerIncoming?.({}, { name: `packet_${i}` });
+    body.finishContainerPacketDump('window-expired');
+    expect(body._logs[0].inboundNames.length).toBeLessThanOrEqual(24);
+  });
+});
+
 describe('接线：openBlockUi 只在开容器时武装、成功即解除', () => {
   it('命中 arm，成功后 disarm(opened)', async () => {
     resetContainerOpenFailures();
