@@ -526,6 +526,18 @@ export const SURVIVAL_GAP_MS = 10_000;
 export const REFLEX_STOP_GRACE_MS = 2_000;
 
 /**
+ * 一次保命处理的可取消句柄。
+ *
+ * `cancel()` 一响，`rescue()` 就当场返回（不用等 `runEmergency` 自己发现危险没了）；
+ * `aborted` 是给那之后仍在后台跑的旧循环看的——它必须**彻底哑火**（不再读世界、
+ * 不再发 goal），直到自己自然收尾。
+ */
+interface RescueRun {
+    aborted: boolean;
+    cancel: (() => void) | null;
+}
+
+/**
  * **模型自己的自救动作**：它们到达身体时，保命反射必须先让位。
  *
  * 真机 2026-10-18 17:59（overnight_b）溺水死亡：`surface` 反射和模型主动调的
@@ -674,6 +686,20 @@ export class MineflayerBody {
     private currentReflexStartedAt = 0;
     /** 急停/Stop 之后不许再跑队列里剩下的反射。 */
     private reflexAbortRequested = false;
+    /**
+     * 正在跑的那一棒保命处理的**取消令牌**（每次 rescue 一个，Stop/急停只取消这一棒）。
+     *
+     * 真机抱怨「`Stop` 之后仍不停手」：`abortReflexes` 只置 `reflexAbortRequested` +
+     * `requestInterrupt()`，而 `runEmergency` 的逃跑循环**每一步**都会重新
+     * `setMovements` + `setGoal`——Stop 停掉的那次寻路，下一 tick（≤1 秒）又会被
+     * 重新起一条。于是"Stop 了"只意味着通道被摘下来，身体还在被那条后台循环
+     * 往同一个方向拖（`interrupt_code` 它也不看）。
+     *
+     * 为什么用**每次一个**令牌而不是只看 `reflexAbortRequested`：那个共享标记会在
+     * 下一次 `emergency()` 排队时被清掉，被丢弃的旧循环会因此"复活"成第二个写手。
+     * 令牌只属于创建它的那一棒，旧循环永远哑火、自然收尾。
+     */
+    private currentRescueRun: RescueRun | null = null;
     /**
      * 被冷却/去重吞掉的一次危险：**一次性边沿（kind:'flag'）没有第二次机会**，
      * 所以到窗口结束时自己补一枪（冷却结束、人还在岩浆里 → 必须有人来救）。
@@ -1191,6 +1217,10 @@ export class MineflayerBody {
             } catch {
                 // 中断失败也要把队列清掉。
             }
+            // **还要让正在跑的那一棒当场收手**：`requestInterrupt()` 只停掉"此刻"
+            // 的寻路，而逃跑循环下一 tick 就会重新 setGoal（真机抱怨的
+            // 「Stop 之后仍不停手」就是这么来的）。
+            this.cancelRunningRescue();
             // **通道必须真的还回去**：宽限期内它自己收手最好；收不了就由
             // `releaseAbortedReflexChannel` 把通道摘下来（快照与回执一致）。
             const timer = setTimeout(() => {
@@ -1207,6 +1237,40 @@ export class MineflayerBody {
         }
         this.pickupPreemptReason = running || pending > 0 ? reason : this.pickupPreemptReason;
         return pending + (running ? 1 : 0);
+    }
+
+    /**
+     * 开一棒保命处理：发一个只属于它的取消令牌。
+     *
+     * 返回值里的 `cancelled` 会被 `rescue()` 和 `runEmergency` 一起 await——
+     * 谁先到谁说了算（危险解除 / Stop 取消）。
+     */
+    private beginRescueRun(): { run: RescueRun; cancelled: Promise<EmergencyResult> } {
+        const run: RescueRun = { aborted: false, cancel: null };
+        const cancelled = new Promise<EmergencyResult>((resolve) => {
+            run.cancel = (): void => {
+                resolve({ escaped: false, reason: 'safe', position: null, health: null });
+            };
+        });
+        this.currentRescueRun = run;
+        return { run, cancelled };
+    }
+
+    /**
+     * Stop / 急停 / 保命预算用完：让**这一棒**保命处理当场收手。
+     *
+     * 只认令牌不认共享标记：共享的 `reflexAbortRequested` 会被下一次 `emergency()`
+     * 清掉，被丢弃的旧循环一旦"复活"就会变成第二个写手（两个循环同时 setGoal）。
+     */
+    private cancelRunningRescue(): void {
+        const run = this.currentRescueRun;
+        if (run == null) return;
+        run.aborted = true;
+        try {
+            run.cancel?.();
+        } catch {
+            // 已经取消过就算了：令牌是幂等的。
+        }
     }
 
     /**
@@ -1664,6 +1728,8 @@ export class MineflayerBody {
                         } catch {
                             // 中断失败也要如实报"让位"。
                         }
+                        // 正在跑的循环也要**当场**收手（它下一步就会重新 setGoal）。
+                        this.cancelRunningRescue();
                         outcome = 'muted';
                         detail =
                             '你把保命程序关掉了：**正在跑的 ' + next.reflex + ' 立刻让位**，身体归你；' +
@@ -1677,6 +1743,9 @@ export class MineflayerBody {
                         } catch {
                             // 中断失败也要如实报"交还身体"。
                         }
+                        // 跑满上限的循环同样要当场收手：只 stop 一次寻路没用，
+                        // 它下一 tick 会重新 setGoal（交还身体不能是句空话）。
+                        this.cancelRunningRescue();
                         outcome = 'aborted';
                         detail =
                             `保命处理跑了 ${Math.round(REFLEX_MAX_MS / 1000)} 秒还没脱险，` +
@@ -2683,8 +2752,11 @@ export class MineflayerBody {
      */
     async rescue(intent: EmergencyIntent): Promise<EmergencyResult> {
         const bot = this.bot;
+        // 这一棒的取消令牌：Stop/急停/预算用完会 `cancel()` 它，`rescue` 当场返回
+        // （否则 stopAll 停掉的寻路会在下一 tick 被逃跑循环重新起一条）。
+        const { run, cancelled } = this.beginRescueRun();
         try {
-            return await runEmergency({
+            const loop = runEmergency({
                 get health(): number {
                     return typeof bot.health === 'number' ? bot.health : 0;
                 },
@@ -2704,6 +2776,10 @@ export class MineflayerBody {
                     }
                 },
                 threats: (): ThreatEntity[] => {
+                    // Stop/急停之后这一棒已经被取消：**不再读世界**，让循环
+                    // 按"没有威胁"自然收尾（只需再等一次 SAFE_SECONDS），
+                    // 而不是继续每秒重算一份威胁表。
+                    if (run.aborted) return [];
                     try {
                         return (Object.values(bot.entities ?? {}) as Array<Record<string, unknown>>)
                             .filter((e) => e != null && (e as { position?: unknown }).position != null)
@@ -2725,9 +2801,15 @@ export class MineflayerBody {
                     }
                 },
                 stopAll: (): void => {
+                    // 已经被 Stop/急停取消的这一棒**不许再动身体**：
+                    // `requestInterrupt()` 会再停一次寻路，而模型此刻已经在用身体。
+                    if (run.aborted) return;
                     this.requestInterrupt();
                 },
                 fleeTo: (x: number, z: number): void => {
+                    // **每一次迈步前都认一次取消令牌**：Stop 之后一毫米都不许再平移
+                    // （真机原话：「Stop 之后仍不停手」）。
+                    if (run.aborted) return;
                     try {
                         const p = bot.entity.position;
                         const from = { x: p.x, y: p.y, z: p.z };
@@ -2738,19 +2820,84 @@ export class MineflayerBody {
                         const awayFrom = { x: p.x - dx, y: p.y, z: p.z - dz };
                         const blockAt = (bx: number, by: number, bz: number): { name?: unknown } | null =>
                             bot.blockAt(new Vec3(bx, by, bz));
+                        // ── **先刹车，再选路**（真机 2026-10-19：末地 4 次同因死亡，
+                        // x/z 冻在 88.5/-1.40、y 从 39 一路掉到 -201——逃跑把它带出了岛）
+                        // 判定顺序不能反：脚下没有实心 / 正在下坠时，**任何横向平移
+                        // 都可能是往崖外走**。这时候唯一正确的动作是停止平移（下落本身
+                        // 还可以靠落地/水桶救），而不是继续朝"远离威胁"的方向跑。
+                        const feetCell = bot.blockAt(new Vec3(Math.floor(p.x), Math.floor(p.y), Math.floor(p.z)));
+                        const under = bot.blockAt(new Vec3(Math.floor(p.x), Math.floor(p.y) - 1, Math.floor(p.z)));
+                        const feetName = String(feetCell?.name ?? '');
+                        const underName = String(under?.name ?? '');
+                        const noFloor = underName === '' || underName === 'air' || underName === 'cave_air' || underName === 'void_air';
+                        const velocityY = Number((bot.entity as { velocity?: { y?: unknown } })?.velocity?.y ?? 0);
+                        const falling = Number.isFinite(velocityY) && velocityY < -0.5;
+                        if (noFloor || falling || feetName === 'lava' || feetName === 'flowing_lava') {
+                            try {
+                                bot.pathfinder.stop();
+                            } catch {
+                                // 停不掉寻路也要把控制键松开。
+                            }
+                            for (const key of ['forward', 'back', 'left', 'right', 'jump', 'sprint']) {
+                                try {
+                                    bot.setControlState(key as never, false);
+                                } catch {
+                                    // 拿不到控制就尽力而为。
+                                }
+                            }
+                            if (this.currentReflexName != null) {
+                                // 说清"为什么这一棒什么都没做"，而不是让它像是逃成功了。
+                                this.notify('reflex.done', KIND.WORLD, LEVEL.STATE, {
+                                    reflex: this.currentReflexName,
+                                    outcome: 'in_progress',
+                                    detail:
+                                        '逃生**刹车**：脚下没有实心方块/正在下坠——横向逃跑只会把你带出岛。' +
+                                        '现在只停止平移（下落本身还能靠落地/水桶救）；请立刻用方块垫脚或往回走上实地。',
+                                    ms: this.currentReflexStartedAt > 0 ? Date.now() - this.currentReflexStartedAt : 0,
+                                });
+                            }
+                            return;
+                        }
                         const safe = chooseSafeFleeTarget(blockAt, from, awayFrom, distance);
                         if (!safe.ok) {
+                            // 附近没有可站立落点 ⇒ **原地不动**（站着吃饭/垒方块严格优于走进虚空）。
                             console.warn('emergency flee has no safe target:', safe.reason);
+                            try {
+                                bot.pathfinder.stop();
+                            } catch {
+                                // 同上。
+                            }
+                            if (this.currentReflexName != null) {
+                                this.notify('reflex.done', KIND.WORLD, LEVEL.STATE, {
+                                    reflex: this.currentReflexName,
+                                    outcome: 'in_progress',
+                                    detail:
+                                        `逃生**原地不动**：找不到能站住的落点（${safe.reason}）。` +
+                                        '站在原地吃/垒方块/等它过来，比走进虚空或岩浆好；请自己选一个方向用方块开路。',
+                                    ms: this.currentReflexStartedAt > 0 ? Date.now() - this.currentReflexStartedAt : 0,
+                                });
+                            }
                             return;
                         }
                         bot.pathfinder.setMovements(movementsFor(bot));
-                        bot.pathfinder.setGoal(new pf.goals.GoalXZ(safe.target.x, safe.target.z));
+                        // **用 GoalNear 而不是 GoalXZ**：GoalXZ 只匹配 x/z、**不看 y**，
+                        // 于是路径可以走到"同一个 x/z 的另一个高度"——在末地就是沿着
+                        // 岛边/虚空上方的格子绕过去。安全落点已经算出了 y，就必须要求
+                        // 走到那个 y（1 格容差），否则"验证过的落点"形同虚设。
+                        bot.pathfinder.setGoal(
+                            new (pf as any).goals.GoalNear(safe.target.x, safe.target.y, safe.target.z, 1),
+                        );
                     } catch (err: unknown) {
                         console.warn('emergency flee failed:', err instanceof Error ? err.message : String(err));
                     }
                 },
-                eat: (food: string): Promise<void> => consume(bot, food).then(() => undefined),
+                eat: (food: string): Promise<void> => {
+                    if (run.aborted) return Promise.resolve();
+                    return consume(bot, food).then(() => undefined);
+                },
                 submerged: (): boolean => {
+                    // 取消之后不再上浮：这一棒已经交还身体，让 `runSurface` 立刻收尾。
+                    if (run.aborted) return false;
                     try {
                         const p = bot.entity.position;
                         return bot.blockAt(p)?.name === 'water' && bot.blockAt(p.offset(0, 1.6, 0))?.name === 'water';
@@ -2759,6 +2906,7 @@ export class MineflayerBody {
                     }
                 },
                 swimUp: (): void => {
+                    if (run.aborted) return;
                     try {
                         // 水里/岩浆里按 jump 就是上浮；顺便抬头，免得贴着天花板原地顶。
                         bot.setControlState('jump', true);
@@ -2768,6 +2916,9 @@ export class MineflayerBody {
                     }
                 },
                 feetBlockName: (): string | null => {
+                    // 取消之后报"脚下不是岩浆"：让 `runLavaEscape` 当场收尾，而不是
+                    // 继续每秒 setControlState / setGoal。
+                    if (run.aborted) return null;
                     try {
                         return bot.blockAt(bot.entity.position)?.name ?? null;
                     } catch {
@@ -2775,6 +2926,7 @@ export class MineflayerBody {
                     }
                 },
                 headBlockName: (): string | null => {
+                    if (run.aborted) return null;
                     try {
                         return bot.blockAt(bot.entity.position.offset(0, 1.6, 0))?.name ?? null;
                     } catch {
@@ -2782,6 +2934,7 @@ export class MineflayerBody {
                     }
                 },
                 lavaNear: (): { x: number; z: number } | null => {
+                    if (run.aborted) return null;
                     try {
                         const p = bot.entity.position;
                         let best: { x: number; z: number; d: number } | null = null;
@@ -2808,9 +2961,15 @@ export class MineflayerBody {
                 // **处理按事件类型选定**：溺水只上浮，威胁只逃跑，不互相代劳。
                 intent,
             });
+            // 危险解除（loop 先到）或 Stop/急停（cancelled 先到）——谁先到谁说了算。
+            return await Promise.race([loop, cancelled]);
         } catch (err: unknown) {
             this.log.with('emergency').warn({ phase: 'failed', intent, err: String(err) });
             throw err;
+        } finally {
+            if (this.currentRescueRun === run) this.currentRescueRun = null;
+            // 被取消时 `runEmergency` 可能还在后台跑：令牌继续哑火，让它自己收尾。
+            run.aborted = true;
         }
     }
 
