@@ -40,6 +40,19 @@ export interface SchedulerSnapshot {
   emergency: boolean;
 }
 
+/**
+ * **模型自己的自救动作**：即使在保命锁下也放行，并顺手解锁。
+ *
+ * 真机 2026-10-18 17:59（overnight_b）：溺水时 `surface` 反射与模型主动调的
+ * `escapeWater` 互相抢身体，`escapeWater` 每次都被 `EMERGENCY_LOCKED` 拒掉，
+ * 十几轮都没上岸，最后 `overnight_b drowned`。
+ *
+ * 紧急锁的本意是"别让**无关**动作打断保命"，不是拦住**同一件事的更好执行者**：
+ * 模型在水里对"往哪游"掌握的信息比一个每秒 abort 一次的反射多。身体侧同时
+ * 会让反射让位（见 `MODEL_RESCUE_TOOLS`），两边一致。
+ */
+export const EMERGENCY_BYPASS_TOOLS = new Set(['escapeWater', 'consume']);
+
 export class Scheduler {
   private action: CurrentAction | null = null;
   private generation = 0;
@@ -53,9 +66,18 @@ export class Scheduler {
    * 记下名字与参数，是为了让调用方能回答"被拒的这次是不是就是正在跑的那件事"：
    * 同一个动作重复下发应当幂等忽略，而不是逼模型先 Stop 再重开（那会把模型
    * 自己正在做的事打断）。
+   *
+   * **例外：模型的自救动作**（见 `EMERGENCY_BYPASS_TOOLS`）。真机 17:59
+   * 溺水时 `escapeWater` 被紧急锁拒了十几轮，模型眼睁睁淹死；锁的用途是
+   * "别让无关动作打断保命"，不是拦住同一件事的更好执行者。
    */
   startAction(id: string, args: unknown = null): StartActionVerdict {
-    if (this.emergency) return { accepted: false, code: 'EMERGENCY_LOCKED' };
+    if (this.emergency) {
+      const base = id.startsWith('!') ? id.slice(1) : id;
+      if (!EMERGENCY_BYPASS_TOOLS.has(base)) return { accepted: false, code: 'EMERGENCY_LOCKED' };
+      // 交给模型执行这件事：解锁，免得身体侧反射和模型继续互相抢。
+      this.emergency = false;
+    }
     if (this.action != null) return { accepted: false, code: 'ACTION_BUSY' };
     this.action = { id, args, startedAt: Date.now(), generation: this.generation };
     return { accepted: true, actionId: id, generation: this.generation };

@@ -27,6 +27,7 @@ import {
   SURVIVAL_COOLDOWN_MS,
 } from '../src/body/mineflayer_body.js';
 import { activityFrom } from '../src/body/library/full_state.js';
+import { safeguards } from '../src/body/safety/safeguards.js';
 import {
   PICKUP_GIVE_UP_ATTEMPTS,
   PICKUP_GIVE_UP_MS,
@@ -452,5 +453,164 @@ describe('⑦ Stop：回执与快照必须一致（不许一边说"已释放"一
     const body = bareBody({ lastPickupAt: -Infinity, survivalCooldownUntil: Date.now() + 10_000 });
     body.schedulePickup(TARGET);
     expect(body.pickingUp).toBe(false);
+  });
+});
+
+/**
+ * 真机 2026-10-18 17:59（overnight_b）**溺水死亡**：
+ * - `surface` 反射一直占着身体，回执反复是 `{"reflex":"surface","outcome":"aborted","ms":1004}`；
+ * - 模型调 `escapeWater` 每次都被「保命反射正在占用身体」拒掉，两边互相抢，十几轮没上岸；
+ * - 模型调 `disableSafeguards(calls=4)`（回执写"接下来 4 次工具调用内不介入"）——
+ *   **反射照旧占着身体**，它越沉越深（y 61→56），最后 `overnight_b drowned`。
+ */
+describe('⑧ 水里：自救不能被保命反射锁死', () => {
+  it('abort 循环被掐掉：同一件事正在跑时，后续边沿只报"进行中"，不再 force-stop', async () => {
+    const events: any[] = [];
+    const body = bareBody({
+      reflexRunning: true,
+      currentReflexName: 'surface',
+      currentReflexStartedAt: Date.now() - 1000,
+      notify: (type: string, _kind: unknown, _level: unknown, payload: unknown) => events.push({ type, payload }),
+      log: { with: () => ({ info: () => {}, error: () => {} }) },
+      rescue: vi.fn(async () => ({ escaped: true, reason: 'ok' })),
+    });
+    // 溺水边沿每 300ms 一条，连来 10 条——以前每条都会 forceStopBody，
+    // 把正在跑的那条自己打断（真机日志里 surface 反复 `aborted, ms:0`）。
+    for (let i = 0; i < 10; i++) {
+      body.emergency('world.water.drowning', { oxygen: 3 }, 'surface', 'surface');
+    }
+    expect(body.reflexQueue).toHaveLength(0);                       // 不重复排队
+    expect(body.bot.clearControlStates).not.toHaveBeenCalled();     // 不反复急停
+    expect(body.bot.pathfinder.stop).not.toHaveBeenCalled();
+    const note = events.filter((e) => e.payload?.outcome === 'in_progress').pop();
+    expect(note).toBeDefined();
+    expect(String(note.payload.detail)).toContain('不重复触发');
+    // 也没有向大脑发新的 L5（不会反复上锁）
+    expect(events.some((e) => e.type === 'world.water.drowning')).toBe(false);
+  });
+
+  it('开跑前清掉上一次急停留下的 interrupt_code：反射不会被自己人打断', async () => {
+    const seen: boolean[] = [];
+    const body = bareBody({
+      bot: {
+        interrupt_code: true,   // emergency() 的 forceStopBody 留下的
+        output: '',
+        entity: { position: { x: 0, y: 64, z: 0 } },
+        entities: {},
+        pathfinder: { stop: vi.fn() },
+        clearControlStates: vi.fn(),
+        stopDigging: vi.fn(),
+      },
+      reflexQueue: [{ reflex: 'surface', intent: 'surface' }],
+      notify: vi.fn(),
+      rescue: vi.fn(async () => {
+        seen.push(body.bot.interrupt_code === true);
+        return { escaped: true, reason: 'ok' };
+      }),
+    });
+    await body.drainReflexes();
+    expect(seen).toEqual([false]);   // 跑到 rescue 那一刻已经是干净的
+  });
+
+  it('disableSafeguards 真的管住反射：不介入、不上锁、身体留给模型，且回执说了怎么恢复', () => {
+    const events: any[] = [];
+    safeguards.suppressCalls(4, '测试：模型自救', Date.now());
+    try {
+      const body = bareBody({
+        notify: (type: string, _kind: unknown, _level: unknown, payload: unknown) => events.push({ type, payload }),
+        log: { with: () => ({ info: () => {}, error: () => {} }) },
+      });
+      body.emergency('world.water.drowning', { oxygen: 3 }, 'surface', 'surface');
+      expect(body.reflexQueue).toHaveLength(0);                    // 没有反射
+      expect(body.bot.clearControlStates).not.toHaveBeenCalled();  // 也没抢身体
+      expect(events.some((e) => e.type === 'world.water.drowning')).toBe(false); // 没上锁
+      const muted = events.filter((e) => e.payload?.outcome === 'muted').pop();
+      expect(muted).toBeDefined();
+      expect(String(muted.payload.detail)).toContain('不介入');
+      expect(String(muted.payload.detail)).toContain('restore=true'); // 告诉它怎么把保命开回来
+    } finally {
+      safeguards.release();
+    }
+  });
+
+  it('**正在跑**的 surface 也认这个开关：关掉后 500ms 内让位（真机 17:59 就是这么淹死的）', async () => {
+    vi.useFakeTimers();
+    try {
+      const events: any[] = [];
+      const requestInterrupt = vi.fn();
+      const body = bareBody({
+        reflexQueue: [{ reflex: 'surface', intent: 'surface' }],
+        rescue: () => new Promise(() => {}),   // 一直上不了岸
+        requestInterrupt,
+        notify: (type: string, _kind: unknown, _level: unknown, payload: unknown) => events.push({ type, payload }),
+        log: { with: () => ({ info: () => {}, error: () => {} }) },
+      });
+      const pending = body.drainReflexes();
+      await vi.advanceTimersByTimeAsync(600);
+      // 快照此刻确实写着 surface（身体被占着）
+      expect(body.currentActionName()).toBe('surface');
+      // 模型关掉保命（就像它 17:59 做的那样）
+      safeguards.suppressCalls(4, '测试：自救', Date.now());
+      await vi.advanceTimersByTimeAsync(600);
+      // 反射让位、身体立刻可用
+      expect(body.currentActionName()).toBeNull();
+      expect(body.survivalCooldownUntil).toBeGreaterThan(Date.now());
+      const muted = events.filter((e) => e.payload?.outcome === 'muted').pop();
+      expect(String(muted.payload.detail)).toContain('立刻让位');
+      expect(requestInterrupt).toHaveBeenCalled();
+      safeguards.release();
+      await vi.advanceTimersByTimeAsync(1);
+      await pending.catch(() => undefined);
+    } finally {
+      safeguards.release();
+      vi.useRealTimers();
+    }
+  });
+
+  it('模型调 escapeWater：保命反射**先让位**（真机这里两边互相抢到淹死）', async () => {
+    const events: any[] = [];
+    const requestInterrupt = vi.fn();
+    const body = bareBody({
+      reflexRunning: true,
+      currentReflexName: 'surface',
+      currentReflexStartedAt: Date.now() - 30_000,
+      reflexQueue: [{ reflex: 'surface', intent: 'surface' }],
+      requestInterrupt,
+      notify: (type: string, _kind: unknown, _level: unknown, payload: unknown) => events.push({ type, payload }),
+      log: { with: () => ({ info: () => {}, error: () => {} }) },
+    });
+    await body.handle({ op: 'action', request: { name: 'escapeWater', args: {} } });
+    expect(body.reflexAbortRequested).toBe(true);      // 反射收到中断
+    expect(requestInterrupt).toHaveBeenCalled();
+    expect(body.reflexQueue).toHaveLength(0);          // 队列里的也不再跑
+    expect(body.survivalCooldownUntil).toBeGreaterThan(Date.now() + SURVIVAL_COOLDOWN_MS - 5_000);
+    const note = events.filter((e) => e.payload?.outcome === 'preempted').pop();
+    expect(note).toBeDefined();
+    expect(String(note.payload.detail)).toContain('escapeWater');
+    expect(String(note.payload.detail)).toContain('不会抢回去');
+  });
+
+  it('水里的占用同样受 45 秒预算约束（surface 也是保命反射）', () => {
+    vi.useFakeTimers();
+    try {
+      const events: any[] = [];
+      const body = bareBody({
+        notify: (type: string, _kind: unknown, _level: unknown, payload: unknown) => events.push({ type, payload }),
+        log: { with: () => ({ info: () => {}, error: () => {} }) },
+        rescue: vi.fn(async () => ({ escaped: false, reason: 'ok' })),
+        drainReflexes: vi.fn(async () => {}),
+      });
+      for (let t = 0; t < SURVIVAL_BUDGET_MS; t += 500) {
+        body.emergency('world.water.drowning', { oxygen: 3 }, 'surface', 'surface');
+        vi.advanceTimersByTime(500);
+      }
+      body.emergency('world.water.drowning', { oxygen: 2 }, 'surface', 'surface');
+      const yielded = events.filter((e) => e.payload?.outcome === 'yielded').pop();
+      expect(yielded).toBeDefined();
+      expect(String(yielded.payload.detail)).toContain('交还身体');
+      expect(body.survivalCooldownUntil).toBeGreaterThan(Date.now());
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

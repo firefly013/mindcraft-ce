@@ -110,4 +110,30 @@ describe('紧急锁（L5 的反射）', () => {
     expect(s.locked).toBe(true);
     expect(s.startAction('moveBy')).toMatchObject({ accepted: false, code: 'EMERGENCY_LOCKED' });
   });
+
+  it('模型的自救动作（escapeWater/consume）穿过紧急锁并解锁（真机 17:59 溺水）', () => {
+    // 溺水时 surface 反射与模型调的 escapeWater 互相抢，escapeWater 每次都被
+    // EMERGENCY_LOCKED 拒掉，十几轮没上岸，最后淹死。
+    const s = new Scheduler();
+    s.beginEmergency();
+    expect(s.startAction('escapeWater', {}).accepted).toBe(true);
+    // 顺手解锁：别让身体侧反射和模型继续互相抢。
+    expect(s.locked).toBe(false);
+
+    const s2 = new Scheduler();
+    s2.beginEmergency();
+    expect(s2.startAction('consume', { item_name: 'bread' }).accepted).toBe(true);
+
+    // 带 ! 前缀也一样。
+    const s3 = new Scheduler();
+    s3.beginEmergency();
+    expect(s3.startAction('!escapeWater', {}).accepted).toBe(true);
+  });
+
+  it('紧急锁对**普通**动作照旧拦（自救例外没有把锁掏空）', () => {
+    const s = new Scheduler();
+    s.beginEmergency();
+    expect(s.startAction('mineBlock', {})).toMatchObject({ accepted: false, code: 'EMERGENCY_LOCKED' });
+    expect(s.locked).toBe(true);
+  });
 });

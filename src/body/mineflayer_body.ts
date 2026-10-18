@@ -523,6 +523,17 @@ export const SURVIVAL_GAP_MS = 10_000;
  */
 export const REFLEX_STOP_GRACE_MS = 2_000;
 
+/**
+ * **模型自己的自救动作**：它们到达身体时，保命反射必须先让位。
+ *
+ * 真机 2026-10-18 17:59（overnight_b）溺水死亡：`surface` 反射和模型主动调的
+ * `escapeWater` 互相抢身体，十几轮都没上岸（"工具 escapeWater → rejected:
+ * 保命反射正在占用身体"），y 从 61 掉到 56，最后 `overnight_b drowned`。
+ * 在**水里**这件事上，模型的判断比一个 1 秒就 abort 一次的反射更靠谱——
+ * 反射挡在这里不是保命，是把两个人都锁死。
+ */
+const MODEL_RESCUE_TOOLS = new Set(['escapeWater', 'consume']);
+
 export class MineflayerBody {
     readonly name: string;
     readonly countId: number;
@@ -1163,14 +1174,34 @@ export class MineflayerBody {
             }
             return;
         }
-        // ── 保命"制度"预算（不是单个反射的预算）─────────────────────────
+        // ── ① 模型把保命关了：**必须真的不介入** ─────────────────────────
+        // `disableSafeguards` 的回执原文是「保命程序已关闭，接下来 N 次工具调用内
+        // 不介入」，而反射引擎以前根本不看这个开关——真机 17:59 溺水时模型正是
+        // 靠它开条生路，结果 surface 照旧占着身体、escapeWater 照旧被拒，
+        // 最后淹死。回执承诺什么，这里就做到什么（关掉期间**不发 L5、不上锁**，
+        // 身体完全归模型）。恢复方式也一并说清。
+        const now = Date.now();
+        if (safeguards.isSuppressed(now)) {
+            if (now - this.survivalYieldNotifiedAt > SURVIVAL_GAP_MS) {
+                this.survivalYieldNotifiedAt = now;
+                this.notify('reflex.done', KIND.WORLD, LEVEL.STATE, {
+                    reflex,
+                    outcome: 'muted',
+                    detail:
+                        `保命程序已被你关闭（${safeguards.describe(now)}），这次**不介入**——身体是你的，` +
+                        '自己想办法脱险；要恢复保命就用 disableSafeguards(restore=true) 或 restoreAllSafety。',
+                    ms: 0,
+                });
+            }
+            return;
+        }
+        // ── ② 保命"制度"预算（不是单个反射的预算）─────────────────────────
         // 真机 17:15（overnight_b）：escape 卡在「已 102s」，Stop 说"通道已释放"
         // 但快照还是 escape，stairUp/restart/disableSafeguards 全被
         // `An action is already running. Stop() first, then retry.` 拒掉。
         // 根因**不是一次反射太长**（那有 REFLEX_MAX_MS 兜着），而是：附近的僵尸
         // 一直在触发半径内 → 每来一条边沿就新起一次 escape → 从模型角度看是
         // **一次连续 100+ 秒的占用**。所以这里按"连续占用段"记账。
-        const now = Date.now();
         // 空闲够久 → 开一段新的占用；否则接着上一段算。
         if (this.survivalBusySince == null || now - this.survivalLastReflexAt > SURVIVAL_GAP_MS) {
             this.survivalBusySince = now;
@@ -1206,6 +1237,29 @@ export class MineflayerBody {
                     (released > 0 ? '' : '（当前没有正在跑的保命处理。）'),
                 ms: 0,
             });
+            return;
+        }
+        // ── ③ 同一件事已经在处理：**不重复触发，也不打断它** ────────────────
+        // 这一条是"abort 循环"的解药。以前每条边沿都会 `forceStopBody`（把
+        // interrupt_code 置位）再排一条新反射——正在跑的那条于是被自己的下一次
+        // 触发打断（真机日志：surface `outcome:"aborted", ms:0` 反复出现，
+        // 模型看到的是"一直在占着身体，却永远不上岸"）。
+        // 同一件事就让它跑完：边沿只报一句"还在处理"。
+        const sameRunning = this.reflexRunning === true && this.currentReflexName === reflex;
+        const sameQueued = Array.isArray(this.reflexQueue) && this.reflexQueue.some((q) => q.reflex === reflex);
+        if (sameRunning || sameQueued) {
+            if (now - this.survivalYieldNotifiedAt > SURVIVAL_GAP_MS) {
+                this.survivalYieldNotifiedAt = now;
+                const ms = this.currentReflexStartedAt > 0 ? now - this.currentReflexStartedAt : 0;
+                this.notify('reflex.done', KIND.WORLD, LEVEL.STATE, {
+                    reflex,
+                    outcome: 'in_progress',
+                    detail:
+                        `${reflex} 保命处理正在进行中（已 ${Math.round(ms / 1000)} 秒），**不重复触发**；` +
+                        '它跑完会自己报结果。急的话先 Stop（会立刻把身体给你）。',
+                    ms,
+                });
+            }
             return;
         }
         // 模型的动作请求已经在路上：这次不抢（它可能正是在自救）。
@@ -1254,18 +1308,61 @@ export class MineflayerBody {
                 this.currentReflexStartedAt = started;
                 this.reflexCompletionSent = false;
                 this.survivalLastReflexAt = started;
-                let outcome: 'ok' | 'failed' | 'partial' | 'aborted' = 'ok';
+                let outcome: 'ok' | 'failed' | 'partial' | 'aborted' | 'muted' = 'ok';
                 let detail = '';
-                let capTimer: ReturnType<typeof setTimeout> | null = null;
+                let guardTimer: ReturnType<typeof setInterval> | null = null;
                 try {
-                    // **保命循环也要有上限**：跑太久就中断并交还身体。
+                    // **把上一次急停留下的 interrupt_code 清掉再跑。**
+                    // `emergency()` 为了抢身体会 `forceStopBody`（置 interrupt_code），
+                    // 而 skills 每一步都认这个标记——不清的话这一棒刚起步就被自己
+                    // 上一次的急停打断（真机日志：surface `aborted, ms:0` 无限重复）。
+                    // 模型/Stop 的抢占另有 `reflexAbortRequested` / `modelActionRequested`
+                    // 兜着，不会被这里清掉。
+                    try {
+                        if (this.bot != null) this.bot.interrupt_code = false;
+                    } catch {
+                        // 清不掉也要继续跑（最坏是这一棒立刻返回 aborted）。
+                    }
+                    // **保命循环要有上限，也要认模型的开关。**
+                    // 每 500ms 查两件事：
+                    //   ① 跑过 REFLEX_MAX_MS → 交还身体（真机有一次 escape 跑了 419 秒）；
+                    //   ② **模型关掉了保命程序**（disableSafeguards）→ 立刻让位。
+                    // 第 ② 条是真机 17:59 淹死的直接原因：模型关掉保命后，**正在跑的
+                    // surface 照旧占着身体**，escapeWater 依然被拒——回执承诺"不介入"
+                    // 就必须当场生效，包括正在跑的这一条。
                     const raced = await Promise.race([
                         this.rescue(next.intent).then((r) => ({ kind: 'done' as const, r })),
-                        new Promise<{ kind: 'timeout' }>((resolve) => {
-                            capTimer = setTimeout(() => resolve({ kind: 'timeout' }), REFLEX_MAX_MS);
+                        new Promise<{ kind: 'timeout' | 'muted' }>((resolve) => {
+                            guardTimer = setInterval(() => {
+                                const at = Date.now();
+                                if (at - started >= REFLEX_MAX_MS) {
+                                    resolve({ kind: 'timeout' });
+                                    return;
+                                }
+                                if (safeguards.isSuppressed(at)) {
+                                    resolve({ kind: 'muted' });
+                                }
+                            }, 500);
                         }),
                     ]);
-                    if (raced.kind === 'timeout') {
+                    if (raced.kind === 'muted') {
+                        // 模型明确关掉了保命：让位 + 冷却（别立刻又抢回来）。
+                        this.reflexAbortRequested = true;
+                        this.survivalCooldownUntil = Math.max(
+                            this.survivalCooldownUntil,
+                            Date.now() + SURVIVAL_COOLDOWN_MS,
+                        );
+                        try {
+                            this.requestInterrupt();
+                        } catch {
+                            // 中断失败也要如实报"让位"。
+                        }
+                        outcome = 'muted';
+                        detail =
+                            '你把保命程序关掉了：**正在跑的 ' + next.reflex + ' 立刻让位**，身体归你；' +
+                            `接下来 ${Math.round(SURVIVAL_COOLDOWN_MS / 1000)} 秒内保命不会介入` +
+                            '（要恢复就用 disableSafeguards(restore=true) 或 restoreAllSafety）。';
+                    } else if (raced.kind === 'timeout') {
                         // 让它收手（skills 认 interrupt_code），并把通道还给模型。
                         this.reflexAbortRequested = true;
                         try {
@@ -1279,7 +1376,7 @@ export class MineflayerBody {
                             '已中断并**交还身体通道**（模型可以吃药/逃跑/换方向自救）；' +
                             '**如果危险还在，保命会在下一条受击事件上重新接管**——' +
                             '这一段只是先把身体还给你，不是把保命关掉。';
-                    } else {
+                    } else if (raced.kind === 'done') {
                         const result = raced.r;
                         if (result.reason === 'died') {
                             outcome = 'failed';
@@ -1300,7 +1397,7 @@ export class MineflayerBody {
                     outcome = 'failed';
                     detail = err instanceof Error ? err.message : String(err);
                 } finally {
-                    if (capTimer != null) clearTimeout(capTimer);
+                    if (guardTimer != null) clearInterval(guardTimer);
                 }
                 this.currentReflexName = null;
                 this.currentReflexStartedAt = 0;
@@ -2483,8 +2580,30 @@ export class MineflayerBody {
                 try {
                     await this.yieldAutoPickupToModel();
                     // 非保命反射也让位（保命反射除外：那是"先活下来"的那件事，
-                    // 只有 Stop 能硬停它）。
+                    // 只有 Stop / 模型的自救动作能硬停它）。
                     this.yieldNonSurvivalReflexes('模型动作抢占：已放弃这次自动拾取。');
+                    // **模型自己的自救动作优先于保命反射。** 真机 17:59 溺水：
+                    // surface 反射和模型调的 escapeWater 互相抢，十几轮没上岸，
+                    // 最后淹死。水里这件事模型的判断比反射准——让它接手。
+                    const baseName = String(name ?? '').replace(/^!/, '');
+                    if (MODEL_RESCUE_TOOLS.has(baseName)) {
+                        const stopped = this.abortReflexes(`模型要用 ${baseName} 自救`);
+                        // 交还一段时间：反射别在模型游到一半时又抢回去。
+                        this.survivalCooldownUntil = Math.max(
+                            this.survivalCooldownUntil,
+                            Date.now() + SURVIVAL_COOLDOWN_MS,
+                        );
+                        this.survivalBusySince = null;
+                        this.notify('reflex.done', KIND.WORLD, LEVEL.STATE, {
+                            reflex: baseName,
+                            outcome: 'preempted',
+                            detail:
+                                `你用 ${baseName} 自救：已让出身体` +
+                                (stopped > 0 ? `（中断 ${stopped} 条保命/反射）` : '') +
+                                `，接下来 ${Math.round(SURVIVAL_COOLDOWN_MS / 1000)} 秒内保命不会抢回去。`,
+                            ms: 0,
+                        });
+                    }
                     const text = await executeToolCall(this, name, args);
                     this.consumePermitFor(name);
                     return { ok: true, op: 'action', result: { ok: true, text, code: 'OK' } };
