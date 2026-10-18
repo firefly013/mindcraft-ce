@@ -129,3 +129,30 @@ describe('身体侧接线：拒的是进攻，放行的是逃生；而且不打�
     expect(body.criticalHealthRefusalFor('attack')).toBeNull();
   });
 });
+
+describe('有食物 vs 没食物：措辞必须不同（防止"有吃的却去送死"这个新失败模式）', () => {
+  it('背包里有食物 ⇒ 先让吃它，把"故意死"降级为"实在没别的办法时"', () => {
+    const text = combatRefusalVerdict(facts({ health: 1.5, food: 4, foodItems: ['cooked_beef', 'bread'] })).text;
+    expect(text).toContain('你背包里有吃的');
+    expect(text).toContain('cooked_beef');
+    expect(text).toContain('先吃它');
+    expect(text).toContain('只有真的没食物');
+    expect(text).not.toContain('如果既没有食物也脱不了战');
+    expect(text).toContain('consume(item_name="cooked_beef")');
+  });
+
+  it('背包里没有食物 ⇒ 才把"故意死一次是合法重置"明说出来', () => {
+    const text = combatRefusalVerdict(facts({ health: 1.5, food: 4, foodItems: [] })).text;
+    expect(text).toContain('如果既没有食物也脱不了战');
+    expect(text).toContain('合法选择');
+    expect(text).not.toContain('你背包里有吃的');
+  });
+
+  it('食物名列表为空/null/脏数据都不会崩，且退回"没食物"的措辞', () => {
+    for (const value of [null, undefined, [], [''], ['']]) {
+      const verdict = combatRefusalVerdict(facts({ health: 2, food: 1, foodItems: value as any }));
+      expect(verdict.allowed).toBe(false);
+      expect(verdict.text).toContain('如果既没有食物也脱不了战');
+    }
+  });
+});

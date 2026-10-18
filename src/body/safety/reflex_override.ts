@@ -227,6 +227,8 @@ export const OFFENSIVE_TOOL_NAMES: ReadonlySet<string> = new Set(['attack', 'hun
 export interface CombatFacts {
     health: number | null;
     food: number | null;
+    /** 背包里能吃的食物名（有的话，回执必须先让人吃东西，而不是先谈死）。 */
+    foodItems?: string[] | null;
     /** 最近的敌对生物距离（米）；null = 读不到 / 周围没有。 */
     hostileMeters: number | null;
     keepInventory: boolean | null;
@@ -275,11 +277,28 @@ export function combatRefusalVerdict(facts: CombatFacts): { allowed: boolean; te
     }
     parts.push('**逃跑、吃东西、垫方块、`escapeWater`、保命反射都不受这条限制**——它只拦进攻。');
     parts.push(deathCostLine(facts));
-    parts.push('如果既没有食物也脱不了战，**在这个世界里故意死一次是合法选择**：一次重生、物品和经验都保留、立刻满血。');
+    // **"故意死一次"只在真的没得吃时推荐。**
+    // Lead 2026-10-19：把"死亡是合法重置"写进回执是当晚最有效的一次人工干预，
+    // 但它有副作用——如果背包里明明有食物却先去送死，那就是我们**新造**的失败模式。
+    // 所以：有食物 ⇒ 那句话降级成"实在没别的办法时"，并把具体吃哪一样放前面。
+    const foodItems = (facts.foodItems ?? []).filter((name) => typeof name === 'string' && name !== '');
+    const bestFood = foodItems[0] ?? null;
+    if (bestFood != null) {
+        parts.push(
+            `你背包里有吃的（${foodItems.slice(0, 3).join('、')}）——**先吃它**：\`consume(item_name="${bestFood}")\`；` +
+                '只有真的没食物、也脱不了战的时候，才轮到"故意死一次"这个选项。',
+        );
+    } else {
+        parts.push('如果既没有食物也脱不了战，**在这个世界里故意死一次是合法选择**：一次重生、物品和经验都保留、立刻满血。');
+    }
     parts.push(
-        threat != null
-            ? '下一步（照做即可）：`moveAway(distance=16)`，然后 `consume(item_name="…")` 或 `getFood()`。'
-            : '下一步（照做即可）：`getFood()` 或 `consume(item_name="…")`。',
+        bestFood != null
+            ? threat != null
+                ? `下一步（照做即可）：\`moveAway(distance=16)\`，然后 \`consume(item_name="${bestFood}")\`。`
+                : `下一步（照做即可）：\`consume(item_name="${bestFood}")\`。`
+            : threat != null
+                ? '下一步（照做即可）：`moveAway(distance=16)`，然后 `consume(item_name="…")` 或 `getFood()`。'
+                : '下一步（照做即可）：`getFood()` 或 `consume(item_name="…")`。',
     );
     return { allowed: false, text: parts.join('\n    ') };
 }

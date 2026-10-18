@@ -1478,9 +1478,46 @@ export class MineflayerBody {
                 food: Number.isFinite(food) ? food : null,
                 // 只做"附近有没有威胁"的粗判：读不到就是 null（不拿它当理由）。
                 hostileMeters: this.nearestHostileMeters(),
+                // **背包里有没有吃的**：有 ⇒ 回执必须先让模型吃，而不是先谈"故意死一次"
+                // （Lead 2026-10-19：把死亡写进回执是最有效的人工干预，但也可能造出
+                // "有食物却去送死"这个新失败模式——所以这两种情况的措辞必须不同）。
+                foodItems: (() => {
+                    try {
+                        return ((this.bot as any)?.inventory?.items?.() ?? [])
+                            .map((item: any) => String(item?.name ?? ''))
+                            .filter((name: string) => name !== '' && FOOD_VALUE[name] != null);
+                    } catch {
+                        return null;
+                    }
+                })(),
                 keepInventory,
                 immediateRespawn,
             });
+            if (!verdict.allowed) {
+                // **一行有界日志**：真机出现"有食物却去送死"时，这一行能直接给出证据
+                // （血量/食物/威胁/背包里有什么吃的），不用等到早上看复盘。
+                try {
+                    this.log.with('lifecycle').info({
+                        event: 'combat-refusal',
+                        tool: String(toolName ?? ''),
+                        health: Number.isFinite(health) ? health : null,
+                        food: Number.isFinite(food) ? food : null,
+                        hostileMeters: this.nearestHostileMeters(),
+                        foodItems: (() => {
+                            try {
+                                return ((this.bot as any)?.inventory?.items?.() ?? [])
+                                    .map((item: any) => String(item?.name ?? ''))
+                                    .filter((name: string) => name !== '' && FOOD_VALUE[name] != null)
+                                    .slice(0, 5);
+                            } catch {
+                                return null;
+                            }
+                        })(),
+                    });
+                } catch {
+                    // 日志失败不影响拒绝本身。
+                }
+            }
             return verdict.allowed ? null : verdict.text;
         } catch {
             // 守卫自己出错时**放行**（不能因为守卫坏了让模型动不了）。
