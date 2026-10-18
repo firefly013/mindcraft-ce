@@ -48,6 +48,32 @@ function formatPosition(pos: Position | null): string {
     return `(${pos.x.toFixed(1)}, ${pos.y.toFixed(1)}, ${pos.z.toFixed(1)})`;
 }
 
+/** 动作返回后、采样结束位置之前的落定时间（ms）：别把"还在滑行"算成搜索的位移。 */
+export const SEARCH_SETTLE_MS = 250;
+
+const sleepMs = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
+
+/**
+ * "这次搜索有没有真的靠近目标"——**实测**的两个距离之差（起手距目标 → 现在距目标）。
+ *
+ * 比"移动了几格"有用得多：绕路也可能移动很多格却没靠近（真机 overnight_a 就是被
+ * 一个对不上的位移数字弄糊涂的）。拿不到目标坐标或起手位置就说"量不出来"，不猜。
+ */
+export function closingSummary(
+    before: Position | null,
+    after: Position | null,
+    target: Position | null,
+): string {
+    if (target == null || before == null || after == null) return '';
+    const d0 = Math.hypot(before.x - target.x, before.y - target.y, before.z - target.z);
+    const d1 = Math.hypot(after.x - target.x, after.y - target.y, after.z - target.z);
+    const delta = d0 - d1;
+    const numbers = `实测：起手 ${d0.toFixed(1)} 格 → 现在 ${d1.toFixed(1)} 格`;
+    if (delta >= 0.3) return `离目标**接近了 ${delta.toFixed(1)} 格**（${numbers}）。`;
+    if (delta <= -0.3) return `离目标**反而远了 ${Math.abs(delta).toFixed(1)} 格**（${numbers}）。`;
+    return `离目标几乎没变（${numbers}）。`;
+}
+
 /**
  * 搜索类回执必须回答两个问题：有没有找到、玩家被挪到哪了。
  *
@@ -165,14 +191,14 @@ export function annotateSearchForBlock(
     if (body.includes('could not reach it')) {
         return (
             `searchForBlock：找到了 ${type} ${targetText}，但走不过去（路径被堵或太远）。` +
-            `搜索范围 ${range} 格${distanceText}；${moved}` +
+            `搜索范围 ${range} 格${distanceText}；${moved}${closingSummary(before, from, target)}` +
             `结论：范围内找到了 ${type} ${targetText}，但当前走不到；要么挖通道/绕路过去，要么换目标。`
         );
     }
     if (/\bFound\b/i.test(body) && target != null) {
         return (
             `searchForBlock：找到了 ${type} ${targetText}${distanceText}（搜索范围 ${range} 格）。` +
-            `${moved}结论：范围内找到了 ${type} ${targetText}。`
+            `${moved}${closingSummary(before, from, target)}结论：范围内找到了 ${type} ${targetText}。`
         );
     }
     if (/被中断|中断（|interrupted/i.test(body)) {
@@ -230,6 +256,10 @@ export async function executeToolCall(agent: any, toolName: string, args: Record
         const result: unknown = await command.perform(agent, ...ordered);
         const text = (result as string | null | undefined) ?? '';
         if (toolName === 'searchForBlock') {
+            // **落定再采样**：动作刚返回时身体可能还在滑行/被寻路器最后推一下，
+            // 立刻采样会把这段"余量"算进这次搜索的位移里——真机 overnight_a 反馈
+            // 「searchForBlock 报告位移与实际不符」，量的时机就是原因之一。
+            await sleepMs(SEARCH_SETTLE_MS);
             return annotateSearchForBlock(String(text), args, before, readPosition(agent));
         }
         if (toolName === 'collectBlocks') {

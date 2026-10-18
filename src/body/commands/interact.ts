@@ -48,6 +48,14 @@ import type { AgentCommand } from './actions.js';
 export interface ItemSpec {
   name: string;
   count: number;
+  /**
+   * 模型是否**显式**给了数量。
+   *
+   * 没给时 `count=1` 只是默认值，**不能**当成"只要 1 个"——真机报告
+   * 「从熔炉取物一次只取 1 个」就是这个默认值被当成了语义：原版熔炉取物是
+   * **把产物槽里现有的全拿走**。显式给了数量才按数量取，并报告剩下多少。
+   */
+  countGiven?: boolean;
 }
 
 /**
@@ -78,9 +86,9 @@ export function parseItems(raw: unknown): { items: ItemSpec[]; error?: string } 
         const b = m[2] ?? '';
         const count = /^\d+$/.test(a) ? Number(a) : Number(b);
         const name = /^\d+$/.test(a) ? b : a;
-        items.push({ name, count });
+        items.push({ name, count, countGiven: true });
       } else {
-        items.push({ name: entry.trim(), count: 1 });
+        items.push({ name: entry.trim(), count: 1, countGiven: false });
       }
       continue;
     }
@@ -95,7 +103,7 @@ export function parseItems(raw: unknown): { items: ItemSpec[]; error?: string } 
       if (!Number.isFinite(count) || count <= 0) {
         return { items: [], error: `"${name}" 的数量要是正整数。` };
       }
-      items.push({ name, count });
+      items.push({ name, count, countGiven: true });
       continue;
     }
     return { items: [], error: 'input/output 只能是物品名、{name,count} 或它们的数组。' };
@@ -608,6 +616,114 @@ export function formatTransferReceipt(
   }
   if (Math.abs(delta) === 0 && (result.localMoved ?? 0) > 0) lines.push(result.detail);
   return lines.join('\n    ');
+}
+
+/** 熔炉族：blasting/smoking 和普通熔炉一样有 input/fuel/output 三个槽。 */
+export function isFurnaceLikeBlock(name: unknown): boolean {
+  return name === 'furnace' || name === 'blast_furnace' || name === 'smoker';
+}
+
+/**
+ * 从熔炉**产物槽**取物。
+ *
+ * 契约（Lead 裁定，2026-10-19）：
+ *   - 没显式给数量 ⇒ **取走产物槽里现有的全部**（原版熔炉界面的直觉），报告取到几个；
+ *   - 显式给了数量 ⇒ 按数量取，并报告**还剩多少**；
+ *   - **不碰原料槽/燃料槽**，并且回执点名只动了产物槽；
+ *   - 取到几个必须来自**背包实际增量**（操作前后 countInInventory 的差），
+ *     不能来自"我打算取几个"——这是整晚反复用的证据规则。
+ *   - 产物槽里只有 1 个时要说"只有 1 个（其余还在烧）"，别让小数看起来像失败。
+ */
+export async function takeFromFurnace(
+  bot: any,
+  located: { x: number; y: number; z: number },
+  item: ItemSpec,
+  type: string,
+): Promise<string[]> {
+  const lines: string[] = [];
+  const block = bot?.blockAt?.(new Vec3(located.x, located.y, located.z));
+  if (block == null || !isFurnaceLikeBlock(block.name)) {
+    return [`- 目标 (${located.x},${located.y},${located.z}) 读不到 ${type}（区块没加载或坐标偏了），这次没动任何槽位。`];
+  }
+  const before = countInInventory(bot, item.name);
+  let furnace: any = null;
+  try {
+    furnace = await skills.openBlockUi(bot, block);
+  } catch (error: unknown) {
+    return [
+      `- 打开 ${type} 失败：${error instanceof Error ? error.message : String(error)}`,
+      '    （没有从任何槽里取东西；这是"打不开"，不是"里面没有"。）',
+    ];
+  }
+  try {
+    const slot = (() => {
+      try {
+        return furnace?.outputItem?.() ?? null;
+      } catch {
+        return null;
+      }
+    })();
+    const slotName = typeof slot?.name === 'string' ? slot.name : null;
+    const slotCount = Number(slot?.count ?? 0);
+    if (slotName == null || !Number.isFinite(slotCount) || slotCount <= 0) {
+      return [`- ${type} 的**产物槽是空的**：没有东西可取（原料槽/燃料槽没动；还在烧就再等一会儿）。`];
+    }
+    if (slotName !== item.name) {
+      return [
+        `- 产物槽里是 ${slotName}×${slotCount}，不是 ${item.name}——没有取（避免拿错）。` +
+          `要取它就写 useBlock(type=${type}, output="${slotName}")；原料槽/燃料槽没动。`,
+      ];
+    }
+    // **显式数量和整叠取物冲突时要诚实**：mineflayer 的 `takeOutput()` 只能整叠取，
+    // 没有"取 2 留 3"的接口。数量 < 槽内数量时**不取**并说明，而不是偷偷全拿走
+    // 再声称只取了 2 个。
+    if (item.countGiven === true && item.count < slotCount) {
+      return [
+        `- 产物槽里是 ${slotName}×${slotCount}（整叠）：取物接口只能**整叠取**，做不到"只取 ${item.count} 个"——这次**没动**任何槽位（原料槽/燃料槽也没动），${slotCount} 个仍在产物槽里。`,
+        `    要精确数量：先整叠取出来（useBlock(type=${type}, output="${item.name}") 不带数量），再把多余的存回去。`,
+      ];
+    }
+    const wanted = item.countGiven === true ? Math.min(item.count, slotCount) : slotCount;
+    let remaining = slotCount;
+    let passes = 0;
+    while (remaining > 0 && passes < 8) {
+      passes += 1;
+      const got = await (async (): Promise<number> => {
+        try {
+          const taken = await furnace.takeOutput?.();
+          const count = Number(taken?.count ?? 0);
+          return Number.isFinite(count) ? count : 0;
+        } catch {
+          return 0;
+        }
+      })();
+      if (got <= 0) break;
+      remaining -= got;
+    }
+    await settleInventory(bot, 3, 50);
+    const after = countInInventory(bot, item.name);
+    const delta = before != null && after != null ? after - before : null;
+    const takenReport = delta != null ? `${delta} 个` : '（背包读数暂时不可用，取出的数量以 stats 为准）';
+    lines.push(`- 从 ${type} 的**产物槽**取出 ${takenReport} ${item.name}（只动了产物槽，原料槽/燃料槽没动）。`);
+    if (delta != null && delta < wanted) {
+      lines.push(`    注意：这次只拿到 ${delta} 个（产物槽原有 ${slotCount}，这次想取 ${wanted}）——其余可能还在烧，或背包同步延迟；以 stats 为准。`);
+    } else if (item.countGiven === true && item.count > wanted) {
+      lines.push(`    请求 ${item.count} 个，产物槽只有 ${wanted} 个，剩下的 ${item.count - wanted} 个**没有**可取的了（其余还在烧就再等）。`);
+    }
+    if (item.countGiven === true) {
+      const left = Math.max(0, remaining);
+      lines.push(`    显式指定了数量 ${item.count}：这次取 ${wanted} 个，产物槽里还剩 ${left} 个。`);
+    } else if (slotCount === 1) {
+      lines.push('    产物槽里只有 1 个（其余还在烧）——一次调用取走 1 个，不是失败。');
+    }
+    return lines;
+  } finally {
+    try {
+      if (furnace != null) await bot.closeWindow(furnace);
+    } catch {
+      /* 关不上不影响已经取到的结果 */
+    }
+  }
 }
 
 async function transferWithContainer(
@@ -1618,6 +1734,14 @@ const interactCommands: AgentCommand[] = [
 
       if (plan.kind === 'withdraw') {
         if (located == null) return renderReport(lines, '定位不到容器。');
+        // **熔炉族走专用取物**：不传数量时"把产物槽里现有的全拿走"（原版界面行为），
+        // 传了数量就按数量取并说明剩下多少；**绝不碰原料槽/燃料槽**。
+        if (isFurnaceLikeBlock(type)) {
+          for (const item of parsedOut.items) {
+            lines.push(...(await takeFromFurnace(agent.bot, located, item, type)));
+          }
+          return renderReport(lines);
+        }
         for (const item of parsedOut.items) {
           await settleInventory(agent.bot, 2, 50);
           const beforeCount = countInInventory(agent.bot, item.name);

@@ -155,6 +155,8 @@ function travelHarness(
         setClock: (v: number) => (clock = v),
         dugCount: () => dug.size,
         bridgeCalls,
+        /** 直接改"世界里那一格是什么"（测试里模拟"垫成功了"）。 */
+        placedSet: (k: string, name: string) => placed.set(k, name),
     };
 }
 
@@ -326,6 +328,29 @@ describe('travelTo：一次调用往前走（执行）', () => {
 });
 
 describe('travelTo：诚实拒绝（不出发）', () => {
+    it('**镐在背包里、只是没握在手上** ⇒ 不许报"没有镐"：自己换上再走（真机 overnight_b）', async () => {
+        let held: string | null = 'stone_sword';
+        const h = travelHarness({
+            pos: { x: 0, y: 70, z: 0 },
+            tool: { name: 'stone_sword', remaining: null, max: null, low: false },
+            inventory: [{ name: 'iron_pickaxe', count: 1 }],
+        });
+        const equipped: string[] = [];
+        h.deps.tool = () => ({ name: held, remaining: held == null ? null : 900, max: held == null ? null : 1561, low: false });
+        h.deps.equip = async (_b: any, item: string) => {
+            equipped.push(item);
+            held = item;
+            return true;
+        };
+        const receipt = await travelToSkill(h.bot, 200, 70, 0, 300_000, undefined, undefined, h.deps);
+
+        expect(equipped).toEqual(['iron_pickaxe']); // 自己换上了，不是拒绝
+        expect(receipt).not.toContain('**没出发**');
+        expect(receipt).not.toContain('没有镐');
+        expect(receipt).toContain('镐在背包里没握在手上 → 已自动换上 iron_pickaxe');
+        expect(displacementOf(receipt)).toBeGreaterThan(0); // 而且真的往前走了
+    });
+
     it('没有镐 + 需要挖 ⇒ 拒绝，并说清镐要在工作台上做', async () => {
         const h = travelHarness({
             pos: { x: 0, y: 70, z: 0 },
@@ -431,6 +456,59 @@ describe('travelTo：搭桥（横向的 pillarUp）', () => {
         expect(h.bot.entity.position.x).toBeGreaterThan(stop1);
         // 两次都不能拿"脚下悬空"当结论（桥已经搭过去了）
         expect(second).not.toContain('下一步脚下不是实心');
+    });
+
+    it('搭桥一次不成 ⇒ **换个依附面/换种材料再试**，成了就继续走（不是只丢一句 moveAway）', async () => {
+        const h = travelHarness({
+            pos: { x: 0, y: 70, z: 0 },
+            dimension: 'overworld',
+            inventory: [
+                { name: 'diamond_pickaxe', count: 1 },
+                { name: 'cobblestone', count: 8 },
+                { name: 'netherrack', count: 8 },
+            ],
+            canWalk: false,
+            cells: { [key(1, 69, 0)]: 'air' },
+        });
+        const attempts: Array<{ block: string; face: string | undefined }> = [];
+        h.deps.place = async (_b: any, block: string, x: number, y: number, z: number, face?: string) => {
+            attempts.push({ block, face });
+            if (attempts.length <= 2) return false; // 前两次没搭上（依附面/材料不对）
+            h.placedSet(key(x, y, z), block);
+            return true;
+        };
+        const receipt = await travelToSkill(h.bot, 8, 70, 0, 300_000, undefined, undefined, h.deps);
+
+        expect(attempts.length).toBeGreaterThanOrEqual(3); // 真的换了再试
+        expect(new Set(attempts.map((a) => `${a.block}@${a.face}`)).size).toBeGreaterThan(1);
+        expect(receipt).toContain('垫了一块桥过去');
+        expect(receipt).toContain('先试了');
+        expect(displacementOf(receipt)).toBeGreaterThan(0); // 桥搭上了就继续走
+    });
+
+    it('所有依附面/材料都搭不上 ⇒ 停手，并把**试过什么**写清楚', async () => {
+        const h = travelHarness({
+            pos: { x: 0, y: 70, z: 0 },
+            dimension: 'overworld',
+            inventory: [
+                { name: 'diamond_pickaxe', count: 1 },
+                { name: 'cobblestone', count: 8 },
+            ],
+            canWalk: false,
+            cells: { [key(1, 69, 0)]: 'air' },
+        });
+        const attempts: string[] = [];
+        h.deps.place = async (_b: any, block: string, _x: number, _y: number, _z: number, face?: string) => {
+            attempts.push(`${block}@${face}`);
+            return false;
+        };
+        const receipt = await travelToSkill(h.bot, 8, 70, 0, 300_000, undefined, undefined, h.deps);
+
+        expect(attempts.length).toBeGreaterThanOrEqual(3);
+        expect(receipt).toContain('搭桥');
+        expect(receipt).toContain('都没成功');
+        expect(receipt).toContain('试了');
+        expect(receipt.trimEnd().split('\n').at(-1)).toBe('下一步（照做即可）：moveAway(distance=3)');
     });
 
     it('桥下是岩浆 → 拒绝搭桥（沿用液体门的措辞，一块都不垫）', async () => {

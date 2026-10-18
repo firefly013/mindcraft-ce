@@ -252,8 +252,10 @@ export function rodNextCall(options: {
         if (options.cobweb != null) {
             return `goToCoordinates(x=${Math.round(options.cobweb.x)}, y=${Math.round(options.cobweb.y)}, z=${Math.round(options.cobweb.z)}, closeness=2)`;
         }
-        const dimension = options.dimension ?? 'overworld';
-        if (!dimension.toLowerCase().includes('nether') && !dimension.toLowerCase().includes('end')) {
+        // 已知蛛网点是**主世界**的坐标：只有调用方明确说"在主世界"才照抄
+        // （维度未知时不猜——猜错等于把人指到另一个维度去）。
+        const dimension = (options.dimension ?? '').toLowerCase();
+        if (dimension.includes('overworld')) {
             const site = bestKnownCobwebSite(options.here ?? null);
             if (site != null) {
                 return `goToCoordinates(x=${Math.round(site.x)}, y=${Math.round(site.y)}, z=${Math.round(site.z)}, closeness=2)`;
@@ -542,7 +544,31 @@ export async function getFoodSkill(
                 if (!hasRod) {
                     const web = findShallowCobweb(bot);
                     const spawner = nearestEntity(bot, ['spider', 'cave_spider'], GETFOOD_HUNT_RADIUS);
-                    nextCall = rodNextCall({ hasRod: false, string: countOf(bot, 'string'), sticks: countOf(bot, 'stick'), cobweb: web, spawner, water: waterInfo });
+                    const here = (() => {
+                        try {
+                            const pos = bot?.entity?.position;
+                            return pos == null ? null : { x: Number(pos.x), y: Number(pos.y), z: Number(pos.z) };
+                        } catch {
+                            return null;
+                        }
+                    })();
+                    const dimension = (() => {
+                        try {
+                            return typeof bot?.game?.dimension === 'string' ? bot.game.dimension : null;
+                        } catch {
+                            return null;
+                        }
+                    })();
+                    nextCall = rodNextCall({
+                        hasRod: false,
+                        string: countOf(bot, 'string'),
+                        sticks: countOf(bot, 'stick'),
+                        cobweb: web,
+                        spawner,
+                        water: waterInfo,
+                        here,
+                        dimension,
+                    });
                     record(
                         'rod',
                         `竿子这条路卡住了：string ${countOf(bot, 'string')}/2、stick ${countOf(bot, 'stick')}/3` +

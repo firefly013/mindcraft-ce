@@ -1247,6 +1247,43 @@ describe('mineTunnel：进度必须是**量出来的**，不是数出来的（�
         expect(next).toContain('stats(type="body")');
     });
 
+    it('**镐在背包里、只是没握在手上** ⇒ 不许说"手上没有镐"，自己换上再挖（真机 overnight_b）', async () => {
+        let held: string | null = 'stone_sword';
+        const h = tunnelHarness({
+            tool: { name: 'stone_sword', remaining: null, max: null, low: false },
+            inventory: [{ name: 'iron_pickaxe', count: 1 }],
+        });
+        const equipped: string[] = [];
+        const receipt = await mineTunnelSkill(h.bot, 3, 2, '+x', {
+            ...h.deps,
+            tool: () => ({ name: held, remaining: held == null ? null : 900, max: held == null ? null : 1561, low: false }),
+            equip: async (_b: any, item: string) => {
+                equipped.push(item);
+                held = item;
+                return true;
+            },
+        });
+
+        expect(equipped).toEqual(['iron_pickaxe']); // 自己换上了
+        expect(receipt).not.toContain('手上没有镐'); // 不许假报"没有镐"
+        expect(receipt).not.toContain('背包里也没有镐');
+        expect(receipt).toContain('镐在背包里没握在手上 → 已自动换上 iron_pickaxe');
+        expect(receipt).toContain('净前进 3/3 格'); // 也没被这件事挡住
+    });
+
+    it('真的没镐（背包也没有）+ 方块徒手挖不动 ⇒ 如实拒绝并点名"背包里也没有镐"', async () => {
+        const h = tunnelHarness({
+            tool: { name: 'stone_sword', remaining: null, max: null, low: false },
+            inventory: [{ name: 'stone_sword', count: 1 }],
+            cells: { '1,70,0': 'obsidian', '1,71,0': 'obsidian' },
+        });
+        const receipt = await mineTunnelSkill(h.bot, 3, 2, '+x', h.deps);
+
+        expect(receipt).toContain('净前进 0/3 格');
+        expect(receipt).toContain('背包里也没有镐');
+        expect(receipt).not.toContain('已自动换上');
+    });
+
     it('挖不动时**先换镐再试**（真机"爬 6 格就停"的形状）：换完能挖就继续，并把换手写进回执', async () => {
         const h = tunnelHarness({
             inventory: [

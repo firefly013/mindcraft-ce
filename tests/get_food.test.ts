@@ -15,6 +15,8 @@ import { describe, expect, it } from 'vitest';
 import {
     FOOD_ACCEPTABLE,
     GETFOOD_MAX_MS_LIMIT,
+    KNOWN_COBWEB_SITES,
+    bestKnownCobwebSite,
     cookCallFor,
     craftingTableCall,
     edibleItemsFrom,
@@ -48,6 +50,10 @@ function harness(
         /** 半径内最近的实体名（动物/蜘蛛）；null = 这一带什么都没有。 */
         nearest?: string | null;
         blocks?: Record<string, { x: number; y: number; z: number } | null>;
+        /** 一次给多个蛛网（用来验证"优先挑浅的"）。 */
+        cobwebs?: Array<{ x: number; y: number; z: number }>;
+        /** 当前维度（已知蛛网点只在主世界能照抄）。 */
+        dimension?: string;
         water?: { x: number; y: number; z: number } | null;
         waterDistance?: number;
         travelOk?: boolean;
@@ -55,7 +61,7 @@ function harness(
 ) {
     const items: FakeItem[] = (options.items ?? []).map((item) => ({ ...item }));
     let clock = 0;
-    const calls = { eat: 0, hunt: [] as string[], fish: 0, mine: 0, craftRod: 0, travel: 0 };
+    const calls = { eat: 0, hunt: [] as string[], fish: 0, mine: 0, craftRod: 0, travel: 0, travelTargets: [] as Array<{ x: number; y: number; z: number }> };
 
     const bot: any = {
         interrupt_code: false,
@@ -63,6 +69,7 @@ function harness(
         food: options.food ?? 10,
         foodSaturation: options.saturation ?? 0,
         entity: { position: { x: 0, y: 64, z: 0 } },
+        game: { dimension: options.dimension ?? 'overworld' },
         inventory: {
             items: () => items,
             findInventoryItem: (name: string) => items.find((item) => item.name === name && item.count > 0),
@@ -107,8 +114,10 @@ function harness(
             return { gained: 0, label: 'fish：一条都没钓到', nextCall: 'fish(max_ms=90000, max_casts=1)' };
         },
         findBlock: (_b: any, block: string): any => options.blocks?.[block] ?? null,
-        travel: async (): Promise<boolean> => {
+        findCobwebs: options.cobwebs == null ? undefined : (): any[] => options.cobwebs ?? [],
+        travel: async (_b: any, x: number, y: number, z: number): Promise<boolean> => {
             calls.travel += 1;
+            calls.travelTargets.push({ x, y, z });
             return options.travelOk !== false;
         },
         mine: async (): Promise<boolean> => {
@@ -202,8 +211,80 @@ describe('getFood：打猎 → 钓鱼（含"自己弄竿"）', () => {
         expect(next).not.toContain('find food');
     });
 
-    it('**竿这条路永远点名工作台**（3 木棍 + 2 线，2×2 放不下）', async () => {
-        const h = harness({ items: [stack('string', 2), stack('stick', 3)], food: 6, nearest: null });
+    it('**挑最省事的蛛网**：竖直距离优先（少挖深井），不是"水平最近的那个"', async () => {
+        // 人在 y=64，两个蛛网**都在下面**：一个浅（y=28，overnight_a 实测那个）但远，
+        // 一个深（y=-20，要挖 84 格深井）但水平更近 → 选浅的。
+        const h = harness({
+            items: [stack('stone', 4)],
+            food: 6,
+            nearest: null,
+            cobwebs: [
+                { x: 30, y: -20, z: -10 }, // 水平更近，但深 84 格
+                { x: 71, y: 28, z: -76 }, // 远，但只深 36 格
+            ],
+        });
+        const receipt = await getFoodSkill(h.bot, 3, 300_000, h.deps as any);
+
+        expect(h.calls.travelTargets[0]).toEqual({ x: 71, y: 28, z: -76 });
+        expect(receipt).toContain('找线');
+    });
+
+    it('别的维度/维度未知都不照抄主世界的蛛网点', () => {
+        for (const dimension of ['the_nether', 'the_end', null]) {
+            const next = rodNextCall({
+                hasRod: false,
+                string: 0,
+                sticks: 0,
+                cobweb: null,
+                spawner: null,
+                water: null,
+                here: { x: 0, y: 64, z: 0 },
+                dimension,
+            });
+            expect(next, String(dimension)).toBe('exploreFor(block="cobweb", max_steps=8, step=32)');
+            expect(next, String(dimension)).not.toContain('71');
+        }
+    });
+
+    it('半径内没有蛛网 ⇒ 直接给**已知更浅的那个点**（(71, 28, -76)），不瞎撞', () => {
+        const next = rodNextCall({
+            hasRod: false,
+            string: 0,
+            sticks: 0,
+            cobweb: null,
+            spawner: null,
+            water: null,
+            here: { x: 0, y: 64, z: 0 },
+            dimension: 'overworld',
+        });
+        expect(next).toBe('goToCoordinates(x=71, y=28, z=-76, closeness=2)');
+        expect(next).not.toContain('exploreFor');
+        expect(KNOWN_COBWEB_SITES[0]).toEqual({ x: 71, y: 28, z: -76 });
+    });
+
+    it('别的维度不照抄主世界的蛛网点（坐标是主世界的）', () => {
+        const next = rodNextCall({
+            hasRod: false,
+            string: 0,
+            sticks: 0,
+            cobweb: null,
+            spawner: null,
+            water: null,
+            here: { x: 0, y: 64, z: 0 },
+            dimension: 'the_nether',
+        });
+        expect(next).toBe('exploreFor(block="cobweb", max_steps=8, step=32)');
+        expect(next).not.toContain('71');
+    });
+
+    it('bestKnownCobwebSite：竖直代价权重更高（浅的优先）', () => {
+        const here = { x: 0, y: 64, z: 0 };
+        expect(bestKnownCobwebSite(here, [{ x: 3, y: 120, z: 0 }, { x: 60, y: 30, z: 0 }])).toEqual({ x: 60, y: 30, z: 0 });
+        expect(bestKnownCobwebSite(null, [{ x: 1, y: 2, z: 3 }])).toEqual({ x: 1, y: 2, z: 3 });
+        expect(bestKnownCobwebSite(here, [])).toBeNull();
+    });
+
+    it('**竿这条路永远点名工作台**（3 木棍 + 2 线，2×2 放不下）', async () => {        const h = harness({ items: [stack('string', 2), stack('stick', 3)], food: 6, nearest: null });
         const receipt = await getFoodSkill(h.bot, 3, 300_000, h.deps as any);
 
         // 注入的 craftRod 故意失败（模拟"附近没有工作台"）

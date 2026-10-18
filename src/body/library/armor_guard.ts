@@ -184,6 +184,13 @@ export function armorVanishReport(change: ArmorChange, ctx: ArmorVanishContext):
     const parts: string[] = [];
     parts.push(`⚠️ **护甲凭空消失**：${slotName} 上原本是 ${from ?? '空'}，现在**空了**（背包 totals 里也没有；触发路径：${ctx.via ?? '未知'}）。`);
     parts.push('这**不是自动换甲**——换甲会走"护甲变化"报告，这里没有任何替换动作。');
+    // **我们分不清"真丢了"和"本地视图错位"**（Lead 2026-10-19 的要求）：
+    // 一次容器操作可能在"窗口已经打开、客户端已经本地移物、随后失败/超时"的中间态里
+    // 把我们的视图改掉，而真实背包里东西还在。所以报告不许断言真损失，必须给核对步骤。
+    parts.push(
+        '注意：这也**可能是一次容器/穿甲操作中途失败造成的本地视图错位**（东西可能还在真实背包或容器里）——' +
+            '先用 stats / 重开容器核对，**不要**据此判定"已经没了"、更不要因此重做一件。',
+    );
     if (ctx.deathHappened === true && ctx.keepInventory === true) {
         parts.push('它发生在死亡/重生前后，而**这个存档 keepInventory=true：死亡不应该掉护甲**——所以这是**我们读取/同步的问题**，不是世界规则，不要接受这个结果。');
     }

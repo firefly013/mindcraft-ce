@@ -2292,7 +2292,7 @@ export async function digLine(
                 const nowBlock = blockAt(bot, step.floor.x, step.floor.y, step.floor.z);
                 outcome.stop = 'bridge_failed';
                 outcome.detail =
-                    `想在 ${formatPoint(step.floor)} 垫一块桥，试了 ${tried.length} 种（${tried.slice(0, 4).join('、')}）` +
+                    `搭桥：想在 ${formatPoint(step.floor)} 垫一块桥，试了 ${tried.length} 种（${tried.slice(0, 4).join('、')}）` +
                     `都没成功（现在还是 ${normalizeName(nowBlock?.name) ?? '读不到'}）`;
                 break;
             }

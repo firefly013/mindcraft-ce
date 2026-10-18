@@ -4,7 +4,7 @@
  * 这些都不是内部实现细节：模型就是靠这些文本判断动作死没死、东西在不在。
  */
 import { describe, expect, it } from 'vitest';
-import { annotateCollectBlocks, annotateSearchForBlock, movementSummary, parseFoundPosition } from '../src/body/commands/execute.js';
+import { annotateCollectBlocks, annotateSearchForBlock, closingSummary, movementSummary, parseFoundPosition } from '../src/body/commands/execute.js';
 import {
   countInInventoryWithSync,
   findAdjacentStandable,
@@ -25,6 +25,40 @@ describe('searchForBlock 回执', () => {
 
   it('没移动就明确说没移动', () => {
     expect(movementSummary({ x: 1, y: 2, z: 3 }, { x: 1.1, y: 2, z: 3 })).toContain('没有移动');
+  });
+
+  // 真机 overnight_a：「searchForBlock 报告位移与实际不符」——移动了几格不等于靠近了目标
+  // （绕路/被顶开都会移动）。所以另给一个**量出来的**接近量：起手距目标 → 现在距目标。
+  it('接近量是**实测**的（起手距目标 → 现在距目标），近了/远了/没变都如实说', () => {
+    const target = { x: 10, y: 64, z: 0 };
+    const closer = closingSummary({ x: 0, y: 64, z: 0 }, { x: 6, y: 64, z: 0 }, target);
+    expect(closer).toContain('接近了 6.0 格');
+    expect(closer).toContain('起手 10.0 格 → 现在 4.0 格');
+
+    const farther = closingSummary({ x: 0, y: 64, z: 0 }, { x: -5, y: 64, z: 0 }, target);
+    expect(farther).toContain('反而远了 5.0 格');
+    expect(farther).toContain('起手 10.0 格 → 现在 15.0 格');
+
+    const sideways = closingSummary({ x: 0, y: 64, z: 0 }, { x: 0, y: 64, z: 0.2 }, target);
+    expect(sideways).toContain('几乎没变');
+  });
+
+  it('拿不到目标坐标或起手位置 ⇒ 说"量不出来"，不编数字', () => {
+    expect(closingSummary(null, { x: 1, y: 2, z: 3 }, { x: 0, y: 0, z: 0 })).toBe('');
+    expect(closingSummary({ x: 1, y: 2, z: 3 }, null, { x: 0, y: 0, z: 0 })).toBe('');
+    expect(closingSummary({ x: 1, y: 2, z: 3 }, { x: 1, y: 2, z: 3 }, null)).toBe('');
+  });
+
+  it('找到目标时的回执里带上"接近了多少"（实测）', () => {
+    const text = annotateSearchForBlock(
+      'Found cobweb at (10, 64, 0). Navigating...',
+      { type: 'cobweb', search_range: 64 },
+      { x: 0, y: 64, z: 0 },
+      { x: 6, y: 64, z: 0 },
+    );
+    expect(text).toContain('找到了');
+    expect(text).toContain('接近了 6.0 格');
+    expect(text).toContain('实测');
   });
 
   it('找不到时必须写未找到，并带移动情况', () => {

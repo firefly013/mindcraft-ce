@@ -145,3 +145,25 @@ describe('守卫接线：所有护甲槽变化路径都要落到报告上', () =
     expect(logs.some((line) => line.includes('护甲凭空消失'))).toBe(false);
   });
 });
+
+describe('本地视图错位：报告不许断言"真丢了"（Lead 2026-10-19 要求）', () => {
+  it('任何消失报告都要带"可能是本地视图错位 + 先用 stats 核对"的提示', () => {
+    const text = armorVanishReport(
+      { slotName: 'head', from: 'golden_helmet', to: null },
+      { dimension: 'minecraft:the_nether', keepInventory: true, goldLeft: false, via: 'update' },
+    );
+    expect(text).toContain('本地视图错位');
+    expect(text).toContain('stats');
+    expect(text).toContain('不要');
+    expect(text).toContain('重做一件');
+  });
+
+  it('主世界丢甲同样带核对提示（不只是下界）', () => {
+    const text = armorVanishReport(
+      { slotName: 'torso', from: 'iron_chestplate', to: null },
+      { dimension: 'minecraft:overworld', via: 'updateSlot' },
+    );
+    expect(text).toContain('本地视图错位');
+    expect(text).toContain('stats');
+  });
+});
