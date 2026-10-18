@@ -632,6 +632,9 @@ export const FLAG_DANGER_TYPES: ReadonlySet<string> = new Set(
  * （2026-10-19 03:28 真机：三个箱子的 dump 全是"无入站包"，而 Meta.screen 一度闪过 open）。
  * 同类改名还有 `set_content` → `container_set_content`，一起留着。
  */
+// 带槽位容器不可用结论的有效期：结束后自动重试，不许永久焊死。
+const SLOTTED_CONTAINER_BLOCK_MS = 10 * 60_000;
+
 const WINDOW_PACKET_RE = /open_screen|open_window|window_items|window_properties|close_window|set_content|container_set_content|open_sign_editor|merchant_offers/i;
 
 /** 六个窗口包的一行摘要（只留判定字段；读不到就留空，绝不 dump 整包）。 */
@@ -835,6 +838,8 @@ export class MineflayerBody {
             this.finishContainerPacketDump(outcome);
         (this.bot as { __containerProtocolFault?: unknown }).__containerProtocolFault = (withinMs?: number) =>
             this.recentProtocolFault(withinMs);
+        (this.bot as { __slottedContainerStatus?: unknown }).__slottedContainerStatus = () =>
+            this.slottedContainerStatus();
         // **抓错点铺到所有出口**（client-error / deserializer-error / uncaught）；
         // 见 installProtocolFaultCapture 的注释：一次没触发，不等于错误没发生。
         this.installProtocolFaultCapture();
@@ -1232,6 +1237,20 @@ export class MineflayerBody {
                     : inbound.length === 0
                         ? 'no-reply'
                         : 'replied-no-window';
+            // **把"带槽位容器在本服务端不可用"记成一条会过期的结论。**
+            // 真机 2026-10-19 04:47 确证：服务端开窗（open_window）但从不发内容
+            // （window_items 等），且本进程**零**协议解析错误 ⇒ mineflayer 永不发
+            // windowOpen ⇒ 打开槽位容器必然超时。这不是站位/协议问题，重试没有意义。
+            // 但结论**必须能自己过期**：真有窗口内容到达（window-arrived）立刻解除，
+            // 否则 10 分钟后自动失效——不许让一条旧结论把容器永久焊死。
+            if (verdict === 'opened-no-slots') {
+                this.slottedContainerBlockedUntil = Date.now() + SLOTTED_CONTAINER_BLOCK_MS;
+                this.slottedContainerBlockedReason =
+                    '服务端开窗但不发内容（open_window 到了，window_items/set_content 一个都没有，且本进程零协议解析错误）';
+            } else if (verdict === 'window-arrived') {
+                this.slottedContainerBlockedUntil = 0;
+                this.slottedContainerBlockedReason = null;
+            }
             this.log.with('lifecycle').info({
                 event: 'container-packet-dump',
                 outcome,
@@ -1285,6 +1304,9 @@ export class MineflayerBody {
         /** 从哪条路抓到的：client-error / deserializer-error / uncaught。 */
         via: string;
     } | null = null;
+    /** "带槽位容器在本服务端不可用"结论的过期时刻；0 = 当前没被判定为坏。 */
+    private slottedContainerBlockedUntil = 0;
+    private slottedContainerBlockedReason: string | null = null;
     /** 本进程里一共抓到几条解析类错误（**不管有没有在开容器**）。 */
     private protocolFaultCount = 0;
     /** 最近一次"开容器尝试"的武装时刻；用来回答"错误是不是发生在这次尝试期间"。 */
@@ -1416,6 +1438,19 @@ export class MineflayerBody {
         if (fault == null) return null;
         if (Date.now() - fault.at > withinMs) return null;
         return { message: fault.message, packetId: fault.packetId };
+    }
+
+    /**
+     * 带槽位容器现在还能不能试：**最近的失败结论会短路它**（快速失败，不烧 45 秒 + 重试）。
+     * 结论带 TTL，且一旦有窗口内容真的到达就会被清掉（见 finishContainerPacketDump）。
+     */
+    slottedContainerStatus(): { blocked: boolean; reason: string | null; msLeft: number } {
+        const left = Math.max(0, this.slottedContainerBlockedUntil - Date.now());
+        return {
+            blocked: left > 0,
+            reason: left > 0 ? this.slottedContainerBlockedReason : null,
+            msLeft: left,
+        };
     }
 
     /** 背包数据到过一次了（服务端 window_items / heldItemChanged 触发）。 */

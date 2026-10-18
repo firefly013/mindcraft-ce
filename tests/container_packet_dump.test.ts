@@ -313,3 +313,67 @@ describe('"hook 没触发"要能区分：错误没发生 / 错误走了别的出
     expect(dump.protocolFaultsTotal).toBe(1); // 计数器仍会说出真话：进程里确实崩过一次
   });
 });
+
+describe('确证失效 ⇒ 工具层快速失败（不烧 6 秒 × 重试）', () => {
+  it('最近 verdict=opened-no-slots ⇒ openBlockUi 立刻抛，且根本不调用 openContainer', async () => {
+    resetContainerOpenFailures();
+    const openContainer = vi.fn(() => new Promise(() => {}));
+    const bot: any = {
+      output: '',
+      currentWindow: null,
+      openContainer,
+      __slottedContainerStatus: () => ({ blocked: true, reason: '服务端开窗但不发内容', msLeft: 9 * 60_000 }),
+    };
+    const started = Date.now();
+    const err = await openBlockUi(bot, { name: 'chest', position: { x: 9, y: 62, z: 0 } }).catch((e: Error) => e.message);
+    const elapsed = Date.now() - started;
+    expect(openContainer).not.toHaveBeenCalled(); // 没有尝试
+    expect(elapsed).toBeLessThan(300); // 没有空等
+    const text = String(err);
+    expect(text).toContain('直接失败');
+    expect(text).toContain('从不发窗口内容');
+    expect(text).toContain('零协议解析错误');
+    expect(text).toContain('别再开任何箱子');
+    expect(text).toContain('takeFromChest');
+  });
+
+  it('结论过期（blocked=false）⇒ 恢复正常尝试路径（不永久焊死）', async () => {
+    resetContainerOpenFailures();
+    const openContainer = vi.fn(async () => ({ kind: 'container' }));
+    const bot: any = {
+      output: '',
+      currentWindow: null,
+      openContainer,
+      __slottedContainerStatus: () => ({ blocked: false, reason: null, msLeft: 0 }),
+    };
+    await expect(openBlockUi(bot, { name: 'chest', position: { x: 1, y: 2, z: 3 } })).resolves.toMatchObject({
+      kind: 'container',
+    });
+    expect(openContainer).toHaveBeenCalledTimes(1);
+  });
+
+  it('身体侧：verdict=opened-no-slots 会把状态置为 blocked（带 TTL），window-arrived 会清掉它', () => {
+    const body = bareBody();
+    // 第一次失败：开窗包到了、没有槽位包
+    body.armContainerPacketDump('useBlock chest');
+    body.onContainerIncoming?.({ windowId: 1 }, { name: 'open_window' });
+    body.finishContainerPacketDump('window-expired');
+    expect(body.slottedContainerStatus()).toMatchObject({ blocked: true });
+    expect(body.slottedContainerStatus().msLeft).toBeGreaterThan(0);
+    expect(body.slottedContainerStatus().reason).toContain('不发内容');
+    // 后来真有窗口内容到达 ⇒ 立刻解除（escape hatch）
+    body.armContainerPacketDump('useBlock chest');
+    body.onContainerIncoming?.({ windowId: 2, items: [1] }, { name: 'window_items' });
+    expect(body.slottedContainerStatus().blocked).toBe(false);
+  });
+
+  it('身体侧：TTL 过期后自动恢复（结论不许永久焊死）', () => {
+    const body = bareBody();
+    body.armContainerPacketDump('useBlock chest');
+    body.onContainerIncoming?.({ windowId: 1 }, { name: 'open_window' });
+    body.finishContainerPacketDump('window-expired');
+    expect(body.slottedContainerStatus().blocked).toBe(true);
+    body.slottedContainerBlockedUntil = Date.now() - 1; // 手动过期（模拟 10 分钟后）
+    expect(body.slottedContainerStatus().blocked).toBe(false);
+  });
+});

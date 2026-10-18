@@ -5563,6 +5563,38 @@ export async function openBlockUi(
     // 下限 100ms：允许调用方"快点失败"（重试策略/测试），但 0 会变成不等待。
     const timeoutMs = Math.max(100, Number(options.timeoutMs ?? CONTAINER_OPEN_TIMEOUT_MS) || CONTAINER_OPEN_TIMEOUT_MS);
     const retries = Math.max(0, Math.floor(Number(options.retries ?? CONTAINER_OPEN_RETRIES) || 0));
+
+    // **已确证的失效条件 ⇒ 立刻失败，不烧 6 秒 × 重试。**
+    // 真机 2026-10-19 04:47 确证：这个服务端对本 client **开窗但不发内容**
+    // （`open_window` 到了，`window_items`/`set_content` 一个都没有），并且**零**协议
+    // 解析错误 ⇒ mineflayer 等不到槽位数据、永不发 windowOpen ⇒ 开槽位容器必然超时。
+    // 结论由身体在每次转储收尾时写入，**带 10 分钟 TTL**，且一旦真有窗口内容到达就
+    // 立刻解除（见 `__slottedContainerStatus`）——结论会过期，不会把容器永久焊死。
+    const slotted = (() => {
+        try {
+            const read = (
+                bot as {
+                    __slottedContainerStatus?: () => { blocked?: boolean; reason?: string | null; msLeft?: number } | null;
+                }
+            ).__slottedContainerStatus;
+            return typeof read === 'function' ? read() : null;
+        } catch {
+            return null;
+        }
+    })();
+    if (slotted?.blocked === true) {
+        const minutesLeft = Math.max(1, Math.round(Number(slotted.msLeft ?? 0) / 60_000));
+        throw new Error(
+            `打开 ${name} **直接失败（没有尝试、没有空等）**：这个服务端的**带槽位容器在本会话里打不开**——` +
+                `服务端会回"开窗"（open_window）但**从不发窗口内容**（window_items/set_content 一个都没有），` +
+                `而且本进程**零协议解析错误**；mineflayer 要等槽位数据才会发 windowOpen，所以必然超时。` +
+                `这不是站位/角度/协议问题，重试和换箱子都不会变好（这条结论约 ${minutesLeft} 分钟后自动失效，之后才值得再试一次）。` +
+                `下一步（照做即可）：**别再开任何箱子/熔炉/柜子**，走非容器路径——让队友把要用的东西丢在约定点自己捡，` +
+                `或让对方用 takeFromChest 取/存；需要合成就直接 craft（工作台不需要窗口）。` +
+                (slotted.reason ? `（判定依据：${slotted.reason}）` : ''),
+        );
+    }
+
     // **开界面前先松开 sneak、收起手上的东西。**
     // 真机 2026-10-19（overnight_a 的对照实验）：`crafting_table` 的 useBlock 完全正常，
     // 而 **chest / furnace 100% windowOpen 超时**，换方块/换位置/重启都一样。
