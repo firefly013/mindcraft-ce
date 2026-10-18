@@ -17,6 +17,7 @@ import {
   equip,
   heldToolState,
   isHandMineable,
+  isFootingBlock,
   mineBlockAt,
   pathfindDigPolicy,
   pathfindingDigAbort,
@@ -56,6 +57,69 @@ function bareHandBot(block: any): any {
     inventory: { items: () => [] },
   };
 }
+
+describe('D2 安全：徒手挖不能挖自己的立足点', () => {
+  /** 站在 (0.5,64,0.5) 的 netherrack 上，下面是岩浆；空手。 */
+  function lavaBelowBot(): any {
+    const blockAt = (p: any): any => {
+      const x = Math.floor(p.x);
+      const y = Math.floor(p.y);
+      const z = Math.floor(p.z);
+      const key = `${x},${y},${z}`;
+      const position = { x, y, z };
+      if (key === '0,64,0') return { name: 'netherrack', position, hardness: 0.4, diggable: true, canHarvest: () => false, digTime: () => 2000 };
+      if (key === '0,63,0') return { name: 'lava', position };
+      if (key === '0,64,1') return { name: 'netherrack', position, hardness: 0.4, diggable: true, canHarvest: () => false, digTime: () => 2000 };
+      return { name: 'air', position };
+    };
+    return {
+      output: '',
+      game: { gameMode: 'survival' },
+      heldItem: null,
+      entity: { position: { x: 0.5, y: 64, z: 0.5, distanceTo: (p: any) => Math.hypot(0.5 - p.x, 64 - p.y, 0.5 - p.z) } },
+      blockAt,
+      tool: { equipForBlock: async (): Promise<void> => {} },
+      dig: vi.fn(async (): Promise<void> => {}),
+      stopDigging: vi.fn(),
+      targetDigBlock: null,
+      inventory: { items: () => [] },
+    };
+  }
+
+  it('isFootingBlock：脚那一格和它下面一格算承重，前方/侧方/头顶不算', () => {
+    const feet = { x: 0.5, y: 64, z: 0.5 };
+    expect(isFootingBlock(feet, { x: 0, y: 64, z: 0 })).toBe(true);
+    expect(isFootingBlock(feet, { x: 0, y: 63, z: 0 })).toBe(true);
+    expect(isFootingBlock(feet, { x: 0, y: 64, z: 1 })).toBe(false);
+    expect(isFootingBlock(feet, { x: 1, y: 64, z: 0 })).toBe(false);
+    expect(isFootingBlock(feet, { x: 0, y: 65, z: 0 })).toBe(false);
+    // 坐标读不到时不许误伤（返回 false = 放行）。
+    expect(isFootingBlock(undefined, { x: 0, y: 64, z: 0 })).toBe(false);
+    expect(isFootingBlock(feet, undefined)).toBe(false);
+  });
+
+  it('脚下是 netherrack、下面是岩浆：拒绝挖，回执点名承重块并指向 digDown', async () => {
+    const bot = lavaBelowBot();
+    await expect(mineBlockAt(bot, 0, 64, 0)).resolves.toBe(false);
+    expect(bot.dig).not.toHaveBeenCalled();
+    expect(bot.output).toContain('承重');
+    expect(bot.output).toContain('digDown');
+    expect(bot.output).toContain('岩浆');
+  });
+
+  it('支撑自己的那一格（脚下一格）同样拒绝', async () => {
+    const bot = lavaBelowBot();
+    await expect(mineBlockAt(bot, 0, 63, 0)).resolves.toBe(false);
+    expect(bot.dig).not.toHaveBeenCalled();
+    expect(bot.output).toContain('承重');
+  });
+
+  it('D2 逃生不受影响：往前挖同高度的 netherrack 仍然放行（空手）', async () => {
+    const bot = lavaBelowBot();
+    await expect(mineBlockAt(bot, 0, 64, 1)).resolves.toBe(true);
+    expect(bot.dig).toHaveBeenCalledTimes(1);
+  });
+});
 
 describe('D2 徒手挖软方块', () => {
   it('isHandMineable：下界岩/泥土/沙/沙砾可以，石头/黑曜石/基岩不行', () => {

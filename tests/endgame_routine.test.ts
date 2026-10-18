@@ -3,6 +3,7 @@ import { DRAGON_MAX_HEALTH, distance as vecDistance, vec, type Vec3 } from '../s
 
 // ============================ 碰世界那一层（用假 bot，不连服务端） ============================
 import {
+    assessBedCover,
     bedBombDragon,
     clearEndCrystalsSkill,
     countEyesOfEnder,
@@ -14,6 +15,7 @@ import {
     endgameToolSpecs,
     enterEndSkill,
     frameHasEye,
+    isFullCoverBlock,
     pickBedItemName,
     planBedBombSite,
     readDragonHealth,
@@ -291,7 +293,7 @@ describe('drinkPotionByKind（按效果喝药，不是按物品名）', () => {
 
 describe('床炸选址：从真实方块读，不写死坐标', () => {
     /** 地面在 y=64 及以下，上面是空气。 */
-    const ground = (p: Vec3): string => (p.y <= 64 ? 'end_stone' : 'air');
+    const ground = (p: Vec3) => (p.y <= 64 ? fullBlock('end_stone') : AIR_BLOCK);
 
     it('在龙头旁边选出床位/掩体/站位，站位在 4.5 格交互距离内', () => {
         const result = planBedBombSite({ dragonHead: vec(0, 65, 0), self: vec(2.5, 64, 0.5), probe: ground });
@@ -309,14 +311,27 @@ describe('床炸选址：从真实方块读，不写死坐标', () => {
         expect(site.coverCell.x).toBeGreaterThan(site.bedCell.x);
     });
 
-    it('掩体格本来就是实心 → coverAlreadySolid（不用再放一块）', () => {
-        const probe = (p: Vec3): string => {
-            if (p.y === 65 && p.x === 2 && p.z === 0) return 'obsidian';
-            return p.y <= 64 ? 'end_stone' : 'air';
+    it('掩体格本来就是完整方块 → coverAlreadySolid（不用再放一块）', () => {
+        const probe = (p: Vec3) => {
+            if (p.y === 65 && p.x === 2 && p.z === 0) return fullBlock('obsidian');
+            return p.y <= 64 ? fullBlock('end_stone') : AIR_BLOCK;
         };
         const result = planBedBombSite({ dragonHead: vec(0, 65, 0), self: vec(3.5, 65, 0.5), probe });
         expect(result.ok).toBe(true);
         expect(result.site?.coverAlreadySolid).toBe(true);
+        expect(result.site?.coverCellBlock).toBe('obsidian');
+    });
+
+    it('掩体格是火把 → **不算**掩体（这是会死人的那个反例）', () => {
+        const torch = partialBlock('torch', [[]], 'empty');
+        const probe = (p: Vec3) => {
+            if (p.y === 65 && p.x === 2 && p.z === 0) return torch;
+            return p.y <= 64 ? fullBlock('end_stone') : AIR_BLOCK;
+        };
+        const result = planBedBombSite({ dragonHead: vec(0, 65, 0), self: vec(3.5, 65, 0.5), probe });
+        expect(result.ok).toBe(true);
+        expect(result.site?.coverAlreadySolid).toBe(false);
+        expect(result.site?.coverCellBlock).toBe('torch');
     });
 
     it('读不到世界（全 null）→ 拒绝选址，绝不猜地形', () => {
@@ -325,10 +340,18 @@ describe('床炸选址：从真实方块读，不写死坐标', () => {
         expect(result.reason).toContain('能放下床');
     });
 
-    it('床边没有能站住的地方（悬空）→ 拒绝', () => {
-        const result = planBedBombSite({ dragonHead: vec(0, 65, 0), self: vec(2, 64, 0), probe: () => 'air' });
+    it('床边没有能站住的地方（悬空/半砖）→ 拒绝', () => {
+        const result = planBedBombSite({ dragonHead: vec(0, 65, 0), self: vec(2, 64, 0), probe: () => AIR_BLOCK });
         expect(result.ok).toBe(false);
         expect(result.reason).toContain('能站住');
+
+        // 脚下是半砖（boundingBox='block' 但不是完整立方体）→ 同样不算站得住
+        const slabFloor = (p: Vec3) => {
+            if (p.y <= 64) return partialBlock('oak_slab', [[0, 0, 0, 1, 0.5, 1]]);
+            return AIR_BLOCK;
+        };
+        const onSlab = planBedBombSite({ dragonHead: vec(0, 65, 0), self: vec(2, 64, 0), probe: slabFloor });
+        expect(onSlab.ok).toBe(false);
     });
 });
 
@@ -560,6 +583,17 @@ describe('recoverAfterDeath：不再硬编码"刚死/没倒计时"', () => {
     });
 });
 
+/** 完整立方体（能当掩体）：和 prismarine-block 给真方块的样子一致。 */
+function fullBlock(name: string) {
+    return { name, boundingBox: 'block', shapes: [[0, 0, 0, 1, 1, 1]] };
+}
+/** 空气/可替换方块。 */
+const AIR_BLOCK = { name: 'air', boundingBox: 'empty', shapes: [] };
+/** 半高/多段碰撞箱的方块（`boundingBox` 也是 'block'，但挡不住爆风）。 */
+function partialBlock(name: string, shapes: number[][], boundingBox = 'block') {
+    return { name, boundingBox, shapes };
+}
+
 describe('bedBombDragon 的前置条件（不放床就拒绝）', () => {
     afterEach(() => {
         permits.revokeAll();
@@ -593,7 +627,7 @@ describe('bedBombDragon 的前置条件（不放床就拒绝）', () => {
         const bot = makeFakeBot({
             stacks: [stack('white_bed', 1), stack('obsidian', 8)],
             entities: perchedDragon,
-            blockAt: (p: any) => ({ name: p.y <= 64 ? 'end_stone' : 'air' }),
+            blockAt: (p: any) => (p.y <= 64 ? fullBlock('end_stone') : AIR_BLOCK),
         });
         const receipt = await bedBombDragon(bot);
         expect(receipt).toContain('sleep_in_bed');
@@ -626,8 +660,8 @@ describe('bedBombDragon 的前置条件（不放床就拒绝）', () => {
             food: 20,
             blockAt: (p: any) => {
                 const override = blocks.get(key(p));
-                if (override != null) return { name: override };
-                return { name: p.y <= 64 ? 'end_stone' : 'air' };
+                if (override != null) return fullBlock(override);
+                return p.y <= 64 ? fullBlock('end_stone') : AIR_BLOCK;
             },
         });
         const slept: any[] = [];
@@ -727,6 +761,174 @@ describe('clearEndCrystals：退不到 12 格就不放箭', () => {
         expect(crystalToolKit(bot).arrows).toBe(31);
         expect(receipt).toContain('没拆掉水晶');
         expect(receipt).toContain('没掉');
+    });
+});
+
+// ============================ 回归：掩体必须是"完整立方体"（对抗验证 claim 4） ============================
+
+describe('掩体判据：火把/栅栏/铁栏杆/台阶都不算掩体（会死人的那个反例）', () => {
+    const NOT_COVER: Array<[string, any]> = [
+        ['火把', partialBlock('torch', [[]], 'empty')],
+        ['墙上的火把', partialBlock('wall_torch', [[]], 'empty')],
+        ['铁轨', partialBlock('rail', [[]], 'empty')],
+        ['蒲公英', partialBlock('dandelion', [[]], 'empty')],
+        // 下面这些 boundingBox 也是 'block'，但碰撞箱不是完整立方体——只查 boundingBox 会漏
+        ['橡木栅栏', partialBlock('oak_fence', [[0, 0, 0.375, 1, 1.5, 0.625], [0.375, 0, 0, 0.625, 1.5, 0.375]])],
+        ['铁栏杆', partialBlock('iron_bars', [[0, 0, 0.4375, 1, 1, 0.5625]])],
+        ['下半砖', partialBlock('oak_slab', [[0, 0, 0, 1, 0.5, 1]])],
+        ['栅栏门', partialBlock('oak_fence_gate', [[0, 0, 0.375, 1, 1.5, 0.625]])],
+        ['床', partialBlock('white_bed', [[0, 0, 0, 0.1875, 0.5625, 0.1875]])],
+        ['水', partialBlock('water', [[]], 'empty')],
+        ['空气', AIR_BLOCK],
+    ];
+    const COVER: Array<[string, any]> = [
+        ['黑曜石', fullBlock('obsidian')],
+        ['圆石', fullBlock('cobblestone')],
+        ['石头', fullBlock('stone')],
+        ['末地石', fullBlock('end_stone')],
+        ['玻璃', fullBlock('glass')],
+    ];
+
+    it('isFullCoverBlock：只看碰撞箱，不看名字', () => {
+        for (const [label, block] of NOT_COVER) {
+            expect(isFullCoverBlock(block), `${label} 不该算掩体`).toBe(false);
+        }
+        for (const [label, block] of COVER) {
+            expect(isFullCoverBlock(block), `${label} 应该算掩体`).toBe(true);
+        }
+    });
+
+    it('读不到碰撞箱 → 也不算掩体（拿不准就不算，宁可拒绝）', () => {
+        expect(isFullCoverBlock({ name: 'obsidian' })).toBe(false);
+        expect(isFullCoverBlock({ name: 'obsidian', boundingBox: 'block' })).toBe(false);
+        expect(isFullCoverBlock({ name: 'obsidian', boundingBox: 'block', shapes: [] })).toBe(false);
+        expect(isFullCoverBlock(null)).toBe(false);
+        expect(isFullCoverBlock(undefined)).toBe(false);
+    });
+
+    it('assessBedCover：掩体格是火把 → 不算已有掩体，走"放一块再复验"', () => {
+        const torch = partialBlock('torch', [[]], 'empty');
+        const bot = makeFakeBot({
+            stacks: [stack('obsidian', 8)],
+            blockAt: () => torch,
+        });
+        const assessment = assessBedCover(bot, {
+            bedCell: vec(1, 65, 0),
+            coverCell: vec(2, 65, 0),
+            standCell: vec(3, 65, 0),
+            coverAlreadySolid: false,
+            coverCellBlock: 'torch',
+            standDistance: 2,
+            dragonDistance: 1,
+        });
+        expect(assessment.alreadySolid).toBe(false);
+        expect(assessment.coverItem).toBe('obsidian');
+        expect(assessment.available).toBe(true);
+        expect(assessment.reason).toContain('不算掩体');
+    });
+
+    it('assessBedCover：没有可放的完整方块 → available=false（闸门会拒绝）', () => {
+        const bot = makeFakeBot({ stacks: [stack('torch', 4)], blockAt: () => partialBlock('torch', [[]], 'empty') });
+        const assessment = assessBedCover(bot, {
+            bedCell: vec(1, 65, 0),
+            coverCell: vec(2, 65, 0),
+            standCell: vec(3, 65, 0),
+            coverAlreadySolid: false,
+            coverCellBlock: 'torch',
+            standDistance: 2,
+            dragonDistance: 1,
+        });
+        expect(assessment.alreadySolid).toBe(false);
+        expect(assessment.coverItem).toBeNull();
+        expect(assessment.available).toBe(false);
+    });
+
+    /** 授权 + 一个"掩体格有块碍事的非完整方块"的场地。 */
+    function makeTorchCoverBot(options: { withBlocks: boolean }) {
+        permits.grantCalls(['sleep_in_bed'], 3, '测试', Date.now());
+        const blocks = new Map<string, any>();
+        const key = (p: any): string => `${Math.floor(p.x)},${Math.floor(p.y)},${Math.floor(p.z)}`;
+        const torch = partialBlock('torch', [[]], 'empty');
+        const stacks = [stack('white_bed', 2)];
+        if (options.withBlocks) stacks.push(stack('obsidian', 8));
+        const bot = makeFakeBot({
+            stacks,
+            entities: { 1: { name: 'ender_dragon', position: { x: 0, y: 65, z: 0 } } },
+            position: { x: 2.5, y: 64, z: 0.5 },
+            health: 20,
+            food: 20,
+            blockAt: (p: any) => {
+                const override = blocks.get(key(p));
+                if (override != null) return override;
+                const base = p.y <= 64 ? fullBlock('end_stone') : AIR_BLOCK;
+                if (p.y === 65 && p.x === 2 && p.z === 0) return torch; // 掩体格里插着一根火把
+                return base;
+            },
+        });
+        const slept: any[] = [];
+        bot.sleep = (bed: any) => {
+            slept.push(bed);
+            return Promise.resolve();
+        };
+        const placed: Array<[string, number, number, number]> = [];
+        vi.mocked(skills.placeBlock).mockImplementation((_bot: any, item: string, x: number, y: number, z: number) => {
+            placed.push([item, x, y, z]);
+            // 真 placeBlock 会先把碍事的东西清掉再放：这里模拟"放成完整方块"。
+            blocks.set(`${x},${y},${z}`, fullBlock(item));
+            const items = _bot.inventory.items();
+            const used = items.find((stackItem: any) => stackItem?.name === item);
+            if (used != null) consumeOne(items, used);
+            return Promise.resolve(true);
+        });
+        return { bot, placed, slept };
+    }
+
+    it('掩体格是火把 + 背包有方块 → **不会跳过放掩体那一步**，放完复验才点床', async () => {
+        const { bot, placed, slept } = makeTorchCoverBot({ withBlocks: true });
+        const receipt = await bedBombDragon(bot);
+        // 床 + 掩体两次放置：火把不算掩体，所以必须真的去放 obsidian
+        expect(placed.map((p) => p[0])).toEqual(['white_bed', 'obsidian']);
+        expect(placed[1].slice(1)).toEqual([2, 65, 0]);
+        expect(slept).toHaveLength(1); // 复验通过后才点床
+        expect(receipt).toContain('掩体已放好');
+        expect(receipt).toContain('床炸完了');
+        vi.mocked(skills.placeBlock).mockImplementation(() => Promise.resolve(true));
+    });
+
+    it('掩体格是火把 + 背包没有方块 → 拒绝，一个方块都不放、也不点床', async () => {
+        const { bot, placed, slept } = makeTorchCoverBot({ withBlocks: false });
+        const receipt = await bedBombDragon(bot);
+        expect(placed).toHaveLength(0);
+        expect(slept).toHaveLength(0);
+        expect(receipt).toContain('没有执行床炸');
+        expect(receipt).toContain('不算掩体');
+        vi.mocked(skills.placeBlock).mockImplementation(() => Promise.resolve(true));
+    });
+
+    it('endgameStatusReport 的干跑闸门也认这个判据：火把掩体 → "现在不能炸"', () => {
+        const torch = partialBlock('torch', [[]], 'empty');
+        const withTorch = (stacks: any[]) =>
+            makeFakeBot({
+                stacks,
+                entities: { 1: { name: 'ender_dragon', position: { x: 0, y: 65, z: 0 } } },
+                position: { x: 2.5, y: 64, z: 0.5 },
+                bossBars: [{ title: 'Ender Dragon', health: 1 }],
+                blockAt: (p: any) => {
+                    if (p.y === 65 && p.x === 2 && p.z === 0) return torch;
+                    return p.y <= 64 ? fullBlock('end_stone') : AIR_BLOCK;
+                },
+            });
+
+        // 没有可放的完整方块 → 火把不算掩体 → 干跑也拒绝
+        const noBlocks = endgameStatusReport(withTorch([stack('bow', 1), stack('arrow', 32)]));
+        expect(noBlocks).toContain('【床炸闸门】现在不能炸');
+        expect(noBlocks).toContain('不算掩体');
+
+        // 有方块可放 → 可以炸，但报告必须说清"掩体格那根火把不算数、要先放一块"
+        const withBlocks = endgameStatusReport(withTorch([stack('bow', 1), stack('arrow', 32), stack('end_stone', 64)]));
+        expect(withBlocks).toContain('【床炸闸门】现在可以炸');
+        expect(withBlocks).toContain('不算掩体');
+        expect(withBlocks).toContain('end_stone');
     });
 });
 

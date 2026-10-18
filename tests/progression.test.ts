@@ -19,6 +19,7 @@ import {
     DEFAULT_EXPLORE_MAX_STEPS,
     DEFAULT_EXPLORE_SCAN_RADIUS,
     DEFAULT_EXPLORE_STEP,
+    MAX_LEG_PER_SCAN_RATIO,
     collectDrops,
     countItem,
     countTotalItems,
@@ -31,11 +32,14 @@ import {
     hazardHere,
     huntForSkill,
     huntNextAction,
+    maxLegPerScan,
     normalizeName,
     resolveBlockName,
     resolveEntityName,
     spiralReach,
+    spiralScanPath,
     spiralWaypoints,
+    worstCoverageDistance,
     type ExploreOutcome,
     type FlatPosition,
     type HuntOutcome,
@@ -49,6 +53,7 @@ import {
     progressionActionList,
 } from '../src/body/commands/progression.js';
 import { findCommand, toolDeclarations, toolNames } from '../src/body/commands/registry.js';
+import { clearDiscards, markDiscarded, noteDiscardedEntity } from '../src/body/auto_pickup.js';
 import { TOOL_TEXT } from '../src/shared/prompts.js';
 import { getOpenAITools } from '../src/brain/tools/advertise.js';
 
@@ -196,7 +201,12 @@ describe('方形螺旋航点', () => {
 // ──────────────────────── exploreFor：回执诚实 ────────────────────────
 
 describe('exploreFor：系统性探索', () => {
-    it('没找到 → not found after N steps，且写清只覆盖已加载区块', async () => {
+    const ORIGIN: FlatPosition = { x: 0, y: 64, z: 0 };
+    /** 计划步数（长腿被切段后的真实步数）——不是模型给的原始腿数。 */
+    const plannedSteps = (legs: number, step = 32, radius = DEFAULT_EXPLORE_SCAN_RADIUS): number =>
+        spiralScanPath(ORIGIN, step, legs, maxLegPerScan(radius)).length;
+
+    it('没找到 → not found after N steps，且写清只覆盖已加载区块 + 不漏扫保证', async () => {
         const bot = makeBot();
         const visited: FlatPosition[] = [];
         const receipt = await exploreForSkill(
@@ -216,16 +226,24 @@ describe('exploreFor：系统性探索', () => {
             },
         );
 
-        expect(receipt).toContain('not found after 3 steps');
+        const steps = plannedSteps(3);
+        expect(steps).toBeGreaterThan(3); // 长腿切段：3 条原始腿 = 更多步
+        expect(receipt).toContain(`not found after ${steps} steps`);
         expect(receipt).toContain(`每次重扫半径 ${DEFAULT_EXPLORE_SCAN_RADIUS} 格`);
         expect(receipt).toContain('只扫已加载区块');
+        expect(receipt).toContain('走过去了却没扫到'); // 几何保证写进回执
         expect(receipt).toContain('实际移动约');
         expect(receipt).toContain('从 (0, 64, 0) 到');
-        // 三腿都走了：航点顺序 = 螺旋
-        expect(visited).toEqual(spiralWaypoints({ x: 0, y: 64, z: 0 }, 32, 3).map((w) => ({ x: w.x, y: w.y, z: w.z })));
-        // 严格最后一行是"一条能照抄的调用"
+        // 走的顺序 = 切段后的路径（不是原始螺旋端点）
+        expect(visited).toEqual(
+            spiralScanPath(ORIGIN, 32, 3, maxLegPerScan(DEFAULT_EXPLORE_SCAN_RADIUS)).map((w) => ({ x: w.x, y: w.y, z: w.z })),
+        );
+        // 严格最后一行是"一条能照抄的调用"：扫完没有 → 沿同方向走出去（而不是原地重扫）
+        expect(receipt).toContain('已加载范围内确定没有 nether_bricks');
+        expect(receipt).toContain('不是工具坏了');
+        expect(receipt).toContain('继续沿同一方向走');
         expect(receipt.trimEnd().split('\n').at(-1)).toBe(
-            `下一步（照做即可）：exploreFor(block="nether_bricks", max_steps=6, step=32)`,
+            '下一步（照做即可）：goToCoordinates(x=-332, y=64, z=32, closeness=2)',
         );
     });
 
@@ -318,7 +336,7 @@ describe('exploreFor：系统性探索', () => {
             settle: noSleep,
             sleep: noSleep,
         });
-        expect(receipt).toContain('寻路失败 4 腿');
+        expect(receipt).toContain(`失败 ${plannedSteps(4, 64)} 步`);
         expect(receipt).toContain('每一腿都没走到');
         expect(receipt.trimEnd().split('\n').at(-1)).toBe(
             '下一步（照做即可）：exploreFor(block="nether_bricks", max_steps=8, step=16)',
@@ -336,7 +354,7 @@ describe('exploreFor：系统性探索', () => {
             sleep: noSleep,
         });
         expect(receipt).toContain('found obsidian at (2, 64, 2)');
-        expect(receipt).toContain('尝试 0/12 腿');
+        expect(receipt).toContain(`尝试 0/${plannedSteps(12)} 步`);
     });
 
     it('回执渲染：直接喂一个 outcome 也逐字可核（纯函数）', () => {
@@ -345,6 +363,8 @@ describe('exploreFor：系统性探索', () => {
             scanRadius: 64,
             step: 32,
             maxSteps: 12,
+            requestedLegs: 12,
+            maxLeg: maxLegPerScan(64),
             origin: { x: 0, y: 64, z: 0 },
             here: { x: 32, y: 64, z: 32 },
             completedLegs: 2,
@@ -360,11 +380,11 @@ describe('exploreFor：系统性探索', () => {
             unknownBlock: false,
             notes: [],
         };
-        expect(exploreNextAction(outcome)).toBe('exploreFor(block="nether_bricks", max_steps=6, step=32)');
+        expect(exploreNextAction(outcome)).toBe('goToCoordinates(x=332, y=64, z=32, closeness=2)');
         expect(exploreReceipt(outcome)).toContain(describeCoverage(64));
     });
 
-    it('时间到 → 自己收手，回执仍给腿数/覆盖/坐标，下一步是"把剩下的腿走完"', async () => {
+    it('时间到 → 自己收手，回执仍给步数/覆盖/坐标，下一步是"接着跑一轮"', async () => {
         const bot = makeBot();
         let clock = 0;
         let legs = 0;
@@ -377,7 +397,7 @@ describe('exploreFor：系统性探索', () => {
                 travel: async (b, x, y, z) => {
                     legs += 1;
                     b.entity.position = { x, y, z };
-                    clock += 120_000; // 每腿 2 分钟：第 4 腿前就会越过 4.5 分钟预算
+                    clock += 120_000; // 每步 2 分钟：第 4 步前就会越过 4.5 分钟预算
                     return true;
                 },
                 scan: () => null,
@@ -388,24 +408,24 @@ describe('exploreFor：系统性探索', () => {
             { budgetMs: 270_000 },
         );
 
-        // **没有被强退**：走完 3 腿（6 分钟）后第 4 腿前自己收手，不是走满 12 腿
+        // **没有被强退**：走完 3 步（6 分钟）后第 4 步前自己收手，不是走满整条螺旋
         expect(legs).toBe(3);
         // 时间原因必须**明说**，不能写成"范围里确定没有"
         expect(receipt).toContain('时间到');
         expect(receipt).toContain('主动收手');
         expect(receipt).toContain('没走完螺旋');
         expect(receipt).not.toContain('范围内的确定没有');
-        // 报的是**实际走完的腿数**，不是 max_steps
-        expect(receipt).toContain('走完 3/12 腿');
+        // 报的是**实际走完的步数**，不是计划步数
+        expect(receipt).toContain(`走完 3/${plannedSteps(12)} 步`);
         expect(receipt).toContain('not found after 3 steps');
         // 覆盖范围 + 从哪到哪，一个都不能少
         expect(receipt).toContain(`每次重扫半径 ${DEFAULT_EXPLORE_SCAN_RADIUS} 格`);
         expect(receipt).toContain('只扫已加载区块');
         expect(receipt).toContain('从 (0, 64, 0) 到');
         expect(receipt).toContain('实际移动约');
-        // 最后一行仍是**一条**能照抄的调用：剩余腿数（12-3=9）
+        // 最后一行仍是**一条**能照抄的调用：照原始腿数接着跑一轮
         expect(receipt.trimEnd().split('\n').at(-1)).toBe(
-            '下一步（照做即可）：exploreFor(block="nether_bricks", max_steps=9, step=32)',
+            '下一步（照做即可）：exploreFor(block="nether_bricks", max_steps=12, step=32)',
         );
     });
 
@@ -415,6 +435,8 @@ describe('exploreFor：系统性探索', () => {
             scanRadius: 64,
             step: 32,
             maxSteps: 12,
+            requestedLegs: 12,
+            maxLeg: maxLegPerScan(64),
             origin: { x: 0, y: 64, z: 0 },
             here: { x: 32, y: 64, z: 32 },
             completedLegs: 2,
@@ -430,12 +452,12 @@ describe('exploreFor：系统性探索', () => {
             unknownBlock: false,
             notes: [],
         };
-        expect(exploreNextAction(outcome)).toBe('exploreFor(block="nether_bricks", max_steps=10, step=32)');
+        expect(exploreNextAction(outcome)).toBe('exploreFor(block="nether_bricks", max_steps=12, step=32)');
         const text = exploreReceipt(outcome);
         expect(text).toContain('时间到（预算 4.5 分钟）主动收手');
         expect(text).toContain('not found after 2 steps');
         expect(text.trimEnd().split('\n').at(-1)).toBe(
-            '下一步（照做即可）：exploreFor(block="nether_bricks", max_steps=10, step=32)',
+            '下一步（照做即可）：exploreFor(block="nether_bricks", max_steps=12, step=32)',
         );
     });
 
@@ -447,7 +469,7 @@ describe('exploreFor：系统性探索', () => {
             travel: async (b, x, y, z) => {
                 legs += 1;
                 b.entity.position = { x, y, z };
-                clock += 60_000; // 每腿 1 分钟
+                clock += 60_000; // 每步 1 分钟
                 return true;
             },
             scan: () => null,
@@ -455,10 +477,109 @@ describe('exploreFor：系统性探索', () => {
             sleep: noSleep,
             now: () => clock,
         });
-        // 默认预算 4.5 分钟、每腿 1 分钟 → 第 6 腿前收手（走到 5 分钟 > 4.5）
+        // 默认预算 4.5 分钟、每步 1 分钟 → 第 6 步前收手（走到 5 分钟 > 4.5）
         expect(legs).toBe(5);
         expect(receipt).toContain('时间到');
-        expect(receipt).toContain('走完 5/12 腿');
+        expect(receipt).toContain(`走完 5/${plannedSteps(12)} 步`);
+    });
+});
+
+// ────────────── 不漏扫：扫描几何的构造性保证（memo B 的修复） ──────────────
+
+describe('不漏扫：走过的路径必须落在某个扫描球里', () => {
+    const ORIGIN: FlatPosition = { x: 0, y: 64, z: 0 };
+    /**
+     * 真机实测的纵向差：要塞 y≈70、机器人 y≈53 → 差 17 格。
+     * 扫描是 3D 球，所以水平方向上真正够得着的半径是 √(R²−17²)，不是 R。
+     */
+    const LIVE_Y_DIFF = 17;
+    const effectiveRadius = (radius: number): number => Math.sqrt(radius * radius - LIVE_Y_DIFF * LIVE_Y_DIFF);
+    const asPath = (points: readonly { x: number; y: number; z: number }[]): FlatPosition[] =>
+        points.map((p) => ({ x: p.x, y: p.y, z: p.z }));
+
+    it('步长上限写死在常量里：0.75 × 扫描半径', () => {
+        expect(MAX_LEG_PER_SCAN_RATIO).toBe(0.75);
+        expect(maxLegPerScan(64)).toBe(48);
+        expect(maxLegPerScan(96)).toBe(72);
+        expect(maxLegPerScan(48)).toBe(36);
+    });
+
+    it('文档里的"12 腿能走多远"是真数：单轴 96 格、最远对角 ≈136 格（不是 192）', () => {
+        // 回执里的"这一带（约 N 格内）"用的就是它——不许再出现凭感觉的覆盖数字。
+        expect(Math.round(spiralReach(DEFAULT_EXPLORE_STEP, 12))).toBe(136);
+        const path = spiralScanPath(ORIGIN, DEFAULT_EXPLORE_STEP, 12, maxLegPerScan(64));
+        const far = path.reduce((max, wp) => Math.max(max, Math.hypot(wp.x - ORIGIN.x, wp.z - ORIGIN.z)), 0);
+        expect(Math.round(far)).toBe(136);
+    });
+
+    it('**证伪**：原始螺旋（只在腿端点扫）确实有漏扫缝——这正是真机两次没命中的几何原因', () => {
+        const radius = DEFAULT_EXPLORE_SCAN_RADIUS;
+        const raw = spiralWaypoints(ORIGIN, DEFAULT_EXPLORE_STEP, 12);
+        const centres = [ORIGIN, ...asPath(raw)];
+        const worst = worstCoverageDistance(asPath(raw), centres);
+        // 长腿 160/192 的中段离最近扫描中心 ~72 格：连 2D 都超出 64 格半径
+        expect(worst).toBeGreaterThan(radius);
+        // 叠加纵向差折算后（水平只剩 61.7 格）缝更大
+        expect(worst).toBeGreaterThan(effectiveRadius(radius));
+    });
+
+    it('**不变式**：切段后，路径上任意一点都在某个扫描球里（且只用掉不到一半半径）', () => {
+        for (const radius of [48, 64, 96]) {
+            for (const step of [16, 32, 48]) {
+                for (const legs of [6, 12, 20]) {
+                    const path = spiralScanPath(ORIGIN, step, legs, maxLegPerScan(radius));
+                    const centres = [ORIGIN, ...asPath(path)];
+                    const worst = worstCoverageDistance(asPath(path), centres);
+                    // 强判据：最远点 ≤ 半径/2 → 另一半留给纵向差与方块中心偏差
+                    expect(worst, `radius=${radius} step=${step} legs=${legs}`).toBeLessThanOrEqual(radius / 2);
+                    // 连"17 格纵向差"折算后的水平半径也绰绰有余
+                    expect(worst, `radius=${radius} step=${step} legs=${legs}`).toBeLessThan(effectiveRadius(radius));
+                }
+            }
+        }
+    });
+
+    it('构造规则：相邻两个落点距离 ≤ maxLegPerScan(半径)（取整之后也成立）', () => {
+        for (const radius of [48, 64, 96]) {
+            const maxLeg = maxLegPerScan(radius);
+            const path = spiralScanPath(ORIGIN, DEFAULT_EXPLORE_STEP, 12, maxLeg);
+            let prev: FlatPosition = ORIGIN;
+            for (const wp of path) {
+                expect(Math.hypot(wp.x - prev.x, wp.z - prev.z)).toBeLessThanOrEqual(maxLeg);
+                prev = { x: wp.x, y: wp.y, z: wp.z };
+            }
+            // 确实切了段（不是把原始 12 条腿原样当路径）
+            expect(path.length).toBeGreaterThan(DEFAULT_EXPLORE_MAX_STEPS);
+        }
+    });
+
+    it('exploreFor 真的在每一步落点扫描，走出来的折线满足不变式', async () => {
+        const bot = makeBot();
+        const walked: FlatPosition[] = [];
+        const scanCentres: FlatPosition[] = [];
+        const receipt = await exploreForSkill(bot, 'nether_bricks', 12, DEFAULT_EXPLORE_STEP, {
+            travel: async (b, x, y, z) => {
+                b.entity.position = { x, y, z };
+                walked.push({ x, y, z });
+                return true;
+            },
+            scan: (b) => {
+                scanCentres.push({ ...b.entity.position });
+                return null;
+            },
+            settle: noSleep,
+            sleep: noSleep,
+        });
+
+        const path: FlatPosition[] = [{ x: 0, y: 64, z: 0 }, ...walked];
+        // 起点扫 1 次 + 每一步落点扫 1 次
+        expect(scanCentres.length).toBe(path.length);
+        const radius = DEFAULT_EXPLORE_SCAN_RADIUS;
+        const worst = worstCoverageDistance(path, scanCentres);
+        expect(worst).toBeLessThanOrEqual(radius / 2);
+        // 回执把这条保证说出来，而不是让模型猜
+        expect(receipt).toContain('走过去了却没扫到');
+        expect(receipt).toContain(`每步 ≤ ${maxLegPerScan(radius)} 格`);
     });
 });
 
@@ -601,6 +722,42 @@ describe('huntFor：刷到够数 / 只认真实增量', () => {
         });
         expect(receipt).toContain('背包总件数 +1');
         expect(receipt).toContain('掉落表里没有这种怪');
+    });
+
+    it('默认捡拾走 nearestDropWithin：刚扔掉的掉落物不会被走回去捡（丢弃免疫 A/B 对照）', async () => {
+        const drop = { id: 42, name: 'item', displayName: 'Blaze Rod', position: { x: 5, y: 64, z: 5 } };
+        /** 跑一轮：附近只有一只"打死了但东西不进背包"的烈焰人 + 地上那个掉落物。 */
+        const runOnce = async (): Promise<string[]> => {
+            const bot = makeBot({ items: [stack('blaze_rod', 0)], entities: { 42: drop } });
+            const travelled: string[] = [];
+            let clock = 0;
+            await huntForSkill(bot, 'blaze', 3, 48, 4_000, {
+                findEntity: () => ({ name: 'blaze', position: { x: 3, y: 64, z: 0 } }),
+                attack: async () => true,
+                // **不注入 findDrop**：走的必须是默认实现（nearestDropWithin）
+                travel: async (_b, x, y, z) => {
+                    travelled.push(`${x},${y},${z}`);
+                    return true;
+                },
+                sleep: noSleep,
+                now: () => (clock += 1_000),
+            });
+            return travelled;
+        };
+
+        clearDiscards();
+        try {
+            // ① 记下"刚扔了 blaze_rod，落在 (5,64,5)" → 一步都不该为它走
+            markDiscarded('blaze_rod', { x: 5, y: 64, z: 5 });
+            noteDiscardedEntity(42);
+            expect(await runOnce()).not.toContain('5,64,5');
+
+            // ② 清掉免疫（A/B 对照）：同一个掉落物会被走过去 —— 证明①不是"这段压根没跑"
+            clearDiscards();
+            expect(await runOnce()).toContain('5,64,5');
+        } finally {
+            clearDiscards();
+        }
     });
 
     it('huntNextAction：预算用尽 → 建议接着刷剩下的数量', () => {

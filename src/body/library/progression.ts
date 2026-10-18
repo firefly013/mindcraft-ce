@@ -20,6 +20,7 @@
 
 import * as skills from './skills.js';
 import * as world from './world.js';
+import { nearestDropWithin } from '../auto_pickup.js';
 
 // ────────────────────────────── 默认参数 ──────────────────────────────
 
@@ -188,6 +189,105 @@ export function spiralReach(step: number, maxSteps: number): number {
         (max, wp) => Math.max(max, Math.hypot(wp.x, wp.z)),
         0,
     );
+}
+
+// ─────────────────── 不漏扫的几何保证（构造性，不靠调参） ───────────────────
+
+/**
+ * 一腿最长 = `MAX_LEG_PER_SCAN_RATIO × 扫描半径`。
+ *
+ * **这是"走过去了就扫过"的构造性保证。** 扫描只发生在每一腿的落点，所以路径上
+ * 离扫描中心最远的点就是相邻两腿之间的中点，距离 = 腿长/2：
+ *   - 腿长 = 2×半径 → 相邻两个扫描球**外切**，切点正好落在覆盖边界上；
+ *   - 再叠加纵向差（真机实测：要塞 y≈70、机器人 y≈53，差 17 格 → 水平可达半径
+ *     只剩 √(64²−17²) ≈ 61.7 格），"外切"就变成了真实的漏扫缝——机器人从要塞
+ *     旁边走过去也看不见（`overnight_b` 05:24Z：两个圆心的 exploreFor 都没命中）。
+ * 取 0.75×半径后，路径上任意一点到最近扫描中心 ≤ 0.375×半径：一半以上的半径
+ * 留给了纵向差与"目标方块中心不在球心"的误差。**不用把半径调大**（那会真的变慢）。
+ */
+export const MAX_LEG_PER_SCAN_RATIO = 0.75;
+
+/** 一腿最长多少格（按扫描半径算）。 */
+export function maxLegPerScan(scanRadius: number): number {
+    const radius = Number.isFinite(scanRadius) && scanRadius > 0 ? scanRadius : DEFAULT_EXPLORE_SCAN_RADIUS;
+    return Math.max(1, Math.floor(radius * MAX_LEG_PER_SCAN_RATIO));
+}
+
+/**
+ * 螺旋的**走+扫路径**：把每条原始腿按 `maxLeg` 切分，保证**相邻两点距离 ≤ maxLeg**。
+ *
+ * 为什么不直接改 `spiralWaypoints`：那是"螺旋的几何形状"（`spiralReach` 与既有测试
+ * 都用它）。这个函数才是"实际会走、且每一步落点都会扫"的序列——于是"有没有漏扫"
+ * 有了单一判据：相邻点距离 ≤ `maxLegPerScan(radius)`。
+ */
+export function spiralScanPath(origin: FlatPosition, step: number, maxSteps: number, maxLeg: number): Waypoint[] {
+    const raw = spiralWaypoints(origin, step, maxSteps);
+    const cap = Number.isFinite(maxLeg) && maxLeg >= 1 ? Math.floor(maxLeg) : DEFAULT_EXPLORE_STEP;
+    const out: Waypoint[] = [];
+    let prev: FlatPosition = { x: Math.round(origin.x), y: Math.round(origin.y), z: Math.round(origin.z) };
+    let index = 0;
+    for (const target of raw) {
+        const dx = target.x - prev.x;
+        const dz = target.z - prev.z;
+        const length = Math.hypot(dx, dz);
+        const parts = Math.max(1, Math.ceil(length / cap));
+        for (let k = 1; k <= parts; k++) {
+            const ratio = k / parts;
+            index += 1;
+            out.push({
+                index,
+                x: Math.round(prev.x + dx * ratio),
+                y: target.y,
+                z: Math.round(prev.z + dz * ratio),
+                legLength: Math.round(length / parts),
+                direction: target.direction,
+            });
+        }
+        prev = { x: target.x, y: target.y, z: target.z };
+    }
+    return out;
+}
+
+/** 点到一组"扫描中心"的最近距离（3D；扫描用的是 3D 距离）。 */
+export function nearestCentreDistance(point: FlatPosition, centres: readonly FlatPosition[]): number {
+    let best = Number.POSITIVE_INFINITY;
+    for (const centre of centres) {
+        const d = Math.hypot(point.x - centre.x, point.y - centre.y, point.z - centre.z);
+        if (d < best) best = d;
+    }
+    return best;
+}
+
+/**
+ * **路径上任意一点**（origin → w1 → … → wn，按 1 格采样）到最近扫描中心的最大距离。
+ *
+ * 为什么用采样而不是"腿长/2"这个解析式：解析式只对两中心的中点成立，而这里要证的
+ * 是"沿着真正会走的那条折线，没有一步走到没扫过的地方"——采样把取整、y 不变、
+ * 非等分切分这些实现细节全都算进去。没有扫描中心时返回 `Infinity`。
+ */
+export function worstCoverageDistance(path: readonly FlatPosition[], centres: readonly FlatPosition[]): number {
+    if (centres.length === 0) return Number.POSITIVE_INFINITY;
+    let worst = 0;
+    const sample = (point: FlatPosition): void => {
+        const d = nearestCentreDistance(point, centres);
+        if (d > worst) worst = d;
+    };
+    if (path.length > 0) sample(path[0]);
+    for (let i = 1; i < path.length; i++) {
+        const a = path[i - 1];
+        const b = path[i];
+        const length = Math.hypot(b.x - a.x, b.y - a.y, b.z - a.z);
+        const steps = Math.max(1, Math.ceil(length));
+        for (let s = 0; s <= steps; s++) {
+            const t = s / steps;
+            sample({
+                x: a.x + (b.x - a.x) * t,
+                y: a.y + (b.y - a.y) * t,
+                z: a.z + (b.z - a.z) * t,
+            });
+        }
+    }
+    return worst;
 }
 
 // ─────────────────────────── 掉落物对照表 ───────────────────────────
@@ -364,9 +464,10 @@ export function hasFireResistance(bot: any): boolean {
  */
 export function describeCoverage(radius: number): string {
     return (
-        `每次重扫半径 ${Math.round(radius)} 格。注意 findBlocks **只扫已加载区块**：` +
-        `视距够大时这 ${Math.round(radius)} 格是完整的，视距小于 ${Math.round(radius)} 格时` +
-        '边上可能有没扫到的格子；"找到"是真的，"没找到"只代表这次扫过的范围里没有。'
+        `每次重扫半径 ${Math.round(radius)} 格，**每腿 ≤ ${maxLegPerScan(radius)} 格（=0.75×半径）**：` +
+        '相邻两次扫描的球是重叠的，所以**走过的路径上任意一点都在某个扫描球里**（不会出现"走过去了却没扫到"）。' +
+        '注意 findBlocks **只扫已加载区块**：视距够大时这些格子是完整的，视距小于扫描半径时' +
+        `边上可能仍有没扫到的格子；"找到"是真的，"没找到"只代表这次扫过的范围里没有。`
     );
 }
 
@@ -380,7 +481,12 @@ export interface ExploreOutcome {
     block: string;
     scanRadius: number;
     step: number;
+    /** 计划要走+扫的步数（`spiralScanPath` 的长度；长腿会被切成多步以保证不漏扫）。 */
     maxSteps: number;
+    /** 模型给的原始"螺旋腿数"（下一次调用照它继续）。 */
+    requestedLegs: number;
+    /** 一步最长多少格（=0.75×扫描半径）。 */
+    maxLeg: number;
     origin: FlatPosition;
     here: FlatPosition;
     /** 真正走完的腿数（travel 返回 true）。 */
@@ -414,6 +520,26 @@ export interface ExploreOutcome {
  * 空间；给一条带好参数的调用，它才会动。所以这里只返回一个字符串，且必须是
  * 一条合法调用。
  */
+/**
+ * "这一带真没有"之后，一次往同一方向走多远（格）。
+ *
+ * 世界存档分析了已探索的下界区块（chunk x −32..63 / z −32..31，8 个 region 文件）
+ * 里**一块 `nether_bricks` 都没有**——所以"没找到"往往是"真没有，得走更远"，
+ * 不是工具坏了。绕圈重扫同一片区域不会变出方块，只有走出去才有用；
+ * 真人给的判据是"沿一个轴至少走 400 格"，这里给一次 300 格的跳步（重复一次就够）。
+ */
+const WALK_FURTHER_BLOCKS = 300;
+
+/** 空手而归时：沿这一轮**实际推进最多的轴**继续走的坐标。 */
+function walkFurtherTarget(o: ExploreOutcome): FlatPosition {
+    const dx = o.here.x - o.origin.x;
+    const dz = o.here.z - o.origin.z;
+    if (Math.abs(dx) >= Math.abs(dz)) {
+        return { x: o.here.x + (dx < 0 ? -WALK_FURTHER_BLOCKS : WALK_FURTHER_BLOCKS), y: o.here.y, z: o.here.z };
+    }
+    return { x: o.here.x, y: o.here.y, z: o.here.z + (dz < 0 ? -WALK_FURTHER_BLOCKS : WALK_FURTHER_BLOCKS) };
+}
+
 export function exploreNextAction(o: ExploreOutcome): string {
     if (o.unknownBlock) return 'stats(type="blocks")';
     if (o.danger != null) return 'moveAway(distance=8)';
@@ -423,13 +549,17 @@ export function exploreNextAction(o: ExploreOutcome): string {
             `z=${Math.round(o.found.z)}, closeness=2)`
         );
     }
-    // 时间到/被打断：螺旋还没走完，接着把剩下的腿走完（新螺旋从当前位置起算）。
+    // 时间到/被打断：螺旋还没走完，接着跑一轮（新螺旋从当前位置重新起算）。
     if (o.timedOut || o.interrupted) {
-        const remaining = Math.max(1, o.maxSteps - o.completedLegs);
-        return `exploreFor(block="${o.block}", max_steps=${remaining}, step=${o.step})`;
+        return `exploreFor(block="${o.block}", max_steps=${o.requestedLegs}, step=${o.step})`;
     }
     // 一腿都没走成：多半是断层/落差，把 step 调小再来。
     if (o.attemptedLegs > 0 && o.completedLegs === 0) return `exploreFor(block="${o.block}", max_steps=8, step=16)`;
+    // 这一带扫完了、确定没有 → **换地方**，别再原地绕。
+    if (o.completedLegs > 0) {
+        const target = walkFurtherTarget(o);
+        return `goToCoordinates(x=${Math.round(target.x)}, y=${Math.round(target.y)}, z=${Math.round(target.z)}, closeness=2)`;
+    }
     return `exploreFor(block="${o.block}", max_steps=6, step=${o.step})`;
 }
 
@@ -446,22 +576,34 @@ export function exploreReceipt(o: ExploreOutcome): string {
         // **时间到必须说清楚**：不是"范围里确定没有"，是"预算用完了、螺旋没走完"。
         lines.push(
             `exploreFor ${o.block}：**时间到（预算 ${Math.round(o.budgetMs / 60000 * 10) / 10} 分钟）主动收手——没走完螺旋**，` +
-                `走完 ${o.completedLegs}/${o.maxSteps} 腿；**not found after ${o.completedLegs} steps**（只代表这次扫过的范围里没有）。`,
+                `走完 ${o.completedLegs}/${o.maxSteps} 步；**not found after ${o.completedLegs} steps**（只代表这次扫过的范围里没有）。`,
         );
     } else if (o.interrupted) {
         lines.push(`exploreFor ${o.block}：**被打断（Stop/保命）**，没走完，**not found after ${o.completedLegs} steps**。`);
     } else {
         lines.push(
             `exploreFor ${o.block}：**not found after ${o.maxSteps} steps**` +
-                `（走完 ${o.completedLegs} 腿，其中寻路失败 ${o.failedLegs} 腿）。`,
+                `（走完 ${o.completedLegs} 步，其中寻路失败 ${o.failedLegs} 步）。`,
         );
     }
     lines.push(
         `路线：从 ${formatPoint(o.origin)} 到 ${formatPoint(o.here)}，` +
             `实际移动约 ${Math.round(o.walkedBlocks)} 格；` +
-            `尝试 ${o.attemptedLegs}/${o.maxSteps} 腿，走完 ${o.completedLegs} 腿，失败 ${o.failedLegs} 腿，每腿 ${o.step} 格。`,
+            `尝试 ${o.attemptedLegs}/${o.maxSteps} 步，走完 ${o.completedLegs} 步，失败 ${o.failedLegs} 步，` +
+            `每步 ≤ ${o.maxLeg} 格（原始螺旋 ${o.requestedLegs} 腿，长腿已切段以保证不漏扫）。`,
     );
     lines.push(describeCoverage(o.scanRadius));
+    // 扫完了、确定没有：把"这意味着什么"说清楚。否则模型会把 "not found"
+    // 读成"工具坏了"，然后原地反复重扫（真机反馈就是这么来的）。
+    if (o.found == null && o.danger == null && !o.timedOut && !o.interrupted && !o.unknownBlock && o.completedLegs > 0) {
+        const reach = Math.round(spiralReach(o.step, o.requestedLegs));
+        lines.push(
+            `**结论：这一带（约 ${reach} 格内）已加载范围内确定没有 ${o.block}——不是工具坏了，是真没有。**` +
+                `同一片区域再扫一遍不会变出方块；**继续沿同一方向走**（至少 400 格，` +
+                `照下面这条走一次 ≈ ${WALK_FURTHER_BLOCKS} 格、重复一次就够）再 exploreFor，才有新区块。` +
+                `（参考：已探索过的下界区块里一块 nether_bricks 都没有。）`,
+        );
+    }
     if (o.notes.length > 0) for (const note of o.notes) lines.push(note);
     lines.push(`下一步（照做即可）：${exploreNextAction(o)}`);
     return lines.join('\n');
@@ -616,8 +758,10 @@ export async function exploreForSkill(
 ): Promise<string> {
     const block = resolveBlockName(rawBlock);
     const scanRadius = options.scanRadius ?? DEFAULT_EXPLORE_SCAN_RADIUS;
-    const maxSteps = clampInt(rawMaxSteps, DEFAULT_EXPLORE_MAX_STEPS, 1, options.maxStepsLimit ?? 64);
+    const requestedLegs = clampInt(rawMaxSteps, DEFAULT_EXPLORE_MAX_STEPS, 1, options.maxStepsLimit ?? 64);
     const step = clampInt(rawStep, DEFAULT_EXPLORE_STEP, 4, 128);
+    // 一步最长 = 0.75×扫描半径：长腿切段，保证走过的路径不漏扫（见 MAX_LEG_PER_SCAN_RATIO）。
+    const maxLeg = maxLegPerScan(scanRadius);
 
     const travel = deps.travel ?? ((b: any, x: number, y: number, z: number) => skills.goToPosition(b, x, y, z, 3));
     const scan = deps.scan ?? defaultScan;
@@ -630,11 +774,14 @@ export async function exploreForSkill(
 
     const notes: string[] = [];
     const origin = position(bot);
+    const path = spiralScanPath(origin, step, requestedLegs, maxLeg);
     const outcome: ExploreOutcome = {
         block,
         scanRadius,
         step,
-        maxSteps,
+        maxSteps: path.length,
+        requestedLegs,
+        maxLeg,
         origin,
         here: origin,
         completedLegs: 0,
@@ -671,7 +818,7 @@ export async function exploreForSkill(
         return exploreReceipt(outcome);
     }
 
-    for (const waypoint of spiralWaypoints(origin, step, maxSteps)) {
+    for (const waypoint of path) {
         // **时间预算**：到点自己收手，走正常回执（腿数/覆盖/坐标/下一步）。
         // 顺序放在最前：宁可少走一腿，也不要被命令超时/保险丝截胡——那条路
         // 上模型只能拿到一句"已强制释放动作通道"，等于没结论。
@@ -722,7 +869,7 @@ export async function exploreForSkill(
     }
 
     outcome.here = position(bot);
-    if (outcome.found == null && outcome.completedLegs === 0 && outcome.attemptedLegs >= maxSteps && outcome.danger == null && !outcome.interrupted) {
+    if (outcome.found == null && outcome.completedLegs === 0 && outcome.attemptedLegs >= outcome.maxSteps && outcome.danger == null && !outcome.interrupted && !outcome.timedOut) {
         notes.push('⚠️ 每一腿都没走到（寻路全失败）：先 goToCoordinates 挪到一个能走通的位置，或换 step 更小的一轮。');
     }
     return exploreReceipt(outcome);
@@ -761,8 +908,21 @@ function defaultFindEntity(bot: any, entity: string, radius: number): any | null
     return world.getNearestEntityWhere(bot, (e: any) => normalizeName(e?.name) === entity, radius);
 }
 
+/**
+ * 默认"找最近的掉落物"：**必须走 `auto_pickup.nearestDropWithin` 这个入口**，
+ * 不能自己再筛一遍实体表。
+ *
+ * 为什么（2026-10-18 跨文件坑，receipts-dev 报的）：这里以前是
+ * `world.getNearestEntityWhere(bot, e => e.name === 'Item', radius)`，它**绕过了
+ * 丢弃免疫**——刚被 `discard` 扔掉的东西会被 `huntFor` 当成战利品，再走回去踩一遍，
+ * "扔了又自动捡回来"当场复发。`nearestDropWithin` 已经把三条免疫路径
+ * （显示名归一化 / 落点 / 实体 id）都算进去了，所以这里只做**形状转换**：
+ * 它返回扁平的 `{id,name,x,y,z,distance}`，而 `collectDrops` 读 `drop.position.{x,y,z}`。
+ */
 function defaultFindDrop(bot: any, radius: number): any | null {
-    return world.getNearestEntityWhere(bot, (e: any) => e?.name === 'Item', radius);
+    const target = nearestDropWithin(bot, radius);
+    if (target == null) return null;
+    return { id: target.id, name: target.name, position: { x: target.x, y: target.y, z: target.z } };
 }
 
 /**

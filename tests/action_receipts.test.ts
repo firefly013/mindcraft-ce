@@ -394,7 +394,9 @@ describe('D6 searchForBlock 每条回执都以结论收尾', () => {
       { x: 0, y: 64, z: 0 },
       { x: 0, y: 64, z: 0 },
     );
-    expect(missing).toContain('结论：范围内的确定没有 obsidian');
+    // "确定没有"必须带覆盖范围限定：未加载的区块根本没看过。
+    expect(missing).toContain('只覆盖已加载区块');
+    expect(missing).toContain('结论：已加载范围内没有 obsidian');
   });
 });
 

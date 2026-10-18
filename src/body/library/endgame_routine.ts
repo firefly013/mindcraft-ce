@@ -535,8 +535,51 @@ function isAirLikeName(name: string | null): boolean {
     return name != null && REPLACEABLE_NAMES.has(name);
 }
 
-function isSolidName(name: string | null): boolean {
-    return name != null && !REPLACEABLE_NAMES.has(name);
+/** 完整立方体的碰撞箱。 */
+const FULL_CUBE_SHAPE: readonly number[] = Object.freeze([0, 0, 0, 1, 1, 1]);
+
+/**
+ * 探针结果归一化。
+ *
+ * `probe` 正常应该返回**方块对象**（`bot.blockAt` 的返回值）。兼容"只给名字"的旧式探针，
+ * 但那种探针**永远不算完整立方体**——名字判断不了"挡不挡得住爆风"，拿不准就不算掩体。
+ */
+function probeInfo(raw: any): { name: string | null; fullCube: boolean } {
+    if (typeof raw === 'string') return { name: raw, fullCube: false };
+    return {
+        name: typeof raw?.name === 'string' ? raw.name : null,
+        fullCube: isFullCoverBlock(raw),
+    };
+}
+
+/**
+ * 这一格是不是**完整立方体**——也就是"能不能真的挡住爆风"。
+ *
+ * ⚠️ 这里曾经用 `isSolidName`（"名字不在空气家族里"）当掩体判据，那是**会死人的**：
+ * 火把、铁栏杆、铁轨、蒲公英的名字都不是空气，可是它们挡不住爆炸。对抗验证
+ * （task-5 / VERIFY.md claim 4）给的反例：掩体格插一根火把 → `coverAlreadySolid = true`
+ * → 闸门按暴露度 0.15 放行（自伤约 5.7），实际是 51.4 点，而且因为"已经有掩体了"，
+ * 连"放一块方块再复验"那一步都会被跳过。
+ *
+ * 判据只看**碰撞箱**，不看名字：
+ * - `boundingBox !== 'block'` → 不是（火把/铁轨/蒲公英/水/空气）；
+ * - 碰撞箱不是"恰好一个 `[0,0,0,1,1,1]`" → 不是（**栅栏、铁栏杆、台阶、床、门**这些
+ *   `boundingBox` 也是 'block'，但形状是多段或半高——实测确认过）；
+ * - **读不到碰撞箱 → 也不是**：拿不准就不算掩体，宁可拒绝，也不拿命赌。
+ *
+ * 注意第 3 条意味着"区块没加载/拿不到 shapes 时的安全默认是拒绝"，不是放行。
+ */
+export function isFullCoverBlock(block: any): boolean {
+    if (block == null || typeof block.name !== 'string') return false;
+    if (block.boundingBox !== 'block') return false;
+    const shapes = block.shapes;
+    if (!Array.isArray(shapes) || shapes.length !== 1) return false;
+    const box = shapes[0];
+    if (!Array.isArray(box) || box.length !== FULL_CUBE_SHAPE.length) return false;
+    return box.every(
+        (value: unknown, index: number) =>
+            typeof value === 'number' && Number.isFinite(value) && Math.abs(value - FULL_CUBE_SHAPE[index]) < 1e-6
+    );
 }
 
 /** 读一格方块名；读不到（区块没加载 / bot 没有 `blockAt`）返回 **null——表示"不知道"，不是"空气"**。 */
@@ -560,6 +603,10 @@ function blockObjectAt(bot: any, p: Vec3): any | null {
     }
 }
 
+function describeCell(p: Vec3): string {
+    return `(${Math.floor(p.x)},${Math.floor(p.y)},${Math.floor(p.z)})`;
+}
+
 export interface BedBombSite {
     /** 床放哪一格。 */
     bedCell: Vec3;
@@ -567,8 +614,10 @@ export interface BedBombSite {
     coverCell: Vec3;
     /** 点床时站哪一格（掩体后面）。 */
     standCell: Vec3;
-    /** 掩体格**现在**就是实体方块（不用放）。 */
+    /** 掩体格**现在**就是完整立方体（不用放）。判据是 {@link isFullCoverBlock}，不是"名字不是空气"。 */
     coverAlreadySolid: boolean;
+    /** 掩体格现在放的是什么方块名（读不到给 null，给回执用）。 */
+    coverCellBlock: string | null;
     /** 站位到床的距离（目标 2 格：中间隔着一格掩体，还在 4.5 格交互距离内）。 */
     standDistance: number;
     /** 床到龙头的距离（决定打掉多少血）。 */
@@ -584,16 +633,30 @@ export interface BedBombSite {
  * 真机上只要它没在坑里，那 0.15 就是假的，床一炸就是 71 点原始伤害。
  * 现在每一格都用 `bot.blockAt` 探过；**探不到就不猜**（返回 ok=false）。
  *
+ * `probe` 返回的是**方块对象**（不是名字）：掩体和脚下都必须按
+ * {@link isFullCoverBlock} 验碰撞箱，光有名字判断不了"挡不挡得住"。
+ *
  * 站位固定取"床 + 2 格"：中间那格放掩体，人躲在掩体后面点床（wiki 的标准姿势：
  * 床边放一块方块挡爆风）。2 格也远小于 4.5 格的交互距离，点得着。
  */
 export function planBedBombSite(input: {
     dragonHead: Vec3;
     self: Vec3;
-    probe: (p: Vec3) => string | null;
+    probe: (p: Vec3) => any;
 }): { ok: boolean; site?: BedBombSite; reason: string } {
     const { dragonHead, self, probe } = input;
     const headY = Math.floor(dragonHead.y);
+    // 旧式探针（只返回名字）诊断用：名字判断不了碰撞箱，选址会一律失败——得说清是探针的问题。
+    let sawNameOnlyProbe = false;
+    const probeCell = (p: Vec3): { name: string | null; fullCube: boolean } => {
+        const raw = probe(p);
+        if (typeof raw === 'string') sawNameOnlyProbe = true;
+        return probeInfo(raw);
+    };
+    const withProbeHint = (reason: string): string =>
+        sawNameOnlyProbe
+            ? `${reason}（注意：探针只返回了方块名，判断不了"是不是完整方块"，所以掩体/落脚点一律不算数——要传 bot.blockAt 的方块对象。）`
+            : reason;
 
     // 1) 床位：龙头水平方向的 4 个邻格 × 两个高度，取"离龙头最近、能放下床"的那个。
     let bedCell: Vec3 | null = null;
@@ -601,8 +664,9 @@ export function planBedBombSite(input: {
     for (const [dx, dz] of CARDINALS) {
         for (const y of [headY - 1, headY]) {
             const candidate = vec(Math.floor(dragonHead.x) + dx, y, Math.floor(dragonHead.z) + dz);
-            const name = probe(candidate);
-            if (!isAirLikeName(name)) continue; // 读不到（null）或有方块 → 这格放不了
+            const candidateBlock = probeCell(candidate);
+            // 读不到（null）或有方块 → 这格放不了床
+            if (!isAirLikeName(candidateBlock.name)) continue;
             const d = vecDistance(candidate, dragonHead);
             if (d < bestDragonDistance) {
                 bestDragonDistance = d;
@@ -613,34 +677,42 @@ export function planBedBombSite(input: {
     if (bedCell == null) {
         return {
             ok: false,
-            reason: '龙头四周没有一个能放下床的空格（要么被方块占着，要么区块没加载读不到）——先挖/垫一格，或者换到龙头另一边再试。',
+            reason: withProbeHint(
+                '龙头四周没有一个能放下床的空格（要么被方块占着，要么区块没加载读不到）——先挖/垫一格，或者换到龙头另一边再试。'
+            ),
         };
     }
 
     // 2) 掩体 + 站位：4 个正方向里挑一个"能站住、且掩体在你和床之间"的方向。
     const away = { x: self.x - bedCell.x, z: self.z - bedCell.z };
     const awayLength = Math.hypot(away.x, away.z);
-    let best: { dir: readonly [number, number]; coverAlreadySolid: boolean; score: number } | null = null;
+    let best: { dir: readonly [number, number]; coverAlreadySolid: boolean; coverCellBlock: string | null; score: number } | null =
+        null;
     for (const dir of CARDINALS) {
         const coverCell = vec(bedCell.x + dir[0], bedCell.y, bedCell.z + dir[1]);
         const standCell = vec(bedCell.x + dir[0] * 2, bedCell.y, bedCell.z + dir[1] * 2);
-        const coverName = probe(coverCell);
-        const feet = probe(standCell);
-        const support = probe(vec(standCell.x, standCell.y - 1, standCell.z));
+        const coverBlock = probeCell(coverCell);
+        const feetBlock = probeCell(standCell);
+        const supportBlock = probeCell(vec(standCell.x, standCell.y - 1, standCell.z));
         // 读不到（null）一律不用：宁可不动手，也不拿"猜的地形"当掩体。
-        if (coverName == null || feet == null || support == null) continue;
-        if (!isAirLikeName(feet)) continue; // 站的地方得是空的
-        if (!isSolidName(support)) continue; // 脚下得踩得住（虚空/水都不算）
-        // 方向分：越靠近"我现在站的那一侧"越好（少走路，掩体天然在中间）。已经实心的掩体更值钱。
+        if (coverBlock.name == null || feetBlock.name == null || supportBlock.name == null) continue;
+        if (!isAirLikeName(feetBlock.name)) continue; // 站的地方得是空的
+        // 脚下必须是**完整立方体**：栅栏/台阶/铁栏杆踩不住（"名字不是空气"骗过这里过）。
+        if (!supportBlock.fullCube) continue;
+        // 方向分：越靠近"我现在站的那一侧"越好（少走路，掩体天然在中间）。已经是完整方块的掩体更值钱。
         const alignment = awayLength === 0 ? 0 : (dir[0] * away.x + dir[1] * away.z) / awayLength;
-        const coverAlreadySolid = isSolidName(coverName);
+        const coverAlreadySolid = coverBlock.fullCube;
         const score = alignment + (coverAlreadySolid ? 0.5 : 0);
-        if (best == null || score > best.score) best = { dir, coverAlreadySolid, score };
+        if (best == null || score > best.score) {
+            best = { dir, coverAlreadySolid, coverCellBlock: coverBlock.name, score };
+        }
     }
     if (best == null) {
         return {
             ok: false,
-            reason: '床边没有能站住的位置：掩体格或落脚点被占/是虚空/读不到世界——先清出"床边一格掩体 + 掩体后一格站位"再点床。',
+            reason: withProbeHint(
+                '床边没有能站住的位置：掩体格或落脚点被占/是虚空/读不到世界——先清出"床边一格掩体 + 掩体后一格站位"再点床。'
+            ),
         };
     }
 
@@ -653,10 +725,49 @@ export function planBedBombSite(input: {
             coverCell,
             standCell,
             coverAlreadySolid: best.coverAlreadySolid,
+            coverCellBlock: best.coverCellBlock,
             standDistance: vecDistance(bedCell, standCell),
             dragonDistance: bestDragonDistance,
         },
         reason: `床放 (${bedCell.x},${bedCell.y},${bedCell.z})，掩体放 (${coverCell.x},${coverCell.y},${coverCell.z})，人站 (${standCell.x},${standCell.y},${standCell.z}) 隔着一格点床。`,
+    };
+}
+
+export interface BedCoverAssessment {
+    /** 掩体格现在就是**完整立方体**（不用再放）。 */
+    alreadySolid: boolean;
+    /** 掩体格现在是什么方块（读不到给 null）。 */
+    cellBlock: string | null;
+    /** 要放的话用背包里哪个方块（不用放时给 null）。 */
+    coverItem: string | null;
+    /** 掩体能不能兑现：现在就是完整方块，或者手里有方块能放上去。 */
+    available: boolean;
+    /** 人话理由，直接进回执。 */
+    reason: string;
+}
+
+/**
+ * 掩体结算：**唯一**的"这格算不算掩体"判据入口。
+ *
+ * 专门抽出来就是为了不让两条路径漂移：`bedBombDragon`（真炸）和 `endgameStatusReport`
+ * （干跑给模型看）必须用同一段判定。曾经真炸那条用 `isSolidName`，于是火把也能当掩体。
+ */
+export function assessBedCover(bot: any, site: BedBombSite): BedCoverAssessment {
+    const block = blockObjectAt(bot, site.coverCell);
+    const cellBlock = typeof block?.name === 'string' ? block.name : null;
+    const alreadySolid = isFullCoverBlock(block);
+    const coverItem = alreadySolid ? null : pickCoverBlockItemName(bot);
+    const where = describeCell(site.coverCell);
+    return {
+        alreadySolid,
+        cellBlock,
+        coverItem,
+        available: alreadySolid || coverItem != null,
+        reason: alreadySolid
+            ? `掩体格 ${where} 已经是完整方块（${cellBlock}），不用再放。`
+            : coverItem != null
+                ? `掩体格 ${where} 现在是 ${cellBlock ?? '读不到'}，**不算掩体**（火把/栅栏/铁栏杆/台阶都挡不住爆风），要放一块 ${coverItem} 上去再复验。`
+                : `掩体格 ${where} 现在是 ${cellBlock ?? '读不到'}，不算掩体，而且背包里没有能当掩体的完整方块（要 obsidian/cobblestone/stone 这类）。`,
     };
 }
 
@@ -736,24 +847,24 @@ export async function bedBombDragon(bot: any, options: { dryRun?: boolean } = {}
     const bedItem = pickBedItemName(bot);
     if (bedItem == null) return '背包里没有床。';
 
-    // —— 选址：全部从真实世界读，不写死坐标 ——
+    // —— 选址：全部从真实世界读，不写死坐标（探针给方块对象：掩体要按碰撞箱判） ——
     const siteResult = planBedBombSite({
         dragonHead: headPosition,
         self: position,
-        probe: (p) => blockNameAt(bot, p),
+        probe: (p) => blockObjectAt(bot, p),
     });
     if (!siteResult.ok || siteResult.site == null) return `没有执行床炸：${siteResult.reason}`;
     const site = siteResult.site;
 
     const trench = detectPodiumTrench(bot, site.standCell);
-    const coverItem = site.coverAlreadySolid ? null : pickCoverBlockItemName(bot);
-    const coverAvailable = site.coverAlreadySolid || coverItem != null;
+    // 掩体：只有**完整立方体**才算（火把/栅栏/铁栏杆/台阶都不算），或者手里有完整方块能放上去。
+    const cover = assessBedCover(bot, site);
     const plan = planBedBombing({
         dragonHead: headPosition,
         bedCell: site.bedCell,
         standCell: site.standCell,
-        // 掩体只有**现在就是实心**、或者**手里有方块能放下去**时才算数。
-        coverCells: coverAvailable ? [site.coverCell] : [],
+        // 纯逻辑层只认"调用方验过的格子"——所以这里必须已经按碰撞箱验过，见 assessBedCover。
+        coverCells: cover.available ? [site.coverCell] : [],
         inTrench: trench === true,
         health,
         dragonHealth: signals.dragonHealth,
@@ -763,6 +874,7 @@ export async function bedBombDragon(bot: any, options: { dryRun?: boolean } = {}
         return endgameReceipt('没有执行床炸（安全闸门拒绝，一个方块都没放）。', [
             plan.reason,
             siteResult.reason,
+            cover.reason,
             ...plan.warnings.slice(0, 3),
         ]);
     }
@@ -793,21 +905,28 @@ export async function bedBombDragon(bot: any, options: { dryRun?: boolean } = {}
     details.push(`床已放下（${bedItem}）。`);
 
     // —— 掩体：床边放一块方块（wiki 标准姿势：挡爆风的头） ——
-    if (!site.coverAlreadySolid) {
-        if (coverItem == null) {
-            return endgameReceipt('床放好了但**没有方块可以做掩体**，没敢点（床还在原地，可以用 placeHere 补一块再点）。', details);
-        }
-        const coverPlaced = await skills.placeBlock(bot, coverItem, site.coverCell.x, site.coverCell.y, site.coverCell.z);
-        const coverName = blockNameAt(bot, site.coverCell);
-        if (!coverPlaced || !isSolidName(coverName)) {
-            return endgameReceipt('掩体没放成，没敢点床（床还在原地）。', [
+    // **临炸之前重新结算一次**（不是复用选址时那份）：这中间可能过了几秒，世界会变。
+    const coverNow = assessBedCover(bot, site);
+    if (!coverNow.alreadySolid) {
+        if (coverNow.coverItem == null) {
+            return endgameReceipt('床放好了但**没有完整方块可以做掩体**，没敢点（床还在原地，可以用 placeHere 补一块再点）。', [
                 ...details,
-                `掩体本该放在 (${site.coverCell.x},${site.coverCell.y},${site.coverCell.z})（用 ${coverItem}），现在读到的是 ${coverName ?? '读不到'}。`,
+                coverNow.reason,
             ]);
         }
-        details.push(`掩体已放好（${coverItem} @ ${site.coverCell.x},${site.coverCell.y},${site.coverCell.z}）。`);
+        const coverPlaced = await skills.placeBlock(bot, coverNow.coverItem, site.coverCell.x, site.coverCell.y, site.coverCell.z);
+        const coverBlockAfter = blockObjectAt(bot, site.coverCell);
+        if (!coverPlaced || !isFullCoverBlock(coverBlockAfter)) {
+            return endgameReceipt('掩体没放成（那一格不是完整方块），没敢点床（床还在原地）。', [
+                ...details,
+                `掩体本该放在 ${describeCell(site.coverCell)}（用 ${coverNow.coverItem}），现在读到的是 ${
+                    typeof coverBlockAfter?.name === 'string' ? coverBlockAfter.name : '读不到'
+                }（还可能是火把/栅栏这类挡不住爆风的东西）。`,
+            ]);
+        }
+        details.push(`掩体已放好（${coverNow.coverItem} @ ${describeCell(site.coverCell)}，完整方块）。`);
     } else {
-        details.push('掩体格本来就是实心方块，直接用。');
+        details.push(coverNow.reason);
     }
 
     // —— 站到掩体后面（不是掩体那一格） ——
@@ -951,28 +1070,30 @@ export function endgameStatusReport(bot: any): string {
     }
     if (signals.inEnd && signals.dragonAlive && signals.dragonPerched && signals.position != null) {
         // 干跑一次床炸闸门：让模型在"放床之前"就知道现在能不能炸。
+        // 探针给的是**方块对象**：掩体要按碰撞箱判"挡不挡得住"，名字判断不了。
         const site = planBedBombSite({
             dragonHead: signals.dragonPosition ?? END_PODIUM,
             self: signals.position,
-            probe: (p) => blockNameAt(bot, p),
+            probe: (p) => blockObjectAt(bot, p),
         });
         const health = typeof bot?.health === 'number' && Number.isFinite(bot.health) ? bot.health : null;
         if (!site.ok || site.site == null) {
             lines.push(`【床炸闸门】现在不能炸：${site.reason}`);
         } else {
-            const coverItem = site.site.coverAlreadySolid ? null : pickCoverBlockItemName(bot);
-            const coverAvailable = site.site.coverAlreadySolid || coverItem != null;
+            // 和真正炸的时候**同一段判定**，免得"报告说能炸、真炸被拒"或反过来。
+            const cover = assessBedCover(bot, site.site);
             const plan = planBedBombing({
                 dragonHead: signals.dragonPosition ?? END_PODIUM,
                 bedCell: site.site.bedCell,
                 standCell: site.site.standCell,
-                coverCells: coverAvailable ? [site.site.coverCell] : [],
+                coverCells: cover.available ? [site.site.coverCell] : [],
                 inTrench: detectPodiumTrench(bot, site.site.standCell) === true,
                 health: health ?? undefined,
                 dragonHealth: signals.dragonHealth,
             });
             lines.push(`【床炸闸门】${plan.ok ? '现在可以炸：' : '现在不能炸：'}${plan.reason}`);
-            if (plan.ok) lines.push(`  站位/掩体：${site.reason}`);
+            lines.push(`  掩体：${cover.reason}`);
+            if (plan.ok) lines.push(`  站位：${site.reason}`);
         }
     }
     return lines.join('\n');

@@ -3457,6 +3457,34 @@ function stringifyItem(bot: any, item: any): string {
     return text;
 }
 
+/**
+ * `mineBlock` 的承重块判据：目标是"你正站着的那一格 / 支撑你的那一格"吗？
+ *
+ * 为什么必须有：D2 放行徒手挖软方块之后，`mineBlock` 也能挖**自己脚下**了——
+ * 脚下是 netherrack、再下面就是岩浆海时，这一挖就是自杀。承重块的保护原本
+ * 只写在 `assessPlaceBlockRisk`（placeBlock 用），挖的路径上没有任何检查。
+ * 对抗验证给了可复现反例：站在 netherrack 上、下面就是岩浆、空手 →
+ * 旧代码拒绝，新代码 `dug=true`。
+ *
+ * ⚠️ 只拦"正下方"两格（脚那一格 + 它下面一格）。**往前/往侧挖照旧放行**——
+ * D2 的逃生场景挖的是前方的方块，不能被这条规则挡回去。想往下走请用 `digDown`：
+ * 它自带 `classifyDigDownStep` 的岩浆/落差检查。
+ */
+export function isFootingBlock(
+    feet: { x?: unknown; y?: unknown; z?: unknown } | null | undefined,
+    target: { x?: unknown; y?: unknown; z?: unknown } | null | undefined,
+): boolean {
+    const fx = Math.floor(Number(feet?.x));
+    const fy = Math.floor(Number(feet?.y));
+    const fz = Math.floor(Number(feet?.z));
+    const tx = Math.floor(Number(target?.x));
+    const ty = Math.floor(Number(target?.y));
+    const tz = Math.floor(Number(target?.z));
+    if (!Number.isFinite(fx) || !Number.isFinite(fy) || !Number.isFinite(fz)) return false;
+    if (!Number.isFinite(tx) || !Number.isFinite(ty) || !Number.isFinite(tz)) return false;
+    return tx === fx && tz === fz && (ty === fy || ty === fy - 1);
+}
+
 export async function mineBlockAt(bot: any, x: number, y: number, z: number): Promise<boolean> {
     /**
      * 挖掉**指定坐标**的那一格。
@@ -3475,6 +3503,16 @@ export async function mineBlockAt(bot: any, x: number, y: number, z: number): Pr
     }
     if (target.name === 'air' || target.name === 'cave_air' || target.name === 'void_air') {
         log(bot, `(${x},${y},${z}) 是空气，不用挖。`);
+        return false;
+    }
+    // **别挖自己的立足点。** 徒手挖软方块放行之后（D2），软方块正好是脚下那格时
+    // 会连人带方块一起掉下去——下界岩下面常常就是岩浆海。往前往侧挖不受影响。
+    if (isFootingBlock(bot?.entity?.position, target.position)) {
+        log(
+            bot,
+            `不挖 ${target.name} @(${x},${y},${z})：**这是你脚下的承重方块**，拆了会掉下去（下面可能是岩浆或深井）。` +
+                '要往下走用 digDown（它自带岩浆/落差检查）；只想换位置就先挪到旁边一格再挖。',
+        );
         return false;
     }
     const dist: number = bot.entity.position.distanceTo(target.position);
