@@ -18,6 +18,7 @@ import { Vec3 } from 'vec3';
 import * as skills from './skills.js';
 import type { MoveDirection } from './skills.js';
 import * as world from './world.js';
+import settings from '../../shared/settings.js';
 // 找水只留一份实现（`nearestWater` 在 progression 里，只扫已加载区块）：
 // progression 不 import survival，所以这条依赖不会成环。
 import { capLines, capReceipt, nearestWater } from './progression.js';
@@ -1003,6 +1004,275 @@ export function findNearestSolidAhead(
     return best;
 }
 
+/**
+ * **横向逃生第一步**：同层或上一格、`maxDistance` 格以内有没有能站住的落脚点。
+ *
+ * 真机 2026-10-18 21:44（overnight_a）：垂直水柱里泡着，血 20→16.17，
+ * 而**同层一步之外 `(4,62,29)` 就是草地**。老实现先寻路（被避水规则锁死）、
+ * 再往上/往前游、再上浮——从来没试过"横着走一步上岸"。
+ * 水在往下流时上浮顶不住，横向离开水流才是正解，所以这一步排在最前面。
+ */
+export function findStepOutSpot(bot: any, maxDistance = 2): DrySpot | null {
+    const p = bot?.entity?.position;
+    if (p == null || typeof bot?.blockAt !== 'function') return null;
+    const bx = Math.floor(p.x);
+    const by = Math.floor(p.y);
+    const bz = Math.floor(p.z);
+    const R = Math.max(1, Math.min(4, Math.floor(maxDistance)));
+    let best: DrySpot | null = null;
+    let bestScore = Number.POSITIVE_INFINITY;
+    for (let dx = -R; dx <= R; dx++) {
+        for (let dz = -R; dz <= R; dz++) {
+            const horizontal = Math.hypot(dx, dz);
+            if (horizontal === 0 || horizontal > R + 0.5) continue;
+            for (const dy of [0, 1]) {
+                const x = bx + dx;
+                const y = by + dy;
+                const z = bz + dz;
+                if (!isDryStandableAt(bot, x, y, z)) continue;
+                const score = horizontal + dy * 0.5;
+                if (score < bestScore) {
+                    bestScore = score;
+                    best = { x, y, z, distance: Math.round(score * 10) / 10, waterRise: dy };
+                }
+            }
+        }
+    }
+    return best;
+}
+
+export interface WaterFlowState {
+    /** 有 level 读数且 >0，或名字是 flowing_*：水在流动。 */
+    flowing: boolean;
+    /** level >= 8（下落水柱）：竖直方向被往下推。 */
+    falling: boolean;
+}
+
+/** 读一格水的流动状态（不是水就返回 null）。 */
+export function waterFlowAt(bot: any, x: number, y: number, z: number): WaterFlowState | null {
+    const name = blockNameAtSafe(bot, x, y, z);
+    if (name == null || !isWaterBlockName(name)) return null;
+    let block: any = null;
+    try {
+        block = bot?.blockAt?.(new Vec3(Math.floor(x), Math.floor(y), Math.floor(z)));
+    } catch {
+        block = null;
+    }
+    const level = readFluidLevel(block);
+    if (level == null) {
+        // 读不到 level：至少能用名字判"流动水"。
+        const flowingByName = typeof name === 'string' && name.startsWith('flowing_');
+        return { flowing: flowingByName, falling: false };
+    }
+    return { flowing: level >= 1, falling: level >= 8 };
+}
+
+/**
+ * 脚下/头所在的水是不是**往下流**——"上浮顶不住"的签名。
+ *
+ * 真机 21:44（overnight_a）：水柱里的水是向下流动的，bot 一直往上顶却一直在原地，
+ * 氧气耗尽开始掉血。回执必须把它说成"水流把你按下去"，否则模型会一直重试上浮。
+ */
+export function inDownwardCurrent(bot: any): boolean {
+    const f = botFeet(bot);
+    if (f == null) return false;
+    for (const dy of [0, 1]) {
+        const flow = waterFlowAt(bot, f.x, f.y + dy, f.z);
+        if (flow != null && (flow.falling || flow.flowing)) return true;
+    }
+    return false;
+}
+
+/** 这些方块**永远不挖**（挖不动/挖了没意义/会出事）。 */
+const ESCAPE_NEVER_DIG: ReadonlySet<string> = new Set([
+    'air',
+    'cave_air',
+    'void_air',
+    'water',
+    'flowing_water',
+    'lava',
+    'flowing_lava',
+    'bedrock',
+    'barrier',
+    'light',
+    'structure_void',
+    'end_portal',
+    'end_gateway',
+    'nether_portal',
+    'reinforced_deepslate',
+    'obsidian',
+    'crying_obsidian',
+    'respawn_anchor',
+    'chest',
+    'trapped_chest',
+    'ender_chest',
+    'barrel',
+    'furnace',
+    'blast_furnace',
+    'smoker',
+    'crafting_table',
+    'spawner',
+    'beacon',
+]);
+
+/** 徒手就能快速挖开的软方块（硬度 < 1）。 */
+const ESCAPE_SOFT_DIG: ReadonlySet<string> = new Set([
+    'dirt',
+    'grass_block',
+    'coarse_dirt',
+    'rooted_dirt',
+    'podzol',
+    'mycelium',
+    'sand',
+    'red_sand',
+    'gravel',
+    'clay',
+    'snow',
+    'snow_block',
+    'netherrack',
+    'soul_sand',
+    'soul_soil',
+    'mud',
+    'moss_block',
+    'farmland',
+    'dirt_path',
+]);
+
+export interface EscapeDigPlan {
+    /** 需要挖掉的格子（按顺序，先挖下面的再挖上面的）。 */
+    dig: Array<{ x: number; y: number; z: number }>;
+    /** 挖完之后要站上去的格子（脚的位置）。 */
+    stand: { x: number; y: number; z: number };
+    /** same-level = 平着挪进去；step-up = 跳上一格台阶。 */
+    kind: 'same-level' | 'step-up';
+    direction: 'north' | 'south' | 'east' | 'west';
+}
+
+/**
+ * **挖出台阶**：站在坑里/水坑里时，人是怎么出来的——挖一面墙、跨进去、再挖、再上。
+ *
+ * 纯函数（只吃一个 `blockAt` 和一个 `canDig`），所以可以直接拿真机地形表做单测。
+ * 优先 `step-up`（挖开隔壁**头上**那格，跳上它下面的实心块——一步升高一层），
+ * 其次 `same-level`（挖穿同层的墙 + 上面那格，平着挪进隔间）。
+ *
+ * @returns 没有可挖的出路时返回 null（调用方据此写"四周是实心墙/挖不动"的回执）。
+ */
+export function planEscapeDig(
+    blockAt: (x: number, y: number, z: number) => string | null,
+    feet: { x: number; y: number; z: number },
+    canDig: (name: string) => boolean,
+): EscapeDigPlan | null {
+    const passable = (name: string | null): boolean =>
+        name != null && (isAirBlockName(name) || isWaterBlockName(name));
+    const solid = (name: string | null): boolean =>
+        name != null && !passable(name) && name !== 'lava' && name !== 'flowing_lava';
+    const directions: Array<{ dx: number; dz: number; dir: EscapeDigPlan['direction'] }> = [
+        { dx: 1, dz: 0, dir: 'east' },
+        { dx: -1, dz: 0, dir: 'west' },
+        { dx: 0, dz: 1, dir: 'south' },
+        { dx: 0, dz: -1, dir: 'north' },
+    ];
+    for (const { dx, dz, dir } of directions) {
+        const nx = feet.x + dx;
+        const nz = feet.z + dz;
+        // ① step-up：隔壁脚下是实心（天然台阶），挖开它上面两格 → 站到台阶顶
+        const stepBlock = blockAt(nx, feet.y, nz);
+        const stepFeet = blockAt(nx, feet.y + 1, nz);
+        const stepHead = blockAt(nx, feet.y + 2, nz);
+        const digUp: Array<{ x: number; y: number; z: number }> = [];
+        if (solid(stepBlock) && (passable(stepFeet) || canDig(stepFeet ?? '')) && (passable(stepHead) || canDig(stepHead ?? ''))) {
+            if (solid(stepFeet)) digUp.push({ x: nx, y: feet.y + 1, z: nz });
+            if (solid(stepHead)) digUp.push({ x: nx, y: feet.y + 2, z: nz });
+            return { dig: digUp, stand: { x: nx, y: feet.y + 1, z: nz }, kind: 'step-up', direction: dir };
+        }
+        // ② same-level：挖穿隔壁的脚/头两格，脚下那格必须实心（挖完能站）
+        const wallFeet = blockAt(nx, feet.y, nz);
+        const wallHead = blockAt(nx, feet.y + 1, nz);
+        const wallFloor = blockAt(nx, feet.y - 1, nz);
+        if (!solid(wallFloor)) continue;
+        const cells = [
+            { name: wallFeet, y: feet.y },
+            { name: wallHead, y: feet.y + 1 },
+        ];
+        const diggable = cells.every((cell) => passable(cell.name) || (solid(cell.name) && canDig(cell.name ?? '')));
+        if (!diggable) continue;
+        const dig = cells.filter((cell) => solid(cell.name)).map((cell) => ({ x: nx, y: cell.y, z: nz }));
+        if (dig.length === 0) continue;
+        return { dig, stand: { x: nx, y: feet.y, z: nz }, kind: 'same-level', direction: dir };
+    }
+    return null;
+}
+
+/**
+ * 这一格挖得动吗（**逃生口径**：不是"理论上能挖"，而是"够快能当逃生手段"）。
+ *
+ * 徒手破石头要十几秒——在水里等不起。所以硬度 ≥1 的方块要求背包里有镐
+ * （≥5 要求钻石/下界合金镐），否则按"挖不动"处理，由调用方在回执里说明
+ * 「四周是实心墙、手上没镐」并给出下一步（而不是让模型再试一次同样的东西）。
+ */
+export function escapeDiggableName(bot: any, name: string): boolean {
+    if (name === '' || ESCAPE_NEVER_DIG.has(name)) return false;
+    let hardness: number | null = null;
+    try {
+        const def = bot?.registry?.blocksByName?.[name];
+        const h = Number(def?.hardness);
+        if (Number.isFinite(h)) hardness = h;
+    } catch {
+        hardness = null;
+    }
+    if (hardness == null) return ESCAPE_SOFT_DIG.has(name);
+    if (hardness < 0) return false;
+    if (hardness < 1) return true;
+    const pickaxes = inventoryItemNames(bot).filter((item) => item.endsWith('_pickaxe'));
+    if (pickaxes.length === 0) return false;
+    if (hardness >= 5) return pickaxes.some((item) => item.startsWith('diamond_') || item.startsWith('netherite_'));
+    return true;
+}
+
+function inventoryItemNames(bot: any): string[] {
+    try {
+        const items = bot?.inventory?.items?.() ?? [];
+        return items.map((item: any) => String(item?.name ?? '')).filter((name: string) => name !== '');
+    } catch {
+        return [];
+    }
+}
+
+/**
+ * 最后手段：主动溺水。**只在 keepInventory 明确时才敢断言代价**。
+ *
+ * 用户核对过这个存档 `level.dat` 的 keepInventory 是 `"true"`（物品和经验都保留）。
+ * 但代码不能假设每个存档都一样，所以三态：true = 说清低代价；false = 不要选；
+ * null = 先让模型确认。**这不是首选**，只在"所有物理逃生手段都失败"时才给。
+ */
+export function deliberateDrownAdvice(keepInventory: boolean | null | undefined): string {
+    if (keepInventory === false) {
+        return '最后手段：**不要**主动溺水——这个存档没开 keepInventory，死了会掉光背包。继续找路或等人来救。';
+    }
+    if (keepInventory === true) {
+        return (
+            '最后手段（这个存档**开了 keepInventory，死亡不掉落**）：实在出不去就主动溺水。' +
+            '代价只有一次重生——满血复活、背包和经验都保留，比在水里继续掉血划算；' +
+            '要这么做就停止上浮、让它沉，别再浪费体力。'
+        );
+    }
+    return (
+        '如果这个存档开了 keepInventory（死亡不掉落；先确认：/gamerule keepInventory 或问管理员），' +
+        '**主动溺水是一个真选项**：满血复活、物品与经验都保留，代价只剩一次走位；' +
+        '没开就会掉光背包——确认之后再决定。'
+    );
+}
+
+function configuredKeepInventory(): boolean | null {
+    try {
+        const raw = (settings as any)?.gameplay?.keepInventoryOnDeath;
+        if (raw === true || raw === false) return raw;
+    } catch {
+        // 读不到就按"未知"处理。
+    }
+    return null;
+}
+
 function posText(bot: any): string {
     const p = bot?.entity?.position;
     if (p == null) return '(unknown)';
@@ -1013,6 +1283,12 @@ export interface EscapeWaterDeps {
     goTo?: (bot: any, x: number, y: number, z: number, closeness: number) => Promise<boolean>;
     /** 向上挖开实心方块（默认 skills.mineBlockAt）。 */
     mineUp?: (bot: any, x: number, y: number, z: number) => Promise<boolean>;
+    /** 挖任意一格（挖台阶逃生用；默认 skills.mineBlockAt）。 */
+    digBlock?: (bot: any, x: number, y: number, z: number) => Promise<boolean>;
+    /** 逃生口径的"这一格挖得动吗"（默认 `escapeDiggableName`，会看镐）。 */
+    canDig?: (bot: any, name: string) => boolean;
+    /** 这个存档是否开了 keepInventory（主动溺水那个选项的代价判断）。 */
+    keepInventory?: boolean | null;
     sleep?: (ms: number) => Promise<void>;
     now?: () => number;
     maxMs?: number;
@@ -1190,8 +1466,11 @@ export async function floatUpSkill(
  * 水位变化 / 是否通过硬校验。
  */
 export async function escapeWaterSkill(bot: any, deps: EscapeWaterDeps = {}): Promise<string> {
-    const goTo = deps.goTo ?? ((b: any, x: number, y: number, z: number, c: number) => skills.goToPosition(b, x, y, z, c));
+    const goTo = deps.goTo ?? ((b: any, x: number, y: number, z: number, c: number) => skills.goToPosition(b, x, y, z, c, { allowWater: true }));
     const mineUp = deps.mineUp ?? ((b: any, x: number, y: number, z: number) => skills.mineBlockAt(b, x, y, z));
+    const digBlock = deps.digBlock ?? ((b: any, x: number, y: number, z: number) => skills.mineBlockAt(b, x, y, z));
+    const canDig = deps.canDig ?? ((b: any, name: string) => escapeDiggableName(b, name));
+    const keepInventory = deps.keepInventory ?? configuredKeepInventory();
     const sleep = deps.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
     const now = deps.now ?? Date.now;
     const maxMs = deps.maxMs ?? 12000;
@@ -1207,6 +1486,28 @@ export async function escapeWaterSkill(bot: any, deps: EscapeWaterDeps = {}): Pr
         const riseText = delta == null ? '未知' : `${delta >= 0 ? '+' : ''}${delta}（${delta > 0 ? '上浮' : delta < 0 ? '下沉' : '未变'}）`;
         return `已真正脱险（硬校验：脚/头不在水 + 脚下实心 + 连续 ${needed} 次确认）：${how}，起点 ${start} → ${posText(bot)}，水位变化 y ${riseText}。`;
     };
+
+    // ── ⓪ **横向一步上岸**（排在最前）──────────────────────────────────
+    // 真机 21:44（overnight_a）：垂直水柱里血 20→16.17，而同层一步之外
+    // `(4,62,29)` 就是草地。老实现先寻路（被避水规则锁死）→ 再游 → 再上浮，
+    // 从来没试过"横着走一步"。水往下流时上浮顶不住，横着离开水流才是正解。
+    const stepSpot = findStepOutSpot(bot, 2);
+    if (stepSpot != null) {
+        try {
+            const ok = await goTo(bot, stepSpot.x, stepSpot.y, stepSpot.z, 1);
+            if (ok && (await confirmDryGround(bot, { sleep, startY, needed }))) {
+                return logLine(
+                    bot,
+                    receipt(
+                        `**横向一步上岸**：踩上 (${stepSpot.x},${stepSpot.y - 1},${stepSpot.z}) 这块实心` +
+                            `（就在旁边，没往上爬；落点 (${stepSpot.x},${stepSpot.y},${stepSpot.z})）`,
+                    ),
+                );
+            }
+        } catch {
+            // 横向走不通就继续走后面的路径/挖台阶。
+        }
+    }
 
     const spot = findNearestDrySpot(bot, 48);
     let pathError = '';
@@ -1246,6 +1547,7 @@ export async function escapeWaterSkill(bot: any, deps: EscapeWaterDeps = {}): Pr
         }
     }
 
+    const beforeFloatY = botY(bot);
     const float = await floatUpSkill(bot, {
         sleep,
         now,
@@ -1258,19 +1560,124 @@ export async function escapeWaterSkill(bot: any, deps: EscapeWaterDeps = {}): Pr
         return logLine(bot, receipt(`无干岸，改为向上挖/上浮，${float.reason}`));
     }
 
+    // ── ④ **挖出台阶**（人从坑里/水坑里出来就是这么干的）────────────────
+    const digAttempt = await digStepOutOfPit(bot, {
+        sleep,
+        now,
+        maxMs: Math.max(3000, Math.min(maxMs, 6000)),
+        digBlock,
+        canDig,
+        goTo,
+    });
+    if (digAttempt.ok) {
+        return logLine(bot, receipt(`**挖出台阶**：挖开 ${digAttempt.dug.join('、')}，${digAttempt.reason}`));
+    }
+
+    // ── 失败：把"为什么"和"下一步"说清楚，最后一档才提主动溺水 ──────────
     const endY = botY(bot);
     const delta = startY != null && endY != null ? Math.round((endY - startY) * 10) / 10 : null;
     const riseText = delta == null ? '未知' : `${delta >= 0 ? '+' : ''}${delta}（${delta > 0 ? '上浮' : delta < 0 ? '下沉' : '未变'}）`;
+    const risingFailed = beforeFloatY != null && endY != null && endY <= beforeFloatY + 0.2;
+    const current = inDownwardCurrent(bot);
+    const wallPlan = planEscapeDig(
+        (x, y, z) => blockNameAtSafe(bot, x, y, z),
+        botFeet(bot) ?? { x: 0, y: 0, z: 0 },
+        (name) => canDig(bot, name),
+    );
+    const why = current && risingFailed
+        ? '**水在往下流，上浮顶不住**——你越游越被按回去，先横向离开这股水流（朝最近的干岸横着游）'
+        : digAttempt.dug.length > 0
+            ? `墙能挖开（已挖 ${digAttempt.dug.join('、')}），但${digAttempt.reason}`
+            : wallPlan == null
+                ? '四周是实心墙，而且**挖不动**（手上没有能快速挖开它的镐，徒手在水里等不起）'
+                : '四周的墙能挖，但挖完还是没找到落脚点';
+    const nextSteps =
+        wallPlan != null && wallPlan.dig.length > 0
+            ? `下一步（照做即可）：mineBlock(x=${wallPlan.dig[0].x}, y=${wallPlan.dig[0].y}, z=${wallPlan.dig[0].z}) 挖开它，` +
+                `再朝 ${wallPlan.direction} 挪一步；背包里有方块也可以 placeHere/pillarUp 垫高。`
+            : '下一步（照做即可）：先确认背包有没有可放置方块（placeHere/pillarUp 垫高），' +
+                '或用 mineBlock 点名挖开你旁边那面墙；别在原地重复 escapeWater。';
     return logLine(
         bot,
-        `浅水坑困死：48 格内` +
-            (spot == null ? '没找到可站立干岸' : `最近干岸 (${spot.x},${spot.y},${spot.z}) 到不了`) +
-            (solidAhead == null ? '，也没有可作目标的实心方块；' : `，朝 (${solidAhead.x},${solidAhead.y},${solidAhead.z}) 游/跳也没能上岸；`) +
-            `向上挖/上浮也没找到空气（${float.reason}）；水底${hasSupport(bot) ? '有实心但垫台阶失败' : '没有可垫脚的实心'}。` +
+        `没能脱险（浅水坑困死）：${why}。` +
+            (spot == null ? '48 格内没找到可站立干岸；' : `最近干岸 (${spot.x},${spot.y},${spot.z}) 到不了；`) +
+            `向上挖/上浮也没成（${float.reason}）；` +
+            (current ? '脚下/头所在的水在流动（上浮被往下推）；' : '') +
             `起点 ${start}，现在 ${posText(bot)}，水位变化 y ${riseText}；` +
-            '硬校验仍未上岸（脚/头仍在水里或脚下没有实心）。下一步建议：检查背包有没有可放置方块，朝岸边再试 escapeWater；' +
-            '如果有材料，先 placeHere/pillarUp 垫高，再 goToCoordinates 到最近干岸；不要往下游。',
+            '硬校验仍未上岸（脚/头仍在水里或脚下没有实心）。' +
+            nextSteps +
+            '不要往下游。' +
+            ' ' +
+            deliberateDrownAdvice(keepInventory),
     );
+}
+
+/**
+ * 挖出台阶：读 → 判断 → 挖 → **复读确认真的变成空气** → 挪进去，最多几轮。
+ *
+ * 每步都重新读地形（不缓存），因为水会流进来、方块会掉；挖完不复读就挪，
+ * 会出现"以为挖开了其实没有"的假脱险——这正是 mineTunnel 那条纪律。
+ */
+async function digStepOutOfPit(
+    bot: any,
+    opts: {
+        sleep: (ms: number) => Promise<void>;
+        now: () => number;
+        maxMs: number;
+        digBlock: (bot: any, x: number, y: number, z: number) => Promise<boolean>;
+        canDig: (bot: any, name: string) => boolean;
+        goTo: (bot: any, x: number, y: number, z: number, closeness: number) => Promise<boolean>;
+    },
+): Promise<{ ok: boolean; dug: string[]; reason: string }> {
+    const dug: string[] = [];
+    const deadline = opts.now() + opts.maxMs;
+    for (let step = 0; step < 4; step++) {
+        if (bot?.interrupt_code === true) return { ok: false, dug, reason: '被 Stop/保命打断' };
+        const feet = botFeet(bot);
+        if (feet == null) return { ok: false, dug, reason: '读不到自己的位置' };
+        const plan = planEscapeDig(
+            (x, y, z) => blockNameAtSafe(bot, x, y, z),
+            feet,
+            (name) => opts.canDig(bot, name),
+        );
+        if (plan == null) {
+            return { ok: false, dug, reason: dug.length > 0 ? '挖开了但没有可站的落脚点' : '四周没有可挖的墙' };
+        }
+        for (const cell of plan.dig) {
+            if (opts.now() > deadline) return { ok: false, dug, reason: '挖台阶超时' };
+            let ok = false;
+            try {
+                ok = await opts.digBlock(bot, cell.x, cell.y, cell.z);
+            } catch {
+                ok = false;
+            }
+            // **复读**：不是看返回值，是看它此刻真的变成了什么。
+            const after = blockNameAtSafe(bot, cell.x, cell.y, cell.z);
+            const through = after != null && (isAirBlockName(after) || isWaterBlockName(after));
+            if (!through) {
+                return {
+                    ok: false,
+                    dug,
+                    reason: `(${cell.x},${cell.y},${cell.z}) 没挖开（${ok ? '返回值说成功但方块还在' : '挖不动'}）`,
+                };
+            }
+            dug.push(`(${cell.x},${cell.y},${cell.z})`);
+        }
+        await opts.sleep(120);
+        let moved = false;
+        try {
+            moved = await opts.goTo(bot, plan.stand.x, plan.stand.y, plan.stand.z, 1);
+        } catch {
+            moved = false;
+        }
+        if (moved && isOnDryGround(bot)) {
+            return { ok: true, dug, reason: `站上了 (${plan.stand.x},${plan.stand.y},${plan.stand.z})` };
+        }
+        if (!moved) {
+            return { ok: false, dug, reason: `挖开了但走不进 (${plan.stand.x},${plan.stand.y},${plan.stand.z})` };
+        }
+    }
+    return { ok: false, dug, reason: '挖了几步还没出头' };
 }
 
 // ---------------------------------------------------------------

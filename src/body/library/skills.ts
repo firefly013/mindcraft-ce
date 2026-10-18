@@ -3143,6 +3143,14 @@ export interface PathfindGoalOptions {
     relaxDropDown?: boolean;
     /** 回执前缀（"第 2/4 段"）：分段/分档时让模型认得出这是哪一次。 */
     label?: string;
+    /**
+     * **逃生专用**：寻路时临时允许走水。
+     *
+     * 只有 `escapeWater` 这种"脚已经在水里"的动作才该传 true——避水规则会把
+     * 水里那格的所有相邻格判成危险，A* 一步都迈不出去，工具等于自相矛盾
+     * （真机 2026-10-18 21:37 overnight_b 卡 1×1 水坑）。普通移动一律不传。
+     */
+    allowWater?: boolean;
 }
 
 /** 一次寻路尝试的结果（阶梯需要知道"是探测失败还是算路失败"）。 */
@@ -3188,7 +3196,7 @@ export async function goToGoalDetailed(bot: any, goal: any, options: PathfindGoa
         }
     }
 
-    const nonDestructiveMovements: any = movementsFor(bot);
+    const nonDestructiveMovements: any = movementsFor(bot, { allowWater: options.allowWater === true });
     const dontBreakBlocks: string[] = ['glass', 'glass_pane'];
     for (const block of dontBreakBlocks) {
         // 某些 Movements 版本/替身没有 blocksCantBreak，add 时把这条兜住。
@@ -3207,7 +3215,7 @@ export async function goToGoalDetailed(bot: any, goal: any, options: PathfindGoa
     nonDestructiveMovements.placeCost = 2;
     nonDestructiveMovements.digCost = 10;
 
-    const destructiveMovements: any = movementsFor(bot);
+    const destructiveMovements: any = movementsFor(bot, { allowWater: options.allowWater === true });
 
     // **安全基线（落差 / 冲刺 / 跑酷 / 深水）不在这里设**——两套 Movements 都来自
     // `movementsFor()`，它在出厂时就套好了，见 `movements.ts`。
@@ -3457,7 +3465,14 @@ export function describeArrival(
     );
 }
 
-export async function goToPosition(bot: any, x: number | null, y: number | null, z: number | null, min_distance: number = 2): Promise<boolean> {
+export async function goToPosition(
+    bot: any,
+    x: number | null,
+    y: number | null,
+    z: number | null,
+    min_distance: number = 2,
+    options: { allowWater?: boolean } = {},
+): Promise<boolean> {
     /**
      * Navigate to the given position.
      * @param {MinecraftBot} bot, reference to the minecraft bot.
@@ -3539,7 +3554,7 @@ export async function goToPosition(bot: any, x: number | null, y: number | null,
                 );
             }
             // 中间段只要求"进到那一格附近"（1 格），最后一段才用调用方的 min_distance。
-            const outcome = await navigateLegWithLadder(bot, leg, lastLeg ? min_distance : 1, label);
+                const outcome = await navigateLegWithLadder(bot, leg, lastLeg ? min_distance : 1, label, options);
             if (outcome.ok) {
                 if (legs.length > 1 && !lastLeg) {
                     const now: any = bot?.entity?.position;
@@ -3632,6 +3647,7 @@ async function navigateLegWithLadder(
     leg: PathLeg,
     minDistance: number,
     label?: string,
+    options: { allowWater?: boolean } = {},
 ): Promise<{ ok: boolean; reason: string }> {
     let reason = '寻路失败（没有具体错误信息）';
     for (const step of PATH_LEG_LADDER) {
@@ -3653,6 +3669,7 @@ async function navigateLegWithLadder(
                 attempt: step.attempt,
                 relaxDropDown: step.attempt >= 3,
                 label: prefix + '（' + step.what + '）',
+                allowWater: options.allowWater === true,
             });
         } catch (err: unknown) {
             const msg = err instanceof Error ? err.message : String(err);

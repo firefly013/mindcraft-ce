@@ -15,16 +15,20 @@
  *
  * ## 三层防线，这层是第 1 层
  *
- * 1. **路径层（这里）** —— 任何寻路都不许规划穿过水的路线。100% 覆盖，不依赖
- *    调用点。
+ * 1. **路径层（这里）** —— 寻路不许规划穿过水的路线；**但「避开 X」永远不能
+ *    用在「你此刻正站在 X 里」上**（用户 2026-10-18 的原话，见
+ *    `relaxAvoidedTypesBotIsInside`）：站在水里时水必须对该次搜索可通行，
+ *    否则避水规则会把它自己那格的**所有邻居**判成危险，A* 连第一步都没有，
+ *    报 `No path to the goal` —— 用来出水的那条路被"防水"关掉了。
  * 2. **目标层** —— 有明确坐标的目标点预先拒绝（`goToGoal` 里那道）。
  * 3. **执行层** —— 已经进水了就强制出水（`forceExitWater`）。
  *
- * 只有第 1 层是"在任何情况下都有效"的：第 2 层管不了动态目标（追怪时怪跳进
- * 水里），第 3 层是事后补救。
+ * 第 1 层是"在任何情况下都有效"的那层；它现在按**状态**评估（每次
+ * `movementsFor()` 都重新读 bot 此刻站的那两格），不是启动时算一次。
  */
 
 import pf from 'mineflayer-pathfinder';
+import Vec3 from 'vec3';
 import * as mc from '../data/mcdata.js';
 import { deepWaterAllowed } from './permits.js';
 
@@ -81,10 +85,68 @@ export function applyWaterPolicy(movements: unknown, waterAllowed: boolean, wate
 }
 
 /**
+ * **「避开 X」永远不能应用在「你此刻正站在 X 里」的情况上。**
+ *
+ * 这是用户 2026-10-18 的原话，也是今晚两个 bot 被自己的安全策略锁死的根因：
+ * 脚在水里时，水在 `blocksToAvoid` 里 → 自己那格的**每个邻居**都是"危险" →
+ * A* 第一步都迈不出去 → `No path to the goal`。用来出水的那条路，被"防水"关掉了。
+ *
+ * 做法是把它当**状态**而不是常量：
+ *   - 逐次寻路评估（`movementsFor()` 每次新建实例时都重新读 bot 的位置）；
+ *   - **泛化到整个 `blocksToAvoid`**，不是只给 water 开洞：任何"被避开的方块类型"
+ *     只要 bot 此刻脚/头就在里面，就从这一套 Movements 里摘掉；
+ *   - 只在这一套实例上生效——bot 一上岸，下一次寻路又是全避让（不会"刚才碰过水，
+ *     以后就能穿湖"）。
+ *
+ * @returns 这次被临时放开的方块 id（调试/日志用）。
+ */
+export function relaxAvoidedTypesBotIsInside(bot: unknown, movements: unknown): number[] {
+  const m = movements as { blocksToAvoid?: Set<number> } | null;
+  const set = m?.blocksToAvoid;
+  if (set == null || typeof set.delete !== 'function') return [];
+  const relaxed: number[] = [];
+  for (const id of blockIdsBotIsInside(bot)) {
+    if (typeof set.has === 'function' && set.has(id)) {
+      set.delete(id);
+      relaxed.push(id);
+    }
+  }
+  return relaxed;
+}
+
+/** bot 脚/头所在两格的方块 id（读不到就返回空集）。 */
+function blockIdsBotIsInside(bot: unknown): Set<number> {
+  const ids = new Set<number>();
+  const b = bot as
+    | { entity?: { position?: { x?: unknown; y?: unknown; z?: unknown } }; blockAt?: (pos: unknown) => unknown }
+    | null
+    | undefined;
+  const p = b?.entity?.position;
+  if (p == null || typeof b?.blockAt !== 'function') return ids;
+  const x = Math.floor(Number(p.x));
+  const y = Math.floor(Number(p.y));
+  const z = Math.floor(Number(p.z));
+  if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(z)) return ids;
+  for (const dy of [0, 1]) {
+    try {
+      const block = b.blockAt(new Vec3(x, y + dy, z)) as { type?: unknown } | null | undefined;
+      const id = Number(block?.type);
+      if (Number.isFinite(id) && id >= 0) ids.add(id);
+    } catch {
+      // 这一格读不到就算了：宁可少放开一个类型，也不能让寻路崩掉。
+    }
+  }
+  return ids;
+}
+
+/**
  * 应用全部安全基线。调用方在**之后**再覆盖自己的偏好（digCost / canDig /
  * allow1by1towers 之类），这样安全项永远不会被业务偏好盖掉。
+ *
+ * `options.allowWater` 是给**逃生专用**的一次性放宽：只允许 `escapeWater`
+ * 这类"我已经在水里了"的动作传 true。普通移动绝不能传——见下面的注释。
  */
-export function applySafety(bot: unknown, movements: unknown): void {
+export function applySafety(bot: unknown, movements: unknown, options?: { allowWater?: boolean }): void {
   const m = movements as Record<string, unknown> | null;
   if (m == null) return;
   // 落差：默认 4，真机被带着直落 12~13 格摔死过
@@ -104,7 +166,16 @@ export function applySafety(bot: unknown, movements: unknown): void {
   // 与避让集合去管，而不是靠"把能力关掉"。
   m.allowSprinting = true;
   m.allowParkour = true;
-  applyWaterPolicy(movements, deepWaterAllowed(bot), waterBlockId(bot));
+  // **逃生例外**：`escapeWater` 只有在"脚已经在水中"时才会被调用，而避水规则
+  // 会把水里那格的**所有相邻格**都判成危险 —— A* 一步都迈不出去，工具自相矛盾
+  // （真机 2026-10-18 21:37，overnight_b 卡在 1×1 水坑里，rung 1 的原话就是
+  // "避水规则把所有相邻格都判成危险，A* 因此一步都走不出去"）。
+  // 所以逃生寻路要临时允许走水；**普通移动仍然严格避水**（这条策略没变，
+  // 只是多了一个只给逃生用的开关，见 `goToPosition` 的 `allowWater` 参数）。
+  applyWaterPolicy(movements, options?.allowWater === true || deepWaterAllowed(bot), waterBlockId(bot));
+  // **状态化豁免（用户规则）：站在 X 里就不许再"避开 X"。**
+  // 顺序很重要：先按策略把水加进/摘出避让集，再把"bot 此刻身体所在类型"放开。
+  relaxAvoidedTypesBotIsInside(bot, movements);
 }
 
 /**
@@ -167,9 +238,9 @@ export function applyScaffoldingBlocks(bot: unknown, movements: unknown): void {
  * **所有**需要寻路的地方都必须走这里。想要破坏性寻路就在返回值上改 `digCost`
  * 之类，别自己 new 一个。
  */
-export function movementsFor(bot: unknown): any {
+export function movementsFor(bot: unknown, options?: { allowWater?: boolean }): any {
   const m = new (pf as any).Movements(bot);
-  applySafety(bot, m);
+  applySafety(bot, m, options);
   applyScaffoldingBlocks(bot, m);
   return m;
 }
