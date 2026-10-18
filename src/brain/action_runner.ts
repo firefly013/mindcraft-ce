@@ -97,6 +97,15 @@ export interface ActionRunnerDeps {
   notify: (payload: ActionNotice) => void;
   /** 可选：通道观测。缺省什么都不做。 */
   trace?: (event: ActionTrace) => void;
+  /**
+   * 可选：读 bot 此刻的坐标（用于「还在跑」进度回执里判断**有没有在动**）。
+   *
+   * 真机反馈（2026-10-18 15:16，overnight_b）：`goToCoordinates 静默卡死 60 秒：
+   * 坐标/speed 全程不变，只在 60 秒时回一句「还在跑」`。只有时间、没有位置的
+   * 进度回执等于没有信息——模型分不清"慢慢走"和"卡死"。读不到就返回 null，
+   * 回执退回原来的措辞（不编造位置）。
+   */
+  bodyPosition?: () => Promise<{ x: number; y: number; z: number } | null>;
 }
 
 export class ActionRunner {
@@ -107,6 +116,7 @@ export class ActionRunner {
   private execute: (name: string, args: Record<string, unknown>) => Promise<string>;
   private notify: (payload: ActionNotice) => void;
   private trace: (event: ActionTrace) => void;
+  private bodyPosition: () => Promise<{ x: number; y: number; z: number } | null>;
   /** 只用于生成 `call_id`；不参与调度，也不影响 generation 的失效语义。 */
   private callSeq = 0;
   /** 当前认领通道的那次调用的标识；用于同动作幂等回执。 */
@@ -121,6 +131,7 @@ export class ActionRunner {
     this.execute = deps.execute;
     this.notify = deps.notify;
     this.trace = deps.trace ?? ((): void => {});
+    this.bodyPosition = deps.bodyPosition ?? (async (): Promise<null> => null);
   }
 
   /** 跑一个工具调用：动作类即时回 accepted，查询类阻塞回内容。 */
@@ -218,8 +229,43 @@ export class ActionRunner {
     // 大范围搜索/长距离移动可能几分钟才返回：身体还在跑，但模型此前只能看到
     // accepted 后的一片沉默。大脑侧每 60 秒发一条「还在跑」的进度回执，保证任何
     // 路径至少有一个明确交代；动作真正结束/失败时下面照旧会覆盖报结果。
+    //
+    // **但"还在跑"本身几乎没用**——真机反馈（2026-10-18 15:16，overnight_b
+    // 的原话）：`goToCoordinates 静默卡死 60 秒：坐标/speed 全程不变，只在 60 秒时
+    // 回一句「还在跑」`。模型据此无法判断"是在慢慢走"还是"彻底卡住了"。
+    // 所以这条回执必须带**可比较的状态**：坐标、速度、以及"和上一条比动了没有"。
+    // 位置连续两次没变就明说是卡住，并给出下一步（那是模型的决策点，不是噪音）。
+    let lastPingPosition: { x: number; y: number; z: number } | null = null;
+    let lastPingAt: number | null = null;
     const progressTimer = setInterval(() => {
+      void (async (): Promise<void> => {
       const seconds = Math.round((Date.now() - startedAt) / 1000);
+      const now = Date.now();
+      let pos: { x: number; y: number; z: number } | null = null;
+      try {
+        pos = await this.bodyPosition();
+      } catch {
+        pos = null; // 采样失败就当"读不到坐标"，不编造。
+      }
+      const where =
+        pos == null
+          ? '读不到坐标'
+          : `(${pos.x.toFixed(1)}, ${pos.y.toFixed(1)}, ${pos.z.toFixed(1)})`;
+      let movement = '';
+      if (pos != null && lastPingPosition != null && lastPingAt != null) {
+        const moved = Math.hypot(pos.x - lastPingPosition.x, pos.y - lastPingPosition.y, pos.z - lastPingPosition.z);
+        const spanSeconds = Math.max(1, Math.round((now - lastPingAt) / 1000));
+        const perSecond = moved / spanSeconds;
+        if (moved < 1) {
+          movement =
+            `⚠️ 这 ${spanSeconds} 秒里位置几乎没变（位移 ${moved.toFixed(1)} 格）——**很可能是卡住了**，不是在慢慢走。` +
+            '下一步：Stop 掉它，然后把目标拆成 ≤32 格的中间点、或往侧面挪 2~4 格再试；被方块挡着就先 mineBlock。';
+        } else {
+          movement = `距上一条回执移动了 ${moved.toFixed(1)} 格（约 ${perSecond.toFixed(1)} 格/秒）。`;
+        }
+      }
+      lastPingPosition = pos;
+      lastPingAt = now;
       this.notify({
         call: name,
         action_id: name,
@@ -229,9 +275,11 @@ export class ActionRunner {
           status: 'accepted',
           data:
             `[${callId} · generation ${generation}] ${name} 还在跑（已 ${seconds} 秒，尚未返回结果）。` +
-            '如果它在做大范围搜索或长距离移动，可以继续等；如果要改做别的，可以 Stop。',
+            `现在在 ${where}。${movement}` +
+            (movement === '' ? '如果它在做大范围搜索或长距离移动，可以继续等；如果要改做别的，可以 Stop。' : ''),
         },
       });
+      })();
     }, ACTION_PROGRESS_NOTICE_MS);
     // **最后保险丝**：身体侧长时间不返回时，动作通道不能永久泄漏。
     // 真机出现过 currentAction 卡住、快照却显示 idle 的幽灵锁；到点强制释放，

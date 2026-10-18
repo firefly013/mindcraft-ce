@@ -81,6 +81,90 @@ function makeHarness(): Harness {
 
 const tick = () => new Promise<void>((r) => setTimeout(r, 0));
 
+/**
+ * 「还在跑」的进度回执必须带**可比较的状态**。
+ *
+ * 真机反馈（2026-10-18 15:16，overnight_b 原话）：`goToCoordinates 静默卡死 60 秒：
+ * 坐标/speed 全程不变，只在 60 秒时回一句「还在跑」`——只有时间、没有位置的进度
+ * 回执等于没有信息，模型分不清"慢慢走"和"卡死"。
+ */
+describe('ActionRunner 进度回执（带位置，能判断卡没卡）', () => {
+  function runnerWithPosition(positions: Array<{ x: number; y: number; z: number } | null>) {
+    const scheduler = new Scheduler();
+    const notices: Array<{ call: string; result: ToolOutcome }> = [];
+    let call = 0;
+    const gate = deferred<string>();
+    const runner = new ActionRunner({
+      scheduler,
+      catalog: CATALOG,
+      record: () => Promise.resolve(),
+      speak: () => {},
+      execute: () => gate.promise,
+      notify: (payload) => {
+        notices.push(payload);
+      },
+      bodyPosition: () => {
+        const value = positions[Math.min(call, positions.length - 1)] ?? null;
+        call += 1;
+        return Promise.resolve(value);
+      },
+    });
+    return { runner, notices, gate };
+  }
+
+  it('位置没变 → 明说"很可能是卡住了"并给出下一步', async () => {
+    vi.useFakeTimers();
+    try {
+      const h = runnerWithPosition([{ x: 1, y: 64, z: 2 }]);
+      await h.runner.run('goToCoordinates', { x: 100, y: 64, z: 0, closeness: 3 });
+      await vi.advanceTimersByTimeAsync(ACTION_PROGRESS_NOTICE_MS * 2 + 50);
+      const text = h.notices.map((n) => String((n.result as { data?: unknown }).data)).join('\n');
+      expect(text).toContain('还在跑');
+      expect(text).toContain('(1.0, 64.0, 2.0)');
+      expect(text).toContain('很可能是卡住了');
+      expect(text).toContain('Stop');
+      h.gate.resolve('done');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('位置在变 → 报位移和速度，不说卡住', async () => {
+    vi.useFakeTimers();
+    try {
+      const h = runnerWithPosition([
+        { x: 0, y: 64, z: 0 },
+        { x: 10, y: 64, z: 0 },
+      ]);
+      await h.runner.run('goToCoordinates', { x: 100, y: 64, z: 0, closeness: 3 });
+      await vi.advanceTimersByTimeAsync(ACTION_PROGRESS_NOTICE_MS * 2 + 50);
+      const text = h.notices.map((n) => String((n.result as { data?: unknown }).data)).join('\n');
+      expect(text).toContain('移动了');
+      expect(text).toContain('格/秒');
+      expect(text).not.toContain('很可能是卡住了');
+      h.gate.resolve('done');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('采样失败（读不到坐标）→ 如实说，不编一个位置', async () => {
+    vi.useFakeTimers();
+    try {
+      const h = runnerWithPosition([null]);
+      await h.runner.run('goToCoordinates', { x: 100, y: 64, z: 0, closeness: 3 });
+      await vi.advanceTimersByTimeAsync(ACTION_PROGRESS_NOTICE_MS + 50);
+      const text = h.notices.map((n) => String((n.result as { data?: unknown }).data)).join('\n');
+      expect(text).toContain('读不到坐标');
+      expect(text).not.toContain('很可能是卡住了');
+      expect(text).toContain('可以继续等');
+      h.gate.resolve('done');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
 describe('ActionRunner', () => {
   it('query tools block and return content, never touching the channel', async () => {
     const h = makeHarness();

@@ -332,8 +332,7 @@ export function getAllBiomes(): any {
     return mcdata.biomes;
 }
 
-export function getItemCraftingRecipes(itemName: string): Array<[Record<string, number>, { craftedCount: number }]> | null {
-    const itemId: number | null = getItemId(itemName);
+export function getItemCraftingRecipes(itemName: string): Array<[Record<string, number>, { craftedCount: number }]> | null {    const itemId: number | null = getItemId(itemName);
     if (itemId === null || !mcdata.recipes[itemId]) {
         return null;
     }

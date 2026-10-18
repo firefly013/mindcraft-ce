@@ -613,6 +613,25 @@ export class Agent {
             trace: (event): void => {
                 this.log.with('action').info({ ...event });
             },
+            // 「还在跑」的进度回执要能判断**有没有在动**：采样一次身体状态，
+            // 只取坐标。采样失败返回 null，回执会说"读不到坐标"而不是编一个。
+            bodyPosition: async (): Promise<{ x: number; y: number; z: number } | null> => {
+                try {
+                    const live = (await this.body?.sample()) as
+                        | { position?: { x?: number; y?: number; z?: number } }
+                        | null
+                        | undefined;
+                    const p = live?.position;
+                    if (p == null) return null;
+                    const x = Number(p.x);
+                    const y = Number(p.y);
+                    const z = Number(p.z);
+                    if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(z)) return null;
+                    return { x, y, z };
+                } catch {
+                    return null;
+                }
+            },
         });
         // 异步装配（要开 SQLite）。`bootstrap` 会等它——工具的 schema 依赖
         // 身体能力表，而 schema 定下来之后再补工具是补不进去的。
