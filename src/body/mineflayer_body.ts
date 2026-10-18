@@ -1779,7 +1779,16 @@ export class MineflayerBody {
                 // 而"这是玩家在问我、还是队友在报坐标"依赖大脑侧的知识（谁是队友
                 // 来自 profiles）——所以那是这条事件在大脑侧的**处理**，
                 // 不是身体该替它判的事。
-                this.notify('player.chat', KIND.USER, LEVEL.WAKE, {
+                //
+                // ⚠️ **这里必须是 STATE（只记录），不能是 WAKE。** 真机事故
+                // （2026-10-18 23:26）：玩家的建造工具以 `mcbuild` 的名字批量填充方块，
+                // 每批广播一条 `Successfully filled N block(s)`。原来这里写 `LEVEL.WAKE`，
+                // 于是**每条聊天都在大脑判级之前就先唤醒了一次模型**——大脑侧
+                // `routeChat` 的黑名单/`classifyChat` 跑在唤醒**之后**，根本拦不住，
+                // 两个 bot 的上下文被 80+ 条刷爆。
+                // 分层说得很清楚：**判级是大脑的事**，身体给一个"只记录"的等级，
+                // `routeChat` 会按 `classifyChat` 把真正该唤醒的提到 WAKE。
+                this.notify('player.chat', KIND.USER, LEVEL.STATE, {
                     from: username,
                     message,
                     whisper,
