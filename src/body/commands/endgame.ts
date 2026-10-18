@@ -85,12 +85,18 @@ export const ENDGAME_TOOL_TEXT: Record<string, { description: string; params: Re
     },
     reviveDragon: {
         description:
-            '**把已经打完的末影龙叫回来**（这个世界已经通关了，不然拆水晶/床炸那段代码永远跑不到）：往返回门基座环上的 **4 个缺口**各放一颗末影水晶（背包要有 4 颗 end_crystal）。' +
-            '它会**从世界读**返回门位置（end_portal 方块 → 龙蛋柱 → 记下来的坐标），**从真实方块推导** 4 个缺口（不写死 (0,62,0)），**放一颗复验一颗**（新出现的末影水晶实体）——' +
-            '缺口被占 / 水晶没放成 / 龙没回来都会**停手并如实说**，不会把 4 颗水晶一次烧光。' +
+            '**把已经打完的末影龙叫回来**（这个世界已经通关了，不然拆水晶/床炸那段代码永远跑不到）：往返回门基座环上的 **4 个标准位置**各放一颗末影水晶（背包要有 4 颗 end_crystal）。' +
+            '它会**从世界读**返回门位置（`end_portal` **方块群的质心** → 龙蛋柱 → 记下来的坐标），**从真实方块推导**四个格子并按"像不像标准位置"分档（不写死 (0,62,0)），**放一颗复验一颗**（新出现的末影水晶实体），每放一颗之后都看一眼龙回来没有。' +
+            '格子被占 / 水晶没放成 / 龙没回来都会**停手并如实说**，不会把 4 颗水晶一次烧光。' +
+            '**推不出格子 ≠ 工具坏了**：那说明这个世界的返回门不是课本形状（比如已经通关、门是激活状态，那一层是 end_portal）——' +
+            '这时**用 spots 参数显式给四个绝对坐标**（格式 "3,63,0;-3,63,0;0,63,3;0,63,-3"，分号隔开、每段 x,y,z），给了就用你给的、跳过自动推导；也可以找开发者确认门结构。' +
             '不在末地、龙还活着、水晶不够（会告诉你还差几颗 + 采购清单：4 恶魂之泪 + 4 末影之眼 + 28 玻璃）都会直接拒绝。' +
             '放完龙会带着**柱子上那 10 颗水晶**一起回来：先 clearEndCrystals 拆干净，再 bedBombDragon。',
-        params: {},
+        params: {
+            spots:
+                '可选。直接指定放水晶的格子（**绝对坐标**），格式 "x,y,z;x,y,z;x,y,z;x,y,z"，例如 "3,63,0;-3,63,0;0,63,3;0,63,-3"。' +
+                '给了就**跳过自动推导**、照你给的四格放；不确认能不能触发仪式时先不放。不给就自己从世界里的方块推。',
+        },
     },
 };
 
@@ -100,17 +106,20 @@ const DESCRIPTION = (name: keyof typeof ENDGAME_TOOL_TEXT): string => ENDGAME_TO
 /**
  * 动作包装：走身体通道 + 超时兜底。与 `actions.ts` 的 `runAsAction` 同语义，
  * 但**显式传 label**，所以命令不需要住在 `actionsList` 里。
+ *
+ * `...args` 是**位置参数**（与 `progression.ts` 的 `runProgressionAction` 一致）：
+ * 现在只有 `reviveDragon(spots)` 用得到。
  */
 function runEndgameAction(
     label: string,
     timeoutMinutes: number,
-    actionFn: (agent: any) => Promise<unknown>,
+    actionFn: (agent: any, ...args: any[]) => Promise<unknown>,
 ): CommandPerform {
-    const wrapped = async function (agent: any): Promise<string | null | undefined> {
+    const wrapped = async function (agent: any, ...args: any[]): Promise<string | null | undefined> {
         const result = await agent.actions.runAction(
             `action:${label}`,
             async () => {
-                await actionFn(agent);
+                await actionFn(agent, ...args);
             },
             { timeout: timeoutMinutes },
         );
@@ -222,10 +231,16 @@ export const endgameActionList: AgentCommand[] = [
     {
         name: '!reviveDragon',
         description: DESCRIPTION('reviveDragon'),
-        params: {},
+        params: {
+            spots: {
+                type: 'string',
+                description: ENDGAME_TOOL_TEXT.reviveDragon.params.spots,
+                optional: true,
+            },
+        },
         // 找门 + 放 4 颗水晶 + 等龙回来，给 3 分钟。
-        perform: runEndgameAction('reviveDragon', 3, (agent) =>
-            logReceipt(agent, () => endgame.reviveDragon(agent.bot, agent)),
+        perform: runEndgameAction('reviveDragon', 3, (agent, spots) =>
+            logReceipt(agent, () => endgame.reviveDragon(agent.bot, agent, { spots })),
         ),
     },
 ];

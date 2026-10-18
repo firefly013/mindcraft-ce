@@ -50,8 +50,13 @@ export interface SchedulerSnapshot {
  * 紧急锁的本意是"别让**无关**动作打断保命"，不是拦住**同一件事的更好执行者**：
  * 模型在水里对"往哪游"掌握的信息比一个每秒 abort 一次的反射多。身体侧同时
  * 会让反射让位（见 `MODEL_RESCUE_TOOLS`），两边一致。
+ *
+ * **只有 `escapeWater`。** `consume` 曾经也在这里，但验证者用探针证明了它的
+ * 实际效果是：**吃饭**（哪怕"背包里没有这种食物"而失败）就能把紧急锁清掉，
+ * 并把正在救命的那条 `surface` 反射关掉 25 秒。吃饭不是"从水里/岩浆里出来"，
+ * 它没有资格穿透保命锁——紧急锁要做的事和"吃一口"没有任何关系。
  */
-export const EMERGENCY_BYPASS_TOOLS = new Set(['escapeWater', 'consume']);
+export const EMERGENCY_BYPASS_TOOLS = new Set(['escapeWater']);
 
 export class Scheduler {
   private action: CurrentAction | null = null;

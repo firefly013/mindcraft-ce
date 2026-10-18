@@ -57,6 +57,7 @@ import { headInWater } from './safety/water_safety.js';
 import { movementsFor } from './safety/movements.js';
 import {
     createEdgeWatcher,
+    DETECTORS,
     isHeartbeatDue,
     isStationaryAction,
     isStuck,
@@ -533,7 +534,92 @@ export const REFLEX_STOP_GRACE_MS = 2_000;
  * 在**水里**这件事上，模型的判断比一个 1 秒就 abort 一次的反射更靠谱——
  * 反射挡在这里不是保命，是把两个人都锁死。
  */
-const MODEL_RESCUE_TOOLS = new Set(['escapeWater', 'consume']);
+const MODEL_RESCUE_TOOLS = new Set(['escapeWater']);
+
+/**
+ * **致命危险清单**（= 永远不吃保命冷却的那些 L5）。
+ *
+ * 验证者探针（tmp/verify/emergency_lock.probe.test.ts ②/③）钉出两个洞：
+ *   1. 25 秒冷却是按时间静音的，不看危险种类——被僵尸追 45 秒（预算交还身体）
+ *      之后掉进岩浆/虚空、或者溺水，这 25 秒里所有 L5 都被丢掉，连事件都不推
+ *      给大脑（模型不会被叫醒）；
+ *   2. 岩浆/虚空/致命坠落是 `kind:'flag'` 的**一次性上升沿**（见 `DETECTORS`），
+ *      被吞一次就再没有接管路径——`world.lava.nearby` 只是 L3，不会选反射。
+ *
+ * ## 这不是随便一张表，是**必须完整**的一张表
+ *
+ * 今晚抓到的三个 bug 都是同一种形状：**规则只在一个方向上成立**（有下限没上限、
+ * 去重按名字不按意图、上限只加在一条路径上）。所以这里把它做成**显式分类**：
+ * `tests/reflex_fatal.test.ts` 会枚举 `DETECTORS` 里**所有 level 5** 的类型，
+ * 要求每一个要么在这张"致命"表里、要么在下面的 `NON_FATAL_L5_TYPES` 里写明理由；
+ * **新增一个 L5 危险而忘了分类，测试直接红**。另外它强制要求：
+ * **`kind:'flag'`（一次性边沿）的 L5 必须全部是致命的**——一次性边沿被吞掉
+ * 就再也没有第二次机会。
+ *
+ * 判断标准：**"再等 25 秒会死/会掉出世界"** 才是致命。
+ */
+export const FATAL_DANGER_PREFIXES = ['world.lava.'] as const;
+export const FATAL_DANGER_TYPES: ReadonlySet<string> = new Set([
+    'world.water.drowning',
+    'world.void.falling',
+    'world.fall.lethal',
+]);
+
+/**
+ * **不是致命**的 L5，以及为什么（新增 L5 时必须在这里或 `FATAL_DANGER_*` 里选一边）。
+ *
+ * 判成"非致命"的含义：冷却期内它会让位（身体归模型），但**事件照样推给大脑**
+ * （STATE 记录），而且这些边沿都是 `kind:'all'|'keyed'`——会反复 fire，
+ * 冷却一过就有下一次机会。
+ *
+ * ⚠️ 真机上如果出现"死在冷却期里的 X"，把 X 挪进 `FATAL_DANGER_TYPES`，
+ * 别在这里加理由——这张单子的存在就是为了让那个决定显式发生。
+ */
+export const NON_FATAL_L5_TYPES: ReadonlySet<string> = new Set([
+    // 着火且血少：会持续燃烧、边沿反复 fire，模型自己能吃/跑/放水。
+    'world.fire.burning_low_hp',
+    // 被卡住且血少：不是"下一秒就死"，模型需要时间换方向/挖开。
+    'world.trapped.low_hp',
+    // TNT 已点燃 / 苦力怕膨胀：**这两个最接近致命**，但都是短促的一次性爆发，
+    // kind 是 keyed（每次事件带 key，会反复 fire），而且这里反射能做的
+    // （跑开）和模型能做的完全一样。真要在冷却期里被炸死，把它们挪进致命集。
+    'world.tnt.primed_nearby',
+    'world.creeper.swelling',
+]);
+
+/** 这条 L5 是不是"再等一下就死了"的致命危险。 */
+export function isFatalDanger(type: string): boolean {
+    if (FATAL_DANGER_TYPES.has(type)) return true;
+    return FATAL_DANGER_PREFIXES.some((prefix) => type.startsWith(prefix));
+}
+
+/**
+ * 这条 L5 危险被怎么分类（测试/诊断用）。
+ *
+ * `unclassified` = 清单漏了：新增 L5 危险必须二选一登记，否则
+ * `tests/reflex_fatal.test.ts` 的"致命清单必须完整"会红。
+ */
+export function l5DangerClass(type: string): 'fatal' | 'non-fatal' | 'unclassified' {
+    if (isFatalDanger(type)) return 'fatal';
+    return NON_FATAL_L5_TYPES.has(type) ? 'non-fatal' : 'unclassified';
+}
+
+/** `kind:'flag'` 的边沿只 fire 一次——被吞掉就得自己补一枪（见 `pendingDanger`）。 */
+export const FLAG_DANGER_TYPES: ReadonlySet<string> = new Set(
+    DETECTORS.filter((detector) => detector.kind === 'flag').map((detector) => detector.type),
+);
+
+/**
+ * 工具回执看起来是不是**失败**。
+ *
+ * `executeToolCall` 用字符串回执表示结果（失败形如 `Tool X failed: …` /
+ * `Unknown tool: X`），所以"这次自救到底成没成"只能从回执判断。
+ * 只有明确失败才不放宽保命——判错方向要偏保守（当成失败 = 保命继续待命）。
+ */
+export function toolResultLooksFailed(text: unknown): boolean {
+    const first = String(text ?? '').trim().split('\n')[0] ?? '';
+    return /^(Tool\s+\S+\s+failed:|Unknown tool:|Unknown tool\b)/i.test(first);
+}
 
 export class MineflayerBody {
     readonly name: string;
@@ -583,11 +669,27 @@ export class MineflayerBody {
     private pickupThreatSkippedId: string | null = null;
     /** 正在跑的反射名 + 开始时间（快照要如实报；419 秒的 escape 不该事后才知道）。 */
     private currentReflexName: string | null = null;
+    /** 正在跑的反射**意图**：`escape/flee` 和 `escape/lava` 不是同一件事（去重键要用）。 */
+    private currentReflexIntent: EmergencyIntent | null = null;
     private currentReflexStartedAt = 0;
     /** 急停/Stop 之后不许再跑队列里剩下的反射。 */
     private reflexAbortRequested = false;
+    /**
+     * 被冷却/去重吞掉的一次危险：**一次性边沿（kind:'flag'）没有第二次机会**，
+     * 所以到窗口结束时自己补一枪（冷却结束、人还在岩浆里 → 必须有人来救）。
+     */
+    private pendingDanger: {
+        type: string;
+        payload: unknown;
+        reflex: string;
+        intent: EmergencyIntent;
+        dueAt: number;
+    } | null = null;
+    private pendingDangerTimer: ReturnType<typeof setTimeout> | null = null;
     /** 保命反射"连续占用段"的起点（毫秒时间戳）；null = 当前没有占用段。 */
     private survivalBusySince: number | null = null;
+    /** 当前占用段是哪种危险（fatal/other）：类别变了要开新段，别把两笔账混一起。 */
+    private survivalBusyClass: 'fatal' | 'other' | null = null;
     /** 最近一次保命反射的时刻：用来判"中间的空档算不算同一段占用"。 */
     private survivalLastReflexAt = 0;
     /** 交还身体的冷却截止时间：这段时间身体归模型。 */
@@ -825,11 +927,16 @@ export class MineflayerBody {
         }
     }
 
-    /** 正在跑的反射名 + 开始时间（快照/诊断用）。 */
-    reflexStatus(): { reflex: string; ms: number } | null {
+    /**
+     * 正在跑的反射名 + 意图 + 开始时间（快照/诊断用）。
+     *
+     * 意图必须一起报：`escape(flee)` 和 `escape(lava)` 是**两件事**（flee 只逃跑、
+     * 不爬岩浆），只报名字会把"在躲僵尸"和"在爬出岩浆"混成一句。
+     */
+    reflexStatus(): { reflex: string; intent: string | null; ms: number } | null {
         if (this.currentReflexName == null) return null;
         const ms = this.currentReflexStartedAt > 0 ? Date.now() - this.currentReflexStartedAt : 0;
-        return { reflex: this.currentReflexName, ms };
+        return { reflex: this.currentReflexName, intent: this.currentReflexIntent ?? null, ms };
     }
 
     /**
@@ -1040,6 +1147,7 @@ export class MineflayerBody {
         if (this.reflexRunning !== true) return;
         const name = this.currentReflexName;
         this.currentReflexName = null;
+        this.currentReflexIntent = null;
         this.currentReflexStartedAt = 0;
         this.reflexRunning = false;
         if (Array.isArray(this.reflexQueue)) this.reflexQueue.length = 0;
@@ -1227,13 +1335,30 @@ export class MineflayerBody {
         // 根因**不是一次反射太长**（那有 REFLEX_MAX_MS 兜着），而是：附近的僵尸
         // 一直在触发半径内 → 每来一条边沿就新起一次 escape → 从模型角度看是
         // **一次连续 100+ 秒的占用**。所以这里按"连续占用段"记账。
-        // 空闲够久 → 开一段新的占用；否则接着上一段算。
-        if (this.survivalBusySince == null || now - this.survivalLastReflexAt > SURVIVAL_GAP_MS) {
+        //
+        // **致命危险不吃这套**（验证者探针 ②/③）：25 秒足够淹死/烧死，而且
+        // 岩浆/虚空/致命坠落是一次性边沿，被吞一次就再没有接管路径。
+        const fatal = isFatalDanger(type);
+        if (fatal) {
+            this.survivalCooldownUntil = 0;
+            this.clearPendingDanger();
+        }
+        // 空闲够久 → 开一段新的占用；**危险类别变了也开新段**（被僵尸追了 45 秒
+        // 的账不能算到刚踩进去的岩浆头上）；否则接着上一段算。
+        const segmentClass: 'fatal' | 'other' = fatal ? 'fatal' : 'other';
+        if (
+            this.survivalBusySince == null
+            || (this.survivalBusyClass ?? null) !== segmentClass
+            || now - this.survivalLastReflexAt > SURVIVAL_GAP_MS
+        ) {
             this.survivalBusySince = now;
         }
+        this.survivalBusyClass = segmentClass;
         this.survivalLastReflexAt = now;
         // 冷却期内绝不重新接管：这段时间身体是**模型的**（吃药/搭柱/挖开/Stop）。
-        if (now < this.survivalCooldownUntil) {
+        if (!fatal && now < this.survivalCooldownUntil) {
+            // 被吞掉的危险要留个尾巴：flag 边沿不会再 fire，必须自己在窗口结束时补一枪。
+            this.recordPendingDanger(type, payload, reflex, intent, this.survivalCooldownUntil);
             if (now - this.survivalYieldNotifiedAt > SURVIVAL_GAP_MS) {
                 this.survivalYieldNotifiedAt = now;
                 this.notify('reflex.done', KIND.WORLD, LEVEL.STATE, {
@@ -1244,14 +1369,25 @@ export class MineflayerBody {
                         '这段时间身体归你（吃药/搭柱/挖开/Stop 都行）；危险还在的话冷却结束会重新接管。',
                     ms: 0,
                 });
+                // **事件本身也要进上下文**：早退路径以前连推都不推，模型根本
+                // 不知道自己在冷却期里又遇到了危险（只有那行回执，还带节流）。
+                this.notify(type, KIND.WORLD, LEVEL.STATE, payload, { reflex });
             }
             return;
         }
         // 连续占用超预算：交还身体 + 冷却，并说清"会重新接管"。
+        //
+        // 预算**对致命危险也生效**（跟冷却不同）：45 秒还在水里/岩浆里，说明
+        // "这一棒出不来"，交还身体让模型自己动手（挖开/搭柱/Stop）比继续闷头
+        // 尝试更有用。致命危险随后**可以立刻重新接管**（它们不看冷却），
+        // 所以这个交还只是把身体递出去一下，不是把保命关掉。
         if (now - this.survivalBusySince >= SURVIVAL_BUDGET_MS) {
             this.survivalCooldownUntil = now + SURVIVAL_COOLDOWN_MS;
             this.survivalBusySince = null;
+            this.survivalBusyClass = null;
             const released = this.abortReflexes('保命预算用完');
+            // 致命危险不需要补枪：它们本来就不吃冷却，下一条边沿照常接管。
+            if (!fatal) this.recordPendingDanger(type, payload, reflex, intent, this.survivalCooldownUntil);
             this.notify('reflex.done', KIND.WORLD, LEVEL.STATE, {
                 reflex,
                 outcome: 'yielded',
@@ -1262,6 +1398,7 @@ export class MineflayerBody {
                     (released > 0 ? '' : '（当前没有正在跑的保命处理。）'),
                 ms: 0,
             });
+            this.notify(type, KIND.WORLD, LEVEL.STATE, payload, { reflex });
             return;
         }
         // ── ③ 同一件事已经在处理：**不重复触发，也不打断它** ────────────────
@@ -1270,8 +1407,18 @@ export class MineflayerBody {
         // 触发打断（真机日志：surface `outcome:"aborted", ms:0` 反复出现，
         // 模型看到的是"一直在占着身体，却永远不上岸"）。
         // 同一件事就让它跑完：边沿只报一句"还在处理"。
-        const sameRunning = this.reflexRunning === true && this.currentReflexName === reflex;
-        const sameQueued = Array.isArray(this.reflexQueue) && this.reflexQueue.some((q) => q.reflex === reflex);
+        //
+        // 去重键必须是 **reflex + intent**：`escape/flee`（被僵尸追）和
+        // `escape/lava`（踩进岩浆）同名不同事——flee 分支压根不处理岩浆
+        // （emergency.ts 的 flee 只跑逃跑），把 lava 当"正在进行"吞掉，
+        // 人就会站在岩浆里等一场永远不会来的逃生。
+        const sameRunning =
+            this.reflexRunning === true
+            && this.currentReflexName === reflex
+            && (this.currentReflexIntent ?? null) === intent;
+        const sameQueued =
+            Array.isArray(this.reflexQueue)
+            && this.reflexQueue.some((q) => q.reflex === reflex && q.intent === intent);
         if (sameRunning || sameQueued) {
             if (now - this.survivalYieldNotifiedAt > SURVIVAL_GAP_MS) {
                 this.survivalYieldNotifiedAt = now;
@@ -1285,10 +1432,15 @@ export class MineflayerBody {
                     ms,
                 });
             }
+            // 这里**不发**新的 L5：大脑的 `beginReflex` 是按名字计数的，同一条反射
+            // 重复上报会让计数永远还不清（就是 17:15 那把永久锁的成因）。同一件事
+            // 已经在跑 = 有人在处理，不需要再叫醒谁。
             return;
         }
         // 模型的动作请求已经在路上：这次不抢（它可能正是在自救）。
-        if (this.modelActionRequested && !this.actions?.executing) {
+        // 致命危险例外——等一个在途请求的时间就够死一次了。
+        if (!fatal && this.modelActionRequested && !this.actions?.executing) {
+            this.recordPendingDanger(type, payload, reflex, intent, now + SURVIVAL_GAP_MS);
             this.notify('reflex.done', KIND.WORLD, LEVEL.STATE, {
                 reflex,
                 outcome: 'deferred',
@@ -1297,6 +1449,7 @@ export class MineflayerBody {
                     '危险还在的话，下一条事件会再报一次。',
                 ms: 0,
             });
+            this.notify(type, KIND.WORLD, LEVEL.STATE, payload, { reflex });
             return;
         }
         // **保命抢占（第 0 步）**：先把自动拾取从身体上摘下来，再排队保命。
@@ -1317,6 +1470,60 @@ export class MineflayerBody {
         void this.drainReflexes();
     }
 
+    /**
+     * 记下"这次危险被窗口吞掉了"，到窗口结束时补一枪。
+     *
+     * 为什么必须补：`world.lava.contact` / `world.void.falling` / `world.fall.lethal`
+     * 是 `kind:'flag'` 的**上升沿**，只 fire 一次；被冷却/去重吞掉之后不会再有
+     * 第二条边沿，而 `world.lava.nearby` 只是 L3（不选反射）——人还在岩浆里，
+     * 却再也没有接管路径（验证者探针 ③）。
+     */
+    private recordPendingDanger(
+        type: string,
+        payload: unknown,
+        reflex: string,
+        intent: EmergencyIntent,
+        dueAt: number,
+    ): void {
+        const flagEdge = FLAG_DANGER_TYPES.has(type);
+        // 只有一次性边沿才需要这条兜底；kind:'all' 的边沿下一条马上又来。
+        if (!flagEdge) return;
+        this.pendingDanger = { type, payload, reflex, intent, dueAt };
+        if (this.pendingDangerTimer != null) {
+            clearTimeout(this.pendingDangerTimer);
+            this.pendingDangerTimer = null;
+        }
+        const delay = Math.max(50, Math.min(60_000, dueAt - Date.now() + 50));
+        this.pendingDangerTimer = setTimeout(() => {
+            this.pendingDangerTimer = null;
+            const pending = this.pendingDanger;
+            if (pending == null) return;
+            this.pendingDanger = null;
+            if (Date.now() < pending.dueAt) return;
+            try {
+                this.log.with('reflex').info({
+                    event: 'pending-danger-retry',
+                    type: pending.type,
+                    reflex: pending.reflex,
+                    intent: pending.intent,
+                });
+            } catch {
+                // 日志失败也要补这一枪。
+            }
+            this.emergency(pending.type, pending.payload, pending.reflex, pending.intent);
+        }, delay);
+        // 别为了这个定时器拽着进程不退出。
+        (this.pendingDangerTimer as { unref?: () => void }).unref?.();
+    }
+
+    private clearPendingDanger(): void {
+        if (this.pendingDangerTimer != null) {
+            clearTimeout(this.pendingDangerTimer);
+            this.pendingDangerTimer = null;
+        }
+        this.pendingDanger = null;
+    }
+
     /** 排空反射队列（已经在跑就什么都不做）。 */
     private async drainReflexes(): Promise<void> {
         if (this.reflexRunning) return;
@@ -1328,8 +1535,9 @@ export class MineflayerBody {
                 // Stop/急停清过队列：不再跑下一棒。
                 if (this.reflexAbortRequested) break;
                 const started = Date.now();
-                // **如实报给快照**：谁占着身体、占了多久。
+                // **如实报给快照**：谁占着身体、占了多久、为什么（intent）。
                 this.currentReflexName = next.reflex;
+                this.currentReflexIntent = next.intent ?? null;
                 this.currentReflexStartedAt = started;
                 this.reflexCompletionSent = false;
                 this.survivalLastReflexAt = started;
@@ -1425,6 +1633,7 @@ export class MineflayerBody {
                     if (guardTimer != null) clearInterval(guardTimer);
                 }
                 this.currentReflexName = null;
+                this.currentReflexIntent = null;
                 this.currentReflexStartedAt = 0;
                 this.survivalLastReflexAt = Date.now();
                 // Stop 宽限期已经代发过一次完成报告：这里只收尾，不再重复上报
@@ -1443,6 +1652,7 @@ export class MineflayerBody {
         } finally {
             this.reflexRunning = false;
             this.currentReflexName = null;
+            this.currentReflexIntent = null;
             this.currentReflexStartedAt = 0;
             this.reflexAbortRequested = false;
         }
@@ -2579,6 +2789,41 @@ export class MineflayerBody {
         }
     }
 
+    /**
+     * 模型自救动作收尾：**成功才给 25 秒窗口，失败什么都不给**。
+     *
+     * 验证者探针 ①/⑤：旧实现把"让位 + 25 秒静音"放在执行**之前**，于是模型
+     * 调一次 `consume`（或一次失败的 escapeWater）就能把正在救命的 `surface`
+     * 关掉 25 秒。现在让位照旧要在执行前发生（否则两边同时驱动身体），
+     * 但**冷却只在真成功之后**才给；失败时反射随时可以重新接管。
+     */
+    private settleModelRescue(success: boolean, baseName: string, preempted: number): void {
+        if (success) {
+            this.survivalCooldownUntil = Math.max(this.survivalCooldownUntil, Date.now() + SURVIVAL_COOLDOWN_MS);
+            this.notify('reflex.done', KIND.WORLD, LEVEL.STATE, {
+                reflex: baseName,
+                outcome: 'preempted',
+                detail:
+                    `你用 ${baseName} 自救：已让出身体` +
+                    (preempted > 0 ? `（中断 ${preempted} 条保命/反射）` : '') +
+                    `，接下来 ${Math.round(SURVIVAL_COOLDOWN_MS / 1000)} 秒内保命不会抢回去。`,
+                ms: 0,
+            });
+            return;
+        }
+        // 没成功：**不碰冷却**（既不新建也不清掉已有的），保命随时回来。
+        this.notify('reflex.done', KIND.WORLD, LEVEL.STATE, {
+            reflex: baseName,
+            outcome: 'preempted',
+            detail:
+                `你用 ${baseName} 自救：反射已让位` +
+                (preempted > 0 ? `（中断 ${preempted} 条）` : '') +
+                '，但这次**没成功**——保命随时会重新接管（没有静音窗口）。' +
+                '看一眼为什么失败，必要时再发一次或先 Stop。',
+            ms: 0,
+        });
+    }
+
     /** `BodyServer` 的处理函数。所有异常都变成 `ok:false`，不让它穿到传输层。 */
     async handle(request: BrainRequest): Promise<BodyResponse> {
         switch (request.op) {
@@ -2610,26 +2855,33 @@ export class MineflayerBody {
                     // **模型自己的自救动作优先于保命反射。** 真机 17:59 溺水：
                     // surface 反射和模型调的 escapeWater 互相抢，十几轮没上岸，
                     // 最后淹死。水里这件事模型的判断比反射准——让它接手。
+                    //
+                    // 注意三点（验证者探针 ①/⑤ 的教训）：
+                    //   - 只有 `escapeWater` 在这一类里。`consume` 曾经也在，结果
+                    //     "吃一口"（哪怕吃失败）就能打断正在救命的 surface 并静音
+                    //     25 秒——吃饭不是从水里/岩浆里出来；
+                    //   - 先让位是必须的（否则两边同时驱动身体，谁都做不完）；
+                    //   - **冷却只在自救真的执行成功之后才给**：失败还静音 25 秒，
+                    //     等于把命交给运气。
                     const baseName = String(name ?? '').replace(/^!/, '');
-                    if (MODEL_RESCUE_TOOLS.has(baseName)) {
-                        const stopped = this.abortReflexes(`模型要用 ${baseName} 自救`);
-                        // 交还一段时间：反射别在模型游到一半时又抢回去。
-                        this.survivalCooldownUntil = Math.max(
-                            this.survivalCooldownUntil,
-                            Date.now() + SURVIVAL_COOLDOWN_MS,
-                        );
+                    const rescueAttempt = MODEL_RESCUE_TOOLS.has(baseName);
+                    let preempted = 0;
+                    if (rescueAttempt) {
+                        preempted = this.abortReflexes(`模型要用 ${baseName} 自救`);
                         this.survivalBusySince = null;
-                        this.notify('reflex.done', KIND.WORLD, LEVEL.STATE, {
-                            reflex: baseName,
-                            outcome: 'preempted',
-                            detail:
-                                `你用 ${baseName} 自救：已让出身体` +
-                                (stopped > 0 ? `（中断 ${stopped} 条保命/反射）` : '') +
-                                `，接下来 ${Math.round(SURVIVAL_COOLDOWN_MS / 1000)} 秒内保命不会抢回去。`,
-                            ms: 0,
-                        });
+                        this.survivalBusyClass = null;
                     }
-                    const text = await executeToolCall(this, name, args);
+                    let text: string;
+                    try {
+                        text = await executeToolCall(this, name, args);
+                    } catch (err: unknown) {
+                        // 抛错也算"这次自救没成"：**不许给冷却**，让保命随时能回来。
+                        if (rescueAttempt) this.settleModelRescue(false, baseName, preempted);
+                        throw err;
+                    }
+                    if (rescueAttempt) {
+                        this.settleModelRescue(!toolResultLooksFailed(text), baseName, preempted);
+                    }
                     this.consumePermitFor(name);
                     return { ok: true, op: 'action', result: { ok: true, text, code: 'OK' } };
                 } catch (err: unknown) {
@@ -2675,6 +2927,7 @@ export class MineflayerBody {
                     Date.now() + SURVIVAL_COOLDOWN_MS,
                 );
                 this.survivalBusySince = null;
+                this.survivalBusyClass = null;
                 if (abortedReflexes > 0) {
                     // 回执走事件通道（协议里 stop 的响应形状不动）：让模型知道
                     // Stop 到底停了什么，而不是以为"没反应"。

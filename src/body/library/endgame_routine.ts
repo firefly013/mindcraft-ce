@@ -46,6 +46,7 @@ import {
     planBreathEscape,
     planCrystalAssault,
     planDragonReviveSpots,
+    parseReviveSpotOverride,
     planRecovery,
     potionKindOf,
     potionStock,
@@ -1117,10 +1118,23 @@ export function endgameStatusReport(bot: any, agent?: any): string {
             lines.push('【复活龙】找不到返回门（64 格内没有 end_portal / dragon_egg）：先走到末地主岛中心的基座附近。');
         } else {
             const spots = planDragonReviveSpots({ center: portal.center, probe: (p) => blockNameAt(bot, p) });
+            const shapeText = spots.ok
+                ? spots.standardCount >= DRAGON_REVIVE_CRYSTALS
+                    ? '门上有 4 个标准位置可用'
+                    : '只能按兜底规则凑 4 格（这个门不是课本形状）'
+                : spots.standardCount > 0 && spots.blocked.length > 0
+                  ? '标准位置被占了'
+                  : '推不出四个格子';
             lines.push(
-                `【复活龙】${spots.ok ? '门上有 4 个缺口可用' : '缺口不齐'}（中心来源：${portal.reason}）｜末影水晶 ${signals.endCrystals}/${DRAGON_REVIVE_CRYSTALS}`
+                `【复活龙】${shapeText}（中心来源：${portal.reason}）｜末影水晶 ${signals.endCrystals}/${DRAGON_REVIVE_CRYSTALS}`
             );
             lines.push(`  ${spots.reason}`);
+            if (!spots.ok) {
+                lines.push(
+                    '  这个门推不出格子时：用 reviveDragon(spots="x,y,z;x,y,z;x,y,z;x,y,z") 显式指定四个绝对坐标（不用改代码），' +
+                        '或者找开发者确认这一版的门结构。'
+                );
+            }
             if (signals.endCrystals < DRAGON_REVIVE_CRYSTALS) {
                 lines.push(`  还差 ${DRAGON_REVIVE_CRYSTALS - signals.endCrystals} 颗：${END_CRYSTAL_SHOPPING_LIST.join('；')}`);
             } else if (spots.ok) {
@@ -1779,6 +1793,28 @@ export interface RevivePortalSite {
  * 三样都没有 → null（回执里说清"找不到门"，绝不退回写死的 (0,62,0) 去乱放水晶）。
  */
 export function findExitPortalForRevive(bot: any, agent?: any): RevivePortalSite | null {
+    // 1. `end_portal` 方块**群**的质心。必须用一群、不能用"最近的那一块"：
+    //    激活后的返回门是一大片 end_portal（本世界 20 块），最近的那块通常在边上，
+    //    拿它当中心会把整个搜索框偏移两三格，推出来的格子就全错了。
+    try {
+        const blocks = world.getNearestBlocks(bot, 'end_portal', 64, 256) as any[];
+        const positions = (Array.isArray(blocks) ? blocks : [])
+            .map((b) => toVec(b?.position))
+            .filter((p): p is Vec3 => p != null);
+        if (positions.length > 0) {
+            const x = positions.reduce((sum, p) => sum + p.x, 0) / positions.length;
+            const y = positions.reduce((sum, p) => sum + p.y, 0) / positions.length;
+            const z = positions.reduce((sum, p) => sum + p.z, 0) / positions.length;
+            const center = vec(Math.round(x), Math.round(y), Math.round(z));
+            return {
+                center,
+                source: 'end_portal',
+                reason: `${positions.length} 块 end_portal 的质心 (${center.x},${center.y},${center.z})`,
+            };
+        }
+    } catch {
+        // 没有 minecraft-data / 没有世界数据：继续往下试
+    }
     try {
         const portal = world.getNearestBlock(bot, 'end_portal', 64);
         const position = toVec(portal?.position);
@@ -1786,11 +1822,11 @@ export function findExitPortalForRevive(bot: any, agent?: any): RevivePortalSite
             return {
                 center: vec(Math.round(position.x), Math.round(position.y), Math.round(position.z)),
                 source: 'end_portal',
-                reason: `世界里的返回门方块 (${Math.round(position.x)},${Math.round(position.y)},${Math.round(position.z)})`,
+                reason: `世界里最近的一块返回门方块 (${Math.round(position.x)},${Math.round(position.y)},${Math.round(position.z)})（没拿到整片方块，中心可能有偏差）`,
             };
         }
     } catch {
-        // 没有 minecraft-data / 没有世界数据：继续往下试
+        // 同上
     }
     try {
         const egg = world.getNearestBlock(bot, 'dragon_egg', 64);
@@ -1869,7 +1905,16 @@ export function verifyReviveCrystalAt(bot: any, cell: Vec3, beforeIds: Set<strin
 export async function reviveDragon(
     bot: any,
     agent?: any,
-    options: { waitMs?: number; pollMs?: number } = {}
+    options: {
+        /** 显式指定四个格子（"x,y,z;x,y,z;x,y,z;x,y,z"）：给了就跳过推导，见 `parseReviveSpotOverride`。 */
+        spots?: string;
+        /** 全部放完后等龙的时间（默认 5s）。 */
+        waitMs?: number;
+        /** 每放一颗之后等龙的时间（默认 1.5s）——龙可能中途就回来了。 */
+        afterEachWaitMs?: number;
+        /** 轮询间隔（默认 200ms）。 */
+        pollMs?: number;
+    } = {}
 ): Promise<string> {
     const signals = readEndSignals(bot);
     if (!signals.inEnd) return '你现在不在末地：复活仪式要在返回门旁边做，先 enterEnd。';
@@ -1889,36 +1934,74 @@ export async function reviveDragon(
         );
     }
 
-    const portal = findExitPortalForRevive(bot, agent);
-    if (portal == null) {
-        return endgameReceipt('找不到返回门，没动手。', [
-            '64 格内既没有 end_portal 方块，也没有 dragon_egg，Memory Bank 里也没记过 exit_portal。',
-            '先 goToCoordinates 走到末地主岛中心的返回门附近（龙死后 (0,62,0) 那个基座），再调一次。',
-        ]);
-    }
-    try {
-        agent?.memory_bank?.rememberPlace?.('exit_portal', portal.center.x, portal.center.y, portal.center.z);
-    } catch {
-        // 记不住不影响这次复活
+    const pollMs = Math.max(1, options.pollMs ?? 200);
+    const afterEachWaitMs = Math.max(0, options.afterEachWaitMs ?? 1500);
+    const waitMs = Math.max(0, options.waitMs ?? 5000);
+
+    /** 等龙回来：实体或 boss bar 出现就立刻返回 true（放完不是零延迟）。 */
+    const waitForDragon = async (budgetMs: number): Promise<boolean> => {
+        if (readDragonRevived(bot)) return true;
+        const deadline = Date.now() + budgetMs;
+        while (Date.now() < deadline) {
+            if (bot?.interrupt_code) return readDragonRevived(bot);
+            await skills.wait(bot, pollMs);
+            if (readDragonRevived(bot)) return true;
+        }
+        return false;
+    };
+
+    // —— 取四个格子：显式指定优先（人能直接从存档里算；不用改代码） ——
+    const override = parseReviveSpotOverride(options.spots);
+    const details: string[] = [];
+    let spots: Vec3[];
+    if (override.ok) {
+        spots = override.spots;
+        details.push(`用显式指定的四个格子：${spots.map((s) => `(${s.x},${s.y},${s.z})`).join('、')}（跳过自动推导）。`);
+    } else {
+        if (override.error !== '') {
+            return endgameReceipt(`spots 参数没看懂，没动手（一颗水晶都没放）。`, [override.error]);
+        }
+        const portal = findExitPortalForRevive(bot, agent);
+        if (portal == null) {
+            return endgameReceipt('找不到返回门，没动手。', [
+                '64 格内既没有 end_portal 方块，也没有 dragon_egg，Memory Bank 里也没记过 exit_portal。',
+                '两个办法：先 goToCoordinates 走到末地主岛中心的返回门附近（龙死后 (0,62,0) 那个基座）再调一次；' +
+                    '或者用 spots 参数直接给四个格子（例如 "3,63,0;-3,63,0;0,63,3;0,63,-3"）。',
+            ]);
+        }
+        try {
+            agent?.memory_bank?.rememberPlace?.('exit_portal', portal.center.x, portal.center.y, portal.center.z);
+        } catch {
+            // 记不住不影响这次复活
+        }
+        const plan = planDragonReviveSpots({ center: portal.center, probe: (p) => blockNameAt(bot, p) });
+        details.push(`中心来源：${portal.reason}`, plan.reason);
+        if (!plan.ok) {
+            return endgameReceipt(
+                plan.standardCount > 0 && plan.blocked.length > 0
+                    ? '返回门的标准位置被占了，没动手（一颗水晶都没放）。'
+                    : '这个返回门推不出四个格子，没动手（一颗水晶都没放）。',
+                [
+                    ...details,
+                    '这不是"工具坏了"：**这个世界的门不是课本形状**（可能已经通关、门是激活状态）。',
+                    '两条路：① 用 spots 参数**显式指定**四个格子；② 找开发者确认这一版的门结构。',
+                ],
+            );
+        }
+        spots = plan.spots;
+        if (plan.tiers.some((tier) => tier === 'air_over_base')) {
+            details.push('⚠️ 其中至少一格是**兜底档**（只是"空气+底下基座"，不像标准位置）：能不能触发复活不确定。');
+        }
     }
 
-    const plan = planDragonReviveSpots({ center: portal.center, probe: (p) => blockNameAt(bot, p) });
-    if (!plan.ok) {
-        return endgameReceipt('返回门的缺口不齐，没动手（一颗水晶都没放）。', [
-            `中心来源：${portal.reason}`,
-            plan.reason,
-        ]);
-    }
-
-    const details: string[] = [`中心来源：${portal.reason}`, plan.reason];
     const placedSpots: Vec3[] = [];
     const placedText = (): string => placedSpots.map((s) => `(${s.x},${s.y},${s.z})`).join('、') || '无';
-    for (const spot of plan.spots) {
+    for (const spot of spots) {
         const beforeIds = crystalEntityIds(bot);
         // 每次放之前重新探一次那一格：世界会变（这段时间里可能被谁堵上）
         const here = blockNameAt(bot, spot);
         if (here == null || (here !== 'air' && here !== 'cave_air' && here !== 'void_air')) {
-            return endgameReceipt(`第 ${placedSpots.length + 1} 个缺口 (${spot.x},${spot.y},${spot.z}) 现在放着 ${here ?? '读不到'}，停手。`, [
+            return endgameReceipt(`第 ${placedSpots.length + 1} 个格子 (${spot.x},${spot.y},${spot.z}) 现在放着 ${here ?? '读不到'}，停手。`, [
                 ...details,
                 `已经放了 ${placedSpots.length} 颗（${placedText()}）。`,
                 '把那一格清成空格（底下要留基座）再调一次；**剩下的水晶没动**。',
@@ -1938,24 +2021,31 @@ export async function reviveDragon(
         }
         placedSpots.push(spot);
         details.push(`第 ${placedSpots.length} 颗已就位 ${describeCell(spot)}（${evidence}）。`);
+
+        // 每放一颗之后都看一眼：龙有可能在这一颗之后就回来了（比如最后一格刚好补上）。
+        if (placedSpots.length < DRAGON_REVIVE_CRYSTALS && afterEachWaitMs > 0) {
+            if (await waitForDragon(afterEachWaitMs)) {
+                const health = readDragonHealth(bot);
+                return endgameReceipt(`龙在第 ${placedSpots.length} 颗（${describeCell(spot)}）之后就回来了，停手。`, [
+                    ...details,
+                    `还没放完的格子：${spots
+                        .slice(placedSpots.length)
+                        .map((s) => `(${s.x},${s.y},${s.z})`)
+                        .join('、')}——**没动**。`,
+                    `龙血：${health == null ? 'boss bar 还没出来（实体已经在视野里）' : `${health.toFixed(0)}/${DRAGON_MAX_HEALTH}`}。`,
+                    '先 clearEndCrystals 拆掉柱子上的水晶，再 bedBombDragon。',
+                ]);
+            }
+        }
     }
 
-    // 等龙回来：放完第四颗不是零延迟，给它几秒（默认每 200ms 看一次，最多 5 秒）。
-    const waitMs = Math.max(0, options.waitMs ?? 5000);
-    const pollMs = Math.max(1, options.pollMs ?? 200);
-    const deadline = Date.now() + waitMs;
-    let revived = readDragonRevived(bot);
-    while (!revived && Date.now() < deadline) {
-        if (bot?.interrupt_code) break;
-        await skills.wait(bot, pollMs);
-        revived = readDragonRevived(bot);
-    }
-
-    if (!revived) {
+    if (!(await waitForDragon(waitMs))) {
         return endgameReceipt('四颗水晶都放上了，但**没看到龙回来**。', [
             ...details,
-            '可能：服务端没把仪式判成完整（有一格位置不对/被替换），或者实体还没同步过来。',
-            '先调 endFightStatus 看龙头/龙血；如果水晶还在门上，别重复放（会白烧）。',
+            `放过的格子：${placedText()}。`,
+            '这是一条**真结论**，不是"没做完"：仪式没被判成完整（位置不对/被替换），或者实体还没同步。',
+            '先调 endFightStatus 看龙头/龙血；如果水晶还在门上，别重复放（会白烧）。' +
+                '如果反复不触发，就用 spots 参数换一组格子（这个世界的门可能不是课本形状）。',
         ]);
     }
 

@@ -335,6 +335,16 @@ export const TOOL_TEXT: Record<string, { description: string; params: Record<str
       step: '每腿走多少格（默认 32，4~128）。地形破碎调小，开阔地调大。',
     },
   },
+  // 复活末影龙（`commands/endgame.ts`）。和上面几条一样：模型侧长文案住在命令文件里，
+  // 这里按 check:prompts 的要求留一份**参数说明**（参数名逐字对齐 schema）。
+  reviveDragon: {
+    description:
+      '把已经打完的末影龙叫回来：往返回门的四个标准位置各放一颗末影水晶（要 4 颗 end_crystal）。位置从世界里的方块推、按"像不像标准位置"分档；推不出来说明这个世界的门不是课本形状，可以用 spots 参数直接给格子。',
+    params: {
+      spots:
+        '可选。直接指定放水晶的格子（绝对坐标），格式 "x,y,z;x,y,z;x,y,z;x,y,z"，例如 "3,63,0;-3,63,0;0,63,3;0,63,-3"。给了就跳过自动推导、照你给的四格放；不给就从世界里的方块推。',
+    },
+  },
   huntFor: {
     description:
       '刷怪刷到够数：找最近的这类怪 → 打 → 自己走过去把掉落物踩掉 → 按背包真实增量核对；够了（want）或时间到（max_ms）就停，并逐次报进度。' +

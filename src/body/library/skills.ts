@@ -555,6 +555,31 @@ async function equipHighestAttack(bot: any): Promise<void> {
 }
 
 /**
+ * 背包里"最能打"的那件武器名；没有武器返回 null。**和 `equipHighestAttack` 同一套排序**，
+ * 只是把名字读出来——用来在"打不死"的回执里给一条 `equip(item_name=…)` 的具体建议。
+ */
+export function bestWeaponInInventory(bot: any): string | null {
+    try {
+        const items = (bot?.inventory?.items?.() ?? []) as Array<{ name?: unknown; attackDamage?: unknown }>;
+        if (!Array.isArray(items)) return null;
+        const byName = (predicate: (name: string) => boolean): Array<{ name: string; attackDamage: number }> =>
+            items
+                .filter((item) => typeof item?.name === 'string' && predicate(item.name))
+                .map((item) => ({
+                    name: String(item.name),
+                    attackDamage: Number.isFinite(Number(item?.attackDamage)) ? Number(item.attackDamage) : 0,
+                }));
+        let weapons = byName((name) => name.includes('sword') || (name.includes('axe') && !name.includes('pickaxe')));
+        if (weapons.length === 0) weapons = byName((name) => name.includes('pickaxe') || name.includes('shovel'));
+        if (weapons.length === 0) return null;
+        weapons.sort((a, b) => b.attackDamage - a.attackDamage);
+        return weapons[0]?.name ?? null;
+    } catch {
+        return null;
+    }
+}
+
+/**
  * "想要 N 个成品" → "配方要跑几遍"。**这是被真机测出来的一条。**
  *
  * `num` 是**想要多少个**，不是"跑几遍配方"——一遍配方产多少由配方自己决定：

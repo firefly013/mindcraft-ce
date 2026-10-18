@@ -71,8 +71,18 @@ export const HUNT_ATTACK_TYPE = 'mob';
 /** 同一个目标至少允许尝试打几次（按 want 放宽，见 `huntMaxAttempts`）。 */
 export const HUNT_MAX_ATTEMPTS = 12;
 export const HUNT_MAX_ATTEMPTS_CAP = 64;
-/** 连续失败这么多次 → 认定"内部动作坏了"，立刻停手（不再空转）。 */
+/** 连续失败这么多次 → 认定"内部动作坏了"，立刻停手（不再空转）。**只对"快失败"计数**（见下）。 */
 export const HUNT_MAX_CONSECUTIVE_FAILURES = 3;
+/**
+ * "快失败"的界线（毫秒）：一次攻击**几秒内**就返回 false = 调用本身被拒/解析错/服务端拒绝，
+ * 这类才可能意味着内部动作坏了。
+ *
+ * 真机反例（独立复核探针）：`attackEntity` 的击杀死等预算耗尽（90 秒）也返回 false——
+ * 那是"**打不死**"（耐打的怪/在回血/输出不够），不是工具坏了。原来两种都算进熔断，
+ * 于是三只耐打的怪就让回执说「内部打怪动作可能有问题」，还打发模型去 `attack` 调工具——
+ * 而工具其实是好的，模型被自己的回执骗了。所以：慢失败**不计入**熔断，措辞和下一步都分开。
+ */
+export const HUNT_FAST_FAILURE_MS = 5_000;
 /** 打失败后的退避（随连续失败翻倍，封顶）。 */
 export const HUNT_ATTACK_BACKOFF_MS = 400;
 export const HUNT_ATTACK_BACKOFF_MAX_MS = 3_000;
@@ -714,12 +724,16 @@ export interface HuntOutcome {
     baseline: number;
     kills: number;
     attacks: number;
-    stopReason: 'reached' | 'budget' | 'no_target' | 'interrupted' | 'low_health' | 'danger' | 'gone' | 'attack_failed' | 'attempts';
+    stopReason: 'reached' | 'budget' | 'no_target' | 'interrupted' | 'low_health' | 'danger' | 'gone' | 'attack_failed' | 'attempts' | 'cannot_kill';
     elapsedMs: number;
     /** 在下界刷烈焰人（"没怪了"的下一步建议要用它）。 */
     netherBlaze: boolean;
-    /** 连续失败了几次（`attack_failed` 时用来把话说清楚）。 */
+    /** 连续失败了几次（`attack_failed` 时用来把话说清楚）——**只数"快失败"**。 */
     consecutiveFailures?: number;
+    /** 耗完击杀预算还没打死的次数（`cannot_kill` 时用来把话说清楚）。 */
+    slowFailures?: number;
+    /** 背包里最能打的武器（`cannot_kill` 时给一条 equip 建议）。 */
+    betterWeapon?: string | null;
     warnings: string[];
     progress: HuntProgressLine[];
 }
@@ -734,6 +748,7 @@ const STOP_REASON_TEXT: Record<HuntOutcome['stopReason'], string> = {
     gone: '目标跑掉/消失了',
     attack_failed: '内部打怪动作连续失败，已熔断停手',
     attempts: '尝试次数到上限了',
+    cannot_kill: '打不死（每次都耗完击杀预算），已收手',
 };
 
 export function huntReceipt(o: HuntOutcome): string {
@@ -772,11 +787,25 @@ export function huntReceipt(o: HuntOutcome): string {
         for (const line of capLines(o.progress.map((p) => `- #${p.attempt} ${p.text}`), HUNT_MAX_PROGRESS_LINES, '进度'))
             lines.push(line);
     }
+    if (o.stopReason !== 'cannot_kill' && (o.slowFailures ?? 0) > 0) {
+        lines.push(
+            `ℹ️ 其中 ${o.slowFailures} 次是**耗完击杀预算**的打不死（不是工具坏了）：想换打法就换更好的武器/先吃饱/换个目标。`,
+        );
+    }
     if (o.stopReason === 'attack_failed') {
         lines.push(
             `**内部打怪动作连续失败 ${o.consecutiveFailures ?? '几'} 次，已熔断停手**——` +
-                `这不是"这一带没有 ${o.entity}"，而是**打怪这个动作本身没成功**（最近的错误见上面的警告）。` +
-                `已经停了，不会再原地重试；下一步给的是一条**直接调用**，用来定位到底是哪一步不对。`,
+                `这不是"这一带没有 ${o.entity}"，而是**打怪这个动作本身没成功**（每次都是"几秒内就被拒"，` +
+                `最近的错误见上面的警告）。已经停了，不会再原地重试；下一步给的是一条**直接调用**，用来定位到底是哪一步不对。`,
+        );
+    }
+    if (o.stopReason === 'cannot_kill') {
+        lines.push(
+            `**打不死**：这 ${o.slowFailures ?? '几'} 次攻击每次都是**耗完击杀预算**（默认 90 秒）才收手——` +
+                `说明调用本身是通的（不是被拒/解析错），是**打不动**：它太耐打、在水里回血、或者你的输出不够。` +
+                `**不是工具坏了，别去 debug attack**；要换的是打法：① 换更好的武器 ② ${
+                    o.netherBlaze ? '打烈焰人先 prepareBlaze（抗火 + 吃饱）' : '换个更好打的目标或先 reposition'
+                } ③ 打之前先吃饱/回血。`,
         );
     }
     lines.push(`下一步（照做即可）：${huntNextAction(o)}`);
@@ -808,6 +837,11 @@ export function huntNextAction(o: HuntOutcome): string {
         case 'attack_failed':
             // **绝不把同一个会爆的调用原样丢回去**：给一条直接诊断内部动作的调用。
             return `attack(type="${HUNT_ATTACK_TYPE}", target="${o.entity}")`;
+        case 'cannot_kill':
+            // **打不死 ≠ 工具坏了**：换打法，别让模型去调 attack 那个正常的工具。
+            if (o.netherBlaze) return 'prepareBlaze';
+            if (o.betterWeapon != null && o.betterWeapon !== '') return `equip(item_name="${o.betterWeapon}")`;
+            return 'stats(type="inventory")';
         case 'attempts':
             return 'stats(type="entities")';
         default:
@@ -1261,6 +1295,8 @@ export async function huntForSkill(
     let kills = 0;
     let idlePolls = 0;
     let consecutiveFailures = 0;
+    let fastFailures = 0;
+    let slowFailures = 0;
     const maxAttempts = huntMaxAttempts(want);
     let stopReason: HuntOutcome['stopReason'] = 'budget';
 
@@ -1340,7 +1376,9 @@ export async function huntForSkill(
         idlePolls = 0;
         attempts += 1;
         const before = currentGain(bot, items, baselineAtStart);
+        const attackStartedAt = now();
         const killed = await attack(bot, entity);
+        const attackMs = Math.max(0, now() - attackStartedAt);
         if (killed) kills += 1;
         // 掉落物要自己走过去踩（模型动作期间自动拾取是停的）。
         const looted = await collectDrops(bot, radius, HUNT_LOOT_BUDGET_MS, {
@@ -1360,24 +1398,39 @@ export async function huntForSkill(
         });
         if (progress.length > HUNT_MAX_PROGRESS_LINES) progress.splice(0, progress.length - HUNT_MAX_PROGRESS_LINES);
 
-        // 失败就**退避**（指数、封顶）：既不给服务端打热循环，也给"目标只是暂时打不动"留时间。
+        // 失败分两种（真机复核的教训）：**快失败**（几秒内被拒/解析错/服务端拒绝）才可能是
+        // "工具坏了"；**慢失败**（耗完击杀预算）是"打不死"——坦克怪/回血/输出不够。
+        // 混在一起数，就会让三只耐打的怪把模型骗去 debug 一个正常的工具。
         if (killed) {
             consecutiveFailures = 0;
-        } else {
+        } else if (attackMs < HUNT_FAST_FAILURE_MS) {
             consecutiveFailures += 1;
+            fastFailures += 1;
             if (consecutiveFailures >= HUNT_MAX_CONSECUTIVE_FAILURES) {
                 warnings.push(
-                    `⚠️ 连续 ${consecutiveFailures} 次攻击都没成功（最后一次 ${entity} 没打死、掉落也没涨）：` +
+                    `⚠️ 连续 ${consecutiveFailures} 次攻击都是**几秒内就被拒**（最后一次 ${entity} 没打死、掉落也没涨）：` +
                         `**内部打怪动作本身可能有问题**（参数/目标解析/服务端拒绝），熔断停手，不原地重试。`,
                 );
                 stopReason = 'attack_failed';
                 break;
             }
             await sleep(huntBackoffMs(consecutiveFailures));
+        } else {
+            // 慢失败 = 耗完击杀预算还没打死。**不计数进熔断，而且把快失败连击清零**：
+            // 中间发生过一次"打了 90 秒"就说明工具是通的，"连续 N 次几秒内被拒"这句话必须字面为真。
+            consecutiveFailures = 0;
+            slowFailures += 1;
         }
     }
 
     const gained = currentGain(bot, items, baselineAtStart);
+    // 全程一次都没打死、而且**每一次失败都是慢失败**（没有任何"快失败"）→ 结论是"打不死"，
+    // 不是"工具坏了"：换成 cannot_kill 的说法与下一步（两者措辞与出路都不同）。
+    // 混着快失败时不下这个结论（那可能是真有问题），只在回执里如实补一句"其中几次是打不死"。
+    if (kills === 0 && slowFailures > 0 && fastFailures === 0 && (stopReason === 'budget' || stopReason === 'attempts')) {
+        stopReason = 'cannot_kill';
+    }
+    const betterWeapon = stopReason === 'cannot_kill' ? skills.bestWeaponInInventory(bot) : null;
     // 被动动物这一带没有了：**顺手把"能不能自己造食物"的家底盘出来**（含最近的水），
     // 让回执给的是可执行路线，而不是"换个地方再找找"。
     const assets =
@@ -1398,6 +1451,8 @@ export async function huntForSkill(
         elapsedMs: now() - startedAt,
         netherBlaze,
         consecutiveFailures,
+        slowFailures,
+        ...(stopReason === 'cannot_kill' ? { betterWeapon } : {}),
         warnings,
         progress,
     });

@@ -1608,6 +1608,160 @@ describe('huntFor 失控回执：参数名 / 熔断 / 下一步 / 长度上限',
         expect(huntBackoffMs(99)).toBe(HUNT_ATTACK_BACKOFF_MAX_MS);
     });
 
+    // 独立复核的发现：`attackEntity` 的 90 秒击杀预算耗尽**也**返回 false。
+    // 原来"连续 3 次失败 ⇒ 工具可能坏了"把这种**慢失败**也算了进去，于是三只耐打的怪就让
+    // 回执说「内部打怪动作可能有问题」、并把模型打发去 `attack` 调一个完全正常的工具——
+    // 回执把模型骗了。下面几条把"快失败"和"打不死"钉开。
+    describe('快失败 vs 打不死（时长感知的熔断）', () => {
+        const lastLine = (text: string): string => text.trimEnd().split('\n').at(-1) ?? '';
+
+        it('连续三次**耗完击杀预算**的失败 → 说"打不死"，绝不说工具坏了，下一步不是 attack', async () => {
+            let clock = 0;
+            let attacks = 0;
+            const bot = makeBot({ health: 20, items: [stack('iron_sword', 1)] });
+            const receipt = await huntForSkill(bot, 'blaze', 2, 48, 300_000, {
+                findEntity: () => salmonEntity(),
+                attack: async () => {
+                    attacks += 1;
+                    clock += 90_000; // = attackEntity 的击杀预算
+                    return false;
+                },
+                findDrop: () => null,
+                sleep: async (): Promise<void> => {},
+                now: () => clock,
+            });
+
+            expect(attacks).toBeGreaterThanOrEqual(3);
+            expect(receipt).toContain('停止原因：打不死');
+            expect(receipt).toContain('**打不死**');
+            expect(receipt).toContain('耗完击杀预算');
+            expect(receipt).toContain('不是工具坏了');
+            // 绝不能把模型打发去 debug 一个正常的工具
+            expect(receipt).not.toContain('内部打怪动作');
+            expect(receipt).not.toContain('参数/目标解析/服务端拒绝');
+            const next = lastLine(receipt);
+            expect(next.startsWith('下一步（照做即可）：')).toBe(true);
+            expect(next).not.toContain('attack(');
+            expect(next).not.toContain('huntFor(');
+            // 烈焰人 → 先 prepareBlaze（换打法，而不是调工具）
+            expect(next).toBe('下一步（照做即可）：prepareBlaze');
+        });
+
+        it('打不死但包里有更好的武器 → 下一步是 equip（换武器也是"换打法"）', async () => {
+            let clock = 0;
+            const bot = makeBot({
+                health: 20,
+                items: [stack('iron_sword', 1), stack('diamond_sword', 1)],
+            });
+            // 真机上 item.attackDamage 由 prismarine-item 提供（equipHighestAttack 也用它排序）
+            bot.inventory.items = () => [
+                { name: 'iron_sword', count: 1, attackDamage: 4 },
+                { name: 'diamond_sword', count: 1, attackDamage: 7 },
+            ];
+            const receipt = await huntForSkill(bot, 'zombie', 2, 48, 300_000, {
+                findEntity: () => salmonEntity(),
+                attack: async () => {
+                    clock += 90_000;
+                    return false;
+                },
+                findDrop: () => null,
+                sleep: async (): Promise<void> => {},
+                now: () => clock,
+            });
+
+            expect(receipt).toContain('**打不死**');
+            expect(lastLine(receipt)).toBe('下一步（照做即可）：equip(item_name="diamond_sword")');
+        });
+
+        it('三次**亚秒级**失败 → 仍然是原来的熔断口径（诊断 attack）', async () => {
+            let clock = 0;
+            const bot = makeBot({ health: 20, items: [stack('iron_sword', 1)] });
+            const receipt = await huntForSkill(bot, 'salmon', 2, 48, 300_000, {
+                findEntity: () => salmonEntity(),
+                attack: async () => {
+                    clock += 10;
+                    return false;
+                },
+                findDrop: () => null,
+                sleep: async (): Promise<void> => {},
+                now: () => clock,
+            });
+
+            expect(receipt).toContain('停止原因：内部打怪动作连续失败');
+            expect(receipt).toContain('几秒内就被拒');
+            expect(receipt).not.toContain('**打不死**');
+            expect(lastLine(receipt)).toBe('下一步（照做即可）：attack(type="mob", target="salmon")');
+        });
+
+        it('混合（慢、慢、快、慢）**不会提前熔断**，也不会诬告工具', async () => {
+            let clock = 0;
+            let attacks = 0;
+            // 慢失败会把"快失败连击"清零：所以这一串里最快的连击只有 1 次，永远到不了 3。
+            const durations = [90_000, 90_000, 10, 90_000];
+            const bot = makeBot({ health: 20, items: [stack('iron_sword', 1)] });
+            const receipt = await huntForSkill(bot, 'zombie', 2, 48, 300_000, {
+                findEntity: () => salmonEntity(),
+                attack: async () => {
+                    clock += durations[Math.min(attacks, durations.length - 1)] ?? 10;
+                    attacks += 1;
+                    return false;
+                },
+                findDrop: () => null,
+                sleep: async (): Promise<void> => {},
+                now: () => clock,
+            });
+
+            expect(attacks).toBeGreaterThanOrEqual(4); // 没有在第 3 次就熔断
+            expect(receipt).not.toContain('内部打怪动作'); // 没有"连续三次快失败"，就不许说工具坏了
+            expect(receipt).not.toContain('停止原因：打不死'); // 混着快失败 → 不下"打不死"的结论
+            expect(receipt).toContain('停止原因：到时间预算了'); // 由墙钟预算收尾（口径不变）
+            // 但慢失败这件事仍然如实说一句（不改变下一步，也不诬告工具）
+            expect(receipt).toContain('耗完击杀预算');
+        });
+
+        it('慢失败会清零"快失败连击"：快、快、慢、快、快、快 是在**第 6 次**才熔断，不是第 3 次', async () => {
+            let clock = 0;
+            let attacks = 0;
+            const durations = [10, 10, 90_000, 10, 10, 10, 10];
+            const bot = makeBot({ health: 20, items: [stack('iron_sword', 1)] });
+            const receipt = await huntForSkill(bot, 'zombie', 2, 48, 300_000, {
+                findEntity: () => salmonEntity(),
+                attack: async () => {
+                    clock += durations[Math.min(attacks, durations.length - 1)] ?? 10;
+                    attacks += 1;
+                    return false;
+                },
+                findDrop: () => null,
+                sleep: async (): Promise<void> => {},
+                now: () => clock,
+            });
+
+            // 中间那次 90 秒把连击清零 → 第 4、5 次才重新数到 1、2，第 6 次才到 3
+            expect(attacks).toBe(6);
+            expect(receipt).toContain('连续 3 次攻击都是**几秒内就被拒**'); // 这句话现在字面为真
+            expect(receipt).toContain('停止原因：内部打怪动作连续失败');
+        });
+
+        it('打死了几只、只有慢失败 → 不算"打不死"（按原来的上限口径收尾）', async () => {
+            let clock = 0;
+            let attacks = 0;
+            const bot = makeBot({ health: 20, items: [stack('iron_sword', 1)] });
+            const receipt = await huntForSkill(bot, 'zombie', 1, 48, 300_000, {
+                findEntity: () => salmonEntity(),
+                attack: async () => {
+                    attacks += 1;
+                    clock += attacks === 1 ? 10 : 90_000; // 先杀一只，再慢失败
+                    return attacks === 1;
+                },
+                findDrop: () => null,
+                sleep: async (): Promise<void> => {},
+                now: () => clock,
+            });
+
+            expect(receipt).not.toContain('**打不死**');
+        });
+    });
+
     it('同类风险一起堵：exploreReceipt / tunnelReceipt 也有硬长度上限', () => {
         const notes = Array.from({ length: 3_000 }, (_, i) => `提示 ${i}`);
         const explored = exploreReceipt({

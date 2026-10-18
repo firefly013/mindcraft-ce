@@ -12,6 +12,8 @@ import { describe, expect, it } from 'vitest';
 import { findCommand, toolDeclarations, toolNames } from '../src/body/commands/registry.js';
 import { ENDGAME_TOOL_TEXT, endgameActionList, endgameQueryList } from '../src/body/commands/endgame.js';
 import { choosePotionToDrink, type EffectInfo, type PotionStock } from '../src/body/library/endgame.js';
+import { executeToolCall } from '../src/body/commands/execute.js';
+import { TOOL_TEXT } from '../src/shared/prompts.js';
 import {
     countEyesOfEnder,
     crystalToolKit,
@@ -148,14 +150,42 @@ describe('接线：registry 里的 9 条末地命令', () => {
         expect(findCommand('notAThing')).toBeUndefined();
     });
 
-    it('**所有命令都没有参数**（否则 check-prompts 会报 SCHEMA PARAM WITHOUT PROMPT TEXT）', () => {
+    it('工具调用的 `spots` 参数真的传到了 reviveDragon（按 params 顺序展开成位置参数）', async () => {
+        // 用"坏格式"当探针：只有参数真的传进去了，回执才会说"spots 参数没看懂"。
+        // 动作类工具的回执走 `bot.output`（skills.log），返回值是 runAction 的 message。
+        const bot = makeFakeBot({ stacks: [stack('end_crystal', 4)] });
+        const agent = makeFakeAgent(bot);
+        await executeToolCall(agent, 'reviveDragon', { spots: '3,63,0;哎呀' });
+        expect(bot.output).toContain('spots 参数没看懂');
+
+        bot.output = '';
+        await executeToolCall(agent, 'reviveDragon', {});
+        expect(bot.output).not.toContain('spots 参数没看懂');
+    });
+
+    it('**每个参数都有提示词文案**（否则 check-prompts 会报 SCHEMA PARAM WITHOUT PROMPT TEXT）', () => {
+        // 末地工具默认无参数；`reviveDragon(spots)` 是唯一例外（人能直接指定四个格子）。
+        // 真正的不变式不是"没有参数"，而是"**schema 里有的参数，TOOL_TEXT 里必须有说明**"
+        // —— 这正是 `npm run check:prompts` 第 1b 轮在查的东西。
         for (const command of [...endgameQueryList, ...endgameActionList]) {
-            expect(command.params ?? {}, `${command.name} 不该有参数`).toEqual({});
+            const params = Object.keys(command.params ?? {});
+            if (command.name !== '!reviveDragon') {
+                expect(params, `${command.name} 不该有参数`).toEqual([]);
+            }
+            for (const param of params) {
+                const tool = command.name.replace(/^!/, '');
+                expect((TOOL_TEXT as any)[tool]?.params?.[param], `${tool}.${param} 缺提示词文案`).toBeTruthy();
+            }
         }
         const declarations = toolDeclarations().filter((d) => (ENDGAME_TOOLS as readonly string[]).includes(d.name));
         for (const declaration of declarations) {
-            expect(declaration.params ?? {}).toEqual({});
+            for (const param of Object.keys(declaration.params ?? {})) {
+                expect((TOOL_TEXT as any)[declaration.name]?.params?.[param], `${declaration.name}.${param} 缺提示词文案`).toBeTruthy();
+            }
         }
+        // spots 必须写进 schema，否则模型没法显式指定格子
+        const revive = declarations.find((d) => d.name === 'reviveDragon');
+        expect(Object.keys(revive?.params ?? {})).toEqual(['spots']);
     });
 
     it('描述写得够长（它就是模型看到的说明书）并且都提到了关键风险', () => {

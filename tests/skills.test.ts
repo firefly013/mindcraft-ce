@@ -15,6 +15,7 @@ import {
   PLACE_TARGET_EMPTY_BLOCKS,
   ateByFacts,
   attackEntity,
+  bestWeaponInInventory,
   breakBlockAt,
   capBotOutput,
   choosePillarMaterial,
@@ -1031,5 +1032,30 @@ describe('attackEntity 击杀等待：有界 + 诊断', () => {
     expect(text).toContain('打了 90.0 秒还没打死 zombie');
     expect(text).toContain('你打不到它');
     expect(text).toContain('goToCoordinates(x=14, y=64, z=0, closeness=2)');
+  });
+});
+
+describe('bestWeaponInInventory', () => {
+  const mk = (items: any[]): any => ({ inventory: { items: () => items } });
+
+  it('按 attackDamage 挑最好的武器（和 equipHighestAttack 同一套排序）', () => {
+    expect(
+      bestWeaponInInventory(mk([{ name: 'iron_sword', attackDamage: 4 }, { name: 'diamond_sword', attackDamage: 7 }])),
+    ).toBe('diamond_sword');
+    // 斧头也算武器，镐不算（只有没剑/斧时才退而求其次）
+    expect(
+      bestWeaponInInventory(mk([{ name: 'iron_pickaxe', attackDamage: 2 }, { name: 'stone_axe', attackDamage: 9 }])),
+    ).toBe('stone_axe');
+    expect(bestWeaponInInventory(mk([{ name: 'iron_pickaxe', attackDamage: 2 }]))).toBe('iron_pickaxe');
+  });
+
+  it('没有武器 / 读不到背包 → null（不抛）', () => {
+    expect(bestWeaponInInventory(mk([]))).toBeNull();
+    expect(bestWeaponInInventory({} as any)).toBeNull();
+    expect(bestWeaponInInventory(mk([{ name: 'dirt', count: 64 }]))).toBeNull();
+  });
+
+  it('攻击力读不到时也不炸（取第一个，不编数值）', () => {
+    expect(bestWeaponInInventory(mk([{ name: 'wooden_sword' }]))).toBe('wooden_sword');
   });
 });

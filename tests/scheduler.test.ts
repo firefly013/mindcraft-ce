@@ -120,9 +120,16 @@ describe('紧急锁（L5 的反射）', () => {
     // 顺手解锁：别让身体侧反射和模型继续互相抢。
     expect(s.locked).toBe(false);
 
+    // **`consume` 不在这里**（验证者探针 ①a）：吃饭不是"从水里/岩浆里出来"，
+    // 它在锁下会把紧急锁清掉，等于"吃一口就能把保命关掉"，身体侧还会把正在
+    // 救命的 surface 打断 25 秒。
     const s2 = new Scheduler();
     s2.beginEmergency();
-    expect(s2.startAction('consume', { item_name: 'bread' }).accepted).toBe(true);
+    expect(s2.startAction('consume', { item_name: 'bread' })).toMatchObject({
+      accepted: false,
+      code: 'EMERGENCY_LOCKED',
+    });
+    expect(s2.locked).toBe(true);
 
     // 带 ! 前缀也一样。
     const s3 = new Scheduler();

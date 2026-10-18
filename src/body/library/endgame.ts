@@ -1300,32 +1300,74 @@ export const CARDINAL_LABELS: Record<CardinalDirection, string> = Object.freeze(
     west: '西(-X)',
 });
 
+/**
+ * 一个可放水晶的格子的"像不像标准位置"分档（越靠前越可信）。
+ *
+ * - `cardinal_middle`：半径 3 的四个正方向中点（`(±3,y+1,0)`、`(0,y+1,±3)`）——**本世界**
+ *   的激活返回门就是这一档：y=62 那层是 20 个 `end_portal`，只有环外沿的基座上方才是空气；
+ * - `diagonal_corner`：半径 2 的四个对角（`(±2,y+1,±2)`）；
+ * - `outer_ring`：半径 3 环上的其它格子；
+ * - `ring_gap`：**课本形状**的缺口（空气 + 底下基座 + 垂直于半径的两侧也是基座）；
+ * - `air_over_base`：兜底——"空气 + 底下是基座"，形状不像标准位置。
+ *
+ * 为什么要分档而不是"先到先得"：只按"空气+底下基座"扫，**环上方那一层**会先被选中
+ * （`(±1,y+1,0)`：空气、底下正是基座），水晶就被放到错的高度了。分档把"标准位置"
+ * 排在前面，兜底档只在标准档凑不齐 4 个时才用，并且回执里会**明说这是在猜**。
+ */
+export type ReviveSpotTier = 'cardinal_middle' | 'diagonal_corner' | 'outer_ring' | 'ring_gap' | 'air_over_base';
+
+const TIER_ORDER: readonly ReviveSpotTier[] = [
+    'cardinal_middle',
+    'diagonal_corner',
+    'outer_ring',
+    'ring_gap',
+    'air_over_base',
+];
+
+/** 标准档（前三档 + 课本缺口）；`air_over_base` 是兜底，不算标准。 */
+const STANDARD_TIERS: readonly ReviveSpotTier[] = ['cardinal_middle', 'diagonal_corner', 'outer_ring', 'ring_gap'];
+
 export interface ReviveSpotPlan {
     ok: boolean;
     /** 用到的传送门中心（**观察值**，不是写死的常量）。 */
     center: Vec3;
-    /** 找到的缺口（不足 4 个时就是找到的那几个）。 */
+    /** 选中的格子（不足 4 个时就是找到的那几个）。 */
     spots: Vec3[];
-    /** 哪个方向没找到缺口。 */
+    /** 每个选中的格子属于哪一档（和 `spots` 一一对应）。 */
+    tiers: ReviveSpotTier[];
+    /** 标准档一共找到几个。 */
+    standardCount: number;
+    /** 哪几个格子的形状"像标准位置"但不是空气（被占了）——诊断"这门为什么推不出来"。 */
+    blocked: Array<{ cell: Vec3; block: string | null; tier: ReviveSpotTier }>;
+    /** 哪个方向没找到格子（按主方向归类）。 */
     missing: CardinalDirection[];
-    /** 哪个方向有格子但被别的东西占了（第一格）。 */
-    blocked: Array<{ direction: CardinalDirection; cell: Vec3; block: string | null }>;
+    /** 搜索范围内非空气方块的统计（最多 4 条）——结构性不匹配时就靠它解释。 */
+    census: Array<{ block: string; count: number }>;
     reason: string;
 }
 
+/** 兜底档拿到 4 个格子时，回执必须提醒"这是在猜"。 */
+export function tierIsGuess(tier: ReviveSpotTier): boolean {
+    return tier === 'air_over_base';
+}
+
+function dominantDirection(dx: number, dz: number): CardinalDirection {
+    if (Math.abs(dx) >= Math.abs(dz)) return dx >= 0 ? 'east' : 'west';
+    return dz >= 0 ? 'south' : 'north';
+}
+
 /**
- * 从**真实方块**推出返回门基座上的四个缺口。
+ * 从**真实方块**推出可放水晶的格子（按 `ReviveSpotTier` 分档，标准档优先）。
  *
- * 判据（不写死 `(0,62,0)`，也不写死"就在 y+1"）：
- * 沿每个正方向、在中心 y 附近几层里找一个**空格**，要求
- *   1. 正下方是基座方块（默认 `bedrock`）—— 缺口的底；
- *   2. **垂直于半径方向的两侧同一层也是基座** —— 这条才是"环上的缺口"的签名。
+ * 判据全部来自读到的方块，**不写死坐标、也不写死"就在 y+1"**：
+ * 1. 在中心附近（默认切比雪夫半径 3、y ±2 层）扫所有格子；
+ * 2. 只收**空气**格，且**正下方是基座**（默认 `bedrock`）；
+ * 3. 按形状分档排序，取最靠前的 4 个（彼此至少隔开 2 格，保证分布在四个方向）。
  *
- * 第 2 条是必需的，不是洁癖：只按"空格 + 下面是基座"找，**环上方那一层**
- * （`(±1, y+1, 0)`：空气、底下正是基座）也会中选，于是水晶会被放到错误的高度。
- * 环上缺口两侧是环，环上方两侧是空气 —— 这是唯一能区分两者的判据。
+ * "读不到方块（null）"一律跳过：宁可说"找不到"，也不把水晶放到猜的位置。
  *
- * 读不到方块（null）一律跳过：宁可说"找不到缺口"，也不把水晶放错地方。
+ * **标准档凑不齐时**：如果缺的那一格是被方块占着的标准位置 → 直接拒绝并点名那一格
+ * （清掉它就好，别浪费水晶）；否则退回兜底档，并在 `reason` 里说清"这不是标准形状"。
  */
 export function planDragonReviveSpots(input: {
     center: Vec3;
@@ -1334,81 +1376,197 @@ export function planDragonReviveSpots(input: {
     baseName?: string;
     /** 中心 y 往上/往下各搜几层，默认 2（中心 y 常有一两格的观测误差）。 */
     yTolerance?: number;
+    /** 水平搜索半径（切比雪夫距离），默认 3。 */
+    radius?: number;
 }): ReviveSpotPlan {
     const base = input.baseName ?? 'bedrock';
     const tolerance = Math.max(0, Math.floor(input.yTolerance ?? 2));
+    const radius = Math.min(5, Math.max(1, Math.floor(input.radius ?? 3)));
     const cx = Math.floor(input.center.x);
     const cz = Math.floor(input.center.z);
     const cy = Math.floor(input.center.y);
     const center = vec(cx, cy, cz);
     const nameAt = (p: Vec3): string | null => input.probe(p);
-    const isBase = (p: Vec3): boolean => nameAt(p) === base;
+    const isAir = (name: string | null): boolean => name === 'air' || name === 'cave_air' || name === 'void_air';
 
-    const candidates = new Map<CardinalDirection, { cell: Vec3; score: number }>();
-    // 被占的格子：优先报"长得像缺口但被占了"的那一格（底下是基座 + 两侧是基座），
-    // 否则报最靠外的那一格。不然会把环本身的基座（r=1）误报成"缺口被堵"。
-    const blockedFirst = new Map<
-        CardinalDirection,
-        { cell: Vec3; block: string | null; shaped: boolean; radius: number; dyAbs: number }
-    >();
+    const buckets = new Map<ReviveSpotTier, Vec3[]>(TIER_ORDER.map((tier) => [tier, [] as Vec3[]]));
+    const blocked: ReviveSpotPlan['blocked'] = [];
+    const census = new Map<string, number>();
 
-    for (const dir of CARDINAL_DIRECTIONS) {
-        for (let dy = -tolerance; dy <= tolerance; dy++) {
-            for (let r = 1; r <= 3; r++) {
-                const cell = vec(cx + dir.dx * r, cy + dy, cz + dir.dz * r);
+    for (let dy = -tolerance; dy <= tolerance; dy++) {
+        for (let dx = -radius; dx <= radius; dx++) {
+            for (let dz = -radius; dz <= radius; dz++) {
+                if (dx === 0 && dz === 0) continue;
+                const cell = vec(cx + dx, cy + dy, cz + dz);
                 const here = nameAt(cell);
                 if (here == null) continue; // 读不到 → 不猜
-                const belowIsBase = isBase(vec(cell.x, cell.y - 1, cell.z));
-                const sideA = vec(cell.x - dir.dz, cell.y, cell.z - dir.dx);
-                const sideB = vec(cell.x + dir.dz, cell.y, cell.z + dir.dx);
-                const shaped = belowIsBase && isBase(sideA) && isBase(sideB);
-                if (here !== 'air' && here !== 'cave_air' && here !== 'void_air') {
-                    const previous = blockedFirst.get(dir.point);
-                    const candidate = { cell, block: here, shaped, radius: r, dyAbs: Math.abs(dy) };
-                    // 优先"长得像缺口"的；同样像就取**更靠外**的（缺口在环的外沿 r=2，
-                    // r=1 是环本身的基座，不能报成"缺口被堵"）；再同样就取更贴近中心层的。
-                    const better =
-                        previous == null ||
-                        (candidate.shaped && !previous.shaped) ||
-                        (candidate.shaped === previous.shaped &&
-                            (candidate.radius > previous.radius ||
-                                (candidate.radius === previous.radius && candidate.dyAbs < previous.dyAbs)));
-                    if (better) blockedFirst.set(dir.point, candidate);
+                const cheb = Math.max(Math.abs(dx), Math.abs(dz));
+                // 只有"环上基座的正上方"才是可放格：底下必须是基座。
+                if (!isAir(here)) {
+                    census.set(here, (census.get(here) ?? 0) + 1);
+                    // 课本缺口的签名（空气/非空气都先算形状）：底下基座 + 垂直于半径的两侧也是基座
+                    const perp =
+                        Math.abs(dx) >= Math.abs(dz)
+                            ? [vec(cell.x, cell.y, cell.z - 1), vec(cell.x, cell.y, cell.z + 1)]
+                            : [vec(cell.x - 1, cell.y, cell.z), vec(cell.x + 1, cell.y, cell.z)];
+                    const shaped =
+                        nameAt(vec(cell.x, cell.y - 1, cell.z)) === base &&
+                        perp.every((p) => nameAt(p) === base);
+                    if (shaped) blocked.push({ cell, block: here, tier: 'ring_gap' });
                     continue;
                 }
-                if (!shaped) continue; // 缺口底下得是基座、两侧也得是环
-                const score = Math.abs(dy) * 10 + r;
-                const current = candidates.get(dir.point);
-                if (current == null || score < current.score) candidates.set(dir.point, { cell, score });
-                break; // 这个高度已经找到一个，换下一个高度
+                if (nameAt(vec(cell.x, cell.y - 1, cell.z)) !== base) continue; // 底下不是基座 → 不算
+                let tier: ReviveSpotTier = 'air_over_base';
+                if (dy === 1 && Math.abs(dx) === 3 && dz === 0) tier = 'cardinal_middle';
+                else if (dy === 1 && dx === 0 && Math.abs(dz) === 3) tier = 'cardinal_middle';
+                else if (dy === 1 && Math.abs(dx) === 2 && Math.abs(dz) === 2) tier = 'diagonal_corner';
+                else if (dy === 1 && cheb === 3) tier = 'outer_ring';
+                else {
+                    const perp =
+                        Math.abs(dx) >= Math.abs(dz)
+                            ? [vec(cell.x, cell.y, cell.z - 1), vec(cell.x, cell.y, cell.z + 1)]
+                            : [vec(cell.x - 1, cell.y, cell.z), vec(cell.x + 1, cell.y, cell.z)];
+                    if (perp.every((p) => nameAt(p) === base)) tier = 'ring_gap';
+                }
+                buckets.get(tier)?.push(cell);
             }
         }
     }
 
-    const spots: Vec3[] = [];
-    const missing: CardinalDirection[] = [];
-    const blocked: ReviveSpotPlan['blocked'] = [];
-    for (const dir of CARDINAL_DIRECTIONS) {
-        const found = candidates.get(dir.point);
-        if (found != null) {
-            spots.push(found.cell);
-            continue;
+    // 逐档取格子，彼此至少隔开 2 格（保证落在四个方向上而不是挤在一侧）。
+    const chosen: Vec3[] = [];
+    const chosenTiers: ReviveSpotTier[] = [];
+    const farEnough = (cell: Vec3): boolean =>
+        chosen.every((c) => Math.max(Math.abs(c.x - cell.x), Math.abs(c.z - cell.z)) >= 2);
+    const standardSpots: Vec3[] = [];
+    for (const tier of TIER_ORDER) {
+        const list = (buckets.get(tier) ?? []).slice().sort((a, b) => {
+            const da = Math.abs(a.y - (cy + 1)) * 100 + Math.max(Math.abs(a.x - cx), Math.abs(a.z - cz)) * 10;
+            const db = Math.abs(b.y - (cy + 1)) * 100 + Math.max(Math.abs(b.x - cx), Math.abs(b.z - cz)) * 10;
+            return da - db || a.x - b.x || a.z - b.z;
+        });
+        if (STANDARD_TIERS.includes(tier)) standardSpots.push(...list);
+        for (const cell of list) {
+            if (chosen.length >= DRAGON_REVIVE_CRYSTALS) break;
+            if (!farEnough(cell)) continue;
+            chosen.push(cell);
+            chosenTiers.push(tier);
         }
-        missing.push(dir.point);
-        const blockedCell = blockedFirst.get(dir.point);
-        if (blockedCell != null) blocked.push({ direction: dir.point, cell: blockedCell.cell, block: blockedCell.block });
+        if (chosen.length >= DRAGON_REVIVE_CRYSTALS) break;
     }
 
-    const ok = spots.length === DRAGON_REVIVE_CRYSTALS;
-    const reason = ok
-        ? `返回门 (${cx},${cy},${cz}) 的四个缺口都在：${spots.map((s) => `(${s.x},${s.y},${s.z})`).join('、')}。`
-        : `只找到 ${spots.length}/${DRAGON_REVIVE_CRYSTALS} 个缺口——缺 ${missing.map((d) => CARDINAL_LABELS[d]).join('、')}` +
-            (blocked.length > 0
-                ? `；其中 ${blocked.map((b) => `${CARDINAL_LABELS[b.direction]} 的 (${b.cell.x},${b.cell.y},${b.cell.z}) 被 ${b.block} 占着`).join('、')}。`
-                : '。') +
-            '先把这几格清成空格（底下必须是基座、两侧也要是基座）再复活。';
+    const standardCount = standardSpots.length;
+    const missingSet = new Set<CardinalDirection>(['north', 'east', 'south', 'west']);
+    for (const cell of chosen) missingSet.delete(dominantDirection(cell.x - cx, cell.z - cz));
+    const missing = [...missingSet];
+    const censusList = [...census.entries()]
+        .sort((a, b) => b[1] - a[1])
+        .slice(0, 4)
+        .map(([block, count]) => ({ block, count }));
+    const censusText =
+        censusList.length > 0 ? `搜索范围内见到的方块：${censusList.map((c) => `${c.block}×${c.count}`).join('、')}。` : '';
+    const spotText = chosen.map((s) => `(${s.x},${s.y},${s.z})`).join('、');
 
-    return { ok, center, spots, missing, blocked, reason };
+    // —— 结论 ——
+    if (standardCount >= DRAGON_REVIVE_CRYSTALS) {
+        return {
+            ok: true,
+            center,
+            spots: chosen,
+            tiers: chosenTiers,
+            standardCount,
+            blocked,
+            missing,
+            census: censusList,
+            reason: `返回门 (${cx},${cy},${cz}) 找到 ${standardCount} 个标准位置，用这四个：${spotText}。`,
+        };
+    }
+    if (standardCount > 0 && blocked.length > 0) {
+        return {
+            ok: false,
+            center,
+            spots: chosen,
+            tiers: chosenTiers,
+            standardCount,
+            blocked,
+            missing,
+            census: censusList,
+            reason:
+                `标准位置只找到 ${standardCount}/${DRAGON_REVIVE_CRYSTALS} 个，而且缺的格子**被占着**：` +
+                `${blocked.map((b) => `(${b.cell.x},${b.cell.y},${b.cell.z}) 是 ${b.block}`).join('、')}。` +
+                `先把这几格清成空气（底下留基座）再复活，别用别的格子顶替。${censusText}`,
+        };
+    }
+    if (chosen.length >= DRAGON_REVIVE_CRYSTALS) {
+        return {
+            ok: true,
+            center,
+            spots: chosen,
+            tiers: chosenTiers,
+            standardCount,
+            blocked,
+            missing,
+            census: censusList,
+            reason:
+                `这个返回门**不是课本形状**（标准位置 0 个），按兜底规则选了 ${chosen.length} 个"空气 + 底下基座"的格子：${spotText}。` +
+                `能不能触发复活**不确定**，放完看龙回不回来。${censusText}`,
+        };
+    }
+    return {
+        ok: false,
+        center,
+        spots: chosen,
+        tiers: chosenTiers,
+        standardCount,
+        blocked,
+        missing,
+        census: censusList,
+        reason:
+            `这个返回门的结构对不上：只找到 ${chosen.length}/${DRAGON_REVIVE_CRYSTALS} 个"空气 + 底下基座"的格子。` +
+            `用 spots 参数**显式指定**四个格子（例如 "3,63,0;-3,63,0;0,63,3;0,63,-3"）就能照做。${censusText}`,
+    };
+}
+
+export interface ReviveSpotOverride {
+    ok: boolean;
+    spots: Vec3[];
+    /** 人话的错误说明（`ok=false` 时给模型看）。 */
+    error: string;
+}
+
+/**
+ * 解析 `spots` 参数：`"3,63,0;-3,63,0;0,63,3;0,63,-3"`（绝对坐标，分号/换行分隔，逗号或空格分列）。
+ *
+ * 为什么要这个参数：这个世界**已经通关**，返回门是激活状态（环里那层是 `end_portal`），
+ * 结构可能和课本不一样。人能直接从存档里算出正确的四格 —— 得给一条**不用改代码**的路。
+ */
+export function parseReviveSpotOverride(spec: unknown): ReviveSpotOverride {
+    if (typeof spec !== 'string' || spec.trim() === '') return { ok: false, spots: [], error: '' };
+    const tokens = spec
+        .split(/[;\n]+/)
+        .map((t) => t.trim())
+        .filter((t) => t !== '');
+    if (tokens.length === 0) return { ok: false, spots: [], error: 'spots 是空的。' };
+    const spots: Vec3[] = [];
+    for (const token of tokens) {
+        const parts = token.split(/[,\s]+/).map((n) => Number(n));
+        if (parts.length !== 3 || parts.some((n) => !Number.isFinite(n))) {
+            return {
+                ok: false,
+                spots: [],
+                error: `spots 里有一段看不懂："${token}"——要三段数字（x,y,z），段之间用分号隔开，例如 "3,63,0;-3,63,0;0,63,3;0,63,-3"。`,
+            };
+        }
+        spots.push(vec(Math.floor(parts[0] as number), Math.floor(parts[1] as number), Math.floor(parts[2] as number)));
+    }
+    if (spots.length < DRAGON_REVIVE_CRYSTALS) {
+        return {
+            ok: false,
+            spots,
+            error: `spots 只给了 ${spots.length} 个格子，复活要 ${DRAGON_REVIVE_CRYSTALS} 个（四个方向各一个）。`,
+        };
+    }
+    return { ok: true, spots: spots.slice(0, DRAGON_REVIVE_CRYSTALS), error: '' };
 }
 
 // ============================ 十、阶段状态机（接主循环用） ============================

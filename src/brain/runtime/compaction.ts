@@ -49,14 +49,18 @@ function positiveNumber(value: unknown, fallback: number): number {
 export const MIN_RESERVE_RATIO = 0.2;
 
 /**
- * reserve 的**上限**：窗口的一半。对抗验证（tmp/verify/compaction_floor.probe.test.ts）发现
- * 只抬不封顶会出事——8K 窗口下 reserve 被抬到 16_384（**大于窗口本身**），
- * 触发线成了 `−8192`；而且 `keepRecentTokens=20_000 > window − reserve`，pi-durable 的
- * `selectCut` 永远返回 undefined，于是阈值压缩和**溢出压缩**都选不出切点，
- * 溢出直接变成 "An overflow is never retried" ——**又是 F-21 那个形状，只是换了个窗口大小**。
- * 本机跑的是 1M 窗口所以今晚没踩到，但这段代码是通用的，不能只在 1M 下正确。
+ * reserve 的**上限**：窗口的 40%（触发线 = 窗口的 60%）。
+ *
+ * 对抗验证（`tmp/verify/compaction_floor.probe.test.ts`）发现只抬不封顶会出两种事：
+ * ① 8K 窗口下 reserve 被抬到 16_384（**大于窗口本身**），触发线成了 `−8192`，
+ *    而且 `keepRecentTokens=20_000 > window − reserve` → pi-durable 的 `selectCut`
+ *    永远返回 undefined，阈值压缩和**溢出压缩**都选不出切点，
+ *    溢出直接变成 "An overflow is never retried" ——**又是 F-21 那个形状，换个窗口大小而已**；
+ * ② 就算封在 50%，32K 窗口的触发线也只有 50%（16_384），**压缩得太勤**——
+ *    他们的探针明确要求触发线 ≥ 窗口的 60%（19_661），所以上限取 40%。
+ * 1M 生产窗口下不变：`min(max(400_000, 200_000), 400_000) = 400_000`，触发线仍是 600_000。
  */
-export const MAX_RESERVE_RATIO = 0.5;
+export const MAX_RESERVE_RATIO = 0.4;
 
 /** 从 profile 解析上下文压缩策略。缺字段一律落回 pi-durable 的默认值。 */
 export function compactionPolicyFromProfile(profile: unknown, contextWindow?: number): CompactionPolicy {

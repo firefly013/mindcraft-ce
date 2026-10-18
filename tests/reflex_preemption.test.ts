@@ -469,6 +469,8 @@ describe('⑧ 水里：自救不能被保命反射锁死', () => {
     const body = bareBody({
       reflexRunning: true,
       currentReflexName: 'surface',
+      // 去重键是 reflex + intent（验证者探针 ④）：同名不同意图不是同一件事。
+      currentReflexIntent: 'surface',
       currentReflexStartedAt: Date.now() - 1000,
       notify: (type: string, _kind: unknown, _level: unknown, payload: unknown) => events.push({ type, payload }),
       log: { with: () => ({ info: () => {}, error: () => {} }) },
@@ -583,11 +585,14 @@ describe('⑧ 水里：自救不能被保命反射锁死', () => {
     expect(body.reflexAbortRequested).toBe(true);      // 反射收到中断
     expect(requestInterrupt).toHaveBeenCalled();
     expect(body.reflexQueue).toHaveLength(0);          // 队列里的也不再跑
-    expect(body.survivalCooldownUntil).toBeGreaterThan(Date.now() + SURVIVAL_COOLDOWN_MS - 5_000);
+    // 这个 fixture 里的执行器跑不起来（裸 body）→ 属于**自救失败**：
+    // 让位照旧发生，但**不给 25 秒静音窗口**（验证者探针 ①：失败也静音
+    // 等于把命交给运气）。成功路径的窗口在 tests/reflex_fatal.test.ts。
+    expect(body.survivalCooldownUntil).toBe(0);
     const note = events.filter((e) => e.payload?.outcome === 'preempted').pop();
     expect(note).toBeDefined();
     expect(String(note.payload.detail)).toContain('escapeWater');
-    expect(String(note.payload.detail)).toContain('不会抢回去');
+    expect(String(note.payload.detail)).toContain('没成功');
   });
 
   it('水里的占用同样受 45 秒预算约束（surface 也是保命反射）', () => {
