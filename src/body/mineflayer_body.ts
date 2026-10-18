@@ -621,8 +621,18 @@ export const FLAG_DANGER_TYPES: ReadonlySet<string> = new Set(
     DETECTORS.filter((detector) => detector.kind === 'flag').map((detector) => detector.type),
 );
 
-/** 容器包转储关心的"开界面"包（只有这些记载荷）。 */
-const WINDOW_PACKET_RE = /open_screen|window_items|window_properties|close_window|set_content|container_set_content|open_sign_editor|merchant_offers/i;
+/**
+ * 容器包转储关心的"开界面"包（只有这些记载荷）。
+ *
+ * ⚠️ **包名随协议版本改过，必须两个名字都认**：
+ * 1.19 时代叫 `open_screen`，**1.20.2+ 改名为 `open_window`**（本机 minecraft-data 3.111.0
+ * 的 1.20.6 数据里 toClient 只有 `packet_open_window`，没有 `packet_open_screen`）。
+ * 我们的服务端是 **1.20.6** —— 只写 `open_screen` 会让转储**永远看不见开窗包**，
+ * 于是把"服务端其实发了、我们没接住"误判成 `no-reply`。这个假阴性已经实际发生过一次
+ * （2026-10-19 03:28 真机：三个箱子的 dump 全是"无入站包"，而 Meta.screen 一度闪过 open）。
+ * 同类改名还有 `set_content` → `container_set_content`，一起留着。
+ */
+const WINDOW_PACKET_RE = /open_screen|open_window|window_items|window_properties|close_window|set_content|container_set_content|open_sign_editor|merchant_offers/i;
 
 /** 六个窗口包的一行摘要（只留判定字段；读不到就留空，绝不 dump 整包）。 */
 function summarizeInboundWindowPacket(name: string, data: unknown): string {
