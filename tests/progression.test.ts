@@ -670,6 +670,10 @@ describe('huntFor：刷到够数 / 只认真实增量', () => {
             sleep: noSleep,
         });
         expect(receipt).toContain('停止原因：半径内找不到目标了');
+        // 和 exploreFor 同一个口径："这一带没有"不是"工具坏了"
+        expect(receipt).toContain('这一带（半径 48 格内）确实没有 blaze');
+        expect(receipt).toContain('不是工具坏了');
+        expect(receipt).toContain('烈焰人只在要塞里刷');
         expect(receipt.trimEnd().split('\n').at(-1)).toBe(
             '下一步（照做即可）：exploreFor(block="nether_bricks", max_steps=4)',
         );

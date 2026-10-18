@@ -26,6 +26,7 @@ import { applyScaffoldingBlocks, movementsFor, MAX_DROP_DOWN } from "../safety/m
 import { deepWaterAllowed } from "../safety/permits.js";
 import { assessStandingSpot, chooseSafeFleeTarget } from "../safety/flee.js";
 import { safeguards } from "../safety/safeguards.js";
+import { FOOD_VALUE } from "../safety/emergency.js";
 
 export function log(bot: any, ...messages: any[]): void {
     bot.output += messages.join(' ') + '\n';
@@ -2158,29 +2159,296 @@ export async function viewChest(bot: any): Promise<boolean> {
     return contents.readable;
 }
 
-export async function consume(bot: any, itemName: string = ""): Promise<boolean> {
+// ──────────────────────────── 吃东西（consume） ────────────────────────────
+//
+// 真机反馈（overnight_b，15:58）：`consume(mutton)` 撞上 mineflayer 的
+// "Promise timed out" 后，回执整段是 `!!Action threw exception!!` + 堆栈；
+// 同时快照显示 mutton 还在手上、food 仍是 14/sat 0。模型拿不到任何能据以决策的
+// 事实（该换食物还是该跑？），只能在被打的时候原地反复试同一件事。饱食度是回血的
+// 唯一来源，所以这条路径必须给结论。
+//
+// 契约（和 AGENTS 的口径一致）：
+//   1. **不抛异常**：任何失败都变成一段事实回执（堆栈只进控制台，不进回执）；
+//   2. **判定靠真实变化**：饱食度/饱和度上升、**或**手上确实少了一个——都不是就是"没生效"；
+//   3. **同步超时自动退避重试 1 次**，重试前重新取物品并 equip（确认东西还在手上）；
+//   4. **回执永远带吃前/吃后的 food 与 saturation**，并给一条能照抄的下一步。
+
+/** 吃一口之后等服务端把饱食度同步回来——**只在第一次读不到变化时才等**。 */
+const CONSUME_RESYNC_MS = 700;
+/** 同步超时后的退避时间。 */
+const CONSUME_RETRY_BACKOFF_MS = 800;
+/** 最多试几次（1 次正常 + 1 次重试）。 */
+const CONSUME_MAX_ATTEMPTS = 2;
+
+export interface ConsumeOptions {
+    /** 等数值同步的时间（测试里给 0）。 */
+    resyncMs?: number;
+    /** 重试前的退避（测试里给 0）。 */
+    retryBackoffMs?: number;
+    /** 最多尝试次数。 */
+    maxAttempts?: number;
+}
+
+export interface FoodState {
+    food: number | null;
+    saturation: number | null;
+}
+
+export interface EdibleItem {
+    name: string;
+    count: number;
+    food: number;
+    saturation: number;
+}
+
+function finiteOrNull(value: unknown): number | null {
+    return typeof value === 'number' && Number.isFinite(value) ? value : null;
+}
+
+/** 饿不饿、饱食度多少；读不到就是 null（回执如实写"读不到"，不编数字）。 */
+export function readFoodState(bot: any): FoodState {
+    return { food: finiteOrNull(bot?.food), saturation: finiteOrNull(bot?.foodSaturation) };
+}
+
+/** `food 14/sat 0`；读不到就写"读不到"。 */
+export function formatFoodState(state: FoodState): string {
+    const food = state.food == null ? '读不到' : String(state.food);
+    const saturation = state.saturation == null ? '读不到' : String(Math.round(state.saturation * 10) / 10);
+    return `food ${food}/sat ${saturation}`;
+}
+
+/** `food 14/sat 0 → food 20/sat 9.6`；一模一样时补一句"没有变化"。 */
+export function formatFoodDelta(before: FoodState, after: FoodState): string {
+    const same = before.food === after.food && before.saturation === after.saturation;
+    return `${formatFoodState(before)} → ${formatFoodState(after)}${same ? '（没有变化）' : ''}`;
+}
+
+/** 1.13 去掉了 `raw_` 前缀、1.21.2 又加回来——两个名字都得认。 */
+const RAW_FOOD_ALIASES: Readonly<Record<string, string>> = Object.freeze({
+    mutton: 'raw_mutton',
+    beef: 'raw_beef',
+    porkchop: 'raw_porkchop',
+    chicken: 'raw_chicken',
+    cod: 'raw_cod',
+    salmon: 'raw_salmon',
+    rabbit: 'raw_rabbit',
+});
+
+function stripNamespace(name: unknown): string {
+    return typeof name === 'string' ? name.trim().toLowerCase().replace(/^minecraft:/, '') : '';
+}
+
+/** 这个物品能不能吃（返回 [饥饿值, 饱和度]）；不能吃返回 null。两个版本的命名都认。 */
+export function foodValueOf(name: unknown): readonly [number, number] | null {
+    const key = stripNamespace(name);
+    if (key === '') return null;
+    return FOOD_VALUE[key] ?? FOOD_VALUE[RAW_FOOD_ALIASES[key] ?? ''] ?? null;
+}
+
+/** 背包里所有能吃的东西（按"值不值得吃"排序），带数量。 */
+export function listEdibleItems(bot: any): EdibleItem[] {
+    let items: Array<{ name?: unknown; count?: unknown }>;
+    try {
+        items = (bot?.inventory?.items?.() ?? []) as Array<{ name?: unknown; count?: unknown }>;
+    } catch {
+        return [];
+    }
+    if (!Array.isArray(items)) return [];
+    const out: EdibleItem[] = [];
+    for (const item of items) {
+        const name = typeof item?.name === 'string' ? item.name : '';
+        const values = foodValueOf(name);
+        const count = finiteOrNull(item?.count) ?? 0;
+        if (values == null || count <= 0) continue;
+        out.push({ name, count, food: values[0], saturation: values[1] });
+    }
+    return out.sort((a, b) => b.saturation * 100 + b.food - (a.saturation * 100 + a.food));
+}
+
+/** 错误的**要点**（不是堆栈）：回执里只出现模型能据以决策的信息。 */
+export function describeConsumeError(err: unknown): string {
+    const raw = err instanceof Error ? err.message : String(err);
+    const message = raw.replace(/\s+/g, ' ').trim();
+    if (/timed?\s*out|timeout/i.test(message)) {
+        return `等待服务端回应超时（mineflayer: ${message.slice(0, 80)}）`;
+    }
+    return message === '' ? '未知错误' : message.slice(0, 120);
+}
+
+/**
+ * 用**可观测的事实**判断这一口有没有吃进去（而不是"调用没抛错"）。
+ *
+ * 三个事实任一成立就算吃进去了：饥饿值上升、饱和度上升、手上少了一个。
+ * `null` 表示读不到——读不到的一律不当作证据（宁可说"无法确认"）。
+ */
+export function ateByFacts(
+    before: FoodState,
+    after: FoodState,
+    countBefore: number | null,
+    countAfter: number | null,
+): boolean {
+    if (before.food != null && after.food != null && after.food > before.food) return true;
+    if (before.saturation != null && after.saturation != null && after.saturation > before.saturation) return true;
+    if (countBefore != null && countAfter != null && countAfter < countBefore) return true;
+    return false;
+}
+
+/** 供回执用的一句话：手上还有什么能吃的。 */
+function describeEdibles(edibles: readonly EdibleItem[]): string {
+    if (edibles.length === 0) return '背包里没有别的东西能吃。';
+    return `能吃的还有：${edibles.map((e) => `${e.name}x${e.count}`).join('、')}。`;
+}
+
+/** 失败之后：说清换哪一种、够不够、要不要先烤/做，并给**一条**能照抄的调用。 */
+function consumeAdvice(bot: any, wanted: string, edibles: readonly EdibleItem[]): { text: string; call: string } {
+    const others = edibles.filter((e) => stripNamespace(e.name) !== stripNamespace(wanted));
+    if (others.length > 0) {
+        const best = others[0] as EdibleItem;
+        return {
+            text: `手里还有别的能吃（${others.map((e) => `${e.name}x${e.count}`).join('、')}）：**换一种**比重复同一次调用有用；生肉也能吃但补得少，有熔炉就先烤熟（熟食补得多）。`,
+            call: `consume(item_name="${best.name}")`,
+        };
+    }
+    const same = wanted === '' ? null : inventoryCountOf(bot, wanted);
+    if (same != null && same > 0) {
+        return {
+            text: `背包里没有别的食物了，${wanted} 还有 ${same} 个：可以照下面这条再试一次；**如果还是超时，就别在原地反复吃**——先离开/找食物（生肉放熔炉烤熟更划算）。`,
+            call: `consume(item_name="${wanted}")`,
+        };
+    }
+    return {
+        text: `背包里没有别的食物，${wanted || '这一种'}也没了：先去找或做吃的（打猎拿生肉→熔炉烤熟），别空着肚子打架。`,
+        call: 'stats(type="inventory")',
+    };
+}
+
+export async function consume(bot: any, itemName: string = "", options: ConsumeOptions = {}): Promise<boolean> {
     /**
      * Eat/drink the given item.
+     *
+     * **不抛异常**：失败也是回执（见本段上方契约）。返回值：`true` = 有事实证据表明吃进去了。
      * @param {MinecraftBot} bot, reference to the minecraft bot.
      * @param {string} itemName, the item to eat/drink.
+     * @param {ConsumeOptions} options, 只在测试里用（把等待时间调成 0）。
      * @returns {Promise<boolean>} true if the item was eaten, false otherwise.
      * @example
      * await skills.eat(bot, "apple");
      **/
-    let item: any;
-    let name: string | undefined;
-    if (itemName) {
-        item = bot.inventory.findInventoryItem(itemName);
-        name = itemName;
-    }
-    if (!item) {
-        log(bot, `You do not have any ${name} to eat.`);
+    const wanted = String(itemName ?? '').trim();
+    const resyncMs = options.resyncMs ?? CONSUME_RESYNC_MS;
+    const retryBackoffMs = options.retryBackoffMs ?? CONSUME_RETRY_BACKOFF_MS;
+    const maxAttempts = Math.max(1, Math.floor(options.maxAttempts ?? CONSUME_MAX_ATTEMPTS));
+    const before = readFoodState(bot);
+    const countBefore = wanted === '' ? null : inventoryCountOf(bot, wanted);
+    const edibles = listEdibleItems(bot);
+
+    /** 每次都重新取：重试前必须确认东西**真的还在背包里**。 */
+    const findItem = (): any => {
+        if (wanted === '') return null;
+        try {
+            const found = bot?.inventory?.findInventoryItem?.(wanted);
+            if (found != null) return found;
+            const alt = wanted.includes(':') ? wanted.replace(/^minecraft:/, '') : `minecraft:${wanted}`;
+            return bot?.inventory?.findInventoryItem?.(alt) ?? null;
+        } catch {
+            return null;
+        }
+    };
+
+    // 没有这个东西（或没给名字）：点名缺什么 + 说清还有什么能吃的，不抛异常。
+    if (wanted === '' || findItem() == null) {
+        const advice = consumeAdvice(bot, wanted, edibles);
+        log(
+            bot,
+            `没吃成：背包里没有 ${wanted || '(没给物品名)'}。${describeEdibles(edibles)}` +
+                `现在 ${formatFoodState(before)}。${advice.text}`,
+        );
+        log(bot, `下一步（照做即可）：${advice.call}`);
         return false;
     }
-    await bot.equip(item, 'hand');
-    await bot.consume();
-    log(bot, `Consumed ${item.name}.`);
-    return true;
+
+    let failures: string[] = [];
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+        const item = findItem();
+        if (item == null) {
+            failures.push(`第 ${attempt} 次尝试前发现 ${wanted} 已经不在背包里`);
+            break;
+        }
+        let failure: string | null = null;
+        try {
+            await bot.equip(item, 'hand');
+            await bot.consume();
+        } catch (err) {
+            failure = describeConsumeError(err);
+            // 堆栈给控制台（排障要），回执只给事实（模型要）。
+            console.error(`[consume] ${wanted} 第 ${attempt} 次失败：`, err);
+        }
+
+        let after = readFoodState(bot);
+        let countAfter = wanted === '' ? null : inventoryCountOf(bot, wanted);
+        if (!ateByFacts(before, after, countBefore, countAfter)) {
+            // 只有"读不到变化"时才等一次同步，成功路径不付这个时间。
+            await sleep(resyncMs);
+            after = readFoodState(bot);
+            countAfter = wanted === '' ? null : inventoryCountOf(bot, wanted);
+        }
+
+        const ateByState =
+            (before.food != null && after.food != null && after.food > before.food) ||
+            (before.saturation != null && after.saturation != null && after.saturation > before.saturation);
+        const ateByCount = countBefore != null && countAfter != null && countAfter < countBefore;
+        const countText = countBefore == null || countAfter == null ? '数量读不到' : `手上 ${countBefore} → ${countAfter}`;
+        const retried = failures.length > 0;
+
+        if (ateByFacts(before, after, countBefore, countAfter)) {
+            const how =
+                ateByState && ateByCount
+                    ? `${countText}，${formatFoodDelta(before, after)}`
+                    : ateByState
+                      ? formatFoodDelta(before, after)
+                      : `${countText}（饱食度读数没变，服务端可能还没同步——别再连吃）`;
+            const retryNote = retried ? `第 ${attempt - 1} 次同步超时（${failures.join('；')}），退避后重试成功——` : '';
+            log(bot, `${retryNote}吃成了：${wanted}（${how}）。`);
+            return true;
+        }
+
+        if (failure == null) {
+            // 调用没报错、但事实没变：如实说"没生效"，**不再重试**（免得重复吃）。
+            const readable = after.food != null || countAfter != null;
+            const advice = consumeAdvice(bot, wanted, edibles);
+            log(
+                bot,
+                readable
+                    ? `consume ${wanted}：**没生效**——调用没报错，但${countText}、${formatFoodDelta(before, after)}，` +
+                          '说明这一口服务端没采纳。可以按下面这条再试一次；连续两次这样就别在原地反复吃。' +
+                          ` ${advice.text}`
+                    : `consume ${wanted}：**无法确认**——调用没报错，但饥饿值和背包数量都读不到，不能证明吃进去了。` +
+                          ` 请用 stats(type="inventory") 核对。 ${advice.text}`,
+            );
+            log(bot, `下一步（照做即可）：${advice.call}`);
+            return false;
+        }
+        failures.push(failure);
+        if (attempt < maxAttempts) await sleep(retryBackoffMs);
+    }
+
+    const after = readFoodState(bot);
+    const countAfter = wanted === '' ? null : inventoryCountOf(bot, wanted);
+    const advice = consumeAdvice(bot, wanted, edibles);
+    const stillHeld = countAfter != null && countAfter > 0;
+    // 两次都是同一个原因时别复读两遍（真机回执要短、要能一眼看完）。
+    const reason =
+        failures.length > 1 && new Set(failures).size === 1
+            ? `${failures.length} 次都是${failures[0]}`
+            : failures.join('；') || '未知原因';
+    log(
+        bot,
+        `consume ${wanted}：**没吃成**（试了 ${Math.max(1, failures.length)} 次）——${reason}。` +
+            (stillHeld ? `东西**还在手上**（${countAfter} 个），可以重试。` : '东西已经不在手上了，先确认背包再决定。') +
+            `饥饿值 ${formatFoodDelta(before, after)}——这一口没起效。${advice.text}`,
+    );
+    log(bot, `下一步（照做即可）：${advice.call}`);
+    return false;
 }
 
 

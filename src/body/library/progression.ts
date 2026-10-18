@@ -617,6 +617,8 @@ export interface HuntProgressLine {
 export interface HuntOutcome {
     entity: string;
     want: number;
+    /** 找怪用的半径（回执里要写清"这一带确实没有"的范围）。 */
+    radius?: number;
     /** 计数的物品；空数组 = 不知道掉什么，用背包总件数核对。 */
     items: string[];
     gained: number;
@@ -649,6 +651,17 @@ export function huntReceipt(o: HuntOutcome): string {
     lines.push(`${head}；${tail}`);
     if (o.items.length === 0) {
         lines.push('⚠️ 掉落表里没有这种怪：**只报攻击/击杀次数**，没有可靠的"到手几个"依据——请用 stats 核对背包。');
+    }
+    if (o.stopReason === 'no_target') {
+        // 和 exploreFor 同一个口径：**"这一带没有"不是"工具坏了"**，换地方才有用。
+        // 真机里模型会把"没找到"读成工具问题，然后在原地反复调同一个工具。
+        const scope = o.radius == null ? '这一带' : `这一带（半径 ${Math.round(o.radius)} 格内）`;
+        lines.push(
+            `**${scope}确实没有 ${o.entity}——不是工具坏了，是真没有。**` +
+                (o.netherBlaze
+                    ? '烈焰人只在要塞里刷：先在附近 exploreFor(nether_bricks) 找到要塞再回来刷。'
+                    : '同一片区域反复刷不会出怪：换地方、走远一点再来。'),
+        );
     }
     for (const warning of o.warnings) lines.push(warning);
     if (o.progress.length > 0) {
@@ -1058,6 +1071,7 @@ export async function huntForSkill(
     return huntReceipt({
         entity,
         want,
+        radius,
         items,
         gained,
         baseline: baselineAtStart,

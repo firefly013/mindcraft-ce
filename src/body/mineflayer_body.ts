@@ -65,7 +65,7 @@ import {
     snapshotFromBot,
 } from './edges.js';
 import { renderEventText } from '../shared/event_stream.js';
-import { isDiscardedDrop, isDiscardedDropById, nearestDropWithin, noteDiscardedEntity, PICKUP_RADIUS, PICKUP_TIMEOUT_MS } from './auto_pickup.js';
+import { isDiscardedDrop, isDiscardedDropById, nearestDropWithin, noteDiscardedEntity, PICKUP_GIVE_UP_ATTEMPTS, PICKUP_GIVE_UP_MS, PICKUP_RADIUS, PICKUP_SURVIVAL_SUPPRESS_MS, PICKUP_THREAT_RADIUS, PICKUP_TIMEOUT_MS, shouldGiveUpPickup } from './auto_pickup.js';
 import {
     confirmedPickupGains,
     formatInventoryGains,
@@ -475,6 +475,15 @@ const OXYGEN_ACT_MS = 13_500;
 /** 申请额度的三个控制工具：它们**自己不发额度，也不消耗额度**。 */
 const CONTROL_TOOL_NAMES = new Set(['allowDangerousOps', 'disableSafeguards', 'restoreAllSafety']);
 
+/**
+ * 反射跑过这个时长就把"已 N 秒"写进动作名里。
+ *
+ * 真机有一跑 419 秒的 escape（`{"reflex":"escape","outcome":"ok","ms":419426}`），
+ * 而它跑着的时候快照只写 `action idle`——模型既不知道身体被占着，也不知道
+ * 已经占了多久。30 秒之后开始报时长，够长才报，免得刷屏。
+ */
+const REFLEX_SLOW_MS = 30_000;
+
 export class MineflayerBody {
     readonly name: string;
     readonly countId: number;
@@ -510,6 +519,22 @@ export class MineflayerBody {
     private pickupTargetName: string | null = null;
     /** 当前 pickup 目标实体 id：名字可能读不到/被改写，id 是身份。 */
     private pickupTargetId: number | null = null;
+    /**
+     * 这次拾取是**被谁抢掉的**（保命 / Stop / 模型动作）。
+     *
+     * 必须记下来：收尾时如果只看 `actions.executing`，保命抢占会被当成"拾取失败"
+     * 去累计退避，回执还会说"退避 N 秒后再试"——而真实情况是"保命优先，主动放弃"。
+     */
+    private pickupPreemptReason: string | null = null;
+    /** 保命抢占后的拾取静默截止时间：命保住了再谈捡东西。 */
+    private pickupSuppressedUntil = 0;
+    /** 已经因为"附近有敌人"跳过过哪一件（避免每 300ms 重复发回执）。 */
+    private pickupThreatSkippedId: string | null = null;
+    /** 正在跑的反射名 + 开始时间（快照要如实报；419 秒的 escape 不该事后才知道）。 */
+    private currentReflexName: string | null = null;
+    private currentReflexStartedAt = 0;
+    /** 急停/Stop 之后不许再跑队列里剩下的反射。 */
+    private reflexAbortRequested = false;
     /** 模型动作请求已经在路上时，禁止新的自动拾取抢身体。 */
     private modelActionRequested = false;
     /** 在途模型协议 action 数：查询/动作可能重叠，用计数而不是布尔。 */
@@ -675,13 +700,51 @@ export class MineflayerBody {
     // ── 命令实现用得着的表面（`executeToolCall` 的 agent）────────────────────
 
     /**
-     * 当前正在跑的动作名（模型的动作）。身体正在自主走路的反射（拾取）也报出来，
+     * 当前正在跑的动作名（模型的动作）。身体正在自主走路的反射也报出来，
      * 免得模型看到"身体空着"却调不动。
+     *
+     * ⚠️ **这里以前会撒谎**：只报了模型动作和 pickup，**没报保命反射**。
+     * 真机 2026-10-18 15:56（overnight_a）的原文：快照写 `Meta: action idle`，
+     * 但 `speed 2.0-2.4`，身体正被反射拖着走——它据此以为"我可以发动作"，
+     * 结果每条调用都被"动作已在跑"拒掉，几十秒里被打死。
+     * 现在**谁占着身体就报谁**（模型动作 > pickup > 反射），并且反射跑久了
+     * 把已运行时长一起报出来（419 秒的 escape 不该等它结束才知道）。
      */
     currentActionName(): string | null {
         const label = this.actions?.currentActionLabel;
         if (label) return label;
-        return this.pickingUp ? 'autoPickup' : null;
+        // 保命反射优先于拾取：两者同时为真只可能出现在"拾取正在被摘下来"的
+        // 那一两个 tick 里，此时真正驱动身体的是反射。
+        if (this.currentReflexName != null) {
+            const ms = this.currentReflexStartedAt > 0 ? Date.now() - this.currentReflexStartedAt : 0;
+            return ms >= REFLEX_SLOW_MS
+                ? `${this.currentReflexName}（已 ${Math.round(ms / 1000)}s）`
+                : this.currentReflexName;
+        }
+        if (this.pickingUp) return 'autoPickup';
+        return null;
+    }
+
+    /**
+     * 以 bot 当前位置为圆心找最近的敌对生物（拾取前的保命判据用）。
+     *
+     * 位置读不到就返回 null——**宁可不挡拾取，也不许因为读不到位置就永久不捡**。
+     */
+    private threatNearRelative(radius: number): { name: string; distance: number } | null {
+        try {
+            const p = this.bot?.entity?.position;
+            if (p == null) return null;
+            return this.threatNear({ x: p.x, y: p.y, z: p.z }, radius);
+        } catch {
+            return null;
+        }
+    }
+
+    /** 正在跑的反射名 + 开始时间（快照/诊断用）。 */
+    reflexStatus(): { reflex: string; ms: number } | null {
+        if (this.currentReflexName == null) return null;
+        const ms = this.currentReflexStartedAt > 0 ? Date.now() - this.currentReflexStartedAt : 0;
+        return { reflex: this.currentReflexName, ms };
     }
 
     /**
@@ -790,6 +853,7 @@ export class MineflayerBody {
      */
     private async yieldAutoPickupToModel(): Promise<void> {
         if (!this.pickingUp) return;
+        this.pickupPreemptReason = '模型动作抢占：已让出身体通道。';
         // 模型动作优先：标记取消并调用 pickup 自己的即时取消回调。
         // pickupAbortRequested 与 interrupt_code 不同：ActionManager.clearBotLogs
         // 清掉 interrupt_code 也不会影响它；取消回调会立刻 pathfinder.stop()。
@@ -807,6 +871,63 @@ export class MineflayerBody {
         while (this.pickingUp && Date.now() < deadline) {
             await new Promise<void>((resolve) => setTimeout(resolve, 10));
         }
+    }
+
+    /**
+     * **保命优先**：把自动拾取从身体上摘下来，并给它一段静默期。
+     *
+     * 真机 2026-10-18 15:56（overnight_a）：被骷髅/末影人围攻时，拾取反射反复
+     * 超时重试、每次都占着通道，模型 consume/move/stay/goToCoordinates 全被拒，
+     * 血从 17.26 掉到 0.045。**一个替模型打输这场架的反射，比没有反射更糟。**
+     *
+     * @returns 是否真的打断了一次正在跑的拾取（用来决定要不要发回执）。
+     */
+    private abortAutoPickup(reason: string): boolean {
+        const wasRunning = this.pickingUp;
+        this.pickupAbortRequested = true;
+        this.pickupPreemptReason = reason;
+        try {
+            this.pickupCancel?.();
+        } catch {
+            // 取消失败由 50ms 轮询兜底。
+        }
+        if (wasRunning || this.pickingUp) return true;
+        return false;
+    }
+
+    /**
+     * 停掉**非保命反射**（当前只有自动拾取），并把静默期推后。
+     *
+     * 保命反射（escape/surface）不在这一档：它们正是"先活下来"的那件事，
+     * 只有 Stop / 急停（`abortReflexes`）能硬停。
+     */
+    private yieldNonSurvivalReflexes(reason: string): void {
+        if (this.pickingUp) {
+            this.abortAutoPickup(reason);
+            this.pickupSuppressedUntil = Math.max(this.pickupSuppressedUntil, Date.now() + PICKUP_SURVIVAL_SUPPRESS_MS);
+        }
+    }
+
+    /**
+     * 硬停反射（Stop / 急停）：清队列 + 给正在跑的那条打中断标记。
+     *
+     * 真机抱怨："Stop 之后反射还在跑"——反射占着身体时，模型的动作全被拒，
+     * 于是 Stop 也救不了它。
+     */
+    private abortReflexes(reason: string): number {
+        const pending = this.reflexQueue?.length ?? 0;
+        if (Array.isArray(this.reflexQueue)) this.reflexQueue.length = 0;
+        const running = this.reflexRunning === true;
+        if (running) {
+            this.reflexAbortRequested = true;
+            try {
+                this.requestInterrupt();
+            } catch {
+                // 中断失败也要把队列清掉。
+            }
+        }
+        this.pickupPreemptReason = running || pending > 0 ? reason : this.pickupPreemptReason;
+        return pending + (running ? 1 : 0);
     }
 
     clearBotLogs(): void {
@@ -947,6 +1068,12 @@ export class MineflayerBody {
             }
             return;
         }
+        // **保命抢占（第 0 步）**：先把自动拾取从身体上摘下来，再排队保命。
+        // 顺序反了就会出现真机 15:56 那一幕——拾取反射反复超时重试占着通道，
+        // 模型的 consume/move/stay/goToCoordinates 全被拒，人被打死。
+        this.yieldNonSurvivalReflexes(`保命优先（${type}）：已放弃这次自动拾取。`);
+        // 新的保命需求来了：清掉上一次的急停标记，让这一棒能真的跑起来。
+        this.reflexAbortRequested = false;
         // **先硬中断正在跑的模型动作**，再通知/排队保命：
         // 真机 Feedback #24 长寻路遇敌时，反射只是排队，身体还在被寻路带走，
         // 等 rescue 跑到 stopAll 时人已经在水里了。
@@ -965,16 +1092,25 @@ export class MineflayerBody {
         this.reflexRunning = true;
         try {
             for (;;) {
-                const next = this.reflexQueue.shift();
+                const next = this.reflexQueue?.shift?.() ?? null;
                 if (next == null) break;
+                // Stop/急停清过队列：不再跑下一棒。
+                if (this.reflexAbortRequested) break;
                 const started = Date.now();
-                let outcome: 'ok' | 'failed' | 'partial' = 'ok';
+                // **如实报给快照**：谁占着身体、占了多久。
+                this.currentReflexName = next.reflex;
+                this.currentReflexStartedAt = started;
+                let outcome: 'ok' | 'failed' | 'partial' | 'aborted' = 'ok';
                 let detail = '';
                 try {
                     const result = await this.rescue(next.intent);
                     if (result.reason === 'died') {
                         outcome = 'failed';
                         detail = '处理过程中死亡。';
+                    } else if (this.reflexAbortRequested || this.bot?.interrupt_code === true) {
+                        // 被 Stop / 模型抢占打断：如实说"中断"，别说成"脱险了"。
+                        outcome = 'aborted';
+                        detail = '被 Stop/急停中断（模型要用身体，或保命升级）。';
                     } else if (result.escaped) {
                         outcome = 'ok';
                         detail = next.intent === 'surface' ? '已经把头露出水面。' : '已经脱离威胁。';
@@ -986,6 +1122,8 @@ export class MineflayerBody {
                     outcome = 'failed';
                     detail = err instanceof Error ? err.message : String(err);
                 }
+                this.currentReflexName = null;
+                this.currentReflexStartedAt = 0;
                 this.notify(
                     'reflex.done',
                     KIND.WORLD,
@@ -996,6 +1134,9 @@ export class MineflayerBody {
             }
         } finally {
             this.reflexRunning = false;
+            this.currentReflexName = null;
+            this.currentReflexStartedAt = 0;
+            this.reflexAbortRequested = false;
         }
     }
 
@@ -1738,16 +1879,46 @@ export class MineflayerBody {
         const now = Date.now();
         if (this.pickupAbortRequested) return;
         if (now < this.pickupBackoffUntil) return;
+        // 保命抢占后的静默期：命保住了再谈捡东西。
+        if (now < this.pickupSuppressedUntil) return;
         // 刚 discard 的东西即使实体已经出现，也不许再被自己捡回：
         // 名字 / 落点 / 实体 id 三条路一起判（见 auto_pickup.ts 的 matchedRecord）。
         if (isDiscardedDrop(target.name, target, target.id)) return;
+        // 威胁范围内有敌对生物：**别去捡**（真机 15:56 就是一边挨打一边被拖着走）。
+        const threat = this.threatNearRelative(PICKUP_THREAT_RADIUS);
         const go = shouldAttemptPickup({
             busy: this.actions.executing || this.hasModelActionInFlight(),
             pickingUp: this.pickingUp,
             sinceLastAttemptMs: now - this.lastPickupAt,
             backoffRemainingMs: this.pickupBackoffUntil - now,
+            // 保命反射在跑（或队列里还有）：非保命反射让路。
+            reflexBusy: this.reflexRunning === true || (this.reflexQueue?.length ?? 0) > 0,
+            threatNear: threat != null,
         });
-        if (!go) return;
+        if (!go) {
+            if (threat != null && this.pickupThreatSkippedId !== String(target.id)) {
+                this.pickupThreatSkippedId = String(target.id);
+                this.notify(
+                    'reflex.done',
+                    KIND.WORLD,
+                    LEVEL.STATE,
+                    {
+                        reflex: 'pickup',
+                        outcome: 'skipped',
+                        detail:
+                            `附近有敌对生物 ${threat.name ?? '?'}（${Math.round(threat.distance ?? 0)} 格），` +
+                            '这次不去捡掉落物——先保命。',
+                        ms: 0,
+                        failures: this.pickupFailures,
+                        backoffMs: 0,
+                        preempted: true,
+                    },
+                    { completes: 'pickup' },
+                );
+            }
+            return;
+        }
+        this.pickupThreatSkippedId = null;
         this.lastPickupAt = now;
         this.pickupTargetName = target.name;
         this.pickupTargetId = typeof target.id === 'number' ? target.id : null;
@@ -1768,16 +1939,30 @@ export class MineflayerBody {
                 // walkToPickup/gotoPickupInterruptibly 看到一次。
                 this.pickupAbortRequested = false;
             }
-            // 被模型动作抢占不算拾取失败：不累计退避，也不把通道算在拾取头上。
-            const preempted = this.hasModelActionInFlight() || this.actions.executing;
+            // 被抢占（模型动作 / 保命 / Stop）不算拾取失败：不累计退避，
+            // 也不把通道算在拾取头上。
+            const preemptReason = this.pickupPreemptReason;
+            this.pickupPreemptReason = null;
+            const preempted = preemptReason != null || this.hasModelActionInFlight() || this.actions.executing;
             let backoffMs = 0;
+            let gaveUp = false;
             if (arrived) {
                 this.pickupFailures = 0;
                 this.pickupBackoffUntil = 0;
             } else if (!preempted) {
                 this.pickupFailures += 1;
-                backoffMs = nextPickupBackoffMs(this.pickupFailures);
-                this.pickupBackoffUntil = Date.now() + backoffMs;
+                if (shouldGiveUpPickup(this.pickupFailures)) {
+                    // **认了，别 3 秒一次地无限重试。** 真机 15:56：反复
+                    // "退避 3 秒后再试"每次都占着通道，模型的自救动作全被拒。
+                    gaveUp = true;
+                    backoffMs = PICKUP_GIVE_UP_MS;
+                    this.pickupBackoffUntil = Date.now() + backoffMs;
+                    this.pickupSuppressedUntil = Math.max(this.pickupSuppressedUntil, this.pickupBackoffUntil);
+                    this.pickupFailures = 0;
+                } else {
+                    backoffMs = nextPickupBackoffMs(this.pickupFailures);
+                    this.pickupBackoffUntil = Date.now() + backoffMs;
+                }
             }
             this.notify(
                 'reflex.done',
@@ -1788,14 +1973,21 @@ export class MineflayerBody {
                     outcome: arrived ? 'ok' : 'failed',
                     detail: arrived
                         ? '走到了 ' + target.name + ' 的位置；是否入包由 playerCollect 核验后另行报告。'
-                        : preempted
-                            ? '拾取被模型动作抢占，已释放身体通道（模型优先，本次不额外退避）。'
-                            : '没走到 ' + target.name + ' 的位置（超时）；' +
-                                '已释放身体通道，退避 ' + Math.round(backoffMs / 1000) + ' 秒后再试（连续失败 ' + this.pickupFailures + ' 次）。',
+                        : preemptReason != null
+                            ? preemptReason
+                            : preempted
+                                ? '拾取被模型动作抢占，已释放身体通道（模型优先，本次不额外退避）。'
+                                : gaveUp
+                                    ? `连续 ${PICKUP_GIVE_UP_ATTEMPTS} 次没走到掉落物，**放弃这次拾取**` +
+                                        `（${Math.round(backoffMs / 1000)} 秒内不再自动捡；地上那件先放着，` +
+                                        '要就拿它当目标自己走过去踩）。'
+                                    : '没走到 ' + target.name + ' 的位置（超时）；' +
+                                        '已释放身体通道，退避 ' + Math.round(backoffMs / 1000) + ' 秒后再试。',
                     ms: Date.now() - started,
                     failures: arrived ? 0 : this.pickupFailures,
                     backoffMs,
                     preempted,
+                    gaveUp,
                 },
                 { completes: 'pickup' },
             );
@@ -2101,6 +2293,9 @@ export class MineflayerBody {
                 this.modelActionsInFlight += 1;
                 try {
                     await this.yieldAutoPickupToModel();
+                    // 非保命反射也让位（保命反射除外：那是"先活下来"的那件事，
+                    // 只有 Stop 能硬停它）。
+                    this.yieldNonSurvivalReflexes('模型动作抢占：已放弃这次自动拾取。');
                     const text = await executeToolCall(this, name, args);
                     this.consumePermitFor(name);
                     return { ok: true, op: 'action', result: { ok: true, text, code: 'OK' } };
@@ -2131,6 +2326,28 @@ export class MineflayerBody {
                 // 也不能让 modelActionRequested 或 executing 残留卡住下一轮动作。
                 this.modelActionRequested = false;
                 this.modelActionsInFlight = 0;
+                // **Stop 还要真的停掉反射。** 真机抱怨："Stop 之后反射还在跑"——
+                // 反射占着身体时模型的动作全被拒，于是 Stop 也救不了它。
+                // 拾取立刻收手并静默一段；正在跑的保命反射打中断标记。
+                this.abortAutoPickup('收到 Stop：已放弃这次自动拾取。');
+                this.pickupSuppressedUntil = Math.max(
+                    this.pickupSuppressedUntil,
+                    Date.now() + PICKUP_SURVIVAL_SUPPRESS_MS,
+                );
+                const abortedReflexes = this.abortReflexes('收到 Stop');
+                if (abortedReflexes > 0) {
+                    // 回执走事件通道（协议里 stop 的响应形状不动）：让模型知道
+                    // Stop 到底停了什么，而不是以为"没反应"。
+                    this.notify('reflex.done', KIND.WORLD, LEVEL.STATE, {
+                        reflex: 'stop',
+                        outcome: 'aborted',
+                        detail:
+                            'Stop 已中断正在跑的反射与自动拾取' +
+                            (abortedReflexes > 1 ? `（队列里还有 ${abortedReflexes - 1} 条也一起清了）` : '') +
+                            '；身体通道已释放。',
+                        ms: 0,
+                    });
+                }
                 try {
                     await this.actions.stop();
                 } finally {

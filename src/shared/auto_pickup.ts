@@ -31,6 +31,27 @@ export const PICKUP_TIMEOUT_MS = 12_000;
 /** 刚被 `discard` 扔掉的东西，多久之内不要去捡。 */
 export const DISCARD_IGNORE_MS = 180_000;
 /**
+ * 连续失败到这个次数就**放弃这次拾取**（不再 3 秒一次地无限重试）。
+ *
+ * 真机 2026-10-18 15:56：`{"reflex":"pickup","outcome":"failed",…"退避 3 秒后再试
+ * （连续失败 1 次）"}` 反复出现，每次都把身体通道占住——而模型那时正被骷髅和
+ * 末影人围攻、血从 17.26 掉到 0.045，所有自救动作都被"动作已在跑"拒掉。
+ * 走到一件掉落物的时间是有上限的，走不到就是走不到，认了比耗着强。
+ */
+export const PICKUP_GIVE_UP_ATTEMPTS = 2;
+/** 放弃之后静默多久（毫秒）：期间即使地上有新掉落物也不再自动捡。 */
+export const PICKUP_GIVE_UP_MS = 60_000;
+/** 保命抢占后，拾取静默多久（毫秒）——先保命，命保住了再谈捡东西。 */
+export const PICKUP_SURVIVAL_SUPPRESS_MS = 30_000;
+/** 敌对生物在这个距离内就不启动拾取（格）。 */
+export const PICKUP_THREAT_RADIUS = 16;
+/**
+ * 连续失败够次数了没有？够就放弃这次拾取（回执里说清"放弃"，不再承诺"再试"）。
+ */
+export function shouldGiveUpPickup(failures: number): boolean {
+  return Number.isFinite(failures) && failures >= PICKUP_GIVE_UP_ATTEMPTS;
+}
+/**
  * discard 免疫的**空间半径**（格）。
  *
  * 只按名字匹配挡不住真机那条路径：overnight_b 13:24 扔了 256 下界岩，2.7 秒后
@@ -151,6 +172,15 @@ export interface PickupGate {
   sinceLastAttemptMs: number;
   /** 连续失败后的剩余退避；>0 就不许再抢身体。 */
   backoffRemainingMs?: number;
+  /**
+   * 保命反射正在跑（或还在队列里）：非保命反射不许在这时候抢身体。
+   *
+   * 真机 2026-10-18 15:56（overnight_a）：一边挨打一边被拾取反射带着走，
+   * 模型 consume/move/stay/goToCoordinates 全被拒，血从 17.26 掉到 0.045。
+   */
+  reflexBusy?: boolean;
+  /** 威胁范围内有敌对生物：**别去捡东西**，先活下来。 */
+  threatNear?: boolean;
 }
 
 /**
@@ -160,6 +190,10 @@ export interface PickupGate {
  * 剩下的只是"什么时候调用它"。
  */
 export function shouldAttemptPickup(gate: PickupGate): boolean {
+  // **保命第一**：保命反射占着身体、或敌人在附近时，捡东西这件事排最后。
+  // 一个"替模型打输这场架"的反射比没有反射更糟。
+  if (gate.reflexBusy === true) return false;
+  if (gate.threatNear === true) return false;
   if (gate.pickingUp) return false;
   if (gate.busy) return false;
   if ((gate.backoffRemainingMs ?? 0) > 0) return false;

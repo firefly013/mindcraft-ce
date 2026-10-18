@@ -87,8 +87,19 @@ export function getFullState(agent: any): FullState {
 
     // Richer activity than a bare "Idle": a bot counts as idle (no action executing) even while
     // chatting, deciding its next move, or stopped. Surface those so the dashboard is meaningful.
+    //
+    // ⚠️ **身体反射也算"在干活"。** 真机 2026-10-18 15:56：快照写 `action idle`，而
+    // speed 2.0-2.4、身体正被反射拖着走（模型据此以为可以发动作，结果全被拒）。
+    // `isIdle()` 只回答"模型动作占没占通道"，所以这里必须问 `currentActionName()`
+    // ——它把 autoPickup / escape 反射也算进去（见 MineflayerBody.currentActionName）。
+    const currentName: string | null =
+        typeof (agent as { currentActionName?: () => string | null }).currentActionName === 'function'
+            ? (agent as { currentActionName: () => string | null }).currentActionName()
+            : null;
     let activity: { current: string; kind: string };
-    if (!agent.isIdle()) {
+    if (currentName != null && currentName !== '') {
+        activity = { current: currentName, kind: 'acting' };
+    } else if (!agent.isIdle()) {
         activity = { current: agent.actions.currentActionLabel || 'Acting', kind: 'acting' };
     } else {
         activity = { current: 'Idle', kind: 'idle' };

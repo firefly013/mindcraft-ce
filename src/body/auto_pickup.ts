@@ -25,11 +25,16 @@ export {
   PICKUP_INTERVAL_MS,
   PICKUP_TIMEOUT_MS,
   PICKUP_CONFIRM_DELAY_MS,
+  PICKUP_GIVE_UP_ATTEMPTS,
+  PICKUP_GIVE_UP_MS,
+  PICKUP_SURVIVAL_SUPPRESS_MS,
+  PICKUP_THREAT_RADIUS,
   confirmedPickupGains,
   positiveInventoryDelta,
   formatInventoryGains,
   itemNameMatches,
   normalizeItemName,
+  shouldGiveUpPickup,
 } from '../shared/auto_pickup.js';
 export type { PickupGate, PickupTarget } from '../shared/auto_pickup.js';
 

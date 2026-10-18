@@ -10,14 +10,20 @@ import { describe, expect, it, vi } from 'vitest';
 import {
   BARE_HAND_MAX_DIG_MS,
   PLACE_TARGET_EMPTY_BLOCKS,
+  ateByFacts,
   breakBlockAt,
   choosePillarMaterial,
   choosePillarMaterialChoice,
+  consume,
   describeStairJumpFailure,
   equip,
+  foodValueOf,
+  formatFoodDelta,
+  formatFoodState,
   heldToolState,
   isHandMineable,
   isFootingBlock,
+  listEdibleItems,
   mineBlockAt,
   pathfindDigPolicy,
   pathfindingDigAbort,
@@ -608,5 +614,180 @@ describe('D5 放置 vs 清障的意图区分', () => {
     await expect(placeBlock(bot, 'netherrack', 0, 64, 0)).resolves.toBe(false);
     expect(bot.output).not.toContain('拒绝清障');
     expect(bot.output).toContain('nothing to place on');
+  });
+});
+
+// ─────────── consume：超时不许只丢一段堆栈（overnight_b 15:58 反馈） ───────────
+//
+// 真机：`consume(mutton)` → `!!Action threw exception!! Promise timed out`，同时
+// 手上 mutton 还在、food 仍 14/sat 0。模型没有事实可判断（换食物？跑？），只能在
+// 挨打时原地重复。这里钉的就是"失败也要给事实 + 一条下一步"。
+
+/** 假 bot：只实现 consume 用到的表面（food/sat 可读写，背包可读）。 */
+function consumeBot(
+  options: {
+    held?: Array<{ name: string; count: number }>;
+    food?: number;
+    saturation?: number;
+    consume?: () => Promise<void>;
+  } = {},
+): any {
+  const items = options.held ?? [];
+  return {
+    output: '',
+    food: options.food ?? 14,
+    foodSaturation: options.saturation ?? 0,
+    inventory: {
+      items: () => items,
+      findInventoryItem: (name: string) => items.find((i) => i.name === name),
+    },
+    equip: vi.fn(async (): Promise<void> => {}),
+    consume: vi.fn(options.consume ?? (async (): Promise<void> => {})),
+  };
+}
+
+/** 测试里不真的等同步/退避。 */
+const NO_WAIT = { resyncMs: 0, retryBackoffMs: 0 };
+
+describe('consume：失败也要给事实，不给堆栈', () => {
+  it('吃成了：数量 -1、饱食度真的涨了（判定靠事实，不是"没抛错"）', async () => {
+    const bot = consumeBot({ held: [{ name: 'mutton', count: 1 }] });
+    bot.consume = vi.fn(async () => {
+      bot.food = 20;
+      bot.foodSaturation = 9.6;
+      bot.inventory.items()[0].count = 0;
+    });
+
+    await expect(consume(bot, 'mutton', NO_WAIT)).resolves.toBe(true);
+    expect(bot.output).toContain('吃成了');
+    expect(bot.output).toContain('手上 1 → 0');
+    expect(bot.output).toContain('food 14/sat 0 → food 20/sat 9.6');
+  });
+
+  it('同步超时且东西还在 → "没吃成/还在手上/可重试"，且回执里没有堆栈', async () => {
+    const bot = consumeBot({ held: [{ name: 'mutton', count: 1 }] });
+    bot.consume = vi.fn(async () => {
+      throw new Error('Promise timed out.');
+    });
+
+    await expect(consume(bot, 'mutton', NO_WAIT)).resolves.toBe(false);
+    expect(bot.output).toContain('没吃成');
+    expect(bot.output).toContain('还在手上');
+    expect(bot.output).toContain('可以重试');
+    expect(bot.output).toContain('等待服务端回应超时');
+    expect(bot.output).toContain('food 14/sat 0 → food 14/sat 0（没有变化）');
+    // **绝不把原始异常/堆栈当回执**
+    expect(bot.output).not.toContain('!!Action threw exception!!');
+    expect(bot.output).not.toContain('Stack trace');
+    expect(bot.output).not.toContain('at Object.');
+    // 自动重试了一次（1 次正常 + 1 次重试）
+    expect(bot.consume).toHaveBeenCalledTimes(2);
+    // 下一步是**一条**能照抄的调用
+    expect(bot.output.trimEnd().split('\n').at(-1)).toBe('下一步（照做即可）：consume(item_name="mutton")');
+  });
+
+  it('第一次超时 + 第二次成功 → 回执写明"重试后吃成了"，且重试前重新 equip', async () => {
+    const bot = consumeBot({ held: [{ name: 'mutton', count: 2 }] });
+    let calls = 0;
+    bot.consume = vi.fn(async () => {
+      calls += 1;
+      if (calls === 1) throw new Error('Promise timed out.');
+      bot.food = 20;
+      bot.foodSaturation = 9.6;
+    });
+
+    await expect(consume(bot, 'mutton', NO_WAIT)).resolves.toBe(true);
+    expect(calls).toBe(2);
+    expect(bot.output).toContain('重试');
+    expect(bot.output).toContain('吃成了');
+    expect(bot.output).toContain('food 14/sat 0 → food 20/sat 9.6');
+    // 重试前确认食物还在手上 → 再 equip 一次
+    expect(bot.equip).toHaveBeenCalledTimes(2);
+  });
+
+  it('手里没有该食物 → 点名缺什么，并给"换一种"的一条调用', async () => {
+    const bot = consumeBot({ held: [{ name: 'bread', count: 2 }] });
+
+    await expect(consume(bot, 'mutton', NO_WAIT)).resolves.toBe(false);
+    expect(bot.output).toContain('背包里没有 mutton');
+    expect(bot.output).toContain('breadx2');
+    expect(bot.output.trimEnd().split('\n').at(-1)).toBe('下一步（照做即可）：consume(item_name="bread")');
+    expect(bot.consume).not.toHaveBeenCalled();
+  });
+
+  it('调用没报错但数值没变 → 如实说"没生效"，且不重复吃', async () => {
+    const bot = consumeBot({ held: [{ name: 'mutton', count: 2 }] });
+
+    await expect(consume(bot, 'mutton', NO_WAIT)).resolves.toBe(false);
+    expect(bot.output).toContain('没生效');
+    expect(bot.output).not.toContain('吃成了');
+    expect(bot.output).toContain('手上 2 → 2');
+    expect(bot.output).toContain('food 14/sat 0 → food 14/sat 0（没有变化）');
+    // 没报错就不重试：重复吃会白白浪费食物
+    expect(bot.consume).toHaveBeenCalledTimes(1);
+  });
+
+  it('读不到饥饿值也读不到数量 → 说"无法确认"，不假装吃成了', async () => {
+    const bot = consumeBot({ held: [{ name: 'mutton', count: 1 }] });
+    delete bot.food;
+    delete bot.foodSaturation;
+    bot.inventory.items = () => undefined;
+
+    await expect(consume(bot, 'mutton', NO_WAIT)).resolves.toBe(false);
+    expect(bot.output).toContain('无法确认');
+    expect(bot.output).not.toContain('吃成了');
+  });
+
+  it('饱食度读不到但手上确实少了一个 → 按"少了一个"的事实算吃成（说明读数没同步）', async () => {
+    const bot = consumeBot({ held: [{ name: 'mutton', count: 1 }] });
+    delete bot.food;
+    delete bot.foodSaturation;
+    bot.consume = vi.fn(async () => {
+      bot.inventory.items()[0].count = 0;
+    });
+
+    await expect(consume(bot, 'mutton', NO_WAIT)).resolves.toBe(true);
+    expect(bot.output).toContain('手上 1 → 0');
+    expect(bot.output).toContain('饱食度读数没变');
+  });
+});
+
+describe('consume 的食物判定（纯函数）', () => {
+  it('mutton / raw_mutton 两个版本的命名都认', () => {
+    expect(foodValueOf('mutton')).toEqual([2, 1.8]);
+    expect(foodValueOf('raw_mutton')).toEqual([2, 1.8]);
+    expect(foodValueOf('minecraft:cooked_beef')).toEqual([8, 12.8]);
+    expect(foodValueOf('porkchop')).toEqual([3, 1.8]);
+    expect(foodValueOf('stone')).toBeNull();
+    expect(foodValueOf('')).toBeNull();
+  });
+
+  it('ateByFacts：只有真实变化才算吃进去，读不到不算证据', () => {
+    expect(ateByFacts({ food: 14, saturation: 0 }, { food: 20, saturation: 0 }, 1, 1)).toBe(true);
+    expect(ateByFacts({ food: 20, saturation: 0 }, { food: 20, saturation: 9.6 }, 1, 1)).toBe(true);
+    expect(ateByFacts({ food: 14, saturation: 0 }, { food: 14, saturation: 0 }, 2, 1)).toBe(true);
+    expect(ateByFacts({ food: 14, saturation: 0 }, { food: 14, saturation: 0 }, 1, 1)).toBe(false);
+    expect(ateByFacts({ food: null, saturation: null }, { food: null, saturation: null }, null, null)).toBe(false);
+  });
+
+  it('回执格式：吃前→吃后逐字可核，没变化要明说', () => {
+    expect(formatFoodDelta({ food: 14, saturation: 0 }, { food: 20, saturation: 9.6 })).toBe(
+      'food 14/sat 0 → food 20/sat 9.6',
+    );
+    expect(formatFoodDelta({ food: 14, saturation: 0 }, { food: 14, saturation: 0 })).toBe(
+      'food 14/sat 0 → food 14/sat 0（没有变化）',
+    );
+    expect(formatFoodState({ food: null, saturation: null })).toBe('food 读不到/sat 读不到');
+  });
+
+  it('listEdibleItems：只列能吃的，按"值不值得吃"排序，带数量', () => {
+    const bot = consumeBot({
+      held: [
+        { name: 'stone', count: 64 },
+        { name: 'mutton', count: 2 },
+        { name: 'cooked_beef', count: 1 },
+      ],
+    });
+    expect(listEdibleItems(bot).map((e) => `${e.name}x${e.count}`)).toEqual(['cooked_beefx1', 'muttonx2']);
   });
 });
