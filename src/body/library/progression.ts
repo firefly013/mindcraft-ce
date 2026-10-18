@@ -20,6 +20,7 @@
 
 import * as skills from './skills.js';
 import * as world from './world.js';
+import { Vec3 } from 'vec3';
 import { nearestDropWithin } from '../auto_pickup.js';
 
 // ────────────────────────────── 默认参数 ──────────────────────────────
@@ -388,9 +389,27 @@ const HAZARD_BLOCKS: ReadonlySet<string> = new Set([
     'powder_snow',
 ]);
 
+/**
+ * 把一个坐标包成 `bot.blockAt()` **真正接受**的类型。
+ *
+ * ⚠️ **真机事故（2026-10-18 17:14，overnight_a）**：这里以前直接传普通对象
+ * `{ x, y, z }`。mineflayer 的 `blockAt` 转给 prismarine-world 的
+ * `getBlock(pos)`，而后者第一件事就是 `pos.floored()` ——
+ * **普通对象没有这个方法，直接抛 TypeError**，被外面的 `try/catch` 吞成 `null`。
+ * 结果：`mineTunnel` 永远报「读不到方块（区块没加载？），不敢瞎挖」，**一格都挖不动**
+ * （两个候选点、连续两次 0/64），而单元测试全绿——因为替身 `blockAt` 收普通对象也认。
+ *
+ * 所以这里**必须**给 `Vec3`。`nether_portal.ts` 里同一个功能一直是对的，因为它用了
+ * `new Vec3(...)`；这处是漏网的那份。替身请照真实 API 写：**参数没有 `.floored()`
+ * 就抛错**，否则这种 bug 还会再溜进来一次。
+ */
+export function vec3At(x: number, y: number, z: number): any {
+    return new Vec3(x, y, z);
+}
+
 export function blockNameAt(bot: any, x: number, y: number, z: number): string | null {
     try {
-        const block = bot?.blockAt?.({ x, y, z });
+        const block = bot?.blockAt?.(vec3At(x, y, z));
         const name = block?.name;
         return typeof name === 'string' ? normalizeName(name) : null;
     } catch {
@@ -1399,7 +1418,8 @@ export interface TunnelOptions {
 
 function defaultBlockObject(bot: any, x: number, y: number, z: number): any | null {
     try {
-        return bot?.blockAt?.({ x, y, z }) ?? null;
+        // 同 `blockNameAt`：必须给 Vec3，普通对象会被 `pos.floored()` 打回。
+        return bot?.blockAt?.(vec3At(x, y, z)) ?? null;
     } catch {
         return null;
     }

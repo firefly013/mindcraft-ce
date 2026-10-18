@@ -109,7 +109,7 @@ describe('deepWaterAllowed', () => {
 });
 
 describe('movementsFor', () => {
-  it('出厂就带安全基线：落差/冲刺/跑酷/深水全收住了', () => {
+  it('出厂就带安全基线：落差/深水收住；**冲刺与跑酷保持开启**', () => {
     // Movements 的构造函数要读一整张方块表（chest/fire/lava/water…），假 registry
     // 补不全，直接用真数据。
     const registry: any = minecraftData(MC_VERSION);
@@ -117,8 +117,12 @@ describe('movementsFor', () => {
     const waterId: number = registry.blocksByName.water.id;
 
     expect(m.maxDropDown).toBe(MAX_DROP_DOWN);
-    expect(m.allowSprinting).toBe(false);
-    expect(m.allowParkour).toBe(false);
+    // 用户 2026-10-18 明确要求"冲刺和跑酷不能禁"：库里
+    // `const maxD = this.allowSprinting ? 4 : 2`，关掉它等于把跳跃距离从 4 格砍到
+    // 2 格，可行走图大幅缩小（下界实测"绕不过去就只能挖"的直接原因之一）。
+    // 谁再把这两行改回 false，这条测试会立刻红——请先说服用户。
+    expect(m.allowSprinting).toBe(true);
+    expect(m.allowParkour).toBe(true);
     // 未授权 → 水进了避让集合（这才是"不许穿过水"真正生效的地方）
     expect(m.blocksToAvoid.has(waterId)).toBe(true);
   });

@@ -25,6 +25,7 @@ import {
     MAX_LEG_PER_SCAN_RATIO,
     MAX_TUNNEL_HEIGHT,
     MAX_TUNNEL_LENGTH,
+    blockNameAt,
     collectDrops,
     countItem,
     countTotalItems,
@@ -1221,5 +1222,95 @@ describe('mineTunnel：直线隧道', () => {
         ]);
         expect(step.feet).toEqual({ x: 10, y: 70, z: -5 });
         expect(step.floor).toEqual({ x: 10, y: 69, z: -5 });
+    });
+});
+
+/**
+ * **真实 API 契约**：`bot.blockAt()` 必须收到 `Vec3`（或至少带 `.floored()` 的对象）。
+ *
+ * 真机事故（2026-10-18 17:14，overnight_a）：`blockNameAt` 传普通对象 `{x,y,z}`，
+ * mineflayer 转给 prismarine-world 的 `getBlock(pos)`，后者第一件事是 `pos.floored()`
+ * ——普通对象没有这个方法，**抛 TypeError 被 catch 吞成 null**。表现是
+ * `mineTunnel` 永远「读不到方块（区块没加载？），不敢瞎挖」，一格都挖不动，
+ * 而当时所有替身测试全绿：**替身太宽容**（收普通对象也认）。
+ *
+ * 所以这里的替身**故意像真东西一样苛刻**：参数没有 `.floored()` 就抛。
+ * 谁再把它改回普通对象，这条立刻红。
+ */
+describe('blockAt 契约：参数必须是 Vec3（替身照真实 API 苛刻）', () => {
+    function strictBot(name: string | null): { bot: any; seen: any[] } {
+        const seen: any[] = [];
+        return {
+            seen,
+            bot: {
+                blockAt: (p: any) => {
+                    seen.push(p);
+                    if (typeof p?.floored !== 'function') {
+                        throw new TypeError('pos.floored is not a function');
+                    }
+                    return name == null ? null : { name };
+                },
+            },
+        };
+    }
+
+    it('blockNameAt 传进去的对象带 floored()，坐标原样保留（含负数）', () => {
+        const { bot, seen } = strictBot('netherrack');
+        expect(blockNameAt(bot, -15, 70, 3)).toBe('netherrack');
+        expect(seen).toHaveLength(1);
+        expect(typeof seen[0].floored).toBe('function');
+        expect([seen[0].x, seen[0].y, seen[0].z]).toEqual([-15, 70, 3]);
+    });
+
+    it('读不到方块时如实返回 null（不是"区块没加载"的谎）', () => {
+        const { bot } = strictBot(null);
+        expect(blockNameAt(bot, 0, 0, 0)).toBeNull();
+    });
+
+    it('mineTunnel 在真实契约下真的挖得动（严格替身 + 负数坐标 + 走生产路径）', async () => {
+        // **生产路径**：`commands/progression.ts` 调 `mineTunnelSkill(agent.bot, ...)`
+        // **不传 deps**，所以读格子走的是 `defaultBlockObject(bot, ...)` → `bot.blockAt`。
+        // 这里故意只给 deps 的其它字段、**不给 blockAt**，逼它走那条路。
+        const world = new Map<string, string>();
+        const key = (x: number, y: number, z: number): string => `${x},${y},${z}`;
+        // 注意：位置取整用的是 `Math.round`（(-14.5, 2.5) → (-14, 3)），铺格子要照着来。
+        for (let x = -20; x <= -10; x += 1) {
+            for (let y = 68; y <= 74; y += 1) world.set(key(x, y, 3), 'netherrack');
+        }
+        const dugOrder: string[] = [];
+        const bot: any = {
+            interrupt_code: false,
+            health: 20,
+            output: '',
+            entity: { position: { x: -14.5, y: 70, z: 2.5 }, yaw: Math.PI / 2 },
+            inventory: { items: () => [] },
+            blockAt: (p: any) => {
+                // 真 API：prismarine-world 的 getBlock 第一件事就是 pos.floored()
+                if (typeof p?.floored !== 'function') throw new TypeError('pos.floored is not a function');
+                const name = world.get(key(p.x, p.y, p.z));
+                return name == null ? null : { name, position: { x: p.x, y: p.y, z: p.z }, hardness: 0.4, diggable: true };
+            },
+        };
+        const deps = {
+            position: () => ({ ...bot.entity.position }),
+            dig: async (_b: any, x: number, y: number, z: number) => {
+                const k = key(x, y, z);
+                world.set(k, 'air');
+                dugOrder.push(k);
+                return true;
+            },
+            travel: async (b: any, x: number, y: number, z: number) => {
+                b.entity.position = { x, y, z };
+                return true;
+            },
+            tool: () => ({ name: 'diamond_pickaxe', remaining: 500, max: 1561, low: false }),
+            health: () => bot.health,
+            sleep: async (): Promise<void> => {},
+            now: () => 0,
+        };
+        const receipt = await mineTunnelSkill(bot, 3, 2, '-x', deps as any);
+        expect(dugOrder).toEqual(['-15,70,3', '-15,71,3', '-16,70,3', '-16,71,3', '-17,70,3', '-17,71,3']);
+        expect(receipt).toContain('挖了 3/3 格');
+        expect(receipt).not.toContain('读不到方块');
     });
 });

@@ -1,20 +1,31 @@
 /**
- * 反射与保命优先级 —— 真机 2026-10-18 15:56（overnight_a）的回归。
+ * 反射与保命优先级 —— 真机 2026-10-18 的两次事故回归。
  *
- * 模型的原话：长途赶路时被骷髅/末影人围攻，血从 17.26 掉到 0.045，
- * 期间 consume / move / stay / goToCoordinates **全部**被拒
- * （`An action is already running. Stop() first, then retry.`），
- * 而快照同一时刻写着 `Meta: action idle`，speed 2.0-2.4 —— 身体正被反射拖着走。
- * 拾取反射反复超时（"退避 3 秒后再试（连续失败 1 次）"），每次都占着身体通道。
+ * 15:56（overnight_a）：被骷髅/末影人围攻时，consume / move / stay /
+ * goToCoordinates **全部**被拒，而快照同一时刻写着 `Meta: action idle`，
+ * speed 2.0-2.4——身体正被反射拖着走。
  *
- * 四条要求，一条一个用例组：
+ * 17:15（overnight_b）：`escape（已 102s）` **永久占用**。Stop 回
+ * `{"stopped":true}`、事件也说"身体通道已释放"，但快照还是 escape；
+ * stairUp / **restart** / disableSafeguards 全被
+ * `An action is already running. Stop() first, then retry.` 拒掉。
+ * 它最后只能去关自己的安全护栏——保命变成了危险本身。
+ *
+ * 用例组：
  *   1. 快照不许说谎：谁占着身体就报谁（autoPickup / escape，跑久了带已运行时长）；
  *   2. 连续 2 次超时就放弃，不再 3 秒一次无限重试；
- *   3. Stop 必须真的中断反射与拾取；
- *   4. 保命优先：拾取占着身体时，保命需求立刻抢占；敌人在附近就不重启拾取。
+ *   3. Stop 必须真的中断，且**回执与快照一致**；
+ *   4. 保命优先，但**制度**有预算：连续占用 45 秒就交还身体 25 秒；
+ *   5. 模型的动作请求优先于"重新接管"。
  */
 import { describe, expect, it, vi } from 'vitest';
-import { MineflayerBody, REFLEX_MAX_MS } from '../src/body/mineflayer_body.js';
+import {
+  MineflayerBody,
+  REFLEX_MAX_MS,
+  REFLEX_STOP_GRACE_MS,
+  SURVIVAL_BUDGET_MS,
+  SURVIVAL_COOLDOWN_MS,
+} from '../src/body/mineflayer_body.js';
 import { activityFrom } from '../src/body/library/full_state.js';
 import {
   PICKUP_GIVE_UP_ATTEMPTS,
@@ -49,6 +60,11 @@ function bareBody(overrides: Record<string, unknown> = {}): any {
   body.reflexAbortRequested = false;
   body.currentReflexName = null;
   body.currentReflexStartedAt = 0;
+  body.reflexCompletionSent = false;
+  body.survivalBusySince = null;
+  body.survivalLastReflexAt = 0;
+  body.survivalCooldownUntil = 0;
+  body.survivalYieldNotifiedAt = 0;
   body.modelActionRequested = false;
   body.modelActionsInFlight = 0;
   body.actions = { executing: false, currentActionLabel: '', stop: vi.fn(async () => {}), releaseCurrentAction: vi.fn() };
@@ -284,5 +300,157 @@ describe('④ 保命优先：抢占拾取，且敌人附近不重启拾取', () 
     } finally {
       vi.useRealTimers();
     }
+  });
+});
+
+/** 造一个"僵尸一直在 11.7 米内"的持续威胁：每 300ms 一条边沿。 */
+function persistentHostileBody(events: any[], extra: Record<string, unknown> = {}): any {
+  const body = bareBody({
+    notify: (type: string, _kind: unknown, _level: unknown, payload: unknown) => events.push({ type, payload }),
+    log: { with: () => ({ info: () => {}, error: () => {} }) },
+    rescue: vi.fn(async () => ({ escaped: true, reason: 'ok' })),
+    // 只记账、不真的跑保命处理（这一组测的是**制度预算**）。
+    drainReflexes: vi.fn(async () => {}),
+    ...extra,
+  });
+  return body;
+}
+
+describe('⑤ 制度预算：连续占用 45 秒就必须交还身体（真机 17:15 的 escape 102 秒死锁）', () => {
+  it('僵尸一直在触发半径内：45 秒到点交还 + 冷却 25 秒，期间不再重新接管', () => {
+    vi.useFakeTimers();
+    try {
+      const events: any[] = [];
+      const body = persistentHostileBody(events);
+      // 每 300ms 一条边沿事件，持续 45 秒（这就是"同一次占用"）
+      for (let t = 0; t < SURVIVAL_BUDGET_MS; t += 300) {
+        body.emergency('bot.attacked', { health: 12, by: 'zombie' }, 'escape', 'flee');
+        vi.advanceTimersByTime(300);
+      }
+      // 到点：预算用完 → 交还身体
+      body.emergency('bot.attacked', { health: 12, by: 'zombie' }, 'escape', 'flee');
+      const yielded = events.filter((e) => e.type === 'reflex.done' && e.payload.outcome === 'yielded').pop();
+      expect(yielded).toBeDefined();
+      expect(yielded.payload.detail).toContain('交还身体');
+      expect(yielded.payload.detail).toContain('重新接管');
+      expect(body.survivalCooldownUntil).toBeGreaterThan(Date.now());
+
+      // 冷却期内：再怎么触发都不重新接管（队列不涨）
+      const queuedBefore = body.reflexQueue.length;
+      for (let t = 0; t < SURVIVAL_COOLDOWN_MS - 1000; t += 300) {
+        body.emergency('bot.attacked', { health: 12, by: 'zombie' }, 'escape', 'flee');
+        vi.advanceTimersByTime(300);
+      }
+      expect(body.reflexQueue.length).toBe(queuedBefore);
+      expect(events.some((e) => e.payload.outcome === 'deferred' && String(e.payload.detail).includes('冷却期'))).toBe(true);
+
+      // 冷却结束：危险还在 → 重新接管
+      vi.advanceTimersByTime(SURVIVAL_COOLDOWN_MS);
+      body.emergency('bot.attacked', { health: 12, by: 'zombie' }, 'escape', 'flee');
+      expect(body.reflexQueue.length).toBe(queuedBefore + 1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('空档够久（>10 秒）算新的一段：不会把两小时前的占用算进来', () => {
+    vi.useFakeTimers();
+    try {
+      const events: any[] = [];
+      const body = persistentHostileBody(events);
+      body.emergency('bot.attacked', { health: 12 }, 'escape', 'flee');
+      expect(body.survivalBusySince).not.toBeNull();
+      const firstSince = body.survivalBusySince;
+      // 空闲 30 秒（超过 SURVIVAL_GAP_MS）：下一段重新起算
+      vi.advanceTimersByTime(30_000);
+      body.emergency('bot.attacked', { health: 12 }, 'escape', 'flee');
+      expect(body.survivalBusySince).not.toBe(firstSince);
+      expect(body.survivalCooldownUntil).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
+describe('⑥ 模型的请求优先于"重新接管"', () => {
+  it('有模型动作请求在途：这次保命不抢身体，如实说 deferred', () => {
+    const events: any[] = [];
+    const body = persistentHostileBody(events, { modelActionRequested: true });
+    body.emergency('bot.attacked', { health: 12 }, 'escape', 'flee');
+    expect(body.reflexQueue).toHaveLength(0);
+    const deferred = events.filter((e) => e.type === 'reflex.done' && e.payload.outcome === 'deferred').pop();
+    expect(deferred).toBeDefined();
+    expect(String(deferred.payload.detail)).toContain('不抢身体');
+  });
+
+  it('模型动作**正在跑**时不改判：保命仍然抢占（模型动作可以被紧急中断）', () => {
+    const events: any[] = [];
+    const body = persistentHostileBody(events, {
+      modelActionRequested: true,
+      actions: { executing: true, currentActionLabel: 'goToCoordinates', stop: vi.fn(), releaseCurrentAction: vi.fn() },
+    });
+    body.emergency('bot.attacked', { health: 12 }, 'escape', 'flee');
+    expect(body.reflexQueue).toHaveLength(1);
+    expect(body.modelActionRequested).toBe(false); // 急停后模型锁清零
+  });
+});
+
+describe('⑦ Stop：回执与快照必须一致（不许一边说"已释放"一边还写着 escape）', () => {
+  it('宽限期内如实说"最多再等 2 秒"；宽限期到点真的把通道摘下来', async () => {
+    vi.useFakeTimers();
+    try {
+      const events: any[] = [];
+      const body = bareBody({
+        reflexRunning: true,
+        currentReflexName: 'escape',
+        currentReflexStartedAt: Date.now() - 102_000,
+        requestInterrupt: vi.fn(),
+        notify: (type: string, _kind: unknown, _level: unknown, payload: unknown) => events.push({ type, payload }),
+      });
+      // 快照此刻确实写着 escape（已 102s）——这正是真机上模型看到的那一行
+      expect(body.currentActionName()).toBe('escape（已 102s）');
+      await body.handle({ op: 'stop' });
+
+      const stopNote = events.filter((e) => e.type === 'reflex.done' && e.payload.reflex === 'stop').pop();
+      expect(stopNote).toBeDefined();
+      // **不许说"已释放"**：这时保命处理还在收尾。
+      expect(String(stopNote.payload.detail)).toContain('最多再等');
+      expect(String(stopNote.payload.detail)).not.toContain('通道现在就是你的');
+      // 快照仍如实写着 escape：状态和回执一致（没有说谎）。
+      expect(body.currentActionName()).toBe('escape（已 102s）');
+
+      // 宽限期到点：通道真的摘下来，且只发一次完成报告
+      vi.advanceTimersByTime(REFLEX_STOP_GRACE_MS + 50);
+      expect(body.currentActionName()).toBeNull();
+      expect(body.reflexRunning).toBe(false);
+      const completions = events.filter((e) => e.type === 'reflex.done' && e.payload.reflex === 'escape');
+      expect(completions).toHaveLength(1);
+      expect(String(completions[0].payload.detail)).toContain('还给模型');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('Stop 之后 25 秒冷却：危险还在也不许立刻重新接管（真机："Stop 只中断了那一次"）', async () => {
+    const events: any[] = [];
+    const body = bareBody({
+      reflexRunning: true,
+      currentReflexName: 'escape',
+      currentReflexStartedAt: Date.now(),
+      requestInterrupt: vi.fn(),
+      notify: (type: string, _kind: unknown, _level: unknown, payload: unknown) => events.push({ type, payload }),
+      actions: { executing: true, currentActionLabel: 'goToCoordinates', stop: vi.fn(async () => {}), releaseCurrentAction: vi.fn() },
+    });
+    await body.handle({ op: 'stop' });
+    expect(body.survivalCooldownUntil).toBeGreaterThan(Date.now() + SURVIVAL_COOLDOWN_MS - 5_000);
+    // 冷却期内再来保命：deferred，不排进队列
+    body.emergency('bot.attacked', { health: 12 }, 'escape', 'flee');
+    expect(body.reflexQueue).toHaveLength(0);
+  });
+
+  it('保命冷却期里自动拾取也不许抢（身体是模型的）', () => {
+    const body = bareBody({ lastPickupAt: -Infinity, survivalCooldownUntil: Date.now() + 10_000 });
+    body.schedulePickup(TARGET);
+    expect(body.pickingUp).toBe(false);
   });
 });

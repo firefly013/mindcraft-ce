@@ -88,4 +88,26 @@ describe('紧急锁（L5 的反射）', () => {
     s.beginEmergency();
     expect(s.describe()).toMatchObject({ actionId: null, emergency: true });
   });
+
+  it('**Stop 也解锁**：保命反射一直重新触发时，Stop 必须真的把通道还回来', () => {
+    // 真机 17:15（overnight_b）：紧急锁一直开着，Stop 回 {"stopped":true} 而
+    // 通道仍被锁（快照还写着 escape（已 102s）），stairUp/restart/
+    // disableSafeguards 全被拒。
+    const s = new Scheduler();
+    s.beginEmergency();
+    expect(s.startAction('moveBy')).toMatchObject({ accepted: false, code: 'EMERGENCY_LOCKED' });
+
+    s.stopAll();
+    expect(s.locked).toBe(false);
+    expect(s.startAction('moveBy').accepted).toBe(true);
+  });
+
+  it('Stop 解锁之后，真正的危险还会重新上锁（不是把保命关掉）', () => {
+    const s = new Scheduler();
+    s.beginEmergency();
+    s.stopAll();
+    s.beginEmergency();
+    expect(s.locked).toBe(true);
+    expect(s.startAction('moveBy')).toMatchObject({ accepted: false, code: 'EMERGENCY_LOCKED' });
+  });
 });

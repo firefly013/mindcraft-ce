@@ -494,6 +494,35 @@ const REFLEX_SLOW_MS = 30_000;
  */
 export const REFLEX_MAX_MS = 120_000;
 
+/**
+ * 保命反射**连续占用**身体的预算（毫秒）。
+ *
+ * 单个反射有 `REFLEX_MAX_MS` 兜着，但**制度**没有上限：只要敌人在触发半径里，
+ * 每一条边沿都会立刻新起一次 escape，从模型角度看就是"一次连续几分钟的占用"
+ * （真机 17:15：`escape（已 102s）`，期间 stairUp/restart/disableSafeguards
+ * 全被通道拒掉，它最后只能去关自己的安全护栏）。45 秒是给真实逃脱留的余量
+ * （摔落/岩浆爬出来常常要 20~30 秒），超过就交还身体。
+ */
+export const SURVIVAL_BUDGET_MS = 45_000;
+
+/**
+ * 用完预算后把身体交还多久（毫秒）。
+ *
+ * 这段时间里**不重新接管**——模型需要一段确定的时间窗口去吃药/搭柱/挖开/Stop，
+ * 而不是在它刚发出动作时又被反射抢走。
+ */
+export const SURVIVAL_COOLDOWN_MS = 25_000;
+
+/** 保命反射之间超过这个间隔就算"新的占用段"（毫秒）。 */
+export const SURVIVAL_GAP_MS = 10_000;
+
+/**
+ * Stop 之后等保命处理收手的宽限（毫秒）：超过就把通道**真的**还回去。
+ *
+ * 回执说"通道已释放"而快照还写着 `escape（已 102s）`，就是又一次撒谎。
+ */
+export const REFLEX_STOP_GRACE_MS = 2_000;
+
 export class MineflayerBody {
     readonly name: string;
     readonly countId: number;
@@ -545,6 +574,16 @@ export class MineflayerBody {
     private currentReflexStartedAt = 0;
     /** 急停/Stop 之后不许再跑队列里剩下的反射。 */
     private reflexAbortRequested = false;
+    /** 保命反射"连续占用段"的起点（毫秒时间戳）；null = 当前没有占用段。 */
+    private survivalBusySince: number | null = null;
+    /** 最近一次保命反射的时刻：用来判"中间的空档算不算同一段占用"。 */
+    private survivalLastReflexAt = 0;
+    /** 交还身体的冷却截止时间：这段时间身体归模型。 */
+    private survivalCooldownUntil = 0;
+    /** 冷却期回执的节流时刻（别每 300ms 刷一条）。 */
+    private survivalYieldNotifiedAt = 0;
+    /** 这条反射的完成报告已经发过了吗（Stop 宽限期抢发过一次就不再重复）。 */
+    private reflexCompletionSent = false;
     /** 模型动作请求已经在路上时，禁止新的自动拾取抢身体。 */
     private modelActionRequested = false;
     /** 在途模型协议 action 数：查询/动作可能重叠，用计数而不是布尔。 */
@@ -935,9 +974,55 @@ export class MineflayerBody {
             } catch {
                 // 中断失败也要把队列清掉。
             }
+            // **通道必须真的还回去**：宽限期内它自己收手最好；收不了就由
+            // `releaseAbortedReflexChannel` 把通道摘下来（快照与回执一致）。
+            const timer = setTimeout(() => {
+                try {
+                    this.releaseAbortedReflexChannel(reason);
+                } catch {
+                    // 释放失败也不能抛到定时器外面。
+                }
+            }, REFLEX_STOP_GRACE_MS);
+            // Node 的定时器不该拖住进程退出（body 常常是随进程重启的）。
+            if (typeof (timer as { unref?: () => void }).unref === 'function') {
+                (timer as { unref: () => void }).unref();
+            }
         }
         this.pickupPreemptReason = running || pending > 0 ? reason : this.pickupPreemptReason;
         return pending + (running ? 1 : 0);
+    }
+
+    /**
+     * Stop/急停宽限期到了、保命处理却还在跑：**把通道摘下来还给模型**。
+     *
+     * 真机 17:15：Stop 回 `{"stopped":true}`、事件也说"身体通道已释放"，而快照
+     * 仍写着 `escape（已 102s）`——回执和状态各说各话，模型只能去关自己的护栏。
+     * 这里以**通道状态**为准：摘下来就真的摘下来（后台那条会自己收尾），
+     * 并且只发一次完成报告（`reflexCompletionSent` 防重复）。
+     */
+    private releaseAbortedReflexChannel(reason: string): void {
+        if (this.reflexRunning !== true) return;
+        const name = this.currentReflexName;
+        this.currentReflexName = null;
+        this.currentReflexStartedAt = 0;
+        this.reflexRunning = false;
+        if (Array.isArray(this.reflexQueue)) this.reflexQueue.length = 0;
+        if (this.reflexCompletionSent) return;
+        this.reflexCompletionSent = true;
+        this.notify(
+            'reflex.done',
+            KIND.WORLD,
+            LEVEL.STATE,
+            {
+                reflex: name ?? 'reflex',
+                outcome: 'aborted',
+                detail:
+                    `${reason}：保命处理没有在 ${Math.round(REFLEX_STOP_GRACE_MS / 1000)} 秒内收手，` +
+                    '**已把身体通道还给模型**（后台那条会自己收尾）；危险还在的话会重新接管。',
+                ms: 0,
+            },
+            name != null ? { completes: name } : {},
+        );
     }
 
     clearBotLogs(): void {
@@ -1078,6 +1163,63 @@ export class MineflayerBody {
             }
             return;
         }
+        // ── 保命"制度"预算（不是单个反射的预算）─────────────────────────
+        // 真机 17:15（overnight_b）：escape 卡在「已 102s」，Stop 说"通道已释放"
+        // 但快照还是 escape，stairUp/restart/disableSafeguards 全被
+        // `An action is already running. Stop() first, then retry.` 拒掉。
+        // 根因**不是一次反射太长**（那有 REFLEX_MAX_MS 兜着），而是：附近的僵尸
+        // 一直在触发半径内 → 每来一条边沿就新起一次 escape → 从模型角度看是
+        // **一次连续 100+ 秒的占用**。所以这里按"连续占用段"记账。
+        const now = Date.now();
+        // 空闲够久 → 开一段新的占用；否则接着上一段算。
+        if (this.survivalBusySince == null || now - this.survivalLastReflexAt > SURVIVAL_GAP_MS) {
+            this.survivalBusySince = now;
+        }
+        this.survivalLastReflexAt = now;
+        // 冷却期内绝不重新接管：这段时间身体是**模型的**（吃药/搭柱/挖开/Stop）。
+        if (now < this.survivalCooldownUntil) {
+            if (now - this.survivalYieldNotifiedAt > SURVIVAL_GAP_MS) {
+                this.survivalYieldNotifiedAt = now;
+                this.notify('reflex.done', KIND.WORLD, LEVEL.STATE, {
+                    reflex,
+                    outcome: 'deferred',
+                    detail:
+                        `保命还在冷却期（还有 ${Math.max(1, Math.round((this.survivalCooldownUntil - now) / 1000))} 秒），` +
+                        '这段时间身体归你（吃药/搭柱/挖开/Stop 都行）；危险还在的话冷却结束会重新接管。',
+                    ms: 0,
+                });
+            }
+            return;
+        }
+        // 连续占用超预算：交还身体 + 冷却，并说清"会重新接管"。
+        if (now - this.survivalBusySince >= SURVIVAL_BUDGET_MS) {
+            this.survivalCooldownUntil = now + SURVIVAL_COOLDOWN_MS;
+            this.survivalBusySince = null;
+            const released = this.abortReflexes('保命预算用完');
+            this.notify('reflex.done', KIND.WORLD, LEVEL.STATE, {
+                reflex,
+                outcome: 'yielded',
+                detail:
+                    `保命连续占用 ${Math.round(SURVIVAL_BUDGET_MS / 1000)} 秒仍未脱险，` +
+                    `**先交还身体 ${Math.round(SURVIVAL_COOLDOWN_MS / 1000)} 秒让你自救**` +
+                    '（吃药/搭柱/挖开/Stop 都行）；危险还在的话，冷却结束后会重新接管。' +
+                    (released > 0 ? '' : '（当前没有正在跑的保命处理。）'),
+                ms: 0,
+            });
+            return;
+        }
+        // 模型的动作请求已经在路上：这次不抢（它可能正是在自救）。
+        if (this.modelActionRequested && !this.actions?.executing) {
+            this.notify('reflex.done', KIND.WORLD, LEVEL.STATE, {
+                reflex,
+                outcome: 'deferred',
+                detail:
+                    '你有一个动作请求正在处理，这次保命**不抢身体**（先让你的动作跑）；' +
+                    '危险还在的话，下一条事件会再报一次。',
+                ms: 0,
+            });
+            return;
+        }
         // **保命抢占（第 0 步）**：先把自动拾取从身体上摘下来，再排队保命。
         // 顺序反了就会出现真机 15:56 那一幕——拾取反射反复超时重试占着通道，
         // 模型的 consume/move/stay/goToCoordinates 全被拒，人被打死。
@@ -1110,6 +1252,8 @@ export class MineflayerBody {
                 // **如实报给快照**：谁占着身体、占了多久。
                 this.currentReflexName = next.reflex;
                 this.currentReflexStartedAt = started;
+                this.reflexCompletionSent = false;
+                this.survivalLastReflexAt = started;
                 let outcome: 'ok' | 'failed' | 'partial' | 'aborted' = 'ok';
                 let detail = '';
                 let capTimer: ReturnType<typeof setTimeout> | null = null;
@@ -1160,13 +1304,19 @@ export class MineflayerBody {
                 }
                 this.currentReflexName = null;
                 this.currentReflexStartedAt = 0;
-                this.notify(
-                    'reflex.done',
-                    KIND.WORLD,
-                    LEVEL.STATE,
-                    { reflex: next.reflex, outcome, detail, ms: Date.now() - started },
-                    { completes: next.reflex },
-                );
+                this.survivalLastReflexAt = Date.now();
+                // Stop 宽限期已经代发过一次完成报告：这里只收尾，不再重复上报
+                // （重复上报会让大脑的紧急锁统计错位）。
+                if (!this.reflexCompletionSent) {
+                    this.notify(
+                        'reflex.done',
+                        KIND.WORLD,
+                        LEVEL.STATE,
+                        { reflex: next.reflex, outcome, detail, ms: Date.now() - started },
+                        { completes: next.reflex },
+                    );
+                }
+                this.reflexCompletionSent = false;
             }
         } finally {
             this.reflexRunning = false;
@@ -1917,6 +2067,9 @@ export class MineflayerBody {
         if (now < this.pickupBackoffUntil) return;
         // 保命抢占后的静默期：命保住了再谈捡东西。
         if (now < this.pickupSuppressedUntil) return;
+        // 保命把身体交还给模型的冷却期：**这段时间身体是模型的**，
+        // 拾取别去抢（它是最低优先级的房客）。
+        if (now < this.survivalCooldownUntil) return;
         // 刚 discard 的东西即使实体已经出现，也不许再被自己捡回：
         // 名字 / 落点 / 实体 id 三条路一起判（见 auto_pickup.ts 的 matchedRecord）。
         if (isDiscardedDrop(target.name, target, target.id)) return;
@@ -2371,16 +2524,26 @@ export class MineflayerBody {
                     Date.now() + PICKUP_SURVIVAL_SUPPRESS_MS,
                 );
                 const abortedReflexes = this.abortReflexes('收到 Stop');
+                // Stop 还意味着"把身体判给模型一段时间"：否则危险还在时反射
+                // 立刻重新接管，Stop 在模型眼里就是没反应（真机 17:15 的原话）。
+                this.survivalCooldownUntil = Math.max(
+                    this.survivalCooldownUntil,
+                    Date.now() + SURVIVAL_COOLDOWN_MS,
+                );
+                this.survivalBusySince = null;
                 if (abortedReflexes > 0) {
                     // 回执走事件通道（协议里 stop 的响应形状不动）：让模型知道
                     // Stop 到底停了什么，而不是以为"没反应"。
+                    // ⚠️ 措辞只承诺**已经做到的**：宽限期内那条保命处理可能还在收尾。
                     this.notify('reflex.done', KIND.WORLD, LEVEL.STATE, {
                         reflex: 'stop',
                         outcome: 'aborted',
                         detail:
-                            'Stop 已中断正在跑的反射与自动拾取' +
-                            (abortedReflexes > 1 ? `（队列里还有 ${abortedReflexes - 1} 条也一起清了）` : '') +
-                            '；身体通道已释放。',
+                            `Stop 已中断自动拾取和 ${abortedReflexes} 条保命/反射` +
+                            (this.reflexRunning === true
+                                ? `（正在跑的 ${this.currentReflexName ?? '反射'} 最多再等 ${Math.round(REFLEX_STOP_GRACE_MS / 1000)} 秒收手，之后通道一定还给你）`
+                                : '，通道现在就是你的') +
+                            `；接下来 ${Math.round(SURVIVAL_COOLDOWN_MS / 1000)} 秒内保命不会重新接管（危险还在的话之后会再接管）。`,
                         ms: 0,
                     });
                 }

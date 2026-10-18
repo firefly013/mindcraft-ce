@@ -36,6 +36,14 @@ describe('isActionTool', () => {
     expect(isActionTool(CATALOG, 'Stop')).toBe(false);
   });
 
+  it('进程/护栏开关不受通道约束（真机 17:15：restart 被"动作已在跑"拒掉）', () => {
+    // 这两个恰恰是"通道卡住时才会去用"的工具：重启进程、放开/收回安全护栏。
+    // 一个把自救开关也锁在故障通道后面的仲裁，本身就是危险。
+    for (const name of ['restart', 'disableSafeguards', 'restoreAllSafety', 'allowDangerousOps', '!restart']) {
+      expect(isActionTool(CATALOG, name), `${name} 不该占身体通道`).toBe(false);
+    }
+  });
+
   it('bang prefix is accepted either way', () => {
     expect(isActionTool(CATALOG, '!goToPlayer')).toBe(true);
     expect(stripBang('!goToPlayer')).toBe('goToPlayer');

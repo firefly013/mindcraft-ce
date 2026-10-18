@@ -439,10 +439,13 @@ export function findAdjacentStandable(
 /** 坐标上那个方块的名字（读不到返回 null）。 */
 export function blockNameAt(bot: unknown, x: number, y: number, z: number): string | null {
   const b = bot as {
-    blockAt?: (p: { x: number; y: number; z: number }) => { name?: unknown } | null;
+    blockAt?: (p: unknown) => { name?: unknown } | null;
   };
   try {
-    const block = b.blockAt?.({ x, y, z });
+    // **必须给 Vec3**：mineflayer 的 blockAt 会转给 prismarine-world 的
+    // `getBlock(pos)`，后者第一件事是 `pos.floored()`——普通对象没有这个方法，
+    // 直接抛异常被下面的 catch 吞成 null（真机事故见 progression.ts 的 vec3At）。
+    const block = b.blockAt?.(new Vec3(x, y, z));
     return typeof block?.name === 'string' ? block.name : null;
   } catch {
     return null;

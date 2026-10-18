@@ -90,11 +90,20 @@ export function applySafety(bot: unknown, movements: unknown): void {
   // 落差：默认 4，真机被带着直落 12~13 格摔死过
   // （pib "从 y=29 掉回来 12 格"、pia "竖井直落 13 格"）。
   m.maxDropDown = MAX_DROP_DOWN;
-  // 冲刺不只是快：`movements.js` 里 `const maxD = this.allowSprinting ? 4 : 2`，
-  // 开着它寻路会认为"跳/落 4 格"可达，于是敢往边缘冲。真机证据（pib）：
-  // 38.5,9.92,10.84 → 被 sprint 往北拖 20+ 格 → 坠落，血只剩 6。跑酷同理。
-  m.allowSprinting = false;
-  m.allowParkour = false;
+  // **冲刺与跑酷：用户明确要求不许禁（2026-10-18 17:26 原话："这玩意不能禁止"）。**
+  //
+  // 这里曾经是 `= false`，理由是"开着它寻路会认为跳/落 4 格可达，于是敢往边缘冲"
+  // （真机 pib：被 sprint 往北拖 20+ 格 → 坠落，血剩 6）。但那是**一刀切**：
+  // 库里 `const maxD = this.allowSprinting ? 4 : 2`（movements.js:664），
+  // **关掉冲刺等于把能考虑的跳跃距离从 4 格砍到 2 格**，可行走图大幅缩小——
+  // 在下界"实心岩体与空腔交替"的地形里（实测 y70-85 实心率逐列在 0%~100% 跳变），
+  // 直接后果就是"绕不过去就只能挖"，也就是模型反馈的"30 回合只推进 100 格"。
+  // 用户的判断成立：为了防几次摔死而砍掉整张图，代价大于收益。
+  //
+  // 现在改成默认开；真正致命的东西（脚下岩浆/虚空、落差）继续由 `maxDropDown`
+  // 与避让集合去管，而不是靠"把能力关掉"。
+  m.allowSprinting = true;
+  m.allowParkour = true;
   applyWaterPolicy(movements, deepWaterAllowed(bot), waterBlockId(bot));
 }
 

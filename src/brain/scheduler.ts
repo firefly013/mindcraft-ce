@@ -78,6 +78,13 @@ export class Scheduler {
     this.action = null;
     this.generation++;
     this.invalidationReason = 'stop';
+    // **Stop 也解锁紧急锁。** 真机 2026-10-18 17:15（overnight_b）：保命反射
+    // 一直重新触发，紧急锁跟着一直是开的；Stop 回了 `{"stopped":true}`、事件也说
+    // "身体通道已释放"，可**通道其实还锁着**——stairUp / restart /
+    // disableSafeguards 全被拒，快照还写着 `escape（已 102s）`。
+    // Stop 是模型明确说"把身体给我"，它必须一次到位；真正的危险还会再触发反射
+    // （下一条 L5 会重新上锁），所以这里解锁不会漏掉保命。
+    this.emergency = false;
     return { generation: this.generation, hadAction, actionId };
   }
 

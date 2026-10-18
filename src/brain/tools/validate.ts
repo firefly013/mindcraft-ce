@@ -15,8 +15,31 @@ import { domainBounds, stripBang, type ToolParamDef } from '../../shared/tools.j
 import { validateFeedback as validateFeedbackShape } from '../feedback.js';
 import type { ToolCatalog } from './catalog.js';
 
-/** 控制类工具（循环/说话/计划/反馈），走 handler，不占身体通道。 */
-export const CONTROL_TOOLS = new Set(['Finish', 'Stop', 'Say', 'UpdatePlan', 'Feedback']);
+/**
+ * 控制类工具（循环/说话/计划/反馈 + 进程/安全护栏开关），走 handler，
+ * **不占也不受**身体通道约束。
+ *
+ * ⚠️ `restart` / `disableSafeguards` / `restoreAllSafety` 必须在这里：
+ * 真机 2026-10-18 17:15（overnight_b）保命反射卡住通道时，连
+ * `restart` 和 `disableSafeguards` 都被
+ * `An action is already running. Stop() first, then retry.` 拒掉——
+ * 而这两个正是**因为通道卡住才会去用**的工具（它最后只能靠关掉自己的
+ * 安全护栏来自救）。一个把"自救开关"也锁在故障通道后面的仲裁，
+ * 本身就是危险。
+ */
+export const CONTROL_TOOLS = new Set([
+  'Finish',
+  'Stop',
+  'Say',
+  'UpdatePlan',
+  'Feedback',
+  // 进程控制：重启是"通道卡死"的最后手段，绝不能被通道挡住。
+  'restart',
+  // 安全护栏开关：必须在任何状态下可达（包括保命反射占着身体时）。
+  'disableSafeguards',
+  'restoreAllSafety',
+  'allowDangerousOps',
+]);
 
 export interface ToolValidation {
   ok: boolean;
