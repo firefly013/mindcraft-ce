@@ -82,3 +82,54 @@ export function classifyChat(input: {
   return { addressed: true, level: 3, expectReply: true };
 }
 
+
+/**
+ * **批量广播去重**：同一个人一字不差重复同一句话，不能每次都当成"有人在跟你说话"。
+ *
+ * 真机事故（2026-10-18 23:26）：玩家的建造工具以 `mcbuild` 的名字在世界里批量填充方块，
+ * 每批广播一条 `Successfully filled 15 block(s)`；两个 bot **每一条**都收到
+ * 「有人在直接跟你说话，先用 Say 回一句，再继续手上的活」——80+ 条把一轮上下文刷爆
+ * （两个 bot 各自独立报了这条 Feedback，说"把对话流刷爆"）。
+ *
+ * `agent.ts` 里那份前缀黑名单（`Set the time to` / `Teleported ` 之类）只能挡**已知**文案；
+ * 这条才是兜底：**窗口内重复超过阈值 ⇒ 只提示一次，其余静默**。
+ * 阈值取 3 次/60 秒——真人聊天不会一字不差重复 4 遍，批量工具/宏/循环脚本一定会。
+ */
+export interface ChatRepeatState {
+  count: number;
+  firstAt: number;
+  lastAt: number;
+}
+
+export const CHAT_REPEAT_WINDOW_MS = 60_000;
+export const CHAT_REPEAT_MAX = 3;
+
+/** 判定结果：`allow` 正常投递；`first-suppress` 越线那一次（提示一句）；`suppress` 之后静默。 */
+export type ChatRepeatVerdict = 'allow' | 'first-suppress' | 'suppress';
+
+/**
+ * 记一次消息并按重复度给出判定。**就地更新** `state`（调用方持有 Map）。
+ *
+ * 超过窗口就从这一条重新计数——这样"每 61 秒重复一次"的慢速刷屏仍然会被抓住
+ * （它是持续行为），而"半小时前说过同样一句"不会被算进来。
+ */
+export function noteChatRepeat(
+  state: Map<string, ChatRepeatState>,
+  username: string,
+  message: string,
+  now: number,
+): { verdict: ChatRepeatVerdict; count: number; windowSeconds: number } {
+  const key = username + '\u0000' + message;
+  const seen = state.get(key);
+  if (seen == null || now - seen.firstAt > CHAT_REPEAT_WINDOW_MS) {
+    state.set(key, { count: 1, firstAt: now, lastAt: now });
+    return { verdict: 'allow', count: 1, windowSeconds: 0 };
+  }
+  seen.count += 1;
+  seen.lastAt = now;
+  const windowSeconds = Math.round((now - seen.firstAt) / 1000);
+  if (seen.count > CHAT_REPEAT_MAX) {
+    return { verdict: seen.count === CHAT_REPEAT_MAX + 1 ? 'first-suppress' : 'suppress', count: seen.count, windowSeconds };
+  }
+  return { verdict: 'allow', count: seen.count, windowSeconds };
+}

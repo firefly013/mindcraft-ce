@@ -22,7 +22,7 @@ import { createToolCatalog, EMPTY_TOOL_CATALOG, type ToolCatalog } from './tools
 import type { ToolDeclaration } from '../shared/tools.js';
 import { CliJobTracker } from './cli_jobs.js';
 import { log } from './connection_handler.js';
-import { classifyChat } from '../shared/chat.js';
+import { classifyChat, noteChatRepeat } from '../shared/chat.js';
 import { EVENT_LOG_LIMIT, eventTextFor, renderEventText } from '../shared/event_stream.js';
 import { renderLiveState } from '../shared/live_state.js';
 import type { LiveState } from '../shared/live_state.js';
@@ -74,6 +74,13 @@ export interface CliEvent {
     text: string;
 }
 
+/**
+ * 同一发送者重复同一句话的计数（防批量工具刷屏）。判据在 `shared/chat.ts`。
+ *
+ * 真机事故（2026-10-18 23:26）：玩家的建造工具以 `mcbuild` 的名字批量填充方块，
+ * 每批广播一条 `Successfully filled 15 block(s)`，两个 bot **每一条**都被要求
+ * 「先用 Say 回一句」——上下文被刷爆。黑名单只能挡已知文案，这条才是兜底。
+ */
 export class Agent {
     count_id: number = 0;
 
@@ -121,6 +128,16 @@ export class Agent {
      * 一句话，自己的活一直没推进。见 `shared/chat.ts` 的 `TEAMMATE_WAKE_MIN_GAP_MS`。
      */
     private teammateWakeAt: Map<string, number> = new Map();
+
+    /**
+     * 同一发送者重复同一句话的计数（防批量工具刷屏）。
+     *
+     * 真机事故（2026-10-18 23:26）：玩家的建造工具以 `mcbuild` 的名字批量填充方块，
+     * 每批广播一条 `Successfully filled 15 block(s)`，两个 bot **每一条**都被要求
+     * 「先用 Say 回一句」——上下文被刷爆。黑名单只能挡已知文案，这条才是兜底：
+     * 窗口内重复超过阈值 ⇒ 只记录一次，其余静默。
+     */
+    private chatRepeatAt: Map<string, { count: number; firstAt: number; lastAt: number }> = new Map();
 
     /** 从 profile 文件里读队友名字（读不到就当没有，不影响主流程）。 */
     private loadTeammateNames(): void {
@@ -526,8 +543,45 @@ export class Agent {
                 'Teleported ',
                 'Set the weather to',
                 'Gamerule ',
+                // **指令反馈不是聊天。** 真机事故（2026-10-18 23:26）：玩家的建造工具
+                // 以 `mcbuild` 的名字在世界里批量填充方块，每批都广播一条
+                // `Successfully filled 15 block(s)`，两个 bot **每一条**都收到
+                // 「有人在直接跟你说话，先用 Say 回一句」——80+ 条把上下文刷爆
+                // （bot 自己报了这条 Feedback）。这类文案属于"命令回显"，
+                // 跟 `Set the time to` 是一家人，看到就丢。
+                'Successfully filled',
+                'Successfully placed',
+                'Successfully set',
+                'Filled ',
+                'Changed the block at',
             ];
             if (ignore_messages.some((m) => message.startsWith(m))) return;
+
+            // **同一个人重复同一句话，不能每次都当"有人在跟你说话"。**
+            // 上面的黑名单只能挡已知的批量指令文案；真正的兜底在
+            // `shared/chat.ts` 的 `noteChatRepeat`（纯函数、有单测）：
+            // 窗口内重复超过阈值 ⇒ 只提示一次，其余静默。
+            const repeat = noteChatRepeat(this.chatRepeatAt, username, message, Date.now());
+            if (repeat.verdict === 'first-suppress') {
+                console.log(
+                    this.name,
+                    'chat repeat suppressed:',
+                    username,
+                    '(' + String(repeat.count) + '× in ' + String(repeat.windowSeconds) + 's):',
+                    message,
+                );
+                this.handleMessage(
+                    username,
+                    '【系统】' + username + ' 在 ' + String(repeat.windowSeconds) + ' 秒内重复同一条消息 ' +
+                        String(repeat.count) + ' 次（' + message + '）。' +
+                        '**这多半是批量工具/脚本的广播，不是有人在等你回话**——不用回，继续手上的活；' +
+                        '同类消息我接下来不会再打扰你。',
+                    KIND.USER,
+                    LEVEL.STATE,
+                );
+                return;
+            }
+            if (repeat.verdict === 'suppress') return;
 
             console.log(this.name, 'received message from', username, ':', message);
 
