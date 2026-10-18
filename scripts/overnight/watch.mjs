@@ -257,10 +257,17 @@ async function tick() {
     const mainPid = readMainPid();
     if (mainPid != null && mainPid !== lastMainPid) {
         if (lastMainPid != null) {
-            for (const agent of AGENTS) offlineSince[agent] = null;
+            for (const agent of AGENTS) {
+                offlineSince[agent] = null;
+                // **停滞计时也要清**：不清的话新进程一上线就带着"上一个进程
+                // 已经停滞 N 分钟"的陈旧基线，45 分钟规则会立刻再杀一次
+                // （对抗验证 VERIFY.md 声明 5，与 all-offline 同一类 bug）。
+                lastProgressAt[agent] = null;
+            }
             allOfflineSince = null;
+            mindserverFails = 0;
             freshMainUntil = Date.now() + STARTUP_GRACE_MS;
-            alert('info', 'main-restarted', `supervisor 换了 main 进程（pid ${mainPid}），掉线计时清零并宽限 ${Math.round(STARTUP_GRACE_MS / 1000)}s`, { pid: mainPid });
+            alert('info', 'main-restarted', `supervisor 换了 main 进程（pid ${mainPid}），掉线/停滞/端口失败计时清零并宽限 ${Math.round(STARTUP_GRACE_MS / 1000)}s`, { pid: mainPid });
         }
         lastMainPid = mainPid;
     }

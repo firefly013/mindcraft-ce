@@ -26,10 +26,12 @@ export const PROGRESSION_TOOL_TEXT: Record<string, { description: string; params
             '专治"searchForBlock 一次性扫描搜不到"——它只扫已加载区块，扫不到不等于没有，得走起来才有新区块。' +
             '回执会写清：每腿扫多大半径、实际走了多少格、走了几腿、最后在哪，以及明确的 `found <方块> at (x,y,z)` 或 `not found after N steps`。' +
             '**找下界要塞就用它**：exploreFor(block="nether_bricks", max_steps=12, step=32)。' +
-            '它只负责"找到并报坐标"，不会替你走过去；停下后用 goToCoordinates 过去。危险（岩浆/火）会立刻停手并如实报告。',
+            '它只负责"找到并报坐标"，不会替你走过去；停下后用 goToCoordinates 过去。危险（岩浆/火）会立刻停手并如实报告。' +
+            '**它自己在约 4.5 分钟就收手**（时间预算是内部的，不是你给的参数）：到点照常给完整结论——走了几腿、扫了多大范围、从哪到哪、有没有找到、下一步调什么；' +
+            '所以"跑了一半没结论"不会再发生。看到 `时间到…主动收手` 就照最后那行再调一次，把剩下的腿走完。',
         params: {
             block: '要找的方块 id（英文），例如 nether_bricks（下界要塞）、obsidian、end_portal_frame。也认中文俗称（下界砖/黑曜石）。',
-            max_steps: '最多走几腿（默认 12，1~64）。一腿 = 螺旋上的一段；12 腿约覆盖出发点外 192 格。',
+            max_steps: '最多走几腿（默认 12，1~64）。一腿 = 螺旋上的一段；12 腿约覆盖出发点外 192 格。时间预算不够时会提前收手，并告诉你还剩几腿。',
             step: '每腿走多少格（默认 32，4~128）。地形破碎就调小（16），平原/灵魂沙峡谷可以调大（48）。',
         },
     },
@@ -44,12 +46,29 @@ export const PROGRESSION_TOOL_TEXT: Record<string, { description: string; params
             entity: '要刷的实体 id（英文），例如 blaze（烈焰人）、enderman（末影人）、cow/pig/chicken（食物）。也认中文俗称（烈焰人/末影人/牛/猪/鸡）。',
             want: '要几个掉落物（默认 4，1~64）。烈焰棒推荐 7（合成烈焰粉 + 酿造），末影珍珠推荐 12（12 颗眼填满传送门）。',
             radius: '搜索半径（默认 48，8~128）。找不到就先用 exploreFor 换个地方，而不是把半径拉大。',
-            max_ms: '时间预算毫秒（默认 300000 = 5 分钟，10000~420000）。到点就带着已有进度收手，可以再调一次接着刷。',
+            max_ms: '时间预算毫秒（默认 300000 = 5 分钟，10000~300000）。到点**自己收手并给完整回执**（拿到几个、打了几次、下一步调什么），可以再调一次接着刷。',
         },
     },
 };
 
 const DESCRIPTION = (name: keyof typeof PROGRESSION_TOOL_TEXT): string => PROGRESSION_TOOL_TEXT[name].description;
+
+// ───────────────────── 超时与预算：两者必须一起看 ─────────────────────
+//
+// 这条不变式是真机换来的（2026-10-18 13:13）：`exploreFor#3` 跑过 6.5 分钟被脑侧
+// 保险丝强退，模型只拿到"已强制释放动作通道"——没有腿数、没有覆盖范围、没有坐标、
+// 没有下一步，于是它开始反复拍快照空转。**凡是"可能跑很久"的工具，都必须由它自己
+// 先收手并交出结论**，不能指望超时/保险丝替它总结。
+//
+// 所以链条是：内部预算 < 命令超时 < 脑侧保险丝（8.5 分钟，见 action_runner.ts）。
+// 三条都在 tests/progression.test.ts 里钉住——删掉预算或把超时调大，测试就会红。
+
+/** `exploreFor` 的命令超时（分钟）。**必须 > `DEFAULT_EXPLORE_BUDGET_MS`**，否则超时回执会把结论吃掉。 */
+export const EXPLORE_TIMEOUT_MIN = 6;
+/** `huntFor` 的命令超时（分钟）。**必须 > `HUNT_MAX_MS_LIMIT` + 最后一次攻击/捡拾的余量**。 */
+export const HUNT_TIMEOUT_MIN = 8;
+/** `huntFor` 的时间预算上限（毫秒）：压到 5 分钟，保证"预算 + 最后一击"仍在超时之内。 */
+export const HUNT_MAX_MS_LIMIT = 5 * 60 * 1000;
 
 function clampInt(raw: unknown, fallback: number, min: number, max: number): number {
     const value = typeof raw === 'number' ? raw : Number(raw);
@@ -85,7 +104,8 @@ export interface HuntArgs {
     error?: string;
 }
 
-/** 归一 `huntFor` 的参数。`max_ms` 上限压在 7 分钟，避免撞上动作通道的 8 分钟超时。 */
+/** 归一 `huntFor` 的参数。`max_ms` 上限压在 `HUNT_MAX_MS_LIMIT`（5 分钟），
+ *  保证"时间预算 + 最后一次攻击/捡拾"仍在命令超时之内。 */
 export function parseHuntArgs(rawEntity: unknown, rawWant?: unknown, rawRadius?: unknown, rawMaxMs?: unknown): HuntArgs {
     const entity = progression.resolveEntityName(rawEntity);
     if (entity === '') {
@@ -101,7 +121,7 @@ export function parseHuntArgs(rawEntity: unknown, rawWant?: unknown, rawRadius?:
         entity,
         want: clampInt(rawWant, progression.DEFAULT_HUNT_WANT, 1, 64),
         radius: clampInt(rawRadius, progression.DEFAULT_HUNT_RADIUS, 8, 128),
-        maxMs: clampInt(rawMaxMs, progression.DEFAULT_HUNT_MAX_MS, 10_000, 7 * 60 * 1000),
+        maxMs: clampInt(rawMaxMs, progression.DEFAULT_HUNT_MAX_MS, 10_000, HUNT_MAX_MS_LIMIT),
     };
 }
 
@@ -127,9 +147,11 @@ function runProgressionAction(
         if (result.interrupted && !result.timedout) return;
         if (result.timedout) {
             const why = typeof skills.describeStuck === 'function' ? skills.describeStuck(agent.bot) : '';
+            const next = label === 'exploreFor' ? 'stats(type="body")' : 'stats(type="inventory")';
             return (
                 `${label}：**超时**（${timeoutMinutes} 分钟没做完），已释放身体通道。` +
-                `超时 ≠ 没做成：先看回执里已经走到哪一步，再用 stats/exploreFor 接着来。${why === '' ? '' : `\n卡住时：${why}`}`
+                `注意：${label} 自己有更短的时间预算，正常会先收手并给出完整回执——走到这里说明某一腿/某一次攻击卡住了。` +
+                `下一步（照做即可）：${next}。${why === '' ? '' : `\n卡住时：${why}`}`
             );
         }
         return result.message;
@@ -160,7 +182,7 @@ export const progressionActionList: AgentCommand[] = [
                 domain: [4, 128],
             },
         },
-        perform: runProgressionAction('exploreFor', 8, (agent, rawBlock?: unknown, rawMaxSteps?: unknown, rawStep?: unknown) => {
+        perform: runProgressionAction('exploreFor', EXPLORE_TIMEOUT_MIN, (agent, rawBlock?: unknown, rawMaxSteps?: unknown, rawStep?: unknown) => {
             const args = parseExploreArgs(rawBlock, rawMaxSteps, rawStep);
             if (args.error != null) return Promise.resolve(`exploreFor 参数不对：${args.error}`);
             return progression.exploreForSkill(agent.bot, args.block, args.maxSteps, args.step);
@@ -190,12 +212,12 @@ export const progressionActionList: AgentCommand[] = [
                 description: PROGRESSION_TOOL_TEXT.huntFor.params.max_ms,
                 optional: true,
                 default: progression.DEFAULT_HUNT_MAX_MS,
-                domain: [10_000, 7 * 60 * 1000],
+                domain: [10_000, HUNT_MAX_MS_LIMIT],
             },
         },
         perform: runProgressionAction(
             'huntFor',
-            8,
+            HUNT_TIMEOUT_MIN,
             (agent, rawEntity?: unknown, rawWant?: unknown, rawRadius?: unknown, rawMaxMs?: unknown) => {
                 const args = parseHuntArgs(rawEntity, rawWant, rawRadius, rawMaxMs);
                 if (args.error != null) return Promise.resolve(`huntFor 参数不对：${args.error}`);

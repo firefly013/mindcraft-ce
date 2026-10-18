@@ -170,10 +170,19 @@ while (-not (Test-Path $stopFlag)) {
     if (Test-Path $restartFlag) {
         $reason = (Get-Content -Raw $restartFlag -ErrorAction SilentlyContinue)
         Remove-Item -Force $restartFlag -ErrorAction SilentlyContinue
-        Write-RunLog 'restart-requested' @{ reason = "$reason" }
-        Add-Content -Path $restartLog -Value ((@{ ts = (Get-Date).ToString('o'); by = 'watcher'; reason = "$reason" } | ConvertTo-Json -Compress)) -Encoding utf8
-        Stop-ProcessTree ($script:mainProc.Id)
-        Start-Sleep -Seconds 3
+        # 刚起来的 main 正在重新登录，watcher 可能还拿着"上一个进程期间"的陈旧
+        # 离线/停滞基线来请求重启（实测把只活了 22 秒的新进程又杀了一次）。
+        # 所以主动重启后的 3 分钟内忽略 watcher 的请求——真正的崩溃由下面的
+        # "main 退出"分支兜底，不会漏。
+        $sinceStart = if ($script:mainStartedAt) { ((Get-Date) - $script:mainStartedAt).TotalSeconds } else { 999 }
+        if ($sinceStart -lt 180) {
+            Write-RunLog 'restart-request-ignored' @{ reason = "$reason"; sinceStartSec = [math]::Round($sinceStart, 0) }
+        } else {
+            Write-RunLog 'restart-requested' @{ reason = "$reason" }
+            Add-Content -Path $restartLog -Value ((@{ ts = (Get-Date).ToString('o'); by = 'watcher'; reason = "$reason" } | ConvertTo-Json -Compress)) -Encoding utf8
+            Stop-ProcessTree ($script:mainProc.Id)
+            Start-Sleep -Seconds 3
+        }
     }
 
     $exited = $true

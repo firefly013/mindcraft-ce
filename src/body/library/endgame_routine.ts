@@ -18,14 +18,18 @@ import * as skills from './skills.js';
 import * as world from './world.js';
 import { opContextFor, permits } from '../safety/permits.js';
 import {
+    BLAZE_RODS_FOR_EYES,
     BLOCK_REACH_DISTANCE,
     DRAGON_MAX_HEALTH,
     END_PLATFORM,
     END_PODIUM,
+    END_PORTAL_EYES,
     EXPLOSION_POWER,
+    PEARLS_FOR_EYES,
     PLATFORM_BLOCKS,
     assessEndGear,
     blastRadius,
+    blazePowderAvailable,
     choosePotionToDrink,
     compassBearing,
     describeEyeDirection,
@@ -85,10 +89,11 @@ export const endgameToolSpecs: EndgameToolSpec[] = [
         name: 'endFightStatus',
         kind: 'query',
         description:
-            '末地通关体检：当前阶段、还差哪些装备、还有几颗水晶、龙还剩多少血、有没有故意踩进龙息云。' +
-            '**进末地前先调这个**，它会把"没带缓降药水"这种要命的缺口直接点出来。',
+            '末地通关体检：**整条链**当前到哪一步（备齐 → 下界刷烈焰棒 → 刷末影珍珠 → 合成末影之眼 → 找要塞 → 激活传送门 → 进末地 → 拆水晶 → 床炸龙 → 收尾），' +
+            '还差哪些装备、眼的材料各差多少（棒/粉/珍珠/眼）、还有几颗水晶、龙还剩多少血、有没有故意踩进龙息云。' +
+            '**进末地前先调这个**，它会把"没带缓降药水""还没刷够烈焰棒"这种要命的缺口直接点出来。',
         params: {},
-        backing: '新增查询命令；纯读 bot 状态，不占身体通道。',
+        backing: '新增查询命令；纯读 bot 状态（含背包材料计数与 nether_bricks 探针），不占身体通道。',
     },
     {
         name: 'enterEnd',
@@ -317,6 +322,16 @@ function findDragonEntity(bot: any): any | null {
 export interface EndSignals {
     dimension: string | null;
     inEnd: boolean;
+    inNether: boolean;
+    /** 附近（48 格内）有没有下界要塞的标志方块 nether_bricks。读不到/没有都给 false（那就先 exploreFor）。 */
+    fortressFound: boolean;
+    /** 中段材料（全流程阶段要用）：读不到的给 null。 */
+    blazeRods: number;
+    blazePowder: number;
+    enderPearls: number;
+    eyesOfEnder: number;
+    arrows: number;
+    beds: number;
     position: Vec3 | null;
     crystals: EndCrystalInfo[];
     crystalsAlive: number;
@@ -331,6 +346,22 @@ export interface EndSignals {
     breath: BreathCloud[];
 }
 
+/**
+ * 附近有没有下界要塞的痕迹（nether_bricks）。
+ *
+ * 只在**下界**里查：主世界问这一句是白花一次区块扫描。
+ * 读不到（没有 minecraft-data / 没有世界）→ false —— 对状态机来说 false 就是
+ * "去 exploreFor 找"，这正是没找到时该干的事。
+ */
+export function probeFortressNearby(bot: any, radius = 48): boolean {
+    if (readDimension(bot) !== 'the_nether') return false;
+    try {
+        return world.getNearestBlock(bot, 'nether_bricks', radius) != null;
+    } catch {
+        return false;
+    }
+}
+
 /** 一次把"末地决策要用到的所有信号"读出来。整个函数对坏数据一律降级成 null/空数组，不抛。 */
 export function readEndSignals(bot: any): EndSignals {
     const dimension = readDimension(bot);
@@ -338,14 +369,24 @@ export function readEndSignals(bot: any): EndSignals {
     const crystals = readEndCrystals(bot);
     const effects = readEffects(bot);
     const dragon = findDragonEntity(bot);
+    const counts = safeInventoryCounts(bot);
+    const count = (name: string): number => (Number.isFinite(counts[name]) ? Math.max(0, counts[name] as number) : 0);
     const gear = assessEndGear({
-        inventory: safeInventoryCounts(bot),
+        inventory: counts,
         items: safeInventoryItems(bot),
         effects,
     });
     return {
         dimension,
         inEnd: dimension === 'the_end',
+        inNether: dimension === 'the_nether',
+        fortressFound: probeFortressNearby(bot),
+        blazeRods: count('blaze_rod'),
+        blazePowder: count('blaze_powder'),
+        enderPearls: count('ender_pearl'),
+        eyesOfEnder: count('ender_eye'),
+        arrows: count('arrow') + count('spectral_arrow') + count('tipped_arrow'),
+        beds: countOf(bot, (name) => /(^|_)bed$/.test(name)),
         position,
         crystals,
         crystalsAlive: crystals.length,
@@ -851,12 +892,26 @@ export function endgameStatusReport(bot: any): string {
     const signals = readEndSignals(bot);
     const advice = nextEndgameStep({
         gearReady: signals.gear.ok,
+        inNether: signals.inNether,
+        fortressFound: signals.fortressFound,
+        blazeRods: signals.blazeRods,
+        blazePowder: signals.blazePowder,
+        enderPearls: signals.enderPearls,
+        eyesOfEnder: signals.eyesOfEnder,
+        arrows: signals.arrows,
+        beds: signals.beds,
         inEnd: signals.inEnd,
         crystalsAlive: signals.crystalsAlive,
         dragonHealth: signals.dragonHealth,
         dragonAlive: signals.dragonAlive,
     });
     const lines = [formatEndgameReport(signals.gear, advice)];
+    // 中段材料：模型看不到"还差多少"，就会一直在下界瞎逛。
+    const powder = blazePowderAvailable(signals.blazeRods, signals.blazePowder);
+    lines.push(
+        `【眼的材料】烈焰棒 ${signals.blazeRods} / 粉 ${signals.blazePowder}（折算 ${powder}/${END_PORTAL_EYES} 份粉）｜末影珍珠 ${signals.enderPearls}/${PEARLS_FOR_EYES}｜末影之眼 ${signals.eyesOfEnder}/${END_PORTAL_EYES}` +
+            (signals.inNether ? `｜下界要塞 ${signals.fortressFound ? '在附近（看到 nether_bricks）' : '还没看到'}` : '')
+    );
     const dragonText = !signals.inEnd
         ? '不在末地'
         : signals.dragonHealth != null

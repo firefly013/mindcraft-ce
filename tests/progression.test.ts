@@ -1,17 +1,21 @@
 /**
  * 中段推进能力的测试（不连 MC 服务端、不烧 token）。
  *
- * 这里钉五件事：
+ * 这里钉六件事：
  * 1) **回执诚实**：没找到就说 `not found after N steps`，并写清扫描半径只覆盖
  *    已加载区块——绝不宣称扫过一个没加载的范围（这正是前半夜那个 bug）；
  * 2) **找到给坐标**：`found <方块> at (x, y, z)`，且下一步是一条能照抄的调用；
  * 3) **航点是真的在推进**：方形螺旋的坐标可逐腿核对，不是"原地打转"；
  * 4) **huntFor 到量就停**，并且**只认真实背包增量**（打了不等于到手）；
  * 5) **接线/门禁**：两条命令注册成 action + longRunning，schema 参数在 TOOL_TEXT
- *    里都有说明（`scripts/check-prompts.ts` 的同款不变式）。
+ *    里都有说明（`scripts/check-prompts.ts` 的同款不变式）；
+ * 6) **时间预算先于超时**（本轮新增，针对真机 13:13 的强退）：exploreFor 到点
+ *    **自己收手**并给出腿数/覆盖/坐标/下一步；huntFor 的预算上限压在超时之下。
+ *    这两条以前**没有任何测试**——删掉预算、把超时调大，都不会红。
  */
 import { describe, expect, it } from 'vitest';
 import {
+    DEFAULT_EXPLORE_BUDGET_MS,
     DEFAULT_EXPLORE_MAX_STEPS,
     DEFAULT_EXPLORE_SCAN_RADIUS,
     DEFAULT_EXPLORE_STEP,
@@ -36,7 +40,14 @@ import {
     type FlatPosition,
     type HuntOutcome,
 } from '../src/body/library/progression.js';
-import { parseExploreArgs, parseHuntArgs, progressionActionList } from '../src/body/commands/progression.js';
+import {
+    EXPLORE_TIMEOUT_MIN,
+    HUNT_MAX_MS_LIMIT,
+    HUNT_TIMEOUT_MIN,
+    parseExploreArgs,
+    parseHuntArgs,
+    progressionActionList,
+} from '../src/body/commands/progression.js';
 import { findCommand, toolDeclarations, toolNames } from '../src/body/commands/registry.js';
 import { TOOL_TEXT } from '../src/shared/prompts.js';
 import { getOpenAITools } from '../src/brain/tools/advertise.js';
@@ -344,11 +355,110 @@ describe('exploreFor：系统性探索', () => {
             foundDistance: null,
             interrupted: false,
             danger: null,
+            timedOut: false,
+            budgetMs: DEFAULT_EXPLORE_BUDGET_MS,
             unknownBlock: false,
             notes: [],
         };
         expect(exploreNextAction(outcome)).toBe('exploreFor(block="nether_bricks", max_steps=6, step=32)');
         expect(exploreReceipt(outcome)).toContain(describeCoverage(64));
+    });
+
+    it('时间到 → 自己收手，回执仍给腿数/覆盖/坐标，下一步是"把剩下的腿走完"', async () => {
+        const bot = makeBot();
+        let clock = 0;
+        let legs = 0;
+        const receipt = await exploreForSkill(
+            bot,
+            'nether_bricks',
+            12,
+            32,
+            {
+                travel: async (b, x, y, z) => {
+                    legs += 1;
+                    b.entity.position = { x, y, z };
+                    clock += 120_000; // 每腿 2 分钟：第 4 腿前就会越过 4.5 分钟预算
+                    return true;
+                },
+                scan: () => null,
+                settle: noSleep,
+                sleep: noSleep,
+                now: () => clock,
+            },
+            { budgetMs: 270_000 },
+        );
+
+        // **没有被强退**：走完 3 腿（6 分钟）后第 4 腿前自己收手，不是走满 12 腿
+        expect(legs).toBe(3);
+        // 时间原因必须**明说**，不能写成"范围里确定没有"
+        expect(receipt).toContain('时间到');
+        expect(receipt).toContain('主动收手');
+        expect(receipt).toContain('没走完螺旋');
+        expect(receipt).not.toContain('范围内的确定没有');
+        // 报的是**实际走完的腿数**，不是 max_steps
+        expect(receipt).toContain('走完 3/12 腿');
+        expect(receipt).toContain('not found after 3 steps');
+        // 覆盖范围 + 从哪到哪，一个都不能少
+        expect(receipt).toContain(`每次重扫半径 ${DEFAULT_EXPLORE_SCAN_RADIUS} 格`);
+        expect(receipt).toContain('只扫已加载区块');
+        expect(receipt).toContain('从 (0, 64, 0) 到');
+        expect(receipt).toContain('实际移动约');
+        // 最后一行仍是**一条**能照抄的调用：剩余腿数（12-3=9）
+        expect(receipt.trimEnd().split('\n').at(-1)).toBe(
+            '下一步（照做即可）：exploreFor(block="nether_bricks", max_steps=9, step=32)',
+        );
+    });
+
+    it('时间到（纯渲染）：措辞与"下一步"逐字可核', () => {
+        const outcome: ExploreOutcome = {
+            block: 'nether_bricks',
+            scanRadius: 64,
+            step: 32,
+            maxSteps: 12,
+            origin: { x: 0, y: 64, z: 0 },
+            here: { x: 32, y: 64, z: 32 },
+            completedLegs: 2,
+            attemptedLegs: 2,
+            failedLegs: 0,
+            walkedBlocks: 64,
+            found: null,
+            foundDistance: null,
+            interrupted: false,
+            danger: null,
+            timedOut: true,
+            budgetMs: 270_000,
+            unknownBlock: false,
+            notes: [],
+        };
+        expect(exploreNextAction(outcome)).toBe('exploreFor(block="nether_bricks", max_steps=10, step=32)');
+        const text = exploreReceipt(outcome);
+        expect(text).toContain('时间到（预算 4.5 分钟）主动收手');
+        expect(text).toContain('not found after 2 steps');
+        expect(text.trimEnd().split('\n').at(-1)).toBe(
+            '下一步（照做即可）：exploreFor(block="nether_bricks", max_steps=10, step=32)',
+        );
+    });
+
+    it('默认预算确实在生效（不给 budgetMs 也会收手）', async () => {
+        const bot = makeBot();
+        let clock = 0;
+        let legs = 0;
+        const receipt = await exploreForSkill(bot, 'nether_bricks', 12, 32, {
+            travel: async (b, x, y, z) => {
+                legs += 1;
+                b.entity.position = { x, y, z };
+                clock += 60_000; // 每腿 1 分钟
+                return true;
+            },
+            scan: () => null,
+            settle: noSleep,
+            sleep: noSleep,
+            now: () => clock,
+        });
+        // 默认预算 4.5 分钟、每腿 1 分钟 → 第 6 腿前收手（走到 5 分钟 > 4.5）
+        expect(legs).toBe(5);
+        expect(receipt).toContain('时间到');
+        expect(receipt).toContain('走完 5/12 腿');
     });
 });
 
@@ -396,6 +506,12 @@ describe('huntFor：刷到够数 / 只认真实增量', () => {
         expect(receipt).toContain('击杀');
         expect(receipt).toContain('（这次没涨）');
         expect(receipt).toContain('停止原因：到时间预算了');
+        // **时间预算到点也必须给完整回执**：进度逐条在，且最后一行是一条真实调用。
+        expect(receipt).toContain('进度：');
+        expect(receipt).toContain('攻击');
+        expect(receipt.trimEnd().split('\n').at(-1)).toBe(
+            '下一步（照做即可）：huntFor(entity="blaze", want=3, max_ms=300000)',
+        );
     });
 
     it('掉落物要自己走过去踩：走过去 + 背包涨了才算数', async () => {
@@ -583,9 +699,32 @@ describe('接线：registry 与 schema', () => {
             entity: 'enderman',
             want: 64,
             radius: 8,
-            maxMs: 7 * 60 * 1000, // 上限压在动作通道 8 分钟超时之下
+            maxMs: HUNT_MAX_MS_LIMIT, // 上限压在 5 分钟：内部预算必须低于命令超时
         });
         expect(parseHuntArgs('烈焰人').entity).toBe('blaze');
         expect(parseHuntArgs('').error).toContain('entity 必填');
+    });
+
+    it('时间预算 < 命令超时 < 脑侧保险丝：超时永远不该抢在预算前面', () => {
+        // 脑侧保险丝 = (BODY_ACTION_TIMEOUT_MAX_MIN*60+30) 秒 = 8.5 分钟（action_runner.ts）。
+        const FUSE_MS = 8.5 * 60_000;
+        // Lead 的硬要求：exploreFor 的命令超时压到 ≤6 分钟（不许再回到 8），
+        // 这样"预算 4.5 分钟 + 最后一腿寻路"也够，且离保险丝有 2.5 分钟余量。
+        expect(EXPLORE_TIMEOUT_MIN).toBeLessThanOrEqual(6);
+        expect(DEFAULT_EXPLORE_BUDGET_MS).toBeLessThan(EXPLORE_TIMEOUT_MIN * 60_000);
+        expect(EXPLORE_TIMEOUT_MIN * 60_000).toBeLessThan(FUSE_MS);
+        expect(HUNT_MAX_MS_LIMIT).toBeLessThan(HUNT_TIMEOUT_MIN * 60_000);
+        expect(HUNT_TIMEOUT_MIN * 60_000).toBeLessThan(FUSE_MS);
+        // 两次探索之间的余量：exploreFor 的命令超时不能贴着预算（最后一腿还要寻路时间）。
+        expect(EXPLORE_TIMEOUT_MIN * 60_000 - DEFAULT_EXPLORE_BUDGET_MS).toBeGreaterThanOrEqual(60_000);
+    });
+
+    it('huntFor 的 max_ms：schema 的 domain、clamp、默认值三者同源', () => {
+        const param = progressionActionList[1].params?.max_ms;
+        expect(param?.domain).toEqual([10_000, HUNT_MAX_MS_LIMIT]);
+        expect(param?.default).toBe(HUNT_MAX_MS_LIMIT); // 默认 5 分钟 = 上限，仍低于超时
+        // 模型给再大的值也只能拿到上限（写了 15 分钟也不会把通道占满）
+        expect(parseHuntArgs('blaze', 7, 48, 15 * 60_000).maxMs).toBe(HUNT_MAX_MS_LIMIT);
+        expect(parseHuntArgs('blaze', 7, 48, 10_000).maxMs).toBe(10_000);
     });
 });

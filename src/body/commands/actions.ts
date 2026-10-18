@@ -253,14 +253,25 @@ export const actionsList: AgentCommand[] = [
             const landing = { x: drop.x + dx * 1.5, z: drop.z + dz * 1.5 };
             const ok = await skills.discard(bot, item_name, num);
             if (ok) {
-                markDiscarded(item_name);
+                // **免疫记三样**：名字、落点、以及随后 itemDrop 事件认领到的实体 id。
+                // 只记名字挡不住真机那条路径（overnight_b 13:24：扔 256 下界岩，
+                // 2.7 秒后被自己捡回，free 仍为 0）——实体名可能还没同步，
+                // 反射更可能是从落点上**踩过去**（原版拾取，代码拦不住）。
+                markDiscarded(item_name, { x: landing.x, y: drop.y, z: landing.z });
+                // **丢完立刻后退 2 格**：站在落点旁边时，原版拾取会在 pickupDelay
+                // 结束后把东西吸回背包。后退不改变落点，只拉开距离。
+                const steppedBack = await skills.moveBy(bot, 'back', 2, 'walk');
                 skills.log(
                     bot,
                     '原地扔掉 ' + num + ' 个 ' + item_name + '：起点 @(' +
                         drop.x.toFixed(2) + ',' + drop.y.toFixed(2) + ',' + drop.z.toFixed(2) +
                         ')，面朝方向前方约 1.5 格落点 @(' +
-                        landing.x.toFixed(2) + ',' + drop.y.toFixed(2) + ',' + landing.z.toFixed(2) +
-                        ')；本次没有移动，3 分钟内自动拾取不会捡它。',
+                        landing.x.toFixed(2) + ',' + drop.y.toFixed(2) + ',' + landing.z.toFixed(2) + ')' +
+                        (steppedBack
+                            ? '；丢完后退了 2 格（落点不变，免得自己踩到）'
+                            : '；想后退但没走动（空间不够，落点就在脚边）') +
+                        '。3 分钟内自动拾取不会主动捡它（名字/落点/实体 id 三路屏蔽）；' +
+                        '但如果你自己走过去踩到，原版拾取仍会捡起——要交接就给队友让开位置。',
                 );
             }
         })

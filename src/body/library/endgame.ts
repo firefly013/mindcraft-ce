@@ -1263,21 +1263,57 @@ export function planRecovery(input: RecoveryInput): RecoveryPlan {
 }
 
 // ============================ 十、阶段状态机（接主循环用） ============================
+/**
+ * 全流程阶段：**从"什么都没有"到"龙死"**。
+ *
+ * 为什么中段（下界 → 烈焰棒 → 珍珠 → 眼）必须在这里：决策层是模型唯一能看到的
+ * "下一步"来源。原来只有 prepare → travel_stronghold，**从"没有烈焰棒"到"有烈焰棒"
+ * 之间没有任何阶段** —— 模型在下界刷烈焰人这件事，状态机表达不出来，只能靠模型自己
+ * 记得（feedback-analyst 的 triage 第 4 条）。现在这一段由真实能力驱动：
+ * `exploreFor(block="nether_bricks")` 找要塞、`huntFor(entity="blaze"|"enderman")` 刷掉落。
+ */
 export type EndgamePhase =
+    | 'recover'
     | 'prepare'
+    | 'nether_fortress'
+    | 'nether_blaze'
+    | 'overworld_pearls'
+    | 'craft_eyes'
     | 'travel_stronghold'
     | 'activate_portal'
     | 'enter_end'
     | 'clear_crystals'
     | 'fight_dragon'
-    | 'recover'
     | 'done';
+
+/** 填满末地传送门要 **12 颗眼**（12 格框架全有眼才激活）。 */
+export const END_PORTAL_EYES = 12;
+/** 12 颗眼 = 12 份烈焰粉 = 6 根烈焰棒；要 7 根是容错（掷眼会碎、多出的粉能炼药）。 */
+export const BLAZE_RODS_FOR_EYES = 7;
+/** 一颗眼一颗珍珠 → 12 颗眼要 12 颗末影珍珠。 */
+export const PEARLS_FOR_EYES = 12;
 
 export interface EndgameState {
     /** 死亡后还有东西在地上 → 强制进入 recover。 */
     itemOnGround?: boolean;
-    /** 装备清单过没过。 */
+    /** 装备清单过没过（`assessEndGear().ok`）。 */
     gearReady?: boolean;
+    /** 在下界里（`bot.game.dimension`）。读不到就别填。 */
+    inNether?: boolean;
+    /** 下界要塞找到没有。读不到就别填（默认按"先 exploreFor 找"处理）。 */
+    fortressFound?: boolean;
+    /** 烈焰棒数量。**读不到就别填**（这一环就不介入）。 */
+    blazeRods?: number;
+    /** 烈焰粉数量（和烈焰棒一起折算）。 */
+    blazePowder?: number;
+    /** 末影珍珠数量。 */
+    enderPearls?: number;
+    /** 末影之眼数量。 */
+    eyesOfEnder?: number;
+    /** 箭的数量（末地里没箭就拆不了水晶）。 */
+    arrows?: number;
+    /** 床的数量（没床就只能用箭/砍头打龙）。 */
+    beds?: number;
     /** 要塞找到了没有。 */
     strongholdFound?: boolean;
     /** 12 颗眼填满了没有。 */
@@ -1299,7 +1335,7 @@ export interface EndgameState {
 
 export interface EndgameStepAdvice {
     phase: EndgamePhase;
-    /** 这一步该干嘛（给模型看的一句话）。 */
+    /** 这一步该干嘛（给模型看的一句话，**要点名缺什么**）。 */
     action: string;
     /** 建议调用的工具名（不带 `!`）。 */
     tool?: string;
@@ -1308,9 +1344,95 @@ export interface EndgameStepAdvice {
     reason: string;
 }
 
+/** 把"烈焰棒 + 烈焰粉"折算成能用的粉量（1 根棒 = 2 份粉）。坏数据当 0。 */
+export function blazePowderAvailable(rods?: number | null, powder?: number | null): number {
+    const r = typeof rods === 'number' && Number.isFinite(rods) ? Math.max(0, rods) : 0;
+    const p = typeof powder === 'number' && Number.isFinite(powder) ? Math.max(0, powder) : 0;
+    return r * 2 + p;
+}
+
+/**
+ * 中段材料链：**只判断调用方明确给了数量的那一环**，读不到的环直接跳过（不猜）。
+ * 顺序就是真实的依赖顺序：粉（下界）→ 珍珠 → 眼。
+ */
+function eyeMaterialAdvice(state: EndgameState): EndgameStepAdvice | null {
+    const powderKnown = state.blazeRods != null || state.blazePowder != null;
+    const pearlsKnown = state.enderPearls != null;
+    const eyesKnown = state.eyesOfEnder != null;
+    if (!powderKnown && !pearlsKnown && !eyesKnown) return null;
+
+    const powder = blazePowderAvailable(state.blazeRods, state.blazePowder);
+    if (powderKnown && powder < END_PORTAL_EYES) {
+        if (state.inNether !== true) {
+            return {
+                phase: 'nether_fortress',
+                action:
+                    `还没有烈焰粉（${powder}/${END_PORTAL_EYES}），而合末影之眼必须要它：先 enterNether 去下界，` +
+                    '到了之后 exploreFor(block="nether_bricks") 找要塞、huntFor(entity="blaze") 刷烈焰棒。',
+                tool: 'enterNether',
+                nextPhase: 'nether_fortress',
+                reason: '烈焰粉只有烈焰人掉；你现在不在下界，留在主世界刷不出眼。',
+            };
+        }
+        if (state.fortressFound !== true) {
+            return {
+                phase: 'nether_fortress',
+                action:
+                    `在下界但还没找到要塞（烈焰粉 ${powder}/${END_PORTAL_EYES}）：exploreFor(block="nether_bricks", max_steps=12, step=32) ` +
+                    '螺旋探索找要塞，找到 nether_bricks 就说明到了。',
+                tool: 'exploreFor',
+                nextPhase: 'nether_blaze',
+                reason: '烈焰人只在要塞里刷；找不到要塞，刷棒就无从谈起。',
+            };
+        }
+        const rods = typeof state.blazeRods === 'number' && Number.isFinite(state.blazeRods) ? Math.max(0, state.blazeRods) : 0;
+        // 按**缺口**算要几根：1 根棒 = 2 份粉，多要 1 根做容错（掷眼会碎、粉还能炼药）。
+        // 不要写死 7：已经有 11 份粉时再刷 7 根纯属浪费时间。
+        const want = Math.max(1, Math.ceil(Math.max(0, END_PORTAL_EYES - powder) / 2) + 1);
+        void rods;
+        return {
+            phase: 'nether_blaze',
+            action: `要塞找到了，去刷烈焰棒：huntFor(entity="blaze", want=${want})（现在能用的粉 ${powder}/${END_PORTAL_EYES}）。`,
+            tool: 'huntFor',
+            nextPhase: 'nether_blaze',
+            reason: `${END_PORTAL_EYES} 颗眼要 ${END_PORTAL_EYES} 份粉（至少 ${BLAZE_RODS_FOR_EYES - 1} 根棒），现在只有 ${powder} 份。`,
+        };
+    }
+
+    if (pearlsKnown && (state.enderPearls as number) < PEARLS_FOR_EYES) {
+        const have = Math.max(0, state.enderPearls as number);
+        return {
+            phase: 'overworld_pearls',
+            action: `刷末影珍珠：huntFor(entity="enderman", want=${PEARLS_FOR_EYES - have})（现在 ${have}/${PEARLS_FOR_EYES}）。`,
+            tool: 'huntFor',
+            nextPhase: 'overworld_pearls',
+            reason: `一颗眼一颗珍珠：${END_PORTAL_EYES} 颗眼还差 ${PEARLS_FOR_EYES - have} 颗珍珠。`,
+        };
+    }
+
+    if (eyesKnown && (state.eyesOfEnder as number) < END_PORTAL_EYES && state.strongholdFound !== true) {
+        const have = Math.max(0, state.eyesOfEnder as number);
+        return {
+            phase: 'craft_eyes',
+            action:
+                `合成末影之眼：craft(ender_eye) 再做 ${END_PORTAL_EYES - have} 颗（现在 ${have}/${END_PORTAL_EYES}）。` +
+                '另外多留 2~3 颗用来掷眼（每次 20% 概率碎）——只留 12 颗的话，找完要塞就不够填门了。',
+            tool: 'craft',
+            nextPhase: 'craft_eyes',
+            reason: `传送门要 ${END_PORTAL_EYES} 颗眼全填上才激活，现在只有 ${have} 颗。`,
+        };
+    }
+    return null;
+}
+
 /**
  * 末地通关的**单步决策**：吃当前状态，吐"下一步干什么"。
  * 故意做成纯函数——主循环每轮调一次就行，不用把流程写死在一个几百行的 async 里。
+ *
+ * 排布上有一条硬规矩：**末地里的状态不能被主世界的前置卡住**。
+ * 原实现把 `strongholdFound`/`portalActivated` 排在 `inEnd` 前面，而 `endFightStatus`
+ * 在末地里根本读不到这两个标记（它们是主世界概念）—— 于是模型站在末地中央，报告却让它
+ * "掷末影之眼找要塞"。现在 `inEnd === true` 时整段主世界流程直接跳过。
  */
 export function nextEndgameStep(state: EndgameState): EndgameStepAdvice {
     if (state.itemOnGround === true) {
@@ -1323,35 +1445,64 @@ export function nextEndgameStep(state: EndgameState): EndgameStepAdvice {
         };
     }
     if (state.gearReady !== true) {
-        return {
-            phase: 'prepare',
-            action: '补齐进末地清单：床、方块、水桶、缓降药水、牛奶、抗性/再生药水、金苹果、弓+箭、末影珍珠、镐。',
-            tool: 'endFightStatus',
-            nextPhase: 'prepare',
-            reason: '装备有硬缺口，进去就是送。',
-        };
+        return state.inEnd === true
+            ? {
+                  phase: 'prepare',
+                  action:
+                      '你**已经在末地**，但清单有硬缺口：就地解决——挖末地石/黑曜石当方块和掩体，别贴脸；床/弓/药水这些只能等这波打完或死了回主世界再补。',
+                  tool: 'endFightStatus',
+                  nextPhase: 'prepare',
+                  reason: '装备有硬缺口，在末地硬打就是送（先看报告里缺哪一项）。',
+              }
+            : {
+                  phase: 'prepare',
+                  action:
+                      '补齐进末地清单：床（炸龙）、方块（搭路/掩体）、弓+箭（拆水晶）、水桶、缓降药水、牛奶、抗性/再生药水、金苹果、末影珍珠、镐。',
+                  tool: 'endFightStatus',
+                  nextPhase: 'prepare',
+                  reason: '装备有硬缺口，进去就是送（先看报告里缺哪一项）。',
+              };
     }
-    if (state.strongholdFound !== true) {
-        return {
-            phase: 'travel_stronghold',
-            // 工具名必须是**注册表里真的存在**的：原来这里写 `locateStronghold`，
-            // 而 registry 里没有这条命令，模型照着调只会拿到"未知工具"。
-            action: '掷末影之眼找要塞：先 equip 把 ender_eye 拿到手上，再 throwHeld（眼飞 12 格指方向，20% 概率碎）；跟着走，直到眼睛开始往下钻 → 往下挖到传送门房。',
-            tool: 'throwHeld',
-            nextPhase: 'activate_portal',
-            reason: '还没定位要塞。末地传送门在要塞里。',
-        };
-    }
-    if (state.portalActivated !== true) {
-        return {
-            phase: 'activate_portal',
-            action: '站在要塞传送门房里调 enterEnd：它会把 12 个空框架都用末影之眼填满（天然自带约 10%），填满即激活，然后直接走进去。',
-            tool: 'enterEnd',
-            nextPhase: 'enter_end',
-            reason: '传送门没激活就进不去末地（原来这里写的是不存在的 activateEndPortal）。',
-        };
-    }
+
+    // —— 主世界/下界段：材料链 → 找要塞 → 激活 → 进末地 ——
     if (state.inEnd !== true) {
+        const materials = eyeMaterialAdvice(state);
+        if (materials != null) return materials;
+
+        if (state.strongholdFound !== true) {
+            const eyes = state.eyesOfEnder;
+            const eyeText =
+                eyes == null ? '' : eyes <= 0 ? '（**注意：眼已经用光了**，先回去合成/刷珍珠）' : `（还有 ${eyes} 颗眼）`;
+            return {
+                phase: 'travel_stronghold',
+                // 工具名必须是**注册表里真的存在**的：原来这里写 `locateStronghold`，
+                // 而 registry 里没有这条命令，模型照着调只会拿到"未知工具"。
+                action: `掷末影之眼找要塞${eyeText}：先 equip 把 ender_eye 拿到手上，再 throwHeld（它会量出眼睛的飞行方向）；跟着走，直到眼睛开始往下钻 → 往下挖到传送门房。`,
+                tool: 'throwHeld',
+                nextPhase: 'activate_portal',
+                reason: '还没定位要塞。末地传送门在要塞里。',
+            };
+        }
+        if (state.portalActivated !== true) {
+            const eyes = state.eyesOfEnder;
+            if (eyes != null && eyes <= 0) {
+                return {
+                    phase: 'activate_portal',
+                    action:
+                        '要塞找到了，但**一颗末影之眼都没有**：先补眼——珍珠不够就 huntFor(entity="enderman")，粉不够就回下界 huntFor(entity="blaze")，材料齐了 craft(ender_eye) 合成。',
+                    tool: 'huntFor',
+                    nextPhase: 'activate_portal',
+                    reason: '12 个框架全有眼才激活；没眼就只能先去补。',
+                };
+            }
+            return {
+                phase: 'activate_portal',
+                action: `站在要塞传送门房里调 enterEnd：它会把空框架都用末影之眼填满（12 格全有眼才激活，天然自带约 10%），填满后直接走进去${eyes == null ? '' : `（现在 ${eyes} 颗眼）`}。`,
+                tool: 'enterEnd',
+                nextPhase: 'enter_end',
+                reason: '传送门没激活就进不去末地（原来这里写的是不存在的 activateEndPortal）。',
+            };
+        }
         return {
             phase: 'enter_end',
             action: '走进末地传送门。进去会落在 (100,49,0) 的黑曜石平台上，面朝西——平台和主岛之间的空隙需要搭桥或扔珍珠。',
@@ -1360,13 +1511,18 @@ export function nextEndgameStep(state: EndgameState): EndgameStepAdvice {
             reason: '传送门已激活，该过去了。',
         };
     }
+
+    // —— 末地段：水晶 → 龙 → 收尾 ——
     if (state.crystalsAlive == null || state.crystalsAlive > 0) {
         const unknown = state.crystalsAlive == null;
+        const noArrows = state.arrows != null && state.arrows <= 0;
         return {
             phase: 'clear_crystals',
             action: unknown
                 ? '水晶数量读不到（实体没加载？）：先调 endFightStatus 看治疗光束/实体，确认拆干净之前不要贴脸打龙——只要还剩一颗，龙就一直回血。'
-                : `先拆水晶，还剩 ${state.crystalsAlive} 颗：站在离水晶 ≥12 格外用弓射；笼中那两颗最后处理（TNT 或上柱子拆栏杆）。全拆完再贴脸打龙。`,
+                : noArrows
+                    ? `还剩 ${state.crystalsAlive} 颗水晶，但**箭是 0**：弓箭打不了。把射出去的箭捡回来，或者只剩笼中水晶时用 TNT 掏（allowDangerousOps(ops="ignite", calls=1)）；没有箭就别贴脸。`
+                    : `先拆水晶，还剩 ${state.crystalsAlive} 颗：站在离水晶 ≥12 格外用弓射；笼中那两颗最后处理（TNT 或上柱子拆栏杆）。全拆完再贴脸打龙。`,
             tool: 'clearEndCrystals',
             nextPhase: 'fight_dragon',
             reason: '只要还有一颗水晶，龙就会一直回血，打了也白打。',
@@ -1382,6 +1538,18 @@ export function nextEndgameStep(state: EndgameState): EndgameStepAdvice {
                 state.dragonHealth === 0
                     ? 'Boss 已经打完（血量 0）。'
                     : '龙实体和 boss bar 都不在了，按"打完"处理；**如果还能看见它在飞，先调 endFightStatus 复核**再走。',
+        };
+    }
+    if (state.beds != null && state.beds <= 0) {
+        // 没床 = 主输出没了。在末地出不去（出口要龙死才开），所以只能改打法。
+        return {
+            phase: 'fight_dragon',
+            action: state.inEnd === true
+                ? '**床已经用光了**：末地出不去，改打法——用 attack 在它低头时砍头，或者飞着的时候在飞行轨迹前面放箭；别贴脸站着。'
+                : '**一张床都没有**：先 craft(white_bed)（3 羊毛 + 3 木板）或去搜刮床，凑 4 张再来炸龙；没床就只能弓箭慢慢磨。',
+            tool: state.inEnd === true ? 'attack' : 'craft',
+            nextPhase: 'done',
+            reason: '床炸是主输出（一张最多打掉 1/4 血）；没有床，输出效率差一个数量级。',
         };
     }
     return {

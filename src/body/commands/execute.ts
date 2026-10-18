@@ -156,7 +156,11 @@ export function annotateSearchForBlock(
     // （Feedback #42：缩小范围再试，回执一模一样）。这里分四类收口：
     // 找到 / 找到但走不到 / 明确没有 / 拿不到结论（**附原因**）。
     if (body.includes('Could not find any') || body.includes('范围内确实没有')) {
-        return `searchForBlock：未找到 ${type}（搜索范围 ${range} 格，已搜完）。${moved}结论：范围内的确定没有 ${type}。`;
+        return (
+            `searchForBlock：未找到 ${type}（搜索范围 ${range} 格，已搜完；**只覆盖已加载区块，约等于视距**，` +
+            `范围外的区块没加载就看不到）。${moved}结论：已加载范围内没有 ${type}；` +
+            '要么换个位置/方向再搜，要么先走过去把区块加载出来。'
+        );
     }
     if (body.includes('could not reach it')) {
         return (

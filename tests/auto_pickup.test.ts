@@ -8,6 +8,8 @@ import {
   markDiscarded,
   clearDiscards,
   isDiscardedDrop,
+  isDiscardedDropById,
+  noteDiscardedEntity,
 } from '../src/body/auto_pickup.js';
 import {
   confirmedPickupGains,
@@ -153,6 +155,42 @@ describe('markDiscarded', () => {
     Date.now = (): number => realNow() + DISCARD_IGNORE_MS + 1_000;
     try {
       expect(isDiscardedDrop('Oak Log')).toBe(false);
+    } finally {
+      Date.now = realNow;
+    }
+  });
+
+  // ── 真机回归（overnight_b 2026-10-18 13:24：扔了 256 下界岩，2.7 秒后
+  //    被自己捡回，free 仍为 0）。免疫只按名字匹配是靠不住的：
+  //    实体名可能还没同步，反射也会从落点上走过去踩到。
+  it('落点免疫：实体名还没同步（displayName 缺失）也不能捡刚扔的东西', () => {
+    markDiscarded('netherrack', { x: 0, y: 64, z: 3 });
+    const bot = botWith([drop(7, 0, 64, 3)]);
+    expect(nearestDropWithin(bot, PICKUP_RADIUS)).toBeNull();
+  });
+
+  it('位置免疫不外溢：别处的掉落物照捡', () => {
+    markDiscarded('netherrack', { x: 0, y: 64, z: 3 });
+    const bot = botWith([drop(8, 5, 64, 0)]);
+    expect(nearestDropWithin(bot, PICKUP_RADIUS)?.id).toBe(8);
+  });
+
+  it('实体 id 免疫：itemDrop 认领过的实体，名字对不上也不捡', () => {
+    markDiscarded('netherrack', { x: 0, y: 64, z: 3 });
+    expect(noteDiscardedEntity(7)).toBe(true);
+    // 名字完全不同、位置也很远——只有 id 能证明它就是刚扔出去的那件。
+    const bot = botWith([drop(7, 20, 64, 20, { displayName: 'cobblestone' })]);
+    expect(nearestDropWithin(bot, PICKUP_RADIUS)).toBeNull();
+    expect(isDiscardedDropById(7)).toBe(true);
+  });
+
+  it('落点免疫会过期：窗口过后同一个落点不再是免疫区', () => {
+    const realNow = Date.now;
+    try {
+      markDiscarded('netherrack', { x: 0, y: 64, z: 3 });
+      Date.now = (): number => realNow() + DISCARD_IGNORE_MS + 1_000;
+      expect(nearestDropWithin(botWith([drop(7, 0, 64, 3)]), PICKUP_RADIUS)?.id).toBe(7);
+      expect(isDiscardedDropById(7)).toBe(false);
     } finally {
       Date.now = realNow;
     }

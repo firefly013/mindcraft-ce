@@ -65,7 +65,7 @@ import {
     snapshotFromBot,
 } from './edges.js';
 import { renderEventText } from '../shared/event_stream.js';
-import { isDiscardedDrop, nearestDropWithin, PICKUP_RADIUS, PICKUP_TIMEOUT_MS } from './auto_pickup.js';
+import { isDiscardedDrop, isDiscardedDropById, nearestDropWithin, noteDiscardedEntity, PICKUP_RADIUS, PICKUP_TIMEOUT_MS } from './auto_pickup.js';
 import {
     confirmedPickupGains,
     formatInventoryGains,
@@ -508,6 +508,8 @@ export class MineflayerBody {
     private pickupCancel: (() => void) | null = null;
     /** 当前 pickup 目标显示名；行走中复查 discard 免疫用。 */
     private pickupTargetName: string | null = null;
+    /** 当前 pickup 目标实体 id：名字可能读不到/被改写，id 是身份。 */
+    private pickupTargetId: number | null = null;
     /** 模型动作请求已经在路上时，禁止新的自动拾取抢身体。 */
     private modelActionRequested = false;
     /** 在途模型协议 action 数：查询/动作可能重叠，用计数而不是布尔。 */
@@ -1239,6 +1241,15 @@ export class MineflayerBody {
                 console.error('collect event failed:', err instanceof Error ? err.message : String(err));
             }
         });
+        // 掉落物实体出现：把 id 认领到最近一次 discard 上。
+        // 名字匹配靠不住（实体名可能还没同步），id 才是"就是刚扔的那件"的证明。
+        this.bot.on('itemDrop', (entity: any) => {
+            try {
+                noteDiscardedEntity(entity?.id);
+            } catch {
+                // 认领失败不影响别的路径（名字/落点仍在挡）。
+            }
+        });
         // 开箱：容器界面打开即事件（关箱不报，没信息量）。
         this.bot.on('windowOpen', (window: any) => {
             try {
@@ -1687,7 +1698,11 @@ export class MineflayerBody {
             };
             const timer: ReturnType<typeof setInterval> = setInterval(() => {
                 const timedOut = Date.now() - started >= timeoutMs;
-                const discarded = this.pickupTargetName != null && isDiscardedDrop(this.pickupTargetName);
+                // 名字 / 实体 id 两条都查：名字可能读不到或中途被改写，
+                // id 只在这件实体身上成立（markDiscarded 时由 itemDrop 认领）。
+                const discarded =
+                    (this.pickupTargetName != null && isDiscardedDrop(this.pickupTargetName)) ||
+                    isDiscardedDropById(this.pickupTargetId);
                 if (this.pickupAbortRequested || this.bot?.interrupt_code || timedOut || discarded) {
                     try {
                         this.bot.pathfinder?.stop?.();
@@ -1723,8 +1738,9 @@ export class MineflayerBody {
         const now = Date.now();
         if (this.pickupAbortRequested) return;
         if (now < this.pickupBackoffUntil) return;
-        // 刚 discard 的东西即使实体已经出现，也不许再被自己捡回。
-        if (isDiscardedDrop(target.name)) return;
+        // 刚 discard 的东西即使实体已经出现，也不许再被自己捡回：
+        // 名字 / 落点 / 实体 id 三条路一起判（见 auto_pickup.ts 的 matchedRecord）。
+        if (isDiscardedDrop(target.name, target, target.id)) return;
         const go = shouldAttemptPickup({
             busy: this.actions.executing || this.hasModelActionInFlight(),
             pickingUp: this.pickingUp,
@@ -1734,6 +1750,7 @@ export class MineflayerBody {
         if (!go) return;
         this.lastPickupAt = now;
         this.pickupTargetName = target.name;
+        this.pickupTargetId = typeof target.id === 'number' ? target.id : null;
         this.pickingUp = true;
         void (async (): Promise<void> => {
             const started = Date.now();
@@ -1746,6 +1763,7 @@ export class MineflayerBody {
                 this.pickingUp = false;
                 this.pickupCancel = null;
                 this.pickupTargetName = null;
+                this.pickupTargetId = null;
                 // 模型动作的抢占标志由拾取任务收尾时清掉，确保它至少被本次
                 // walkToPickup/gotoPickupInterruptibly 看到一次。
                 this.pickupAbortRequested = false;

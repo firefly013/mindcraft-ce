@@ -23,6 +23,7 @@ import {
   placeBlock,
   planStairStep,
   runPathfindingInterruptibly,
+  stairUp,
   toolBreakNotice,
   toolDurabilityGuard,
   warnLowDurabilityOnce,
@@ -416,6 +417,85 @@ describe('F-10 垂直上行：2 格高通道里为什么跳不上去', () => {
 
     const open = describeStairJumpFailure(accessor({}), { x: 0, y: 0, z: 0 }, 1, 0);
     expect(open).toContain('前方被挡或落差太大');
+  });
+});
+
+describe('F-10 第二半：前方放不下就改用 pillarUp 直着垫', () => {
+  /** 窄通道/悬空：前方那一格六个面都是空气（nothing to place on），只有脚下是实心。 */
+  function fallbackBot(opts: { noSupport?: boolean } = {}): any {
+    const placedAt = new Set<string>();
+    const slots: any[] = [];
+    slots[40] = { name: 'netherrack', count: 5, slot: 40 };
+    const items = [{ name: 'netherrack', count: 5 }];
+    const mkPos = (x: number, y: number, z: number): any => {
+      const p: any = { x, y, z };
+      p.plus = (v: any): any => mkPos(p.x + v.x, p.y + v.y, p.z + v.z);
+      p.distanceTo = (o: any): number => Math.hypot(p.x - o.x, p.y - o.y, p.z - o.z);
+      p.clone = (): any => mkPos(p.x, p.y, p.z);
+      p.offset = (dx: number, dy: number, dz: number): any => mkPos(p.x + dx, p.y + dy, p.z + dz);
+      return p;
+    };
+    const bot: any = {
+      output: '',
+      interrupt_code: false,
+      game: { gameMode: 'survival' },
+      entity: { position: mkPos(0.5, 64, 0.5), yaw: 0, onGround: true },
+      inventory: {
+        items: () => items,
+        slots,
+        findInventoryItem: (n: string) => slots.find((s: any) => s?.name === n) ?? null,
+      },
+      heldItem: null,
+      tool: { equipForBlock: async (): Promise<void> => {} },
+      registry: { blocksByName: { netherrack: { boundingBox: 'block' }, bedrock: { boundingBox: 'block' } } },
+      blockAt: (p: any) => {
+        const x = Math.floor(p.x);
+        const y = Math.floor(p.y);
+        const z = Math.floor(p.z);
+        const key = `${x},${y},${z}`;
+        const position = mkPos(x, y, z);
+        if (placedAt.has(key)) return { name: 'netherrack', position };
+        // 脚下那一格是唯一实心：pillarUp 依附它，stairUp 的前方那一格四周全空。
+        // noSupport：连脚下都没有——两条路都放不下，用来测"两次都失败"。
+        if (opts.noSupport !== true && key === '0,63,0') return { name: 'netherrack', position };
+        return { name: 'air', position };
+      },
+      setControlState: (control: string, on: boolean) => {
+        if (control === 'jump' && on) {
+          bot.entity.position.y = 65.3;   // 起跳后 >1.1 格，避开"太近先走开"分支
+          bot.entity.onGround = false;
+        }
+        if (control === 'jump' && !on) bot.entity.onGround = true;
+      },
+      equip: async (item: any): Promise<void> => {
+        bot.heldItem = item;
+      },
+      placeBlock: async (): Promise<void> => {
+        placedAt.add('0,64,0');
+      },
+      pathfinder: { setMovements: (): void => {}, stop: (): void => {} },
+      on: (): void => {},
+      removeListener: (): void => {},
+    };
+    return bot;
+  }
+
+  it('前方垫不上（nothing to place on）：自动 pillarUp 垫高 1 格并计入进度', async () => {
+    const bot = fallbackBot();
+    await expect(stairUp(bot, 1)).resolves.toBe(true);
+    expect(bot.output).toContain('nothing to place on');
+    expect(bot.output).toContain('nothing to place on');
+    expect(bot.output).toContain('改用 pillarUp');
+    expect(bot.output).toContain('pillarUp 完成：上升 1 格');
+    expect(bot.output).toContain('stairUp 完成：上升 1 格');
+  });
+
+  it('pillarUp 也不成（连脚下都没有依附面）：停下并说清两条路都失败', async () => {
+    const bot = fallbackBot({ noSupport: true });
+    await expect(stairUp(bot, 1)).resolves.toBe(false);
+    expect(bot.output).toContain('改用 pillarUp');
+    expect(bot.output).toContain('pillarUp 第 1 格失败');
+    expect(bot.output).toContain('stairUp 停止：垫脚失败，pillarUp 也没能上升');
   });
 });
 

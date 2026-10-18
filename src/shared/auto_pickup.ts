@@ -31,6 +31,22 @@ export const PICKUP_TIMEOUT_MS = 12_000;
 /** 刚被 `discard` 扔掉的东西，多久之内不要去捡。 */
 export const DISCARD_IGNORE_MS = 180_000;
 /**
+ * discard 免疫的**空间半径**（格）。
+ *
+ * 只按名字匹配挡不住真机那条路径：overnight_b 13:24 扔了 256 下界岩，2.7 秒后
+ * 又被自己捡回（`auto_pickup: true`，free 仍为 0）。原因是反射走过去时**踩过**
+ * 落点——掉落物实体名可能还没同步，也可能根本不是反射"选中"的那一件，而是
+ * 顺路踩到的。落点附近的这些东西，同样不能捡。
+ */
+export const DISCARD_IGNORE_RADIUS = 2.5;
+/**
+ * discard 之后多久内出现的掉落物实体算"刚扔的那件"（毫秒）。
+ *
+ * 用来把 `itemDrop` 事件里的实体 id 认领到最近一次 discard 上：
+ * id 是身份，不怕实体名缺失或被改写。
+ */
+export const DISCARD_CLAIM_WINDOW_MS = 2_000;
+/**
  * 拾取事件发生后，等多久再重读 player inventory 做核验。
  *
  * 真机 Feedback #62：playerCollect 先到、背包后到；而旧实现拿一份可能很旧的

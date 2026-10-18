@@ -318,10 +318,10 @@ export const TOOL_TEXT: Record<string, { description: string; params: Record<str
   // 中段推进（`commands/progression.ts`）。更长的模型侧文案住在那个文件里；
   // 这里按 check:prompts 的要求留一份参数说明（参数名必须逐字对齐 schema）。
   exploreFor: {
-    description: '系统性探索：方形螺旋一腿一腿走（默认每腿 32 格），每腿落地后重扫目标方块，找到就停并报坐标。回执写明扫描半径只覆盖已加载区块、实际走了多少格，以及 found <方块> at (x,y,z) 或 not found after N steps。找下界要塞（nether_bricks）用它。',
+    description: '系统性探索：方形螺旋一腿一腿走（默认每腿 32 格），每腿落地后重扫目标方块，找到就停并报坐标。回执写明扫描半径只覆盖已加载区块、实际走了多少格，以及 found <方块> at (x,y,z) 或 not found after N steps。找下界要塞（nether_bricks）用它。**它自己在约 4.5 分钟收手**并照常给完整结论（走了几腿 / 覆盖多大 / 从哪到哪 / 下一步调什么），所以不会出现"跑了一半没结论"。',
     params: {
       block: '要找的方块 id（英文），例如 nether_bricks（下界要塞）/ obsidian / end_portal_frame。也认中文俗称。',
-      max_steps: '最多走几腿（默认 12，1~64）。12 腿约覆盖出发点外 192 格。',
+      max_steps: '最多走几腿（默认 12，1~64）。12 腿约覆盖出发点外 192 格；预算不够会提前收手并告诉你还剩几腿。',
       step: '每腿走多少格（默认 32，4~128）。地形破碎调小，开阔地调大。',
     },
   },
@@ -331,7 +331,7 @@ export const TOOL_TEXT: Record<string, { description: string; params: Record<str
       entity: '要刷的实体 id（英文），例如 blaze（烈焰人）/ enderman（末影人）/ cow。也认中文俗称。',
       want: '要几个掉落物（默认 4，1~64）。烈焰棒推荐 7，末影珍珠推荐 12。',
       radius: '搜索半径（默认 48，8~128）。',
-      max_ms: '时间预算毫秒（默认 300000 = 5 分钟，10000~420000）。',
+      max_ms: '时间预算毫秒（默认 300000 = 5 分钟，10000~300000）。到点自己收手并给完整回执。',
     },
   },
 };

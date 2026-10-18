@@ -78,6 +78,15 @@ export const STALL_WATCHDOG_NUDGE =
   + '2) 用 UpdatePlan 把计划重写成"下一步只有一个动作"（如果计划还在，就勾掉已完成项）；'
   + '3) 立刻执行那个动作。不要只回复文字。';
 
+/**
+ * 汇报通道的工具名。
+ *
+ * `Say` **不能**算作"干过活"：它只把字发出去，不改变世界。把它算进去，
+ * 模型靠"正文 → Say → 正文 → Say"就能让护栏的上限永远够不到（见 `afterTool`）。
+ * 这里写成常量而不是散落的字面量，是为了让"哪些工具不算干活"只有一处定义。
+ */
+export const SAY_TOOL_NAME = 'Say';
+
 export interface StallGuardOptions {
   /**
    * 连续按回几次后放手。**默认 3**。
@@ -154,6 +163,17 @@ export function createStallGuard(options: StallGuardOptions = {}): StallGuard {
 
   const noteActivity = (): void => {
     lastActivityAt = now();
+    resyncWatchdog();
+  };
+
+  /**
+   * 真的干了活：把心跳退避**复位**。
+   *
+   * 之前只有 `noteActivity` 会复位 `nextIdleMs`，而生产路径根本没人调用它
+   * （hook 直接改 `lastActivityAt`），于是退避一旦涨到上限就**永远停在 30 分钟**：
+   * 一个健康跑了三小时的 bot 后来真卡住时，也要等满 30 分钟才有人管它。
+   */
+  const resyncWatchdog = (): void => {
     watchdogAttempt = 0;
     nextIdleMs = idleMs;
   };
@@ -161,9 +181,10 @@ export function createStallGuard(options: StallGuardOptions = {}): StallGuard {
   const hooks: HookRegistration[] = [
     hook(GenerationTask, {
       // 模型真答了就是活动（哪怕它只回了正文）：这一条让心跳不会在模型
-      // 正在思考的时候插嘴。
+      // 正在思考的时候插嘴。**也复位退避**——"答过"就说明链路是活的。
       afterResponse: () => {
         lastActivityAt = now();
+        resyncWatchdog();
         return undefined;
       },
       // 最终回答：把它按回去继续干活，直到连续多次都没有工具调用。
@@ -173,6 +194,7 @@ export function createStallGuard(options: StallGuardOptions = {}): StallGuard {
         const attempt = continuesWithoutTool;
         // 催办本身也算活动：心跳从这一刻重新计时。
         lastActivityAt = now();
+        resyncWatchdog();
         options.onContinue?.(attempt);
         return { continue: nudge(attempt) };
       },
@@ -184,11 +206,19 @@ export function createStallGuard(options: StallGuardOptions = {}): StallGuard {
         lastActivityAt = now();
         return undefined;
       },
-      // 工具跑过 = 真的在干活：清零"只会说话"的连击。
-      afterTool: () => {
+      // 工具跑过 = 真的在干活？**要看是哪个工具**。
+      //
+      // `Say` 是汇报通道，不改变世界状态。真机（+ 对抗验证 `VERIFY.md` 声明 1）：
+      // 一旦把 Say 也算作"干活"，模型只要"正文 → Say → 正文 → Say"就能每轮把
+      // 连击清零，`maxContinues` 永远够不到 —— 实测 maxContinues=1 时纯正文 2 次
+      // 请求就停，加了 Say 之后 25 次请求 / 12 次催办还在继续。而 `prompts.ts`
+      // 又刚要求"报进度走 Say"，等于把护栏从"3 次后放手"升级成无限循环。
+      // 所以：只有**改变世界**的工具才算干活。
+      afterTool: (call) => {
         runningTools = Math.max(0, runningTools - 1);
-        continuesWithoutTool = 0;
+        if (call?.name !== SAY_TOOL_NAME) continuesWithoutTool = 0;
         lastActivityAt = now();
+        resyncWatchdog();
         return undefined;
       },
     }),

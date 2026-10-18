@@ -3957,10 +3957,25 @@ export async function stairUp(bot: any, blocks: number = 1): Promise<boolean> {
             if (!placed) {
                 log(
                     bot,
-                    'stairUp 停止：往 (' + plan.target.x + ',' + plan.target.y + ',' + plan.target.z + ') 垫 ' + material +
-                        ' 失败（那一格周围没有可依附的实心方块，或已经被占）。先 mineBlock 挖开它，或改用 pillarUp 直着往上垫。',
+                    'stairUp：往 (' + plan.target.x + ',' + plan.target.y + ',' + plan.target.z + ') 垫 ' + material +
+                        ' 失败（那一格周围没有可依附的实心方块，或已经被占）。改用 pillarUp 在当前位置直着垫高 1 格。',
                 );
-                return false;
+                // **F-10 第二半：放不下就改成"原地往上垫"。** 真机里 stairUp 在窄通道/
+                // 悬空处就是这么卡的（`Cannot place oak_planks at …: nothing to place on`）：
+                // 前方没地方放，但脚下那一格通常能跳起来垫 —— 一样的垂直收益，
+                // 而且 pillarUp 自己会先把头顶挖开（2 格高通道）。
+                const climbed = await pillarUp(bot, 1);
+                if (!climbed) {
+                    log(bot, 'stairUp 停止：垫脚失败，pillarUp 也没能上升（已完成 ' + done + '/' + wanted + ' 格）。');
+                    return false;
+                }
+                done++;
+                log(
+                    bot,
+                    'stairUp 进度 ' + done + '/' + wanted + '：换 pillarUp 在脚下垫了 1 格，现在 y=' +
+                        Number(bot.entity.position.y).toFixed(1) + '。',
+                );
+                continue;
             }
         }
         const beforeY = Number(feet.y);

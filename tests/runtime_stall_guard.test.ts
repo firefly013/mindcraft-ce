@@ -127,6 +127,9 @@ async function runWith(
 const textOnly = (): ReturnType<typeof fauxAssistantMessage> => fauxAssistantMessage('我先汇报一下情况。');
 const toolTurn = (): ReturnType<typeof fauxAssistantMessage> =>
   fauxAssistantMessage([fauxToolCall('Work', {})], { stopReason: 'toolUse' });
+/** 只说话、不改变世界的那个工具（护栏必须把它排除在"干过活"之外）。 */
+const sayTurn = (): ReturnType<typeof fauxAssistantMessage> =>
+  fauxAssistantMessage([fauxToolCall('Say', { text: '我在找要塞' })], { stopReason: 'toolUse' });
 
 describe('反证：没有护栏时，一次纯正文回答就把 bot 停死', () => {
   it('关掉护栏 → 模型只被调用 1 次，之后没有任何请求', async () => {
@@ -155,8 +158,7 @@ describe('onYield 护栏：把"只说话"的回合按回去继续', () => {
     expect(r.requestUsers[2]?.some((text) => text.includes(STALL_NUDGE_ESCALATED))).toBe(true);
   });
 
-  it('只要调过一次工具，连击就清零（干活的 bot 不会被上限掐停）', async () => {
-    const r = await runWith(
+  it('只要调过一次工具，连击就清零（干活的 bot 不会被上限掐停）', async () => {    const r = await runWith(
       [textOnly(), toolTurn(), textOnly(), toolTurn(), textOnly(), toolTurn(), textOnly(), toolTurn()],
       { maxContinues: 1 },
     );
@@ -168,6 +170,23 @@ describe('onYield 护栏：把"只说话"的回合按回去继续', () => {
     const allUsers = r.requestUsers.flat().join('\n');
     expect(allUsers).toContain(STALL_NUDGE);
     expect(allUsers).not.toContain(STALL_NUDGE_ESCALATED);
+  });
+
+  it('Say 不算"干过活"：反复"正文 → Say"不能击穿上限（对抗验证 VERIFY.md 声明 1）', async () => {
+    // 曾经的洞：afterTool 无条件把连击清零，而 Say 是普通工具 ⇒ 模型只要
+    // "正文 → Say → 正文 → Say" 就让 maxContinues 永远够不到——实测
+    // maxContinues=1 时纯正文 2 次请求就停，加了 Say 之后 25 次请求 / 12 次
+    // 催办还在继续。而 prompts.ts 又要求"报进度走 Say"，等于把 F-7 从
+    // "3 次后放手"升级成无限循环。
+    const r = await runWith(
+      [textOnly(), sayTurn(), textOnly(), sayTurn(), textOnly(), sayTurn()],
+      { maxContinues: 1 },
+    );
+    // maxContinues=1：第 1 次纯正文按回一次；Say 不清零 ⇒ 第 2 次 yield 就放手。
+    // 3 次请求 = 正文 → Say → 正文，之后不再续轮。
+    expect(r.callCount).toBe(3);
+    // 上限之内只会用第 1 档文案（连击没被 Say 清零，也就走不到升级档）。
+    expect(r.requestUsers.flat().join('\n')).not.toContain(STALL_NUDGE_ESCALATED);
   });
 });
 
@@ -269,6 +288,26 @@ describe('心跳看门狗：连请求都没有时主动唤醒', () => {
     h.advance(60_000);
     h.tick();
     expect(h.woken).toHaveLength(2);
+    h.guard.stop();
+  });
+
+  it('真的答过一轮之后退避复位（不会永远停在最大间隔）', () => {
+    // 曾经的洞：退避只在 `noteActivity()` 里复位，而生产路径没人调用它 ⇒
+    // 退避涨到上限后永远停在 30 分钟，健康跑了三小时的 bot 后来真卡住也要等满。
+    const h = harness();
+    h.advance(61_000);
+    h.tick();
+    h.advance(121_000);
+    h.tick();
+    h.advance(241_000);
+    h.tick();
+    expect(h.woken).toHaveLength(3); // 60s → 120s → 240s
+    const genHooks = handlersWith(h.guard, 'afterResponse');
+    genHooks['afterResponse']!({}, {}, {}); // 模型真的答了一轮
+    h.advance(61_000);
+    h.tick();
+    // 复位到基准 60s：不需要等 480s。
+    expect(h.woken).toHaveLength(4);
     h.guard.stop();
   });
 });

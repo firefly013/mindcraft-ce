@@ -30,6 +30,16 @@ export const DEFAULT_EXPLORE_STEP = 32;
 /** 默认最多走几腿（方形螺旋 12 腿 ≈ 覆盖到出发点外 6×32=192 格）。 */
 export const DEFAULT_EXPLORE_MAX_STEPS = 12;
 
+/**
+ * `exploreFor` 的**内部时间预算**（毫秒）：到点自己收手，照常出 `exploreReceipt`。
+ *
+ * 为什么必须有：真机 2026-10-18 13:13 的 `exploreFor#3` 跑长后被保险丝强退，模型
+ * 只拿到一句"已强制释放动作通道，它可能仍在跑"——没有腿数、没有覆盖范围、没有
+ * 坐标、没有下一步，于是它开始反复拍快照空转。**主动收手**才能把结论交出去。
+ * 值必须明显小于命令超时（`EXPLORE_TIMEOUT_MIN`），留出最后一腿的寻路时间。
+ */
+export const DEFAULT_EXPLORE_BUDGET_MS = 4.5 * 60 * 1000;
+
 export const DEFAULT_HUNT_RADIUS = 48;
 export const DEFAULT_HUNT_WANT = 4;
 /** 刷怪的默认时间预算（5 分钟）。 */
@@ -386,6 +396,10 @@ export interface ExploreOutcome {
     interrupted: boolean;
     /** 非空 = 因危险中止。 */
     danger: string | null;
+    /** 时间预算到点，自己收手（不是被打断，也不是走完了步数）。 */
+    timedOut: boolean;
+    /** 本次使用的时间预算（毫秒），写进回执让人能核对。 */
+    budgetMs: number;
     /** 方块 id 不在当前版本的注册表里（入参写错了）。 */
     unknownBlock: boolean;
     /** 附加提醒（例如"方块名不认"）。 */
@@ -409,6 +423,11 @@ export function exploreNextAction(o: ExploreOutcome): string {
             `z=${Math.round(o.found.z)}, closeness=2)`
         );
     }
+    // 时间到/被打断：螺旋还没走完，接着把剩下的腿走完（新螺旋从当前位置起算）。
+    if (o.timedOut || o.interrupted) {
+        const remaining = Math.max(1, o.maxSteps - o.completedLegs);
+        return `exploreFor(block="${o.block}", max_steps=${remaining}, step=${o.step})`;
+    }
     // 一腿都没走成：多半是断层/落差，把 step 调小再来。
     if (o.attemptedLegs > 0 && o.completedLegs === 0) return `exploreFor(block="${o.block}", max_steps=8, step=16)`;
     return `exploreFor(block="${o.block}", max_steps=6, step=${o.step})`;
@@ -423,6 +442,12 @@ export function exploreReceipt(o: ExploreOutcome): string {
         );
     } else if (o.danger != null) {
         lines.push(`exploreFor ${o.block}：**中止——${o.danger}**，没找到（不是"附近没有"，是我不敢再走了）。`);
+    } else if (o.timedOut) {
+        // **时间到必须说清楚**：不是"范围里确定没有"，是"预算用完了、螺旋没走完"。
+        lines.push(
+            `exploreFor ${o.block}：**时间到（预算 ${Math.round(o.budgetMs / 60000 * 10) / 10} 分钟）主动收手——没走完螺旋**，` +
+                `走完 ${o.completedLegs}/${o.maxSteps} 腿；**not found after ${o.completedLegs} steps**（只代表这次扫过的范围里没有）。`,
+        );
     } else if (o.interrupted) {
         lines.push(`exploreFor ${o.block}：**被打断（Stop/保命）**，没走完，**not found after ${o.completedLegs} steps**。`);
     } else {
@@ -529,6 +554,8 @@ export interface ExploreDeps {
     sleep?: (ms: number) => Promise<void>;
     /** 取当前位置。 */
     position?: (bot: any) => FlatPosition;
+    /** 取当前时间；测试里换成假时钟（时间预算靠它判）。 */
+    now?: () => number;
 }
 
 const sleepMs = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
@@ -565,6 +592,11 @@ export interface ExploreOptions {
     scanRadius?: number;
     /** 防止调用方传进不合理的大数把身体通道占死。 */
     maxStepsLimit?: number;
+    /**
+     * 内部时间预算（毫秒）。到点**自己收手**并照常出完整回执。
+     * 默认 `DEFAULT_EXPLORE_BUDGET_MS`；必须小于命令超时。
+     */
+    budgetMs?: number;
 }
 
 /**
@@ -592,6 +624,9 @@ export async function exploreForSkill(
     const settle = deps.settle ?? defaultSettle;
     const sleep = deps.sleep ?? sleepMs;
     const position = deps.position ?? defaultPosition;
+    const now = deps.now ?? Date.now;
+    const budgetMs = options.budgetMs ?? DEFAULT_EXPLORE_BUDGET_MS;
+    const startedAt = now();
 
     const notes: string[] = [];
     const origin = position(bot);
@@ -610,6 +645,8 @@ export async function exploreForSkill(
         foundDistance: null,
         interrupted: false,
         danger: null,
+        timedOut: false,
+        budgetMs,
         unknownBlock: false,
         notes,
     };
@@ -635,6 +672,13 @@ export async function exploreForSkill(
     }
 
     for (const waypoint of spiralWaypoints(origin, step, maxSteps)) {
+        // **时间预算**：到点自己收手，走正常回执（腿数/覆盖/坐标/下一步）。
+        // 顺序放在最前：宁可少走一腿，也不要被命令超时/保险丝截胡——那条路
+        // 上模型只能拿到一句"已强制释放动作通道"，等于没结论。
+        if (now() - startedAt >= budgetMs) {
+            outcome.timedOut = true;
+            break;
+        }
         if (bot?.interrupt_code === true) {
             outcome.interrupted = true;
             break;
