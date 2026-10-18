@@ -83,7 +83,7 @@ import { getFullState } from './library/full_state.js';
 import { decodeCursor, EMPTY_CURSOR, encodeCursor, readInbox, type InboxCursor } from './inbox.js';
 import { safeguards } from './safety/safeguards.js';
 import { OFFENSIVE_TOOL_NAMES, combatRefusalVerdict } from './safety/reflex_override.js';
-import { DEPARTURE_TOOLS, departureVerdict, isWeaponName, targetDimensionOf } from './safety/departure_guard.js';
+import { DEPARTURE_TOOLS, annotateReceipt, departureVerdict, isWeaponName, targetDimensionOf } from './safety/departure_guard.js';
 import { permits } from './safety/permits.js';
 import { log, validateNameFormat, handleDisconnection } from './connection_handler.js';
 import { createLogger, type Logger } from '../shared/logger.js';
@@ -3762,9 +3762,26 @@ export class MineflayerBody {
                     }
                     // 边界情况放行，但**提醒必须带进回执**（模型下一轮就看得到）。
                     const departureWarning = departure.warning ?? null;
+                    if (departureWarning != null) {
+                        // **一行有界日志**（只在真的带提醒时记）：以后能回答"这些提醒
+                        // 是在帮忙，还是变成了墙纸"——统计放行次数 vs 后续死亡/进食。
+                        try {
+                            this.log.with('lifecycle').info({
+                                event: 'departure-note',
+                                tool: baseName,
+                                food: Number.isFinite(Number((this.bot as any)?.food))
+                                    ? Number((this.bot as any).food)
+                                    : null,
+                                blocks: null,
+                            });
+                        } catch {
+                            // 日志失败不影响动作。
+                        }
+                    }
                     try {
                         text = await executeToolCall(this, name, args);
-                        if (departureWarning != null) text = `${departureWarning}\n${text}`;
+                        // 提醒**追加在末尾**（见 annotateReceipt）：第一行留给"放行 + 实际发生了什么"。
+                        text = annotateReceipt(text, departureWarning);
                     } catch (err: unknown) {
                         // 抛错也算"这次自救没成"：**不许给冷却**，让保命随时能回来。
                         if (rescueAttempt) this.settleModelRescue(false, baseName, preempted);

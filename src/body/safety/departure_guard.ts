@@ -139,5 +139,24 @@ export function departureVerdict(facts: DepartureFacts): DepartureVerdict {
     if (health != null && health < MIN_HEALTH_SUGGESTED) {
         warnings.push(`血量 ${Math.round(health * 10) / 10} 低于建议的 ${MIN_HEALTH_SUGGESTED}，挨一下就危险。`);
     }
-    return warnings.length > 0 ? { allowed: true, warning: `⚠️ 准备提醒（放行）：${warnings.join(' ')}` } : { allowed: true };
+    return warnings.length > 0
+        ? {
+              allowed: true,
+              // **必须是"补充说明"，不能长得像拒绝**（Lead 2026-10-19 的担心：
+              // 模型把提醒当成拒绝，或者提醒把真正的动作挤没了）。
+              warning: `（**这只是提醒，不是拒绝**——已经放行，该做的事照做。）⚠️ ${warnings.join(' ')}`,
+          }
+        : { allowed: true };
+}
+
+/**
+ * 把提醒**追加在回执末尾**，而不是顶在开头。
+ *
+ * 理由：回执第一行是模型最先读、最容易当结论的一行；把"放行 + 实际发生了什么"
+ * 留在前面，提醒放后面并标注"只是提醒，不是拒绝"，既保留提示，也不会让模型
+ * 以为这次动作被拦了。
+ */
+export function annotateReceipt(text: string, warning?: string | null): string {
+    if (warning == null || warning === '') return text;
+    return `${text}\n    ${warning}`;
 }

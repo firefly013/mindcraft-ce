@@ -11,6 +11,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
   DEPARTURE_TOOLS,
+  annotateReceipt,
   departureVerdict,
   isWeaponName,
   targetDimensionOf,
@@ -190,5 +191,32 @@ describe('身体侧接线：只拦进入、能救就救、拒绝无副作用', (
     };
     body.log = { with: () => ({ info: () => undefined }) };
     expect((await body.departureCheckFor('enterEnd')).text).toBeNull();
+  });
+});
+
+describe('提醒不许长得像拒绝、也不许挤掉动作（Lead 2026-10-19 的担心）', () => {
+  it('提醒里明确写"这只是提醒，不是拒绝"', () => {
+    const verdict = departureVerdict(facts({ food: 9 }));
+    expect(String(verdict.warning)).toContain('这只是提醒，不是拒绝');
+    expect(String(verdict.warning)).toContain('已经放行');
+  });
+
+  it('提醒追加在回执**末尾**：第一行仍然是"放行 + 实际发生了什么"', () => {
+    const receipt = '进入末地：走了 12 步，已在主岛。\n    （走到 (74,35,-31)）';
+    const annotated = annotateReceipt(receipt, '（**这只是提醒，不是拒绝**）⚠️ 你食物只有 9');
+    const lines = annotated.split('\n');
+    expect(lines[0]).toContain('进入末地');
+    expect(lines[0]).not.toContain('提醒');
+    expect(annotated.trimEnd().endsWith('你食物只有 9')).toBe(true);
+  });
+
+  it('没有提醒时回执一字不改（不许无端加噪音）', () => {
+    expect(annotateReceipt('进入末地：完成。', null)).toBe('进入末地：完成。');
+    expect(annotateReceipt('进入末地：完成。', '')).toBe('进入末地：完成。');
+  });
+
+  it('准备齐全 ⇒ 连 warning 字段都不出现（零噪音）', () => {
+    const verdict = departureVerdict(facts());
+    expect(verdict.warning).toBeUndefined();
   });
 });
