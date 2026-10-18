@@ -1629,13 +1629,18 @@ export interface TunnelStep {
     floor: FlatPosition;
 }
 
-/** 第 `index` 步的几何：清哪几格、站到哪、踩在哪。 */
-export function tunnelStep(pos: FlatPosition, dir: TunnelDirection, height: number, index: number): TunnelStep {
+/**
+ * 第 `index` 步的几何：清哪几格、站到哪、踩在哪。
+ *
+ * `rise` = 每步抬高几格（默认 0 = 平隧道；1 = **斜上台阶**：挖斜上两格再走上去，
+ * 不用垫脚料——往 y=116 爬 46 格需要的垫脚方块，bot 身上通常根本没有）。
+ */
+export function tunnelStep(pos: FlatPosition, dir: TunnelDirection, height: number, index: number, rise = 0): TunnelStep {
     const dx = dir.axis === 'x' ? dir.sign : 0;
     const dz = dir.axis === 'z' ? dir.sign : 0;
     const baseX = Math.round(pos.x) + dx;
     const baseZ = Math.round(pos.z) + dz;
-    const baseY = Math.round(pos.y);
+    const baseY = Math.round(pos.y) + rise;
     const dig: FlatPosition[] = [];
     for (let i = 0; i < height; i++) dig.push({ x: baseX, y: baseY + i, z: baseZ });
     return { index, dig, feet: { x: baseX, y: baseY, z: baseZ }, floor: { x: baseX, y: baseY - 1, z: baseZ } };
@@ -1785,27 +1790,30 @@ function defaultTunnelHealth(bot: any): number | null {
     return Number.isFinite(value) ? value : null;
 }
 
+export interface DigLineRequest {
+    /** 已解析好的方向（travelTo 自己挑轴，mineTunnel 由模型给或按朝向推）。 */
+    dir: ResolvedTunnelDirection;
+    length: number;
+    height: number;
+    budgetMs: number;
+    /** 绝对截止时间（多腿共享一个总预算时用；取更早的那个）。 */
+    deadline?: number;
+    /** 每步抬高几格（默认 0；1 = 斜上台阶，爬到目标层用）。 */
+    rise?: number;
+}
+
 /**
- * 沿一条直线挖隧道：每一格都"先判危险 → 挖 → 验证 → 走进去"。
+ * 沿一条直线挖：**每一格都"先判危险 → 挖 → 验证明明变空气 → 走进去"**（安全门一个不少）。
  *
- * 安全门（都在**挖之前**判，触发就停手并点名格子）：
- *   1. 前方脚/头、以及前方脚下那格是 lava/water → 停（就是这条害死了 overnight_a）；
- *   2. 前方脚下那格不是实心 → 停（会走进岩浆海/悬崖）；
- *   3. 没有镐且方块徒手挖不动 → 停并给 equip 提示；徒手挖得动的放行但要如实说慢；
- *   4. 镐快用完（`toolDurabilityGuard.low`）→ 停并给换镐提示；
- *   5. 掉血 / 血量过低 / 被 Stop → 停并说清挖了多少。
+ * 从 `mineTunnelSkill` 里抽出来，是为了让 `travelTo` 的多腿路线**复用同一套门与验证**——
+ * 不许为了"能走长途"把安全门放宽一档。
  */
-export async function mineTunnelSkill(
+export async function digLine(
     bot: any,
-    rawLength?: unknown,
-    rawHeight?: unknown,
-    rawDirection?: unknown,
+    request: DigLineRequest,
     deps: TunnelDeps = {},
     options: TunnelOptions = {},
-): Promise<string> {
-    const requested = clampInt(rawLength, DEFAULT_TUNNEL_LENGTH, 1, MAX_TUNNEL_LENGTH);
-    const height = clampInt(rawHeight, DEFAULT_TUNNEL_HEIGHT, 1, MAX_TUNNEL_HEIGHT);
-    const budgetMs = options.budgetMs ?? DEFAULT_TUNNEL_BUDGET_MS;
+): Promise<TunnelOutcome> {
     const progressEvery = Math.max(1, options.progressEvery ?? TUNNEL_PROGRESS_EVERY);
     const settleMs = options.settleMs ?? 120;
 
@@ -1822,8 +1830,12 @@ export async function mineTunnelSkill(
     const start = position(bot);
     const startedAt = now();
     const startHealth = health(bot);
+    const height = request.height;
+    const requested = request.length;
+    const budgetMs = request.budgetMs;
+    const deadline = Math.min(startedAt + budgetMs, request.deadline ?? Number.POSITIVE_INFINITY);
     const outcome: TunnelOutcome = {
-        dir: { axis: 'x', sign: 1, label: '+x', fromYaw: false },
+        dir: request.dir,
         height,
         requested,
         dug: 0,
@@ -1840,21 +1852,6 @@ export async function mineTunnelSkill(
         handMining: false,
     };
 
-    const resolved = resolveTunnelDirection(rawDirection, yaw(bot));
-    if (resolved == null) {
-        outcome.stop = 'bad_direction';
-        outcome.detail =
-            typeof rawDirection === 'string' && rawDirection.trim() !== ''
-                ? `direction="${rawDirection}" 认不出来（只认 ±x / ±z / east / west / north / south，或留空按朝向）`
-                : '没给 direction，而且读不到 entity.yaw';
-        const g = tool(bot);
-        outcome.toolName = g.name;
-        outcome.toolRemaining = g.remaining;
-        outcome.toolMax = g.max;
-        return tunnelReceipt(outcome);
-    }
-    outcome.dir = resolved;
-
     /** 一手工具的描述（每次都重新读，因为挖着挖着就磨损了）。 */
     const refreshTool = (): { name: string | null; remaining: number | null; max: number | null; low: boolean } => {
         const g = tool(bot);
@@ -1869,7 +1866,7 @@ export async function mineTunnelSkill(
 
     for (let index = 1; index <= requested; index++) {
         // ── 时间预算：到点自己收手（回执必须由工具自己交出来） ──
-        if (now() - startedAt >= budgetMs) {
+        if (now() >= deadline) {
             outcome.stop = 'budget';
             outcome.detail = `本轮预算 ${Math.round(budgetMs / 6000) / 10} 分钟用完`;
             break;
@@ -1890,7 +1887,7 @@ export async function mineTunnelSkill(
             break;
         }
 
-        const step = tunnelStep(position(bot), resolved, height, index);
+        const step = tunnelStep(position(bot), request.dir, height, index, request.rise ?? 0);
 
         // ── 安全门 1：前方（脚/头）与前方脚下都不许是液体 ──
         const feetBlock = blockAt(bot, step.feet.x, step.feet.y, step.feet.z);
@@ -1977,7 +1974,8 @@ export async function mineTunnelSkill(
                 outcome.stop = 'dig_failed';
                 outcome.detail =
                     `第 ${index} 步的 ${cellText(cell, normalizeName(after?.name))}${ok ? '（挖过了但没变空气）' : '（挖不动）'}`;
-                return tunnelReceipt(outcome);
+                refreshTool();
+                return outcome;
             }
         }
         await sleep(settleMs);
@@ -2004,6 +2002,63 @@ export async function mineTunnelSkill(
     }
 
     refreshTool();
+    return outcome;
+}
+
+/**
+ * 沿一条直线挖隧道：每一格都"先判危险 → 挖 → 验证 → 走进去"。
+ *
+ * 安全门（都在**挖之前**判，触发就停手并点名格子）：
+ *   1. 前方脚/头、以及前方脚下那格是 lava/water → 停（就是这条害死了 overnight_a）；
+ *   2. 前方脚下那格不是实心 → 停（会走进岩浆海/悬崖）；
+ *   3. 没有镐且方块徒手挖不动 → 停并给 equip 提示；徒手挖得动的放行但要如实说慢；
+ *   4. 镐快用完（`toolDurabilityGuard.low`）→ 停并给换镐提示；
+ *   5. 掉血 / 血量过低 / 被 Stop → 停并说清挖了多少。
+ */
+export async function mineTunnelSkill(
+    bot: any,
+    rawLength?: unknown,
+    rawHeight?: unknown,
+    rawDirection?: unknown,
+    deps: TunnelDeps = {},
+    options: TunnelOptions = {},
+): Promise<string> {
+    const requested = clampInt(rawLength, DEFAULT_TUNNEL_LENGTH, 1, MAX_TUNNEL_LENGTH);
+    const height = clampInt(rawHeight, DEFAULT_TUNNEL_HEIGHT, 1, MAX_TUNNEL_HEIGHT);
+    const yaw = deps.yaw ?? ((b: any) => (Number.isFinite(Number(b?.entity?.yaw)) ? Number(b.entity.yaw) : null));
+    const tool = deps.tool ?? ((b: any) => skills.toolDurabilityGuard(b));
+    const resolved = resolveTunnelDirection(rawDirection, yaw(bot));
+    if (resolved == null) {
+        // 方向认不出来：保持原来的口径（回执里点名到底哪里不对，并给工具现状）。
+        const g = tool(bot);
+        const outcome: TunnelOutcome = {
+            dir: { axis: 'x', sign: 1, label: '+x', fromYaw: false },
+            height,
+            requested,
+            dug: 0,
+            blocksDug: 0,
+            start: (deps.position ?? defaultPosition)(bot),
+            here: (deps.position ?? defaultPosition)(bot),
+            stop: 'bad_direction',
+            detail:
+                typeof rawDirection === 'string' && rawDirection.trim() !== ''
+                    ? `direction="${rawDirection}" 认不出来（只认 ±x / ±z / east / west / north / south，或留空按朝向）`
+                    : '没给 direction，而且读不到 entity.yaw',
+            hintEquip: null,
+            progress: [],
+            toolName: g.name,
+            toolRemaining: g.remaining,
+            toolMax: g.max,
+            handMining: false,
+        };
+        return tunnelReceipt(outcome);
+    }
+    const outcome = await digLine(
+        bot,
+        { dir: resolved, length: requested, height, budgetMs: options.budgetMs ?? DEFAULT_TUNNEL_BUDGET_MS },
+        deps,
+        options,
+    );
     return tunnelReceipt(outcome);
 }
 
@@ -2027,4 +2082,602 @@ export function bestPickaxeInInventory(bot: any, exclude?: string | null): strin
         const rb = rank.findIndex((prefix) => b.startsWith(prefix));
         return (ra < 0 ? rank.length : ra) - (rb < 0 ? rank.length : rb);
     })[0] as string;
+}
+
+// ─────────────────────────── 长途赶路（travelTo） ───────────────────────────
+//
+// 为什么要有（2026-10-19 的瓶颈）：这两个 bot 反复死在**长多步任务**上。
+// `mineTunnel(length=64)` 单腿很好用，但 500 格要走 ~8 腿，模型在两次调用之间会丢线
+// （overnight_b 被指到 500 格外的要塞，结果在基地待了一小时；overnight_a 走 60 格到
+// 末地门也没到）。`getFood` / `escapeWater` / `mineTunnel` 之所以有效，都是因为把多步链
+// 变成了**一次调用**——travelTo 是同一个动作，用在赶路上：**模型只调一次，人往前走一大截**。
+//
+// 路线自己挑（不许模型自己算两条腿和顺序——那正是它丢的东西）：
+//   同 y     → 直线隧道（第一步先试走路，走得到就不挖）
+//   有高差   → 先 `stairUp`（上）或 `digDown`（下）到目标高度
+//   斜向     → **一次只走一条轴，长的先走**；走完自动重新规划 → 自动换轴
+//
+// 安全门**一格都不许放宽**：每一格还是走 `digLine`（读格子 → 判危险 → 挖 → 验证明明变空气 →
+// 走进去），lava/水、脚下不实心、镐快用完、掉血、Stop、读不到方块全都照旧触发即停。
+
+export const DEFAULT_TRAVEL_MAX_MS = 5 * 60 * 1000;
+export const TRAVEL_MAX_MS_LIMIT = 6 * 60 * 1000;
+/** 每推进这么多格报一次进度。 */
+export const TRAVEL_PROGRESS_EVERY = 32;
+/**
+ * 下界长途的推荐层（真机实测）：y=112~120 **97% 是实心下界岩、几乎没有岩浆**；
+ * 而 y=68~80 只有 ~35% 实心（全是洞 ⇒ 掉下去/岩浆/寻路卡死）。
+ * 在下界做水平长途时默认爬到这一层修直隧道：把"跳洞"变成"挖矿"，差别是数量级的。
+ */
+export const NETHER_TRAVEL_LAYER = 116;
+export const NETHER_LAYER_LOW = 112;
+export const NETHER_LAYER_HIGH = 120;
+/** 短距离先试一次走路（走得到就别挖）：60 格走到末地门这种就该走，走不动下一腿自动改挖。 */
+export const TRAVEL_WALK_MAX_BLOCKS = 64;
+export const TRAVEL_WALK_BUDGET_MS = 45_000;
+/** 竖直段一次最多爬/下多少格（剩下的下一趟接着来）。 */
+export const TRAVEL_MAX_VERTICAL_PER_LEG = 64;
+/** 单腿最多挖多少格（剩下的下一趟接着来）。 */
+export const TRAVEL_MAX_HORIZONTAL_PER_LEG = 256;
+export const TRAVEL_VERTICAL_BUDGET_MS = 90_000;
+/** 剩余预算少于这个值就不再开新腿（宁可老实收手）。 */
+export const TRAVEL_MIN_LEG_MS = 10_000;
+/** 水平距离 ≤ 这个值就算到了（站到目标旁边，不用严丝合缝）。 */
+export const TRAVEL_ARRIVE_RADIUS = 2;
+export const TRAVEL_TUNNEL_HEIGHT = DEFAULT_TUNNEL_HEIGHT;
+
+/** 维度名的归一（模型可能写 nether / 下界 / the_nether）。 */
+export function normalizeDimensionName(raw: unknown): string | null {
+    if (typeof raw !== 'string') return null;
+    const value = raw.trim().toLowerCase();
+    if (value === '') return null;
+    if (['the_nether', 'nether', '下界', '地狱'].includes(value)) return 'the_nether';
+    if (['overworld', 'the_overworld', '主世界', '地上'].includes(value)) return 'overworld';
+    if (['the_end', 'end', '末地', '末路之地'].includes(value)) return 'the_end';
+    return value;
+}
+
+export interface TravelLegPlan {
+    kind: 'walk' | 'stairUp' | 'digDown' | 'tunnel' | 'stairTunnel';
+    blocks: number;
+    axis: 'x' | 'z' | null;
+    sign: 1 | -1 | null;
+    /** 人类可读（进回执）。 */
+    label: string;
+}
+
+/** 目标层：给了就用给的；否则下界水平长途默认修到 `NETHER_TRAVEL_LAYER`。 */
+export function chooseTravelLayer(options: {
+    dimension: string | null;
+    dx: number;
+    dz: number;
+    requested: number | null;
+}): { layer: number | null; note: string } {
+    if (options.requested != null && Number.isFinite(options.requested)) {
+        const layer = Math.max(-60, Math.min(320, Math.round(options.requested)));
+        return { layer, note: `按指定的 layer=${layer} 走。` };
+    }
+    const horizontal = Math.max(Math.abs(options.dx), Math.abs(options.dz));
+    if (options.dimension === 'the_nether' && horizontal >= TRAVEL_WALK_MAX_BLOCKS) {
+        return {
+            layer: NETHER_TRAVEL_LAYER,
+            note:
+                `下界水平长途：默认先爬到 **y=${NETHER_TRAVEL_LAYER}** 再修直隧道——实测这一带` +
+                `（y=${NETHER_LAYER_LOW}~${NETHER_LAYER_HIGH}）**97% 是实心下界岩、几乎没有岩浆**，` +
+                `而 y=68~80 只有 ~35% 实心（全是洞：掉下去 / 岩浆 / 寻路卡死）。`,
+        };
+    }
+    return { layer: null, note: '' };
+}
+
+/**
+ * 只规划**下一条腿**（走完重新规划，所以位置/地形变了也不会照着过期计划走）。
+ * 顺序：竖直段 → 短距离走路 → 长轴隧道（另一条轴下一趟自动接上）。
+ */
+export function planTravelLegs(
+    from: FlatPosition,
+    to: FlatPosition,
+    options: { walkAllowed: boolean; walkFailed?: boolean },
+): TravelLegPlan[] {
+    const legs: TravelLegPlan[] = [];
+    const dy = Math.round(to.y) - Math.round(from.y);
+    if (Math.abs(dy) >= 2) {
+        const blocks = Math.min(Math.abs(dy), TRAVEL_MAX_VERTICAL_PER_LEG);
+        const dx0 = Math.round(to.x) - Math.round(from.x);
+        const dz0 = Math.round(to.z) - Math.round(from.z);
+        const horizontal = Math.max(Math.abs(dx0), Math.abs(dz0));
+        if (dy > 0) {
+            if (horizontal >= 1) {
+                // **斜上台阶**：一边往前挖一边往上走——爬 46 格不需要 46 块垫脚料。
+                const axis: 'x' | 'z' = Math.abs(dx0) >= Math.abs(dz0) ? 'x' : 'z';
+                const sign: 1 | -1 = (axis === 'x' ? dx0 : dz0) >= 0 ? 1 : -1;
+                const label = `${sign > 0 ? '+' : '-'}${axis}` as '+x' | '-x' | '+z' | '-z';
+                legs.push({
+                    kind: 'stairTunnel',
+                    blocks,
+                    axis,
+                    sign,
+                    label: `竖直段：沿 ${label} 挖**斜上台阶** ${blocks} 格（y ${Math.round(from.y)} → ${Math.round(from.y) + blocks}，目标 y=${Math.round(to.y)}；不用垫脚料）`,
+                });
+            } else {
+                legs.push({
+                    kind: 'stairUp',
+                    blocks,
+                    axis: null,
+                    sign: null,
+                    label: `竖直段：stairUp ${blocks} 格（y ${Math.round(from.y)} → ${Math.round(from.y) + blocks}，目标 y=${Math.round(to.y)}；要垫脚方块）`,
+                });
+            }
+        } else {
+            legs.push({
+                kind: 'digDown',
+                blocks,
+                axis: null,
+                sign: null,
+                label: `竖直段：digDown ${blocks} 格（y ${Math.round(from.y)} → ${Math.round(from.y) - blocks}，目标 y=${Math.round(to.y)}）`,
+            });
+        }
+        return legs;
+    }
+    const dx = Math.round(to.x) - Math.round(from.x);
+    const dz = Math.round(to.z) - Math.round(from.z);
+    const straight = Math.max(Math.abs(dx), Math.abs(dz));
+    if (straight <= TRAVEL_ARRIVE_RADIUS) return legs;
+    if (options.walkAllowed && options.walkFailed !== true && straight <= TRAVEL_WALK_MAX_BLOCKS) {
+        legs.push({ kind: 'walk', blocks: straight, axis: null, sign: null, label: `水平段：先试着走过去（${straight} 格，不用挖）` });
+        return legs;
+    }
+    // 一次只走一条轴：**长的先走**（走完重新规划 → 自动换到另一条轴）。
+    const axis: 'x' | 'z' = Math.abs(dx) >= Math.abs(dz) ? 'x' : 'z';
+    const delta = axis === 'x' ? dx : dz;
+    const other = axis === 'x' ? dz : dx;
+    const sign: 1 | -1 = delta >= 0 ? 1 : -1;
+    const label = `${sign > 0 ? '+' : '-'}${axis}` as '+x' | '-x' | '+z' | '-z';
+    const otherText = other === 0 ? '' : `；另一轴（${axis === 'x' ? 'z' : 'x'}）还差 ${Math.abs(other)} 格，这条走完自动换`;
+    legs.push({
+        kind: 'tunnel',
+        blocks: Math.min(Math.abs(delta), TRAVEL_MAX_HORIZONTAL_PER_LEG),
+        axis,
+        sign,
+        label: `水平段：沿 ${label} 挖 ${Math.min(Math.abs(delta), TRAVEL_MAX_HORIZONTAL_PER_LEG)} 格（这个轴还差 ${Math.abs(delta)} 格${otherText}）`,
+    });
+    return legs;
+}
+
+/**
+ * 规划用的目标高度：**水平还没走完时先走在 `layer` 那一层**（下界默认 116：
+ * 实心、少岩浆），只剩最后一小段时才下/上到真正的目标 y。
+ * 这样"500 格洞窟跳"就变成"500 格挖矿"，而最后该去的 y 也不会被丢掉。
+ */
+function planningTarget(here: FlatPosition, target: FlatPosition, layer: number | null): FlatPosition {
+    if (layer == null) return target;
+    if (horizontalDistance(here, target) <= TRAVEL_ARRIVE_RADIUS) return target;
+    return { x: target.x, y: layer, z: target.z };
+}
+
+export type TravelStop =
+    | 'arrived'
+    | 'budget'
+    | 'interrupted'
+    | 'low_health'
+    | 'blocked'
+    | 'no_pickaxe'
+    | 'wrong_dimension'
+    | 'bad_target';
+
+const TRAVEL_STOP_TEXT: Record<TravelStop, string> = {
+    arrived: '到目的地了',
+    budget: '时间预算用完（下一趟接着走）',
+    interrupted: '被 Stop/保命打断',
+    low_health: '血量太低，停手保命',
+    blocked: '安全门触发了，停手',
+    no_pickaxe: '没有能用的镐，挖不动',
+    wrong_dimension: '目标不在当前维度',
+    bad_target: '坐标读不出来',
+};
+
+export interface TravelLegResult {
+    plan: TravelLegPlan;
+    /** 这一腿**真实**推进了多少格（按位置增量算，不是按计划）。 */
+    advanced: number;
+    /** 一腿一句话（进回执）。 */
+    text: string;
+    /** 安全门触发时的隧道结果（保留原始措辞）。 */
+    tunnel?: TunnelOutcome;
+}
+
+export interface TravelOutcome {
+    target: FlatPosition;
+    start: FlatPosition;
+    here: FlatPosition;
+    /** 起手时离目标多远（用来算"推进了多少格"）。 */
+    distanceBefore: number;
+    stop: TravelStop;
+    detail: string;
+    layer: number | null;
+    layerNote: string;
+    legs: TravelLegResult[];
+    /** 触发停止的安全门（原话，来自 digLine）。 */
+    gate: string | null;
+    /** 安全门自己的下一步（`tunnelNextAction`），优先于普通续跑。 */
+    gateNextCall: string | null;
+    toolName: string | null;
+    toolRemaining: number | null;
+    toolMax: number | null;
+    handMining: boolean;
+    budgetMs: number;
+    elapsedMs: number;
+    progress: string[];
+    /** 需不需要在下一趟带 `layer`。 */
+    yExplicit: boolean;
+}
+
+/** 续跑调用：**从当前断点继续朝同一个目标走**（人已经往前挪了，所以这就是"剩下的那一段"）。 */
+export function travelResumeCall(o: TravelOutcome): string {
+    const parts = [`x=${Math.round(o.target.x)}`, `y=${Math.round(o.target.y)}`, `z=${Math.round(o.target.z)}`];
+    if (o.layer != null) parts.push(`layer=${o.layer}`);
+    parts.push(`max_ms=${o.budgetMs}`);
+    return `travelTo(${parts.join(', ')})`;
+}
+
+export function travelNextAction(o: TravelOutcome): string {
+    if (o.gateNextCall != null) return o.gateNextCall;
+    switch (o.stop) {
+        case 'arrived':
+            return 'stats(type="body")';
+        case 'no_pickaxe':
+            return 'useBlock(type="crafting_table", input="3 cobblestone, 2 stick", output="1 stone_pickaxe")';
+        case 'wrong_dimension':
+            return o.detail.includes('the_nether') ? 'enterNether()' : 'getPlaces';
+        case 'interrupted':
+        case 'low_health':
+            return 'survivalCheck';
+        case 'bad_target':
+            return 'stats(type="coords")';
+        default:
+            return travelResumeCall(o);
+    }
+}
+
+/** 剩余方向的短描述（+x 314 格、+z 40 格）。 */
+export function travelRemainingLabel(o: TravelOutcome): string {
+    const dx = Math.round(o.target.x) - Math.round(o.here.x);
+    const dz = Math.round(o.target.z) - Math.round(o.here.z);
+    const parts: string[] = [];
+    if (dx !== 0) parts.push(`${dx > 0 ? '+x' : '-x'} ${Math.abs(dx)} 格`);
+    if (dz !== 0) parts.push(`${dz > 0 ? '+z' : '-z'} ${Math.abs(dz)} 格`);
+    if (parts.length === 0) return '';
+    return `方向 ${parts.join('、')}`;
+}
+
+export function travelReceipt(o: TravelOutcome): string {
+    const lines: string[] = [];
+    const remaining = horizontalDistance(o.here, o.target);
+    const progressed = Math.max(0, Math.round(o.distanceBefore - remaining));
+    const label = travelRemainingLabel(o);
+    if (o.stop === 'arrived') {
+        lines.push(
+            `travelTo：**到了**——现在 ${formatPoint(o.here)}（目标 ${formatPoint(o.target)}，水平还差 ${remaining.toFixed(1)} 格）。` +
+                `这一趟净推进 ${progressed} 格。`,
+        );
+    } else if (o.stop === 'bad_target' || o.stop === 'wrong_dimension' || o.stop === 'no_pickaxe') {
+        lines.push(`travelTo：**没出发**（还站在 ${formatPoint(o.here)}）——${TRAVEL_STOP_TEXT[o.stop]}。`);
+    } else {
+        lines.push(
+            `travelTo：这一趟往前**推进了 ${progressed} 格**（${formatPoint(o.start)} → ${formatPoint(o.here)}），` +
+                `**离目标还剩 ${Math.round(remaining)} 格**${label === '' ? '' : `（${label}）`}。`,
+        );
+    }
+    lines.push(`停止原因：${TRAVEL_STOP_TEXT[o.stop]}${o.detail === '' ? '' : `——${o.detail}`}。`);
+    if (o.layer != null && o.layerNote !== '') lines.push(`层高：${o.layerNote}`);
+    for (const leg of o.legs) lines.push(`- ${leg.text}`);
+    for (const line of capLines(o.progress, 4, '进度')) lines.push(line);
+    if (o.gate != null) lines.push(`⚠️ 安全门（来自隧道那一格一格的门，一步没放宽）：${o.gate}`);
+    if (o.handMining) lines.push('⚠️ 手上没有镐：这些方块是**徒手挖**的，很慢，能换镐就换。');
+    if (o.toolName != null) {
+        lines.push(
+            o.toolRemaining == null
+                ? `镐：${o.toolName}（上限读不到，算不出还剩几次）。`
+                : `镐：${o.toolName} 还剩约 ${o.toolRemaining} 次（${o.toolMax ?? '?'} 上限）。`,
+        );
+    }
+    lines.push(`下一步（照做即可）：${travelNextAction(o)}`);
+    return capReceipt(lines.join('\n'));
+}
+
+export interface TravelOptions {
+    budgetMs?: number;
+    /** 允许"先试走路"（默认允许；下界横向的调用方可以关掉）。 */
+    walkAllowed?: boolean;
+}
+
+export interface TravelDeps extends TunnelDeps {
+    /** 走路（默认 `skills.goToPosition`）。 */
+    walk?: (bot: any, x: number, y: number, z: number) => Promise<boolean>;
+    /** 上台阶（默认 `skills.stairUp`）。 */
+    stairUp?: (bot: any, distance: number) => Promise<boolean>;
+    /** 往下挖（默认 `skills.digDown`）。 */
+    digDown?: (bot: any, distance: number) => Promise<boolean>;
+    /** 当前维度（默认 `bot.game.dimension`）。 */
+    dimension?: (bot: any) => string | null;
+}
+
+/**
+ * 一次调用把"赶路"往前推一大截：自己选路线、自己换腿，到点/触门就停并给**续跑调用**。
+ *
+ * 只认事实：推进量按**位置增量**算（不是"我计划挖 186 格"），每一格都由 `digLine`
+ * 验证过"明明变成空气"才走进去。
+ */
+export async function travelToSkill(
+    bot: any,
+    rawX?: unknown,
+    rawY?: unknown,
+    rawZ?: unknown,
+    rawMaxMs?: unknown,
+    rawLayer?: unknown,
+    rawDimension?: unknown,
+    deps: TravelDeps = {},
+    options: TravelOptions = {},
+): Promise<string> {
+    const budgetMs = clampInt(rawMaxMs, DEFAULT_TRAVEL_MAX_MS, 10_000, TRAVEL_MAX_MS_LIMIT);
+    const position = deps.position ?? defaultPosition;
+    const now = deps.now ?? Date.now;
+    const sleep = deps.sleep ?? sleepMs;
+    const health = deps.health ?? defaultTunnelHealth;
+    const tool = deps.tool ?? ((b: any) => skills.toolDurabilityGuard(b));
+    const blockAt = deps.blockAt ?? defaultBlockObject;
+    const dig = deps.dig ?? ((b: any, x: number, y: number, z: number) => skills.mineBlockAt(b, x, y, z));
+    const travelStep = deps.travel ?? ((b: any, x: number, y: number, z: number) => skills.goToPosition(b, x, y, z, 1));
+    const walk = deps.walk ?? ((b: any, x: number, y: number, z: number) => skills.goToPosition(b, x, y, z, TRAVEL_ARRIVE_RADIUS));
+    const stairUp = deps.stairUp ?? ((b: any, distance: number) => skills.stairUp(b, distance));
+    const digDown = deps.digDown ?? ((b: any, distance: number) => skills.digDown(b, distance));
+    const dimension =
+        deps.dimension ?? ((b: any) => (typeof b?.game?.dimension === 'string' ? String(b.game.dimension) : null));
+
+    const startedAt = now();
+    const start = position(bot);
+    const x = Number(rawX);
+    const z = Number(rawZ);
+    const currentDimension = dimension(bot);
+    const wantedDimension = normalizeDimensionName(rawDimension);
+    const layerHint = rawLayer == null || rawLayer === '' ? null : Number(rawLayer);
+    const layerChoice = chooseTravelLayer({
+        dimension: currentDimension,
+        dx: Number.isFinite(x) ? x - start.x : 0,
+        dz: Number.isFinite(z) ? z - start.z : 0,
+        requested: layerHint != null && Number.isFinite(layerHint) ? layerHint : null,
+    });
+    const layer = layerChoice.layer;
+    const yGiven = Number.isFinite(Number(rawY)) && rawY != null && rawY !== '';
+    const targetY = yGiven ? Math.max(-64, Math.min(320, Math.round(Number(rawY)))) : (layer ?? Math.round(start.y));
+    const target: FlatPosition = { x: Number.isFinite(x) ? Math.round(x) : start.x, y: targetY, z: Number.isFinite(z) ? Math.round(z) : start.z };
+
+    const outcome: TravelOutcome = {
+        target,
+        start,
+        here: start,
+        distanceBefore: horizontalDistance(start, target),
+        stop: 'arrived',
+        detail: '',
+        layer,
+        layerNote: layerChoice.note,
+        legs: [],
+        gate: null,
+        gateNextCall: null,
+        toolName: null,
+        toolRemaining: null,
+        toolMax: null,
+        handMining: false,
+        budgetMs,
+        elapsedMs: 0,
+        progress: [],
+        yExplicit: yGiven,
+    };
+
+    const refreshTool = (): void => {
+        const g = tool(bot);
+        outcome.toolName = g.name;
+        outcome.toolRemaining = g.remaining;
+        outcome.toolMax = g.max;
+    };
+    refreshTool();
+
+    // ── 诚实拒绝 1：坐标读不出来 ──
+    if (!Number.isFinite(x) || !Number.isFinite(z)) {
+        outcome.stop = 'bad_target';
+        outcome.detail = `x/z 读不出来（收到 x=${String(rawX)}, z=${String(rawZ)}）`;
+        return travelReceipt(outcome);
+    }
+    // ── 诚实拒绝 2：目标在别的维度 ──
+    if (wantedDimension != null && currentDimension != null && wantedDimension !== currentDimension) {
+        outcome.stop = 'wrong_dimension';
+        outcome.detail =
+            `目标是 ${wantedDimension}，你现在在 ${currentDimension}——**跨维度要先走传送门**` +
+            (wantedDimension === 'the_nether' ? '（用 enterNether()）' : '（先走回你进来时的那个门：getPlaces 找坐标）');
+        return travelReceipt(outcome);
+    }
+
+    const deadline = startedAt + budgetMs;
+    let walkFailed = false;
+    const walkAllowed = options.walkAllowed ?? currentDimension !== 'the_nether';
+
+    // ── 诚实拒绝 3：要挖但没镐（不出发，而不是挖两下再失败） ──
+    const planProbe = planTravelLegs(start, planningTarget(start, target, layer), { walkAllowed });
+    const needsDigging = planProbe.some((leg) => leg.kind !== 'walk');
+    const guard0 = tool(bot);
+    const equippedPickaxe = guard0.name != null && guard0.name.includes('pickaxe');
+    const sparePickaxe = bestPickaxeInInventory(bot);
+    if (needsDigging && !equippedPickaxe && sparePickaxe == null) {
+        outcome.stop = 'no_pickaxe';
+        outcome.detail =
+            `这条路线要挖（${planProbe.map((leg) => leg.kind).join('+')}），但手上和背包里都没有镐；` +
+            '镐是 3×3 配方，**要在工作台上做**（2×2 放不下）';
+        return travelReceipt(outcome);
+    }
+    if (needsDigging && !equippedPickaxe && sparePickaxe != null) {
+        // 有镐但没拿在手上：先换上（不然徒手挖，慢且危险）。
+        try {
+            await (deps as { equip?: (bot: any, item: string) => Promise<boolean> }).equip?.(bot, sparePickaxe);
+        } catch {
+            /* 换不上就照旧挖，digLine 会按徒手规则判 */
+        }
+    }
+
+    for (;;) {
+        const here = position(bot);
+        outcome.here = here;
+        outcome.elapsedMs = now() - startedAt;
+        const remaining = horizontalDistance(here, target);
+        const heightLeft = Math.abs(Math.round(target.y) - Math.round(here.y));
+        if (remaining <= TRAVEL_ARRIVE_RADIUS && heightLeft <= 2) {
+            outcome.stop = 'arrived';
+            break;
+        }
+        if (bot?.interrupt_code === true) {
+            outcome.stop = 'interrupted';
+            break;
+        }
+        const left = deadline - now();
+        if (left <= 0) {
+            outcome.stop = 'budget';
+            outcome.detail = `本轮预算 ${Math.round(budgetMs / 6000) / 10} 分钟用完（还剩 ${Math.round(remaining)} 格）`;
+            break;
+        }
+        if (left < TRAVEL_MIN_LEG_MS) {
+            outcome.stop = 'budget';
+            outcome.detail = `只剩 ${Math.round(left / 1000)} 秒，不够再开一条腿（还剩 ${Math.round(remaining)} 格）`;
+            break;
+        }
+        const hp = health(bot);
+        if (hp != null && hp <= MIN_HEALTH_TO_DIG) {
+            outcome.stop = 'low_health';
+            outcome.detail = `血量 ${hp} ≤ ${MIN_HEALTH_TO_DIG}`;
+            break;
+        }
+
+        const legs = planTravelLegs(here, planningTarget(here, target, layer), { walkAllowed, walkFailed });
+        const leg = legs[0];
+        if (leg == null) {
+            outcome.stop = 'arrived';
+            break;
+        }
+
+        const before = position(bot);
+        if (leg.kind === 'walk') {
+            let arrived = false;
+            try {
+                arrived = await walk(bot, target.x, target.y, target.z);
+            } catch {
+                arrived = false;
+            }
+            const after = position(bot);
+            outcome.here = after;
+            const advanced = Math.max(0, horizontalDistance(before, target) - horizontalDistance(after, target));
+            if (advanced < 1 && !arrived) {
+                // 走不过去：换成隧道（下一次规划会切到 tunnel），这一腿如实说"没走动"。
+                walkFailed = true;
+                outcome.legs.push({ plan: leg, advanced: 0, text: `${leg.label} → **没走动**（寻路失败），下一腿改挖隧道` });
+                await sleep(150);
+                continue;
+            }
+            outcome.legs.push({
+                plan: leg,
+                advanced,
+                text: `${leg.label} → 实际推进 ${advanced.toFixed(1)} 格${arrived ? '（到了）' : ''}`,
+            });
+            await sleep(150);
+            continue;
+        }
+
+        if (leg.kind === 'stairUp' || leg.kind === 'digDown') {
+            const legBudget = Math.min(TRAVEL_VERTICAL_BUDGET_MS, Math.max(5_000, left - 5_000));
+            const startedLeg = now();
+            let ok = false;
+            try {
+                ok = leg.kind === 'stairUp' ? await stairUp(bot, leg.blocks) : await digDown(bot, leg.blocks);
+            } catch {
+                ok = false;
+            }
+            const after = position(bot);
+            outcome.here = after;
+            const dy = Math.round(after.y) - Math.round(before.y);
+            const wanted = leg.kind === 'stairUp' ? leg.blocks : -leg.blocks;
+            outcome.legs.push({
+                plan: leg,
+                advanced: Math.abs(dy),
+                text:
+                    `${leg.label} → 实际 y ${Math.round(before.y)} → ${Math.round(after.y)}（${dy >= 0 ? '+' : ''}${dy} 格，` +
+                    `${ok ? '完成' : '没走完'}；这一腿用了 ${Math.round((now() - startedLeg) / 1000)} 秒）`,
+            });
+            if (dy === 0 && !ok) {
+                outcome.stop = 'blocked';
+                outcome.detail = `竖直段没推进（${leg.kind} ${leg.blocks} 格没成功），不硬钻`;
+                // 竖直段失败通常是**缺垫脚料**（stairUp）或**下不去**（digDown 遇到岩浆/水）：
+                // 别再给同一条会被照抄的续跑调用（那会原地打转），先让模型看清背包。
+                outcome.gate = '竖直段没进步：stairUp 要垫脚方块，digDown 可能是下面有岩浆/水';
+                outcome.gateNextCall = 'stats(type="inventory")';
+                break;
+            }
+            if (Math.abs(dy - wanted) >= 2 && now() >= deadline) break;
+            await sleep(150);
+            continue;
+        }
+
+        // ── 隧道腿（含斜上台阶）：走 digLine（安全门与验证一格不放宽） ──
+        const dir: ResolvedTunnelDirection = {
+            axis: leg.axis ?? 'x',
+            sign: leg.sign ?? 1,
+            label: (leg.sign ?? 1) > 0 ? `+${leg.axis ?? 'x'}` : `-${leg.axis ?? 'x'}`,
+            fromYaw: false,
+        };
+        const tunnel = await digLine(
+            bot,
+            {
+                dir,
+                length: leg.blocks,
+                height: TRAVEL_TUNNEL_HEIGHT,
+                budgetMs: Math.max(5_000, left - 5_000),
+                deadline,
+                ...(leg.kind === 'stairTunnel' ? { rise: 1 } : {}),
+            },
+            deps,
+            { progressEvery: TRAVEL_PROGRESS_EVERY },
+        );
+        outcome.here = tunnel.here;
+        outcome.handMining = outcome.handMining || tunnel.handMining;
+        refreshTool();
+        const advanced = Math.max(0, horizontalDistance(before, target) - horizontalDistance(tunnel.here, target));
+        outcome.legs.push({
+            plan: leg,
+            advanced,
+            text:
+                `${leg.label} → 挖了 ${tunnel.dug}/${leg.blocks} 格（共挖掉 ${tunnel.blocksDug} 个方块），` +
+                `实际推进 ${advanced.toFixed(1)} 格，现在 ${formatPoint(tunnel.here)}`,
+            ...(tunnel.stop === 'done' ? {} : { tunnel }),
+        });
+        for (const line of tunnel.progress) outcome.progress.push(line);
+        if (tunnel.stop !== 'done') {
+            // 隧道那一格一格的门说了算：原话照抄，下一步也照它的来（不许"为了赶路"降级）。
+            if (tunnel.stop === 'budget' || tunnel.stop === 'interrupted' || tunnel.stop === 'low_health' || tunnel.stop === 'damaged') {
+                outcome.stop = tunnel.stop === 'budget' ? 'budget' : tunnel.stop === 'interrupted' ? 'interrupted' : 'low_health';
+                outcome.detail = tunnel.detail === '' ? TUNNEL_STOP_TEXT[tunnel.stop] : tunnel.detail;
+            } else {
+                outcome.stop = 'blocked';
+                outcome.detail = tunnel.detail === '' ? TUNNEL_STOP_TEXT[tunnel.stop] : tunnel.detail;
+                outcome.gate = `${TUNNEL_STOP_TEXT[tunnel.stop]}${tunnel.detail === '' ? '' : `——${tunnel.detail}`}`;
+                outcome.gateNextCall = tunnelNextAction(tunnel);
+            }
+            break;
+        }
+        if (advanced < 1) {
+            // 挖通了却没往前挪：下次规划会重新挑轴，这里如实记一笔而不是假装在走。
+            outcome.legs.push({ plan: leg, advanced: 0, text: '（这一腿挖通但人没往前挪，下一腿重新规划）' });
+        }
+        await sleep(150);
+    }
+
+    outcome.elapsedMs = now() - startedAt;
+    outcome.here = position(bot);
+    refreshTool();
+    return travelReceipt(outcome);
 }

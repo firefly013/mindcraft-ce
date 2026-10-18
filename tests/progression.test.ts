@@ -959,15 +959,16 @@ describe('危险与 Buff 判据', () => {
 // ───────────────────── 接线 / 参数 / 门禁不变式 ─────────────────────
 
 describe('接线：registry 与 schema', () => {
-    const TOOLS = ['exploreFor', 'huntFor', 'mineTunnel'];
+    const TOOLS = ['exploreFor', 'huntFor', 'mineTunnel', 'travelTo'];
 
-    it('三条命令都注册进 registry 了', () => {
+    it('四条命令都注册进 registry 了', () => {
         const names = toolNames();
         for (const tool of TOOLS) expect(names).toContain(tool);
         expect(progressionActionList.map((c) => c.name.replace('!', ''))).toEqual(TOOLS);
         expect(findCommand('exploreFor')?.name).toBe('!exploreFor');
         expect(findCommand('!huntFor')?.name).toBe('!huntFor');
         expect(findCommand('mineTunnel')?.name).toBe('!mineTunnel');
+        expect(findCommand('travelTo')?.name).toBe('!travelTo');
     });
 
     it('都是 action + longRunning（长动作：走 12 腿 / 刷 5 分钟）', () => {
@@ -977,10 +978,11 @@ describe('接线：registry 与 schema', () => {
         }
     });
 
-    it('参数签名就是任务要求的那四个/三个，且参数顺序 = perform 的位置参数顺序', () => {
+    it('参数签名就是任务要求的那四个/三个/六个，且参数顺序 = perform 的位置参数顺序', () => {
         expect(Object.keys(findCommand('exploreFor')?.params ?? {})).toEqual(['block', 'max_steps', 'step']);
         expect(Object.keys(findCommand('huntFor')?.params ?? {})).toEqual(['entity', 'want', 'radius', 'max_ms']);
         expect(Object.keys(findCommand('mineTunnel')?.params ?? {})).toEqual(['length', 'height', 'direction']);
+        expect(Object.keys(findCommand('travelTo')?.params ?? {})).toEqual(['x', 'y', 'z', 'max_ms', 'layer', 'dimension']);
         expect(progressionActionList[0].params?.block.optional).toBeUndefined(); // block 必填
         expect(progressionActionList[1].params?.entity.optional).toBeUndefined(); // entity 必填
         expect(progressionActionList[0].params?.max_steps.default).toBe(DEFAULT_EXPLORE_MAX_STEPS);

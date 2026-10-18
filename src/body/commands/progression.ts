@@ -65,6 +65,27 @@ export const PROGRESSION_TOOL_TEXT: Record<string, { description: string; params
             direction: '方向：`+x`/`-x`/`+z`/`-z`（也认 east/west/north/south、东/南/西/北）。留空 = 按当前朝向推。回执里会写明实际用的方向，续挖照抄它。',
         },
     },
+    travelTo: {
+        description:
+            '**一次调用往目的地推进一大截**（长距离赶路用它，别自己拆成八条隧道）：路线它自己挑——' +
+            '有高差就先 `stairUp`/`digDown` 到目标高度；同层就挖直隧道；斜向就**一次只走一条轴、长的先走**，走完自动换轴。' +
+            '**你只需要给一次坐标**，剩下的腿和顺序不用你算（那正是会丢的东西）。' +
+            '每推进 32 格报一次进度，到点/触门就停，并给「这一趟推进了 N 格、还剩 M 格（方向 ±x/±z）」+' +
+            '**一条续跑调用**（坐标就是同一个目标，人会从停下那一点继续走，不会回头也不会跳格）。' +
+            '安全门和 mineTunnel **一模一样、一格都不放宽**：岩浆/水、前方脚下不实心、镐快用完、掉血/血 ≤6、被 Stop、读不到方块 → 立刻停并点名那一格；' +
+            '挖完必须验证明明变成空气才走进去。' +
+            '**在下界做水平长途时它会默认爬到 y=116 修隧道**（真机实测 y=112~120 有 97% 实心下界岩、几乎没岩浆，而 y=68~80 只有 ~35% 实心=到处是洞），' +
+            '也可以自己用 `layer` 指定层高。没有镐/目标在别的维度/坐标读不出来 → **不出发**，直接说清要先用什么。' +
+            '用法：travelTo(x=-332, z=88)（要塞/末地门这种几百格的路，一条调用一段，回执给下一次的调用）。',
+        params: {
+            x: '目的地 x 坐标（整数）。',
+            y: '目的地 y 坐标（可选）。给了就按它爬/下到那一层；不给就用当前高度（下界长途则用推荐层）。',
+            z: '目的地 z 坐标（整数）。',
+            max_ms: '这一趟的时间预算（毫秒，默认 300000 = 5 分钟，10000~360000）。到点停手并给续跑调用——**不要**为了"一次走完"把它调很大。',
+            layer: '走哪一层（可选）。下界长途推荐 116（y=112~120 实心、少岩浆）；给了就按它先爬到那一层再横向挖。',
+            dimension: '目标所在维度（可选，只用于**拒绝**）：overworld / the_nether / the_end（也认 下界/主世界/末地）。和当前维度不一致就不出发，并告诉你先 enterNether() 之类。',
+        },
+    },
 };
 
 const DESCRIPTION = (name: keyof typeof PROGRESSION_TOOL_TEXT): string => PROGRESSION_TOOL_TEXT[name].description;
@@ -87,6 +108,11 @@ export const HUNT_TIMEOUT_MIN = 8;
 export const HUNT_MAX_MS_LIMIT = 5 * 60 * 1000;
 /** `mineTunnel` 的命令超时（分钟）。**必须 > `DEFAULT_TUNNEL_BUDGET_MS`**（它自己会先收手）。 */
 export const TUNNEL_TIMEOUT_MIN = 6;
+/**
+ * `travelTo` 的命令超时（分钟）：内部预算最大 6 分钟 → 命令 7 分钟 → 脑侧保险丝 8.5 分钟。
+ * 和 getFood 同一条链：**内部必须最短**，否则超时回执会把"这一趟推进了多少"吃掉。
+ */
+export const TRAVEL_TIMEOUT_MIN = 7;
 
 function clampInt(raw: unknown, fallback: number, min: number, max: number): number {
     const value = typeof raw === 'number' ? raw : Number(raw);
@@ -272,6 +298,56 @@ export const progressionActionList: AgentCommand[] = [
             TUNNEL_TIMEOUT_MIN,
             (agent, rawLength?: unknown, rawHeight?: unknown, rawDirection?: unknown) =>
                 progression.mineTunnelSkill(agent.bot, rawLength, rawHeight, rawDirection),
+        ),
+    },
+    {
+        name: '!travelTo',
+        description: DESCRIPTION('travelTo'),
+        params: {
+            x: {
+                type: 'float',
+                description: PROGRESSION_TOOL_TEXT.travelTo.params.x,
+            },
+            y: {
+                type: 'float',
+                description: PROGRESSION_TOOL_TEXT.travelTo.params.y,
+                optional: true,
+            },
+            z: {
+                type: 'float',
+                description: PROGRESSION_TOOL_TEXT.travelTo.params.z,
+            },
+            max_ms: {
+                type: 'float',
+                description: PROGRESSION_TOOL_TEXT.travelTo.params.max_ms,
+                optional: true,
+                default: progression.DEFAULT_TRAVEL_MAX_MS,
+                domain: [10_000, progression.TRAVEL_MAX_MS_LIMIT],
+            },
+            layer: {
+                type: 'int',
+                description: PROGRESSION_TOOL_TEXT.travelTo.params.layer,
+                optional: true,
+                domain: [-60, 320],
+            },
+            dimension: {
+                type: 'string',
+                description: PROGRESSION_TOOL_TEXT.travelTo.params.dimension,
+                optional: true,
+            },
+        },
+        perform: runProgressionAction(
+            'travelTo',
+            TRAVEL_TIMEOUT_MIN,
+            (
+                agent,
+                rawX?: unknown,
+                rawY?: unknown,
+                rawZ?: unknown,
+                rawMaxMs?: unknown,
+                rawLayer?: unknown,
+                rawDimension?: unknown,
+            ) => progression.travelToSkill(agent.bot, rawX, rawY, rawZ, rawMaxMs, rawLayer, rawDimension),
         ),
     },
 ];
