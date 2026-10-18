@@ -291,6 +291,28 @@ describe('心跳看门狗：连请求都没有时主动唤醒', () => {
     h.guard.stop();
   });
 
+  it('心跳响过之后 onYield 那层重新上膛（否则护栏等于自杀）', () => {
+    // 真机：连续 3 次"只写正文"用光上限后再没复位 ⇒ onYield 永久失效，
+    // 每 10 分钟被叫醒一次回段正文又睡回去，两小时零动作（用户看到"不动弹"）。
+    const h = harness();
+    const genHooks = handlersWith(h.guard, 'onYield');
+    const first = genHooks['onYield']!({}, {}, {}) as { continue?: unknown } | undefined;
+    const second = genHooks['onYield']!({}, {}, {}) as { continue?: unknown } | undefined;
+    const third = genHooks['onYield']!({}, {}, {}) as { continue?: unknown } | undefined;
+    const fourth = genHooks['onYield']!({}, {}, {}) as { continue?: unknown } | undefined;
+    expect(first?.continue).toBeDefined();
+    expect(second?.continue).toBeDefined();
+    expect(third?.continue).toBeDefined();
+    expect(fourth).toBeUndefined(); // 上限 3，用光了
+    // 心跳响一次 → 重新上膛
+    h.advance(61_000);
+    h.tick();
+    expect(h.woken).toHaveLength(1);
+    const again = genHooks['onYield']!({}, {}, {}) as { continue?: unknown } | undefined;
+    expect(again?.continue).toBeDefined();
+    h.guard.stop();
+  });
+
   it('真的答过一轮之后退避复位（不会永远停在最大间隔）', () => {
     // 曾经的洞：退避只在 `noteActivity()` 里复位，而生产路径没人调用它 ⇒
     // 退避涨到上限后永远停在 30 分钟，健康跑了三小时的 bot 后来真卡住也要等满。

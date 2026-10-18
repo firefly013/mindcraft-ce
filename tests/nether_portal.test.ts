@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   NETHER_PORTAL_OBSIDIAN_COST,
+  PORTAL_SEARCH_RADIUS,
   assessPortalMaterials,
   chooseScaffoldMaterial,
   dimensionChanged,
@@ -299,6 +300,33 @@ describe('enterNether 早退路径（不碰真实世界）', () => {
     expect(result.message).toContain('打火石 0/1');
   });
 });
+describe('先找现成的门，找不到才建（用户要求）', () => {
+  it('搜索半径至少 64 格（16 格太窄，模型会宁可重建也不去找）', () => {
+    // 用户原话："地狱门工具应该是先在附近一定范围内寻找地狱门；有就走进去，
+    // 没有再搭建。" 顺序本来就是这样（`enterNether` 第一步就是 findNearbyPortal），
+    // 但半径只有 16 格 —— 门在二十几格外时它宁可重新凑 10 块黑曜石。
+    // 行为分支（走进已有门 vs 新建）在真机上需要 mcdata 注册表才走得动，
+    // 这里钉住"范围"这个可单测的部分；两条回执文案各自在真机日志里可核。
+    expect(PORTAL_SEARCH_RADIUS).toBeGreaterThanOrEqual(64);
+  });
+
+  it('两条回执都写明"先找过现成的门"（模型据此才知道不是没找）', () => {
+    const reused = portalReceipt('已进入下界。', [
+      `先在附近 ${PORTAL_SEARCH_RADIUS} 格内找现成的门，找到了就直接用：(-8,64,0)`,
+      '没有另建，也没有改动任何方块。',
+    ]);
+    expect(reused).toContain(`先在附近 ${PORTAL_SEARCH_RADIUS} 格内找现成的门`);
+    expect(reused).toContain('没有另建');
+
+    const built = portalReceipt('已进入下界。', [
+      `先在附近 ${PORTAL_SEARCH_RADIUS} 格内找过现成的门，没有找到（只扫描已加载区块），因此新建。`,
+      '传送门位置：(-8,64,0)',
+    ]);
+    expect(built).toContain('先在附近');
+    expect(built).toContain('没有找到');
+  });
+});
+
 describe('工具注册与提示词契约', () => {
   it('enterNether 出现在握手声明里，是带超时的动作工具', () => {
     const declaration = toolDeclarations().find((d) => d.name === 'enterNether');

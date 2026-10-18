@@ -132,3 +132,79 @@ describe('movementsFor', () => {
     }
   });
 });
+
+describe('搭塔的垫脚方块来自背包（用户 2026-10-18："默认应该允许搭才合理"）', () => {
+  it('拿着下界岩/深板岩也能搭：库默认只认 dirt + cobblestone', () => {
+    const registry: any = minecraftData(MC_VERSION);
+    // 库的出厂值就那两种（movements.js:90-92）——先确认这个前提没变。
+    const bare = movementsFor({ registry, version: MC_VERSION });
+    expect(bare.allow1by1towers).toBe(true); // 开关本来就是开的
+
+    const bot = {
+      registry,
+      version: MC_VERSION,
+      inventory: {
+        items: () => [
+          { name: 'netherrack' },
+          { name: 'cobbled_deepslate' },
+          { name: 'torch' },   // 放不成整块
+          { name: 'coal' },    // 根本不是方块
+        ],
+      },
+    };
+    const m = movementsFor(bot);
+    expect(m.allow1by1towers).toBe(true);
+    // ⚠️ 垫脚表里必须是**物品 id**（pathfinder 拿 item.type 比），不是方块 id：
+    // 下界岩 方块 id 255 / 物品 id 324，填错了等于一条都匹配不上。
+    expect(m.scafoldingBlocks).toContain(registry.itemsByName.netherrack.id);
+    expect(m.scafoldingBlocks).toContain(registry.itemsByName.cobbled_deepslate.id);
+    expect(m.scafoldingBlocks).not.toContain(registry.blocksByName.netherrack.id);
+    // 库自己的默认值（dirt/cobblestone 的物品 id）也还在。
+    expect(m.scafoldingBlocks).toContain(registry.itemsByName.dirt.id);
+    // 放不成整块的（火把）不能当垫脚
+    expect(m.scafoldingBlocks).not.toContain(registry.itemsByName.torch.id);
+    // 每个垫脚 id 都必须对应一个"能整块放下"的方块
+    const fullBlockItemIds = new Set(
+      Object.values(registry.blocksByName as Record<string, { id: number; boundingBox?: string }>)
+        .filter((b) => b.boundingBox === 'block')
+        .map((b) => registry.itemsByName[Object.keys(registry.blocksByName).find((n) => registry.blocksByName[n].id === b.id) as string]?.id)
+        .filter((id): id is number => typeof id === 'number'),
+    );
+    for (const id of m.scafoldingBlocks) {
+      expect(fullBlockItemIds.has(id), `垫脚 id ${id} 必须是能整块放下的方块物品`).toBe(true);
+    }
+  });
+
+  it('背包读不到也不崩（沿用库的默认垫脚方块）', () => {
+    const registry: any = minecraftData(MC_VERSION);
+    expect(() => movementsFor({ registry, version: MC_VERSION })).not.toThrow();
+  });
+
+  it('徒手软方块在寻路里算得出代价（不会因为"没工具"被当成走不通）', () => {
+    const registry: any = minecraftData(MC_VERSION);
+    const bot: any = {
+      registry,
+      version: MC_VERSION,
+      inventory: { items: () => [] },   // 空手
+      entity: { effects: {}, position: { x: 0, y: 64, z: 0 } },
+      blockAt: () => null,
+      pathfinder: { bestHarvestTool: () => null },
+    };
+    const m = movementsFor(bot);
+    expect(m.canDig).toBe(true);
+    // 下界岩：徒手 digTime 2 秒（真值，node 里核过），代价必须是**有限值**。
+    const netherrack = {
+      name: 'netherrack',
+      type: registry.blocksByName.netherrack.id,
+      position: { x: 0, y: 64, z: 1 },
+      safe: false,
+      physical: true,
+      openable: false,
+      digTime: (tool: unknown) => (tool == null ? 2000 : 400),
+    };
+    const toBreak: unknown[] = [];
+    const cost = m.safeOrBreak(netherrack, toBreak);
+    expect(Number.isFinite(cost)).toBe(true);
+    expect(toBreak).toHaveLength(1);   // 记进了"要挖的方块"，说明这条路真的会挖
+  });
+});

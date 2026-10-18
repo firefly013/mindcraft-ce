@@ -99,6 +99,60 @@ export function applySafety(bot: unknown, movements: unknown): void {
 }
 
 /**
+ * 1x1 搭塔的垫脚方块：**从背包里实际有的整方块来**。
+ *
+ * 库默认只认 `dirt` + `cobblestone`（`node_modules/mineflayer-pathfinder/lib/movements.js:90-92`），
+ * 而我们的机器人在下界手上是 **netherrack / cobbled_deepslate** —— `movements.js:576`
+ * 在 `remainingBlocks === 0` 时直接拒绝 tower move，于是"允许搭方块"
+ * （`allow1by1towers` 默认就是 true）变成一句空话：背包里 400 块也搭不起来。
+ * 用户 2026-10-18 的原话就是"默认应该允许挖、允许搭才比较合理吧"。
+ *
+ * 这里把背包里每个**能整块放下**的方块 id 补进 `scafoldingBlocks`。
+ * 注意：这只解除"硬拒绝"，**没有**降低放方块的代价——`placeCost` 说了算，
+ * 搭塔该贵还是贵。
+ */
+export function applyScaffoldingBlocks(bot: unknown, movements: unknown): void {
+  const m = movements as { scafoldingBlocks?: unknown } | null;
+  if (m == null) return;
+  const scaffold: number[] = Array.isArray(m.scafoldingBlocks)
+    ? [...(m.scafoldingBlocks as number[])]
+    : [];
+  const b = bot as
+    | {
+        registry?: {
+          blocksByName?: Record<string, { id?: unknown; boundingBox?: unknown }>;
+          itemsByName?: Record<string, { id?: unknown }>;
+        };
+        inventory?: { items?: () => Array<{ name?: unknown }> };
+      }
+    | null
+    | undefined;
+  let items: Array<{ name?: unknown }> = [];
+  try {
+    items = b?.inventory?.items?.() ?? [];
+  } catch {
+    items = [];
+  }
+  const blocks = b?.registry?.blocksByName ?? {};
+  const itemDefs = b?.registry?.itemsByName ?? {};
+  for (const item of items) {
+    const name = typeof item?.name === 'string' ? item.name : null;
+    if (name == null) continue;
+    const def = blocks[name];
+    if (def == null) continue;                       // 不是方块（煤/铁锭/羽毛…）
+    if (def.boundingBox != null && def.boundingBox !== 'block') continue;  // 火把/铁轨放不成整块
+    // ⚠️ **必须是物品 id，不是方块 id。** pathfinder 的塔移动拿背包物品的
+    // `item.type`（物品注册表 id）和 `scafoldingBlocks` 比（movements.js:576），
+    // 而库自己的默认值也是 `registry.itemsByName.dirt.id`。1.13+ 之后方块 id 和
+    // 物品 id **不是一回事**：泥土 方块 9 / 物品 28，下界岩 方块 255 / 物品 324。
+    // 用方块 id 填进去等于一条也匹配不上——"允许搭塔"还是句空话。
+    const id = itemDefs[name]?.id ?? def.id;
+    if (typeof id === 'number' && !scaffold.includes(id)) scaffold.push(id);
+  }
+  m.scafoldingBlocks = scaffold;
+}
+
+/**
  * 拿一套配好安全基线的 Movements。
  *
  * **所有**需要寻路的地方都必须走这里。想要破坏性寻路就在返回值上改 `digCost`
@@ -107,7 +161,15 @@ export function applySafety(bot: unknown, movements: unknown): void {
 export function movementsFor(bot: unknown): any {
   const m = new (pf as any).Movements(bot);
   applySafety(bot, m);
+  applyScaffoldingBlocks(bot, m);
   return m;
 }
 
-export default { MAX_DROP_DOWN, deepWaterAllowed, applyWaterPolicy, applySafety, movementsFor };
+export default {
+  MAX_DROP_DOWN,
+  deepWaterAllowed,
+  applyWaterPolicy,
+  applySafety,
+  applyScaffoldingBlocks,
+  movementsFor,
+};

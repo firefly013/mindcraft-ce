@@ -22,7 +22,7 @@ import {
     type WaterClass,
 } from "../safety/water_safety.js";
 import { teleportRefusal } from "../safety/dangerous_blocks.js";
-import { movementsFor } from "../safety/movements.js";
+import { applyScaffoldingBlocks, movementsFor, MAX_DROP_DOWN } from "../safety/movements.js";
 import { deepWaterAllowed } from "../safety/permits.js";
 import { assessStandingSpot, chooseSafeFleeTarget } from "../safety/flee.js";
 import { safeguards } from "../safety/safeguards.js";
@@ -1253,6 +1253,8 @@ export async function pickupNearbyItems(bot: any): Promise<boolean> {
     let pickedUp = 0;
     while (nearestItem) {
         const movements: any = movementsFor(bot);
+        // **局部关闭，不是全局默认**（`Movements` 出厂 `canDig = true`）：
+        // 走过去捡一件掉落物，不该顺手把地形拆了。远距离导航不走这条路径。
         movements.canDig = false;
         bot.pathfinder.setMovements(movements);
         await goToGoal(bot, new (pf as any).goals.GoalFollow(nearestItem, 1));
@@ -1558,6 +1560,8 @@ export async function breakBlockAt(bot: any, x: number, y: number, z: number): P
         if (bot.entity.position.distanceTo(block.position) > 4.5) {
             const pos: any = block.position;
             const movements: any = movementsFor(bot);
+            // **局部关闭，不是全局默认**（出厂 `canPlaceOn = true`、`allow1by1towers = true`）：
+            // 这一步只是"凑到方块旁边再挖它"，不该顺手搭塔/在别人方块上放东西。
             movements.canPlaceOn = false;
             movements.allow1by1towers = false;
             bot.pathfinder.setMovements(movements);
@@ -2261,6 +2265,256 @@ export async function giveToPlayer(bot: any, itemType: string, username: string,
  */
 export const SEGMENT_THRESHOLD = 48;
 
+/**
+ * 水平超过这个距离就**自己分段**（每段一次独立的 A*，搜索空间有界）。
+ *
+ * 用户真机抱怨（2026-10-18）："这个寻路器经常失败，不是找不到可行路径，就是
+ * 提示什么路径太长之类的。" 日志侧同一晚：`Took to long to decide path to goal`
+ * ×70、`NoPath` ×29、`Path was stopped before it could be completed` ×21。
+ * 根因不是"没路"，是**把上百格的目标一次性丢给 A***：下界地形碎、要挖要绕，
+ * 无界搜索直接把 20 秒算路预算烧光。分段后每一段都算得完，而且走一段就**真的**
+ * 前进了一段（部分进度是实打实的）。
+ */
+export const PATH_CHUNK_THRESHOLD = 56;
+
+/** 每段水平长度上限（格）。32 格在下界是 A* 能稳定算完的量级。 */
+export const PATH_CHUNK_LENGTH = 32;
+
+/**
+ * A* 的搜索半径（代价上限，相对启发式的最多额外代价）。
+ *
+ * `mineflayer-pathfinder` 默认 `-1`（无界），正是"烧光预算"的直接原因。
+ * 180 够走 32 格的路 + 绕几个弯 / 挖几格软方块（徒手挖一格下界岩 laborCost≈35），
+ * 又不可能无限展开。
+ */
+export const PATH_SEARCH_RADIUS = 180;
+
+export interface PathLeg {
+    x: number;
+    y: number;
+    z: number;
+}
+
+/**
+ * 把长目标拆成有界的腿（纯函数，便于单测）。
+ *
+ * - 水平 ≤ `threshold`：单腿，直接到目标（短距离不值得分段）。
+ * - 否则：`ceil(水平距离 / chunkLength)` 条腿，每腿 ≤ chunkLength，
+ *   高度按比例插值（和原来的"中途点"口径一致），**最后一条精确落在目标上**。
+ */
+export function planPathLegs(
+    from: { x: number; y: number; z: number } | null | undefined,
+    to: { x: number; y: number; z: number },
+    chunkLength: number = PATH_CHUNK_LENGTH,
+    threshold: number = PATH_CHUNK_THRESHOLD,
+): PathLeg[] {
+    const fx = Number(from?.x ?? 0);
+    const fy = Number(from?.y ?? 0);
+    const fz = Number(from?.z ?? 0);
+    const dx = to.x - fx;
+    const dy = to.y - fy;
+    const dz = to.z - fz;
+    const horizontal = Math.hypot(dx, dz);
+    if (!Number.isFinite(horizontal) || horizontal <= threshold || chunkLength <= 0) {
+        return [{ x: to.x, y: to.y, z: to.z }];
+    }
+    const legs = Math.max(2, Math.ceil(horizontal / chunkLength));
+    const out: PathLeg[] = [];
+    for (let i = 1; i <= legs; i++) {
+        if (i === legs) {
+            out.push({ x: to.x, y: to.y, z: to.z });
+            continue;
+        }
+        const t = i / legs;
+        out.push({ x: fx + dx * t, y: fy + dy * t, z: fz + dz * t });
+    }
+    return out;
+}
+
+/** 垂直方向的横向偏移航点（±distance 格）。纯函数。 */
+export function lateralOffsetWaypoint(
+    from: { x: number; y: number; z: number } | null | undefined,
+    to: PathLeg,
+    side: 1 | -1,
+    distance: number = 3,
+): PathLeg {
+    const fx = Number(from?.x ?? to.x);
+    const fz = Number(from?.z ?? to.z);
+    const dx = to.x - fx;
+    const dz = to.z - fz;
+    const len = Math.hypot(dx, dz);
+    if (!Number.isFinite(len) || len < 1e-6) return { x: to.x, y: to.y, z: to.z };
+    return {
+        x: to.x + (-dz / len) * distance * side,
+        y: to.y,
+        z: to.z + (dx / len) * distance * side,
+    };
+}
+
+export interface PathLegAttemptPlan {
+    /** 第几档（0 起）：goToGoal 据此决定算路预算与放宽开关。 */
+    attempt: number;
+    /** 0 = 不偏移；+1 / -1 = 垂直方向两侧各偏 3 格。 */
+    side: 0 | 1 | -1;
+    /** 这一档在干什么（进回执）。 */
+    what: string;
+}
+
+/**
+ * 每段失败后的**重试阶梯**（顺序即执行顺序，第一档成功就停）。
+ *
+ * 真机失败从来不是"一种失败"：算路预算不够、不会搭塔、挖不动、目标那一列
+ * 恰好不可达。所以按代价从低到高逐档加码，而不是原样重试。
+ */
+export const PATH_LEG_LADDER: readonly PathLegAttemptPlan[] = Object.freeze([
+    { attempt: 0, side: 0, what: '基准（20 秒算路）' },
+    { attempt: 1, side: 0, what: '延长算路到 30 秒' },
+    { attempt: 2, side: 0, what: '允许用背包方块 1x1 搭塔' },
+    { attempt: 3, side: 0, what: '允许挖穿挡路的软方块（工具耐久够用时）' },
+    { attempt: 4, side: 1, what: '横向偏移 +3 格' },
+    { attempt: 4, side: -1, what: '横向偏移 -3 格' },
+]);
+
+/**
+ * 落差限制能不能条件放宽（2 → 3 格）？
+ *
+ * `MAX_DROP_DOWN=2` 是保命值（真机被带着直落 12~13 格摔死过），**不许默默改掉**。
+ * 但在下界崖壁/沟壑地形里它确实会吃掉大量下坡动作。只有同时满足
+ * "血够多（≥16）+ 脚下 4 格内没有岩浆"才放宽，并在回执里说明。
+ */
+export function canRelaxDropDown(bot: any): boolean {
+    const health = typeof bot?.health === 'number' ? bot.health : 20;
+    if (!(health >= 16)) return false;
+    const feet = bot?.entity?.position;
+    if (feet == null) return false;
+    const fx = Math.floor(Number(feet.x));
+    const fy = Math.floor(Number(feet.y));
+    const fz = Math.floor(Number(feet.z));
+    for (let dy = -1; dy >= -4; dy--) {
+        let block: { name?: unknown } | null = null;
+        try {
+            block = bot?.blockAt?.(new Vec3(fx, fy + dy, fz)) ?? null;
+        } catch {
+            block = null;
+        }
+        const name = typeof block?.name === 'string' ? block.name : '';
+        if (name.includes('lava')) return false;
+    }
+    return true;
+}
+
+/** 有没有能挖的工具（镐/斧/锹/锄）：诊断"挖不动"用。 */
+export function hasDigTool(bot: any): boolean {
+    try {
+        const items = (bot?.inventory?.items?.() ?? []) as Array<{ name?: unknown }>;
+        return items.some((i) => typeof i?.name === 'string' && /_(pickaxe|axe|shovel|hoe)$/.test(i.name));
+    } catch {
+        return false;
+    }
+}
+
+/**
+ * 前方有没有"超过安全上限"的落差（诊断用，不改决策）。
+ *
+ * 沿目标方向看最多 6 格：找到每列第一个实心方块，落差 = 脚高度 - 落点高度。
+ * 大于 `maxDropDown` 就说明 `MAX_DROP_DOWN` 很可能是这次失败的原因之一。
+ */
+export function findDropAhead(
+    blockAt: (x: number, y: number, z: number) => { name?: unknown } | null,
+    from: { x: number; y: number; z: number },
+    to: PathLeg,
+    maxDropDown: number = MAX_DROP_DOWN,
+): number | null {
+    const dx = to.x - from.x;
+    const dz = to.z - from.z;
+    const len = Math.hypot(dx, dz);
+    if (!Number.isFinite(len) || len < 1e-6) return null;
+    const ux = dx / len;
+    const uz = dz / len;
+    const fy = Math.floor(Number(from.y));
+    for (let step = 1; step <= 6; step++) {
+        const x = Math.floor(from.x + ux * step);
+        const z = Math.floor(from.z + uz * step);
+        for (let dy = 0; dy >= -6; dy--) {
+            let block: { name?: unknown } | null = null;
+            try {
+                block = blockAt(x, fy + dy, z);
+            } catch {
+                block = null;
+            }
+            const name = typeof block?.name === 'string' ? block.name : '';
+            const solid = name !== '' && !['air', 'cave_air', 'void_air', 'water', 'lava'].includes(name);
+            if (solid) {
+                const drop = -dy;
+                if (drop > maxDropDown && drop <= 6) return drop;
+                break;
+            }
+        }
+    }
+    return null;
+}
+
+export interface PathFailureDiagnosis {
+    kind: 'probe' | 'timeout' | 'drop' | 'nodig' | 'unknown';
+    reason: string;
+    next: string;
+}
+
+/**
+ * 把一次寻路失败翻译成模型能行动的**一类**原因。
+ *
+ * 以前所有失败都长一个样（"Took to long to decide path to goal!. 你在…物理正常。"），
+ * 模型只能反复换招。四类分别给一句具体的下一步。
+ */
+export function classifyPathFailure(input: {
+    message?: string | null;
+    probeFailed?: boolean;
+    dropAhead?: number | null;
+    noTool?: boolean;
+}): PathFailureDiagnosis {
+    const message = input.message ?? '';
+    if (/Took to (o)?(long|longer)|timed? ?out|Execution timed out/i.test(message)) {
+        return {
+            kind: 'timeout',
+            reason: `整段算路超时（A* 把算路预算用完了，通常因为目标太远或地形太碎）`,
+            next: '把目标拆成更短的中间点（≤32 格）再走一次，别一次给上百格',
+        };
+    }
+    if (input.dropAhead != null && input.dropAhead > 0) {
+        return {
+            kind: 'drop',
+            reason: `落差限制挡住了（前方有 ${input.dropAhead} 格落差，安全上限是 ${MAX_DROP_DOWN} 格）`,
+            next: '往侧面挪 4~8 格找缓坡，或先 placeBlock 垫一层再往下走',
+        };
+    }
+    if (input.noTool === true) {
+        return {
+            kind: 'nodig',
+            reason: '挡路的方块手上没工具挖（徒手只挖得动下界岩/沙/沙砾这类软方块）',
+            next: '先补一把镐（背包里有就 equip 到手上），或者绕开这段地形',
+        };
+    }
+    if (input.probeFailed === true) {
+        return {
+            kind: 'probe',
+            reason: '快速探测（1 秒预算）没算出路径——**这不代表走不到**',
+            next: '会按完整算路继续走；还失败就把目标拆成 ≤32 格的中间点',
+        };
+    }
+    if (/No path/i.test(message)) {
+        return {
+            kind: 'unknown',
+            reason: 'A* 没找到可行路径（可能是夹角、封闭地形，或挖不动的方块挡着）',
+            next: '换一个中间点、往侧面挪 2~4 格再试，或自己 mineBlock 开一条路',
+        };
+    }
+    return {
+        kind: 'unknown',
+        reason: message === '' ? '寻路失败（没有具体错误信息）' : `寻路失败：${message}`,
+        next: '先把目标拆小（≤32 格的中途点），或换一个中间点再试',
+    };
+}
+
 /** 可中断寻路的轮询间隔（毫秒）。 */
 export const PATHFIND_INTERRUPT_POLL_MS = 200;
 
@@ -2355,7 +2609,29 @@ export function runPathfindingInterruptibly(bot: any, goal: any): Promise<boolea
     });
 }
 
-export async function goToGoal(bot: any, goal: any, _persist?: boolean): Promise<boolean> {
+export interface PathfindGoalOptions {
+    /** 重试阶梯第几档（0 起）：决定算路预算与放宽开关。 */
+    attempt?: number;
+    /** 条件放宽落差（血量 ≥16 + 脚下 4 格内无岩浆）。 */
+    relaxDropDown?: boolean;
+    /** 回执前缀（"第 2/4 段"）：分段/分档时让模型认得出这是哪一次。 */
+    label?: string;
+}
+
+/** 一次寻路尝试的结果（阶梯需要知道"是探测失败还是算路失败"）。 */
+export interface PathfindOutcome {
+    arrived: boolean;
+    /** 1 秒快速探测有没有失败（失败 ≠ 走不到，但回执要分开说）。 */
+    probeFailed: boolean;
+    /** 有具体错误信息时带上（超时/NoPath），没有就是 null。 */
+    message: string | null;
+}
+
+export async function goToGoal(bot: any, goal: any, _persist?: boolean, options: PathfindGoalOptions = {}): Promise<boolean> {
+    return (await goToGoalDetailed(bot, goal, options)).arrived;
+}
+
+export async function goToGoalDetailed(bot: any, goal: any, options: PathfindGoalOptions = {}): Promise<PathfindOutcome> {
     /**
      * Navigate to the given goal. Use doors and attempt minimally destructive movements.
      * @param {MinecraftBot} bot, reference to the minecraft bot.
@@ -2372,6 +2648,8 @@ export async function goToGoal(bot: any, goal: any, _persist?: boolean): Promise
     // 只有给了明确坐标的 goal（GoalNear / GoalBlock / GoalXZ 那一类）才查得动；
     // GoalFollow 之类追实体的没有坐标，交给下面第二道闸（allowWater）。
     const g = goal as { x?: unknown; y?: unknown; z?: unknown } | null | undefined;
+    const label = options.label != null && options.label !== '' ? options.label + '：' : '';
+    const attempt = Number.isFinite(Number(options.attempt)) ? Number(options.attempt) : 0;
     const gx = g != null ? Number(g.x) : NaN;
     const gy = g != null ? Number(g.y) : NaN;
     const gz = g != null ? Number(g.z) : NaN;
@@ -2379,15 +2657,25 @@ export async function goToGoal(bot: any, goal: any, _persist?: boolean): Promise
         const refusal = dangerousWaterRefusal(bot, gx, gy, gz, '走到');
         if (refusal != null) {
             log(bot, refusal);
-            return false;
+            return { arrived: false, probeFailed: false, message: refusal };
         }
     }
 
     const nonDestructiveMovements: any = movementsFor(bot);
     const dontBreakBlocks: string[] = ['glass', 'glass_pane'];
     for (const block of dontBreakBlocks) {
-        // 某些 Movements 版本/替身没有 blocksCantBreak，audit .add 时把这条兜住。
-        nonDestructiveMovements.blocksCantBreak?.add?.((mc as any).getBlockId(block));
+        // 某些 Movements 版本/替身没有 blocksCantBreak，add 时把这条兜住。
+        //
+        // **mcdata 还没初始化时 `getBlockId` 会抛**（没连服务器时 `mcdata` 是 null，
+        // 报的是 `Cannot read properties of null (reading 'blocksByName')`）。
+        // 这只影响"少一条不挖玻璃的偏好"，**不该让整次寻路失败**——真机重启后
+        // 第一趟寻路正好会踩到，测试里也一样。
+        try {
+            const id = (mc as any)?.getBlockId?.(block);
+            if (typeof id === 'number') nonDestructiveMovements.blocksCantBreak?.add?.(id);
+        } catch {
+            // 拿不到就算了：玻璃照样能挖，只是没有"优先不挖"这条偏好。
+        }
     }
     nonDestructiveMovements.placeCost = 2;
     nonDestructiveMovements.digCost = 10;
@@ -2405,10 +2693,16 @@ export async function goToGoal(bot: any, goal: any, _persist?: boolean): Promise
     // 爬出来、绕过大片水域）根本算不完，就直接报 'Took to long to decide path to goal!'
     // ——模型真机报的"goToCoordinates 完全不动"就是这个。物理诊断加上之后一眼就看到了。
     try {
-        bot.pathfinder.thinkTimeout = 20_000;
+        // 阶梯第 2 档起把算路预算抬到 30 秒（默认 20 秒）。
+        bot.pathfinder.thinkTimeout = attempt >= 1 ? 30_000 : 20_000;
         bot.pathfinder.tickTimeout = 80;
+        // **给 A* 一个搜索半径。** 默认 `-1`（无界）就是"烧光算路预算"的直接原因：
+        // 上百格的下界地形一展开就是天文数字，20 秒也不够，于是报
+        // `Took to long to decide path to goal`。180 够一段 32 格的路绕弯/挖几格，
+        // 又不可能无限展开（见 PATH_SEARCH_RADIUS）。
+        bot.pathfinder.searchRadius = PATH_SEARCH_RADIUS;
     } catch {
-        // 老版本没有这两个字段就算了。
+        // 老版本没有这几个字段就算了。
     }
     // **低耐久时别拿最后一点耐久去挖路。** 真机（2026-10-18 12:47，overnight_b）：
     // goToCoordinates 的破坏性寻路一分钟烧光木镐 60 耐久（40+ 格），全程没有
@@ -2423,29 +2717,66 @@ export async function goToGoal(bot: any, goal: any, _persist?: boolean): Promise
 
     let final_movements: any = digPolicy.allowDestructiveProbe ? destructiveMovements : nonDestructiveMovements;
 
+    // ── 重试阶梯的加码开关（attempt ≥ 2）────────────────────────────
+    // 搭塔默认已开（`allow1by1towers` 出厂就是 true），垫脚方块也已在
+    // `movementsFor()` 里按背包实际物品填好（见 `applyScaffoldingBlocks`：
+    // 库默认只认 dirt/cobblestone，下界手上是 netherrack/深板岩，等于搭不起来）。
+    // 这一档只是**再确认一次**并说明，让模型知道它现在能搭。
+    if (attempt >= 2) {
+        for (const m of [nonDestructiveMovements, destructiveMovements]) {
+            m.allow1by1towers = true;
+            applyScaffoldingBlocks(bot, m);
+        }
+        log(bot, label + '这一档确认允许 1x1 搭塔（垫脚方块来自背包里实际有的整方块）。');
+    }
+    // 第 4 档：允许挖穿挡路的软方块（徒手也能挖，只要不是"真挖不动"）。
+    // 工具耐久低时**不降 digCost**——那正是 E 要防的"拿最后一点耐久挖路"。
+    if (attempt >= 3) {
+        if (digPolicy.note == null) {
+            for (const m of [nonDestructiveMovements, destructiveMovements]) {
+                m.canDig = true;
+                m.digCost = Math.min(m.digCost, 3);
+            }
+            nonDestructiveMovements.blocksCantBreak?.clear?.();
+            destructiveMovements.blocksCantBreak?.clear?.();
+            log(bot, label + '这一档允许挖穿挡路的方块（含徒手挖软方块；不需要掉落）。');
+        } else {
+            log(bot, label + '工具耐久不够，这一档不放开挖掘：' + digPolicy.note);
+        }
+    }
+    // 条件放宽落差：只在血够多、脚下 4 格内无岩浆时 +1 格，并说明。
+    if (options.relaxDropDown === true && canRelaxDropDown(bot)) {
+        for (const m of [nonDestructiveMovements, destructiveMovements]) {
+            m.maxDropDown = MAX_DROP_DOWN + 1;
+        }
+        log(bot, label + `这一档把落差上限从 ${MAX_DROP_DOWN} 格放宽到 ${MAX_DROP_DOWN + 1} 格（血量 ≥16、脚下无岩浆）。`);
+    }
+
+    let probeFailed = false;
     const pathfind_timeout = 1000;
     if (await bot.pathfinder.getPathTo(nonDestructiveMovements, goal, pathfind_timeout).status === 'success') {
         final_movements = nonDestructiveMovements;
-        log(bot, `Found non-destructive path.`);
+        log(bot, label + `探到一条不挖方块的路线。`);
     }
     else if (digPolicy.allowDestructiveProbe
         && await bot.pathfinder.getPathTo(destructiveMovements, goal, pathfind_timeout).status === 'success') {
-        log(bot, `Found destructive path.`);
+        log(bot, label + `探到一条需要挖方块的路线。`);
     }
     else if (!digPolicy.allowDestructiveProbe) {
         log(
             bot,
-            '低耐久寻路：快速探测没找到完全不挖路的路线；只在绕不过去时才挖（每格都在烧耐久）。' +
+            label + '低耐久寻路：快速探测没找到完全不挖路的路线；只在绕不过去时才挖（每格都在烧耐久）。' +
                 '要保住工具就先换/补一把，或者改去更近的目标。',
         );
     }
     else {
-        // **这句话以前很误导**：模型读到 "Path not found" 就以为走不到，开始换招。
-        // 其实这只是 1 秒的快速探测没通过——长路径本来就算不完，接下来**仍然会走**
-        // （goto 里有 20 秒的完整算路 + 边走边挖）。把"仍会走"放在句首，别让它误判。
+        probeFailed = true;
+        // **探测失败 ≠ 走不到。** 模型读到 "Path not found" 就以为没路、开始换招；
+        // 这里把"仍然会走"放在最前面，并标明这是 1 秒探测的结论。
         log(
             bot,
-            `快速探测（1 秒预算）没算出完整路径——这不代表走不到；现在按破坏性寻路实际走（完整算路 + 需要时挖开挡路的方块）。`,
+            label + `快速探测（1 秒预算）没算出完整路径——**这不代表走不到**；` +
+                `接下来按完整算路实际走（${attempt >= 1 ? 30 : 20} 秒预算 + 需要时挖开挡路的方块）。`,
         );
     }
 
@@ -2455,7 +2786,7 @@ export async function goToGoal(bot: any, goal: any, _persist?: boolean): Promise
     try {
         const arrived = await runPathfindingInterruptibly(bot, goal);
         clearInterval(doorCheckInterval);
-        return arrived;
+        return { arrived, probeFailed, message: null };
     } catch (err: unknown) {
         clearInterval(doorCheckInterval);
         // we need to catch so we can clean up the door check interval, then rethrow the error
@@ -2656,11 +2987,48 @@ export async function goToPosition(bot: any, x: number | null, y: number | null,
     const progressInterval: ReturnType<typeof setInterval> = setInterval(checkDigProgress, 1000);
 
     try {
-        await goToGoal(bot, new (pf as any).goals.GoalNear(x, y, z, min_distance));
-        clearInterval(progressInterval);
-        // 中断优先于距离够近就算到了：Stop/急停之后不能报成功。
+        const here: any = bot?.entity?.position;
+        const legs = planPathLegs(here, { x, y, z });
+        if (legs.length > 1) {
+            const horizontal = Math.round(Math.hypot((x as number) - here.x, (z as number) - here.z));
+            log(
+                bot,
+                `目标 ${horizontal} 格（水平），一次 A* 容易算不完——**分 ${legs.length} 段走**，` +
+                    `每段 ≤ ${PATH_CHUNK_LENGTH} 格；先到 (${legs[0].x.toFixed(0)},${legs[0].y.toFixed(0)},${legs[0].z.toFixed(0)})。`,
+            );
+        }
+        for (let i = 0; i < legs.length; i++) {
+            const leg = legs[i] as PathLeg;
+            const lastLeg = i === legs.length - 1;
+            const label = legs.length > 1 ? `第 ${i + 1}/${legs.length} 段` : undefined;
+            // 中间段只要求"进到那一格附近"（1 格），最后一段才用调用方的 min_distance。
+            const outcome = await navigateLegWithLadder(bot, leg, lastLeg ? min_distance : 1, label);
+            if (outcome.ok) {
+                if (legs.length > 1 && !lastLeg) {
+                    const now: any = bot?.entity?.position;
+                    const left = Math.round(Math.hypot((x as number) - now.x, (z as number) - now.z));
+                    log(bot, `${label} 到了，还剩约 ${left} 格。`);
+                }
+                continue;
+            }
+            if (bot.interrupt_code) {
+                log(bot, `走到 (${x},${y},${z}) 的路上被中断（Stop/急停，Navigation interrupted）——没有到达。`);
+                return false;
+            }
+            log(
+                bot,
+                `走不到 (${x},${y},${z})：${label != null ? label + ' ' : ''}试了 ${PATH_LEG_LADDER.length} 档都没走通。` +
+                    outcome.reason +
+                    describeStuck(bot) +
+                    '\n可行的做法：① 换一个中间点（往侧面挪 4~8 格再试，目标那一列常常恰好不可达）；' +
+                    '② 自己挖——mineBlock / digDown 开一条通道；' +
+                    '③ 若你在**地上**而目标在**地下**（或反过来），先找洞口/竖井下去，别指望平地寻路穿越。',
+            );
+            return false;
+        }
+        // 中断优先于"距离够近就算到了"：Stop/急停之后不能报成功。
         if (bot.interrupt_code) {
-            log(bot, `Navigation interrupted before reaching (${x},${y},${z}).`);
+            log(bot, `走到 (${x},${y},${z}) 的路上被中断（Stop/急停，Navigation interrupted）——没有到达。`);
             return false;
         }
         const distance: number = bot.entity.position.distanceTo(new (Vec3 as any)(x, y, z));
@@ -2680,52 +3048,102 @@ export async function goToPosition(bot: any, x: number | null, y: number | null,
             return false;
         }
     } catch (err: unknown) {
-        clearInterval(progressInterval);
         const msg: string = err instanceof Error ? err.message : String(err);
-        // **NoPath 要给可执行的建议。** "No path to the goal!" 是寻路器的内部话，
-        // 模型读到只知道"失败"，不知道该怎么办——它在地下矿洞之间反复撞的就是
-        // 这个：两个洞隔着厚厚的石头，A* 要挖穿整段地形，20 秒内算不完。
-        // 它真正需要的下一步是：分段走（先到中间点）、或干脆自己挖通道。
-        if (/No path/i.test(msg)) {
-            const here: any = bot?.entity?.position;
-            const straight = Math.round(here?.distanceTo(new (Vec3 as any)(x, y, z)) ?? -1);
-            // **远距离先自动分段一次。** 跨矿洞（几十上百格、中间全是实心石头）的
-            // A* 要把"挖穿整段地形"的分支全展开，20 秒也算不完——这不是"没路"，
-            // 是**一次算不完**。近距离（几十格内）它算得动，而且会边走边挖。
-            // 所以：先贪心走到"朝目标方向的一段短途"，到近处再算剩下那段。
-            // 只分一次，避免中点本身不可达时来回递归。
-            if (here != null && straight > SEGMENT_THRESHOLD) {
-                const t = Math.min(24, straight * 0.5) / straight;
-                const mid = {
-                    x: Math.round(here.x + ((x as number) - here.x) * t),
-                    y: Math.round(here.y + ((y as number) - here.y) * t),
-                    z: Math.round(here.z + ((z as number) - here.z) * t),
-                };
-                log(
-                    bot,
-                    `${straight} 格远，一步算不出完整路径——分段走：先到 (${mid.x}, ${mid.y}, ${mid.z})，` +
-                        `到那儿再算剩下的一段。`,
-                );
-                const reached = await goToPosition(bot, mid.x, mid.y, mid.z, 1);
-                if (reached) {
-                    log(bot, `已到中途点，继续走剩下的路。`);
-                    return await goToPosition(bot, x as number, y as number, z as number, min_distance);
-                }
-                log(bot, `中途点也走不到，不再继续分段。`);
-            }
-            log(
-                bot,
-                `走不到 (${x}, ${y}, ${z})：寻路器算不出一条完整路径` +
-                    `（地下隔着厚地形时，把"挖过去"全考虑进去的搜索量会爆炸）。${describeStuck(bot)}\n` +
-                    `可行的做法：① 自己挖——目标在隔壁矿洞就用 digDown / mineBlock 开一条通道；` +
-                    `② 若你在**地上**而目标在**地下**（或反过来），先找洞口/竖井下去，别指望平地寻路穿越；` +
-                    `③ 多试几个中间点（往别的方向绕一段往往就能算出来）。`,
-            );
-            return false;
-        }
-        log(bot, `Pathfinding stopped: ${msg}. ${describeStuck(bot)}`);
+        // **每一类失败都给一句能照做的下一步**（不再是清一色 "Pathfinding stopped"）。
+        const diag = classifyPathFailure({
+            message: msg,
+            dropAhead: readDropAhead(bot, x as number, y as number, z as number),
+            noTool: !hasDigTool(bot),
+        });
+        log(
+            bot,
+            `走不到 (${x}, ${y}, ${z})：${diag.reason}。下一步：${diag.next}。${describeStuck(bot)}`,
+        );
         return false;
+    } finally {
+        // 分段/阶梯都会走很多次，间隔一定得在所有出口上关掉。
+        clearInterval(progressInterval);
     }
+}
+
+/** 前方落差（诊断用）：读不到就返回 null。 */
+function readDropAhead(bot: any, x: number, y: number, z: number): number | null {
+    const here: any = bot?.entity?.position;
+    if (here == null) return null;
+    return findDropAhead(
+        (bx, by, bz) => {
+            try {
+                return bot.blockAt?.(new Vec3(bx, by, bz)) ?? null;
+            } catch {
+                return null;
+            }
+        },
+        { x: here.x, y: here.y, z: here.z },
+        { x, y, z },
+    );
+}
+
+/**
+ * 走**一段**，失败就按 `PATH_LEG_LADDER` 逐档加码（第一档成功即停）。
+ *
+ * 为什么不是"原样重试"：真机失败从来不是一种失败——算路预算不够、不会搭塔、
+ * 挖不动、目标那一列恰好不可达。每一档换一个具体旋钮，最后两档换位置。
+ */
+async function navigateLegWithLadder(
+    bot: any,
+    leg: PathLeg,
+    minDistance: number,
+    label?: string,
+): Promise<{ ok: boolean; reason: string }> {
+    let reason = '寻路失败（没有具体错误信息）';
+    for (const step of PATH_LEG_LADDER) {
+        if (bot?.interrupt_code) return { ok: false, reason: '被 Stop/保命打断，停止重试。' };
+        const here: any = bot?.entity?.position;
+        const waypoint: PathLeg =
+            step.side === 0 ? leg : lateralOffsetWaypoint(here, leg, step.side as 1 | -1);
+        const goal = new (pf as any).goals.GoalNear(waypoint.x, waypoint.y, waypoint.z, minDistance);
+        const prefix = label != null ? label + '·第 ' + (step.attempt + 1) + ' 档' : '第 ' + (step.attempt + 1) + ' 档';
+        let outcome: PathfindOutcome;
+        try {
+            outcome = await goToGoalDetailed(bot, goal, {
+                attempt: step.attempt,
+                relaxDropDown: step.attempt >= 3,
+                label: prefix + '（' + step.what + '）',
+            });
+        } catch (err: unknown) {
+            const msg = err instanceof Error ? err.message : String(err);
+            reason = diagnosisText(bot, msg, waypoint);
+            if (bot?.interrupt_code) return { ok: false, reason: '被 Stop/保命打断，停止重试。' };
+            log(bot, prefix + '（' + step.what + '）没走通：' + reason + ' 换下一档。');
+            continue;
+        }
+        if (outcome.arrived) {
+            if (step.attempt > 0) log(bot, prefix + '走通了（' + step.what + '）。');
+            return { ok: true, reason: '' };
+        }
+        if (bot?.interrupt_code) return { ok: false, reason: '被 Stop/保命打断，停止重试。' };
+        reason = diagnosisText(bot, outcome.message, waypoint, outcome.probeFailed);
+        log(bot, prefix + '（' + step.what + '）没走通：' + reason + ' 换下一档。');
+    }
+    return { ok: false, reason };
+}
+
+/** 把一次失败翻成"原因 + 下一步"的一句话（回执用）。 */
+function diagnosisText(
+    bot: any,
+    message: string | null,
+    waypoint: PathLeg,
+    probeFailed: boolean = false,
+): string {
+    const diag = classifyPathFailure({
+        message,
+        probeFailed,
+        dropAhead: readDropAhead(bot, waypoint.x, waypoint.y, waypoint.z),
+        noTool: !hasDigTool(bot),
+    });
+    // 分类是给人看的归纳，**原始错误**也留着：归纳错了才有得查。
+    const raw = message != null && message !== '' && !diag.reason.includes(message) ? `（原始错误：${message}）` : '';
+    return diag.reason + raw + '；下一步：' + diag.next + '。';
 }
 
 /**

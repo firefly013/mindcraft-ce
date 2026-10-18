@@ -521,9 +521,21 @@ function blockNameAt(bot: any, p: PortalPoint): string | null {
   }
 }
 
-function findNearbyPortal(bot: any): PortalPoint | null {
+/**
+ * 找现成的下界传送门（**先找再用，找不到才建**）。
+ *
+ * 半径从 16 放宽到 64：16 格只够"门就在旁边"的情况，而真机上 bot 常常在门外
+ * 十几二十格的地方绕（还会被地形挡住视线），于是它宁可重新凑 10 块黑曜石也不
+ * 去用现成的门——用户的诉求是"先在附近一定范围内找门，有就走进去，没有再搭建"。
+ *
+ * `findBlock` 只能扫**已加载区块**，所以 64 格是"看得见的那一圈"，不是保证；
+ * 回执里会把实际搜索半径写出来，避免模型把它读成"这一带绝对没有门"。
+ */
+export const PORTAL_SEARCH_RADIUS = 64;
+
+function findNearbyPortal(bot: any, radius = PORTAL_SEARCH_RADIUS): PortalPoint | null {
   try {
-    const block = world.getNearestBlock(bot, 'nether_portal', 16);
+    const block = world.getNearestBlock(bot, 'nether_portal', radius);
     if (block?.position == null) return null;
     return intPoint(block.position.x, block.position.y, block.position.z);
   } catch {
@@ -585,7 +597,8 @@ export async function enterNether(bot: any): Promise<PortalRoutineResult> {
           ok: true,
           step,
           message: portalReceipt('已进入下界。', [
-            `使用了附近已有的传送门 ${formatPoint(existingPortal)}`,
+            `先在附近 ${PORTAL_SEARCH_RADIUS} 格内找现成的门，找到了就直接用：${formatPoint(existingPortal)}`,
+            '没有另建，也没有改动任何方块。',
             `维度：${initialDimension ?? '未知'} → ${dimensionOf(bot) ?? '未知'}`,
           ]),
         };
@@ -833,6 +846,7 @@ export async function enterNether(bot: any): Promise<PortalRoutineResult> {
         ok: true,
         step,
         message: portalReceipt('已进入下界。', [
+          `先在附近 ${PORTAL_SEARCH_RADIUS} 格内找过现成的门，没有找到（只扫描已加载区块），因此新建。`,
           `传送门位置：${formatPoint(plan.base)}（门面沿 ${plan.axis} 轴）`,
           `这次新放 ${placed.length} 块黑曜石，打火石点火成功。`,
           placedScaffolds.length === 0

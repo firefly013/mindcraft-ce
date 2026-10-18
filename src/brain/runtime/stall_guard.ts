@@ -56,20 +56,24 @@ export const STALL_NUDGE =
   + '那就用一个明确的等待动作（如 stay / sleepUnderground）把等待本身做出来，并在正文里写清你在等什么、等多久。';
 
 /**
- * 第 2 次起语气更硬，而且**把选择收窄成一个闭集**。
+ * 第 2 次起的催办：**把选择收窄成闭集，并且专门治"用正文描述要做的动作"**。
  *
- * 实测（2026-10-18 12:47，overnight_a）：15 分钟里 38 次请求有 28 次零工具调用，
- * 思考文本退化成「Hmm — hmm. Hmm — hmm.」的复读。原因不是它不听话，而是
- * **选项太多**：45 个工具 + 一个复杂局面（队友求救、自己被困），它就一直权衡。
- * 对它有效的不是"你要动手"这种抽象要求，而是"从这三条里选一条，现在就调"。
+ * 两条实测依据：
+ * - 2026-10-18 12:47，overnight_a：15 分钟里 38 次请求有 28 次零工具调用，思考
+ *   退化成「Hmm — hmm.」复读。原因不是不听话，而是**选项太多**——45 个工具 +
+ *   一个复杂局面，它就一直权衡。对它有效的不是"你要动手"，而是"从这三条里选一条"。
+ * - 2026-10-18 14:00，同一个 bot：思考里反复写
+ *   `Let me ACT — goToCoordinates(200,72,0,3) — NOW!`，然后正文输出
+ *   `东进 100 格：(200,72,0)。`——把动作**描述**一遍就当完成了，回合到此结束。
+ *   所以必须点破：**正文描述不算执行**。
  */
 export const STALL_NUDGE_ESCALATED =
-  '【继续·必须动手】你已经连续多轮只思考、不调用任何工具了。**不要再权衡、不要再复述计划**——'
-  + '从下面三条里**选一条，立刻调用**，做完再看结果：\n'
+  '【继续·立刻发工具调用】**不要用正文描述你打算做什么——正文描述不算执行**，而且正文一写出来这一轮就结束了。'
+  + '这一轮**不要写任何正文、不要写计划、不要写汇报**，只发一个工具调用，从下面三条里选一条：\n'
   + '① 不知道周围什么情况 → `stats(type=all)`；\n'
   + '② 知道要去哪 → `goToCoordinates(x, y, z, closeness=3)`；\n'
-  + '③ 身边有威胁或被困 → `pillarUp(distance=3)`（垫高躲开地面怪）或 `attack(entity_id)`。\n'
-  + '只回正文不调工具 = 这一轮世界什么都没发生。卡片选一个，调它。';
+  + '③ 身边有威胁或被困 → `pillarUp(distance=3)` 或 `attack(entity_id)`。\n'
+  + '（如果你已经在思考里想好了目标坐标，就把那个坐标直接填进调用里发出来。）';
 
 /** 心跳兜底用的文案（连模型都没答，只能从"看状态、写计划"重新起步）。 */
 export const STALL_WATCHDOG_NUDGE =
@@ -234,6 +238,15 @@ export function createStallGuard(options: StallGuardOptions = {}): StallGuard {
     // 催了也不动就退避，最多 `maxIdleMs` 一次；**永不放弃**（真机要求"不要停"）。
     nextIdleMs = Math.min(maxIdleMs, Math.round(nextIdleMs * 2));
     lastActivityAt = t;
+    // **重新给 onYield 那层上膛**。
+    //
+    // 真机（2026-10-18 14:00，overnight_a）：它连续 3 次"只写正文不调工具"把
+    // `maxContinues` 用光之后再没复位过，于是 onYield 那层**永久失效**——每 10
+    // 分钟被心跳叫醒一次，回一段正文，又睡回去，两小时零动作零移动（用户在游戏里
+    // 直接看到"机器人 A 不动弹也不说话"）。心跳是最后一道兜底，它一响就说明
+    // "上一轮那三次没起作用"，此时必须重新给三次机会，否则护栏等于自杀。
+    // 有界性仍然成立：每 `nextIdleMs`（≥10 分钟）最多 1 + maxContinues 次请求。
+    continuesWithoutTool = 0;
     options.onWatchdog?.(t - lastActivityAt + nextIdleMs, watchdogAttempt);
     if (options.wake != null) {
       void Promise.resolve(options.wake(STALL_WATCHDOG_NUDGE)).catch(() => {
