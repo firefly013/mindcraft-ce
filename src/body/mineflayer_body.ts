@@ -1242,8 +1242,8 @@ export class MineflayerBody {
     /**
      * 开一棒保命处理：发一个只属于它的取消令牌。
      *
-     * 返回值里的 `cancelled` 会被 `rescue()` 和 `runEmergency` 一起 await——
-     * 谁先到谁说了算（危险解除 / Stop 取消）。
+     * `rescue()` 拿这个 `cancelled` 和 `runEmergency(...)` **赛跑**：谁先到谁说了算
+     * （危险自己解除 vs Stop/急停取消）。
      */
     private beginRescueRun(): { run: RescueRun; cancelled: Promise<EmergencyResult> } {
         const run: RescueRun = { aborted: false, cancel: null };
