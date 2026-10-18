@@ -2455,9 +2455,35 @@ export function findDropAhead(
 }
 
 export interface PathFailureDiagnosis {
-    kind: 'probe' | 'timeout' | 'drop' | 'nodig' | 'unknown';
+    kind: 'probe' | 'timeout' | 'drop' | 'nodig' | 'inwater' | 'unknown';
     reason: string;
     next: string;
+}
+
+/**
+ * bot 此刻是不是站在水里（脚或头那一格是 water）。
+ *
+ * 独立成函数是为了能单测，也为了让"水下结论"只有一处判据：避水规则一旦生效，
+ * 站在水里的 bot 会得到"所有相邻格都危险"的寻路图，表现为 `No path to the goal`。
+ * 读不到方块就当没在水里（fail-open，避免凭空给出错误诊断）。
+ */
+export function isStandingInWater(bot: unknown): boolean {
+    const b = bot as { entity?: { position?: { x?: number; y?: number; z?: number } }; blockAt?: (p: unknown) => { name?: string } | null } | null;
+    const pos = b?.entity?.position;
+    if (pos == null || typeof b?.blockAt !== 'function') return false;
+    const x = Number(pos.x);
+    const y = Number(pos.y);
+    const z = Number(pos.z);
+    if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(z)) return false;
+    for (const dy of [0, 1]) {
+        try {
+            const block = b.blockAt!(new Vec3(Math.floor(x), Math.floor(y) + dy, Math.floor(z)));
+            if (block?.name === 'water') return true;
+        } catch {
+            return false;
+        }
+    }
+    return false;
 }
 
 /**
@@ -2471,6 +2497,8 @@ export function classifyPathFailure(input: {
     probeFailed?: boolean;
     dropAhead?: number | null;
     noTool?: boolean;
+    /** 出发时 bot 自己站在水里（脚或头是 water）。 */
+    inWater?: boolean;
 }): PathFailureDiagnosis {
     const message = input.message ?? '';
     if (/Took to (o)?(long|longer)|timed? ?out|Execution timed out/i.test(message)) {
@@ -2478,6 +2506,17 @@ export function classifyPathFailure(input: {
             kind: 'timeout',
             reason: `整段算路超时（A* 把算路预算用完了，通常因为目标太远或地形太碎）`,
             next: '把目标拆成更短的中间点（≤32 格）再走一次，别一次给上百格',
+        };
+    }
+    // **站在水里时，避水规则会把这趟寻路变成"无解"**：所有相邻格都被判成危险，
+    // A* 一步都迈不出去——但报出来只有干巴巴的 `No path to the goal`。
+    // 真机（2026-10-18 14:56，overnight_b 掉进水里）：模型看到那句就开始乱换目标，
+    // 其实解法只有一个——先上岸。所以这一条要排在 NoPath 之前，并且点名动作。
+    if (input.inWater === true) {
+        return {
+            kind: 'inwater',
+            reason: '你**正站在水里**：避水规则把所有相邻格都判成危险，A* 因此一步都走不出去（不是路不存在）',
+            next: '先出水——朝最近的岸边走上去（或调 escapeWater），上岸之后再发 goToCoordinates；在水里重发同一个目标只会得到同一句失败',
         };
     }
     if (input.dropAhead != null && input.dropAhead > 0) {
@@ -3054,6 +3093,7 @@ export async function goToPosition(bot: any, x: number | null, y: number | null,
             message: msg,
             dropAhead: readDropAhead(bot, x as number, y as number, z as number),
             noTool: !hasDigTool(bot),
+            inWater: isStandingInWater(bot),
         });
         log(
             bot,
@@ -3140,6 +3180,7 @@ function diagnosisText(
         probeFailed,
         dropAhead: readDropAhead(bot, waypoint.x, waypoint.y, waypoint.z),
         noTool: !hasDigTool(bot),
+        inWater: isStandingInWater(bot),
     });
     // 分类是给人看的归纳，**原始错误**也留着：归纳错了才有得查。
     const raw = message != null && message !== '' && !diag.reason.includes(message) ? `（原始错误：${message}）` : '';

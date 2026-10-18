@@ -26,6 +26,7 @@ import {
   findDropAhead,
   goToPosition,
   hasDigTool,
+  isStandingInWater,
   lateralOffsetWaypoint,
   planPathLegs,
 } from '../src/body/library/skills.js';
@@ -130,6 +131,37 @@ describe('失败分类：四类原因 + 每类一句下一步', () => {
     const d = classifyPathFailure({});
     expect(d.kind).toBe('unknown');
     expect(d.reason).toContain('没有具体错误信息');
+  });
+
+  // 真机（2026-10-18 14:56，overnight_b 掉进水里）：避水规则把所有相邻格判成危险，
+  // A* 一步都迈不出去，报出来却是干巴巴的 `No path to the goal`，模型于是开始乱换目标。
+  it('站在水里：必须点名"先上岸"，而不是让它重发同一个目标', () => {
+    const d = classifyPathFailure({ message: 'No path to the goal!', inWater: true });
+    expect(d.kind).toBe('inwater');
+    expect(d.reason).toContain('正站在水里');
+    expect(d.next).toContain('出水');
+    // 优先级：水里这一条要压过普通的 NoPath 与探测失败（后两者会让它原地重试）。
+    expect(classifyPathFailure({ message: 'No path to the goal!', inWater: true, probeFailed: true }).kind).toBe('inwater');
+  });
+
+  it('isStandingInWater：脚或头是水才算（读不到方块时 fail-open 为 false）', () => {
+    const mk = (feet: string, head: string) => ({
+      entity: { position: { x: 0.5, y: 64, z: 0.5 } },
+      blockAt: (p: any) => ({ name: p.y === 64 ? feet : head }),
+    });
+    expect(isStandingInWater(mk('water', 'water'))).toBe(true);
+    expect(isStandingInWater(mk('water', 'air'))).toBe(true); // 半身在水里也算
+    expect(isStandingInWater(mk('air', 'water'))).toBe(true); // 头在水里（溺水）
+    expect(isStandingInWater(mk('grass_block', 'air'))).toBe(false);
+    expect(isStandingInWater({ entity: { position: { x: 0, y: 64, z: 0 } } })).toBe(false); // 没有 blockAt
+    expect(
+      isStandingInWater({
+        entity: { position: { x: 0, y: 64, z: 0 } },
+        blockAt: () => {
+          throw new Error('mcdata 没初始化');
+        },
+      }),
+    ).toBe(false);
   });
 });
 
