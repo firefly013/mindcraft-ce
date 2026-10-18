@@ -634,7 +634,7 @@ export const FLAG_DANGER_TYPES: ReadonlySet<string> = new Set(
  * 同类改名还有 `set_content` → `container_set_content`，一起留着。
  */
 // 带槽位容器不可用结论的有效期：结束后自动重试，不许永久焊死。
-const SLOTTED_CONTAINER_BLOCK_MS = 10 * 60_000;
+const SLOTTED_CONTAINER_BLOCK_MS = 12 * 60 * 60_000;
 
 const WINDOW_PACKET_RE = /open_screen|open_window|window_items|window_properties|close_window|set_content|container_set_content|open_sign_editor|merchant_offers/i;
 
