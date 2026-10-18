@@ -16,6 +16,7 @@ const COMMAND_FILES = [
   './src/body/commands/make_obsidian.ts',
   './src/body/commands/survival.ts',
   './src/body/commands/progression.ts',
+  './src/body/commands/throwing.ts',
 ];
 
 // 1. 命令文件引用完整性

@@ -342,6 +342,15 @@ export const TOOL_TEXT: Record<string, { description: string; params: Record<str
       direction: '方向 `+x`/`-x`/`+z`/`-z`（也认 east/west/north/south、东南西北）。留空 = 按当前朝向推；回执写明实际方向，续挖照抄。',
     },
   },
+  throwItem: {
+    description: '通用投掷（鸡蛋/雪球/末影珍珠/喷溅药水/经验瓶/箭/末影之眼），按轨迹分三类处理：抛物线类给目标坐标就解低伸弹道（回执写明抬头多少度与 v/g），制导类（末影之眼）不做弹道解算、只朝方向扔再追踪 8 方位，箭矢类自动拉满弓再放。回执只讲事实：投前/投后数量（没少就是"没扔出去"）、投掷物实体飞了多久/在哪消失；末影珍珠等传送跳变并提醒固定吃 5 点伤害；超出射程如实说"打不到"且不扔。',
+    params: {
+      item_name: '要扔的物品 id（英文）：egg / snowball / ender_pearl / splash_potion / lingering_potion / experience_bottle / arrow / eye_of_ender。也认俗称。',
+      target_x: '目标 X（可选；三个坐标要么都给要么都不给）。抛物线类用它解弹道，末影之眼只取水平方向。',
+      target_y: '目标 Y（可选）。抛物线类需要高差。',
+      target_z: '目标 Z（可选）。',
+    },
+  },
 };
 
 /** 取工具描述 */
