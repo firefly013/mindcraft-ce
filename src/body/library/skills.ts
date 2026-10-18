@@ -5649,14 +5649,36 @@ export async function openBlockUi(
     const consecutive = recordContainerOpenResult(name, false);
     const position = (block as { position?: { x?: number; y?: number; z?: number } })?.position;
     const where = position == null ? '位置读不到' : `(${Math.round(Number(position.x))},${Math.round(Number(position.y))},${Math.round(Number(position.z))})`;
+    // **协议解析失败 > 一切别的解释。** 真机 2026-10-19 04:10 的最终根因：
+    // 服务端**发了** `open_window(windowId=1)`，但紧随其后的窗口内容包
+    // 解不开（protodef `PartialReadError`）——`'packet'` 事件根本不触发，
+    // 所以上面"窗口包计数"必然是 0，而**0 个包不代表服务端没发**。
+    // 这是仪器撒谎的第三种形态：看不见 ≠ 没发生。
+    const protocolFault = (() => {
+        try {
+            const read = (bot as { __containerProtocolFault?: (withinMs?: number) => { message: string; packetId: number | null } | null })
+                .__containerProtocolFault;
+            return typeof read === 'function' ? read(15_000) : null;
+        } catch {
+            return null;
+        }
+    })();
     // **诊断第一句先把"锅在谁身上"说清**，然后才给下一步。真机里模型被同一套
     // "换个位置再试"的建议喂了 18 次，白耗一整晚。
     const diagnosis =
-        windowPackets === 0
-            ? `服务端**一个窗口包都没发**（${timeoutMs >= 1000 ? `${Math.round(timeoutMs / 1000)} 秒` : `${timeoutMs} 毫秒`}内 windowOpen/windowClose 计数 = 0）：这不是站位或角度问题，是"带槽位容器"这条交互路径本身没走通`
-            : `窗口包**到过 ${windowPackets} 次**但没接住（大概率是残留界面/竞态），不是服务端没响应`;
+        protocolFault != null
+            ? `**协议解析失败**（protodef PartialReadError${protocolFault.packetId != null ? `，包 id ${protocolFault.packetId}` : ''}）：` +
+              `服务端**开了窗**，但窗口内容包解不开，我们这边永远等不到槽位数据——` +
+              `这不是"服务端没回话"、也不是站位/角度问题，是**这个服务端的容器协议和我们的定义对不上**。` +
+              `原始错误：${protocolFault.message}`
+            : windowPackets === 0
+                ? `服务端**一个窗口包都没发**（${timeoutMs >= 1000 ? `${Math.round(timeoutMs / 1000)} 秒` : `${timeoutMs} 毫秒`}内 windowOpen/windowClose 计数 = 0）：这不是站位或角度问题，是"带槽位容器"这条交互路径本身没走通`
+                : `窗口包**到过 ${windowPackets} 次**但没接住（大概率是残留界面/竞态），不是服务端没响应`;
     const nextStep =
-        consecutive >= 2
+        protocolFault != null
+            ? `下一步（照做即可）：**别再 useBlock 任何带槽位的容器了**（柜子/熔炉/箱子都一样，重试只是白耗回合）——` +
+              `改走非容器路径（队友把东西丢在约定点后自己捡，或让对方 takeFromChest），并把「容器协议解析失败」告诉人类。`
+            : consecutive >= 2
             ? `下一步（照做即可）：这已经是连续第 ${consecutive} 次打不开容器了——**别再重发同一个 useBlock**（同样的调用只会得到同样的结果）。` +
               `改走非容器路径：让队友把东西丢在约定点后自己捡（或互相用 takeFromChest 由**能开箱的那一方**去取），` +
               `并把这条现象告诉人类（这是代码级故障）。`

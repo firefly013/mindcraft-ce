@@ -833,6 +833,15 @@ export class MineflayerBody {
             this.armContainerPacketDump(reason);
         (this.bot as { __disarmContainerPacketDump?: unknown }).__disarmContainerPacketDump = (outcome: string): void =>
             this.finishContainerPacketDump(outcome);
+        (this.bot as { __containerProtocolFault?: unknown }).__containerProtocolFault = (withinMs?: number) =>
+            this.recentProtocolFault(withinMs);
+        // **协议解析失败的唯一入口**：protodef 的 PartialReadError 只会走 client 'error'，
+        // 那条路径不触发 'packet'，所以只能在错误事件上抓（见 onProtocolFault）。
+        try {
+            (this.bot as { _client?: any })._client?.on?.('error', (err: unknown) => this.onProtocolFault(err));
+        } catch {
+            // 挂不上就少一条症状证据，不影响开容器。
+        }
         // 背包在登录后才会由服务端推下来；在此之前"空"是不可信的（见 inventorySynced）。
         this.inventorySynced = false;
         try {
@@ -1244,7 +1253,102 @@ export class MineflayerBody {
         this.containerDumpSawOpen = false;
     }
 
-    private onContainerIncoming: ((data: unknown, meta: { name?: unknown }) => void) | null = null;    /** 背包数据到过一次了（服务端 window_items / heldItemChanged 触发）。 */
+    private onContainerIncoming: ((data: unknown, meta: { name?: unknown }) => void) | null = null;
+
+    /**
+     * **协议解析失败**（protodef 的 `PartialReadError`）——真机 2026-10-19 03:54 的
+     * 最终根因：服务端**发了** `open_window(windowId=1)`，但紧随其后的**窗口内容包
+     * 解不开**，于是 `'packet'` 事件根本不触发 → mineflayer 的 `prepareWindow` 等
+     * `setWindowItems:<id>` → `windowOpen` 永不触发 → `openContainer` 必然超时。
+     *
+     * 为什么必须单独记：解析失败的包**在转储里是不可见的**（监听器根本没被调用），
+     * 所以"没看到 window_items"会被误读成"服务端没发"——这是仪器撒谎的第三种形态。
+     */
+    private protocolFault: {
+        at: number;
+        message: string;
+        packetId: number | null;
+        bytesHex: string;
+    } | null = null;
+
+    /** 客户端 deserializer 抛错时调用：只留**一行**、有界、脱敏。 */
+    onProtocolFault(err: unknown): void {
+        try {
+            const e = err as { name?: unknown; message?: unknown; partialReadError?: any; id?: unknown; packetId?: unknown };
+            const message = String(e?.message ?? err ?? '');
+            const isPartial =
+                /PartialReadError|Read error for/i.test(String(e?.name ?? '')) || /Read error for/i.test(message);
+            if (!isPartial) return;
+            const detail = e?.partialReadError ?? {};
+            const buffer: unknown = detail?.buffer ?? (e as { buffer?: unknown })?.buffer;
+            let bytesHex = '';
+            try {
+                const slice = (buffer as { slice?: unknown } | null | undefined)?.slice;
+                if (buffer != null && typeof slice === 'function') {
+                    bytesHex = Buffer.from((buffer as Buffer).slice(0, 24)).toString('hex');
+                }
+            } catch {
+                bytesHex = '';
+            }
+            // 解析失败的包**不会触发 'packet'**，所以包 id 只能从残留字节里读：
+            // nmp 的包体头部就是 varint(packetId)，第一个字节通常是 id（<128 时）。
+            let idGuess: number | null = null;
+            try {
+                if (buffer != null) {
+                    const head = Buffer.from((buffer as Buffer).slice(0, 5));
+                    let value = 0;
+                    let shift = 0;
+                    for (const byte of head) {
+                        value |= (byte & 0x7f) << shift;
+                        if ((byte & 0x80) === 0) break;
+                        shift += 7;
+                        if (shift > 28) break;
+                    }
+                    if (Number.isFinite(value) && value >= 0 && value < 512) idGuess = value;
+                }
+            } catch {
+                idGuess = null;
+            }
+            const idRaw = Number(e?.packetId ?? e?.id ?? detail?.packetId ?? detail?.id ?? idGuess);
+            this.protocolFault = {
+                at: Date.now(),
+                message: message.slice(0, 160),
+                packetId: Number.isFinite(idRaw) ? idRaw : null,
+                bytesHex,
+            };
+            try {
+                this.log.with('lifecycle').info({
+                    event: 'container-protocol-fault',
+                    error: this.protocolFault.message,
+                    packetId: this.protocolFault.packetId,
+                    firstBytesHex: this.protocolFault.bytesHex,
+                });
+            } catch {
+                // 日志失败不影响判定。
+            }
+            // 正在录转储就把这条也记进去并收尾（这是"为什么看不见槽位包"的直接答案）。
+            if (this.containerDumpArmed) {
+                try {
+                    this.containerDumpLines.push(`fault:PartialReadError(${this.protocolFault.message})`);
+                } catch {
+                    // 记不进去也要收尾。
+                }
+                this.finishContainerPacketDump('protocol-parse-error');
+            }
+        } catch {
+            // 故障记录本身绝不允许抛出。
+        }
+    }
+
+    /** 最近的协议解析故障（默认 15 秒内有效）；给回执层判定"这不是服务端没响应"。 */
+    recentProtocolFault(withinMs = 15_000): { message: string; packetId: number | null } | null {
+        const fault = this.protocolFault;
+        if (fault == null) return null;
+        if (Date.now() - fault.at > withinMs) return null;
+        return { message: fault.message, packetId: fault.packetId };
+    }
+
+    /** 背包数据到过一次了（服务端 window_items / heldItemChanged 触发）。 */
     private markInventorySynced(): void {
         if (this.inventorySynced) return;
         this.inventorySynced = true;

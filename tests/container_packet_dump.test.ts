@@ -189,3 +189,62 @@ describe('接线：openBlockUi 只在开容器时武装、成功即解除', () =
   });
 });
 
+
+describe('协议解析失败（真机 04:10 的最终根因）：抓得到、说得对、不冒充"服务端没响应"', () => {
+  it('PartialReadError ⇒ 一行 container-protocol-fault，带包 id 候选和前几个字节', () => {
+    const body = bareBody();
+    const err: any = new Error('Read error for undefined : undefined');
+    err.name = 'PartialReadError';
+    err.partialReadError = { buffer: Buffer.from([0x3e, 0x01, 0x00, 0x05, 0xff]) };
+    body.onProtocolFault(err);
+    expect(body._logs).toHaveLength(1);
+    const line = body._logs[0];
+    expect(line.event).toBe('container-protocol-fault');
+    expect(line.error).toContain('Read error for undefined');
+    expect(line.firstBytesHex).toBe('3e010005ff');
+    expect(line.packetId).toBe(0x3e); // varint 头 = 包 id 候选（1.20.6 的容器内容包）
+    // 15 秒内有效，之后过期
+    expect(body.recentProtocolFault(15_000)).toMatchObject({ packetId: 0x3e });
+    expect(body.recentProtocolFault(-1)).toBeNull();
+  });
+
+  it('不是解析失败的错误一律忽略（不许把普通报错算成协议故障）', () => {
+    const body = bareBody();
+    body.onProtocolFault(new Error('ECONNRESET'));
+    expect(body._logs).toHaveLength(0);
+    expect(body.recentProtocolFault()).toBeNull();
+  });
+
+  it('转储武装期间发生解析失败 ⇒ 立刻收尾 outcome=protocol-parse-error，并把 fault 记进去', () => {
+    const body = bareBody();
+    body.armContainerPacketDump('useBlock chest');
+    body.bot._client.write('block_place', { location: { x: 9, y: 62, z: 0 }, direction: 1, hand: 0, sequence: 0 });
+    const err: any = new Error('Read error for undefined : undefined');
+    err.name = 'PartialReadError';
+    err.partialReadError = { buffer: Buffer.from([0x3e]) };
+    body.onProtocolFault(err);
+    const dump = body._logs.find((l: any) => l.event === 'container-packet-dump');
+    expect(dump.outcome).toBe('protocol-parse-error');
+    expect(dump.lines.join(' | ')).toContain('fault:PartialReadError');
+  });
+
+  it('回执必须先说"协议解析失败"，绝不允许说成"服务端没响应/一个窗口包都没发"', async () => {
+    resetContainerOpenFailures();
+    const bot: any = {
+      output: '',
+      currentWindow: null,
+      openContainer: () => new Promise(() => {}), // 永远不回：模拟 openContainer 超时
+      __containerProtocolFault: () => ({ message: 'Read error for undefined : undefined', packetId: 62 }),
+    };
+    const err = await openBlockUi(bot, { name: 'chest', position: { x: 9, y: 62, z: 0 } }, { timeoutMs: 100, retries: 0 })
+      .catch((e: Error) => e.message);
+    const text = String(err);
+    expect(text).toContain('协议解析失败');
+    expect(text).toContain('包 id 62');
+    expect(text).toContain('这个服务端的容器协议和我们的定义对不上');
+    expect(text).toContain('别再 useBlock 任何带槽位的容器');
+    expect(text).not.toContain('一个窗口包都没发');
+    expect(text).not.toContain('但没接住');
+    expect(text).not.toContain('一个窗口包都没发')
+  });
+});
