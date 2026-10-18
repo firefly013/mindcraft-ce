@@ -28,6 +28,7 @@ import {
   STALL_NUDGE_ESCALATED,
   STALL_WATCHDOG_NUDGE,
   createStallGuard,
+  readYieldText,
 } from '../src/brain/runtime/stall_guard.js';
 
 const ctx = BACKGROUND_CONTEXT;
@@ -156,6 +157,10 @@ describe('onYield 护栏：把"只说话"的回合按回去继续', () => {
     // 第 1 档文案出现在第 2 次请求；第 2 档（更硬）出现在第 3 次请求。
     expect(r.requestUsers[1]?.some((text) => text.includes(STALL_NUDGE))).toBe(true);
     expect(r.requestUsers[2]?.some((text) => text.includes(STALL_NUDGE_ESCALATED))).toBe(true);
+    // **把上一轮的正文原样回灌**：模型在那句话里已经想清楚要做什么，
+    // 只是把"写下意图"当成了"执行"（真机 A 的固定错误）。
+    expect(r.requestUsers[2]?.some((text) => text.includes('【你上一轮写的正文是】我先汇报一下情况。'))).toBe(true);
+    expect(r.requestUsers[2]?.some((text) => text.includes('作为工具调用**发出来'))).toBe(true);
   });
 
   it('只要调过一次工具，连击就清零（干活的 bot 不会被上限掐停）', async () => {    const r = await runWith(

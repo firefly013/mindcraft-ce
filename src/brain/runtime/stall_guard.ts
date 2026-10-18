@@ -91,6 +91,30 @@ export const STALL_WATCHDOG_NUDGE =
  */
 export const SAY_TOOL_NAME = 'Say';
 
+/** 正文回灌的长度上限：够模型认出自己那句话就行，不要把它整段汇报塞回去。 */
+const YIELD_ECHO_LIMIT = 160;
+
+/**
+ * 取这条 assistant 消息里的**正文**（thinking 不算）。
+ *
+ * 真机里最有价值的一句催办不是抽象的"你要动手"，而是把它自己刚写的
+ * `东进 100 格：(200,72,0)。` 原样递回去——模型在那句话里已经想清楚了要做
+ * 什么，只是把"写下意图"当成了"执行"。把原文递回去，等于替它把最后一步补上。
+ * 读不到正文就返回空串（不回灌，退回通用文案）。
+ */
+export function readYieldText(answer: unknown): string {
+  const content = (answer as { content?: unknown } | null)?.content;
+  if (!Array.isArray(content)) return '';
+  const parts: string[] = [];
+  for (const part of content) {
+    const p = part as { type?: unknown; text?: unknown } | null;
+    if (p?.type === 'text' && typeof p.text === 'string') parts.push(p.text);
+  }
+  const joined = parts.join(' ').replace(/\s+/g, ' ').trim();
+  if (joined === '') return '';
+  return joined.length > YIELD_ECHO_LIMIT ? `${joined.slice(0, YIELD_ECHO_LIMIT)}…` : joined;
+}
+
 export interface StallGuardOptions {
   /**
    * 连续按回几次后放手。**默认 3**。
@@ -99,8 +123,13 @@ export interface StallGuardOptions {
    * 所以正常干活的 bot 永远不会撞到这个上限。
    */
   maxContinues?: number;
-  /** 自定义 onYield 催办文案（attempt 从 1 开始）。 */
-  nudge?: (attempt: number) => UserInput;
+  /**
+   * 自定义 onYield 催办文案（attempt 从 1 开始）。
+   *
+   * `previousText` 是这个 bot **上一轮正文的原文**（可能为空）。真机上最有用的
+   * 一句话就是"你刚写的这句，现在把它作为工具调用发出来"——见 `readYieldText`。
+   */
+  nudge?: (attempt: number, previousText: string) => UserInput;
   /** 观测：每次按回时回调（日志/测试用）。 */
   onContinue?: (attempt: number) => void;
   /**
@@ -155,7 +184,16 @@ export function createStallGuard(options: StallGuardOptions = {}): StallGuard {
   const maxIdleMs = Math.max(idleMs, options.maxIdleMs ?? 30 * 60_000);
   const now = options.now ?? (() => Date.now());
   const nudge =
-    options.nudge ?? ((attempt: number) => (attempt <= 1 ? STALL_NUDGE : STALL_NUDGE_ESCALATED));
+    options.nudge ??
+    ((attempt: number, previousText: string) => {
+      if (attempt <= 1) return STALL_NUDGE;
+      // 第 2 次起：如果它上一轮写了正文，就把那句话原样递回去，并要求"把这件事
+      // 作为工具调用发出来"。这比任何抽象要求都有效——它已经想清楚了，只差发出去。
+      if (previousText !== '') {
+        return `${STALL_NUDGE_ESCALATED}\n【你上一轮写的正文是】${previousText}\n——如果那句话是在说你要做什么，现在把它**作为工具调用**发出来（不要再写一遍正文）。`;
+      }
+      return STALL_NUDGE_ESCALATED;
+    });
 
   let continuesWithoutTool = 0;
   let lastActivityAt = now();
@@ -192,7 +230,7 @@ export function createStallGuard(options: StallGuardOptions = {}): StallGuard {
         return undefined;
       },
       // 最终回答：把它按回去继续干活，直到连续多次都没有工具调用。
-      onYield: () => {
+      onYield: (answer) => {
         if (continuesWithoutTool >= maxContinues) return undefined;
         continuesWithoutTool += 1;
         const attempt = continuesWithoutTool;
@@ -200,7 +238,7 @@ export function createStallGuard(options: StallGuardOptions = {}): StallGuard {
         lastActivityAt = now();
         resyncWatchdog();
         options.onContinue?.(attempt);
-        return { continue: nudge(attempt) };
+        return { continue: nudge(attempt, readYieldText(answer)) };
       },
     }),
     hook(ToolTask, {
