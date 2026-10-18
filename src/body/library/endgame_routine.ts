@@ -21,6 +21,8 @@ import {
     BLAZE_RODS_FOR_EYES,
     BLOCK_REACH_DISTANCE,
     DRAGON_MAX_HEALTH,
+    DRAGON_REVIVE_CRYSTALS,
+    END_CRYSTAL_SHOPPING_LIST,
     END_PLATFORM,
     END_PODIUM,
     END_PORTAL_EYES,
@@ -43,6 +45,7 @@ import {
     planBedBombing,
     planBreathEscape,
     planCrystalAssault,
+    planDragonReviveSpots,
     planRecovery,
     potionKindOf,
     potionStock,
@@ -183,6 +186,17 @@ export const endgameToolSpecs: EndgameToolSpec[] = [
         timeoutMinutes: 1,
         backing: '原子原语 throwHeld + throwEyeAndTrack 都在 library/endgame_routine.ts（瞄准 + activateItem + 数量核对 + 眼实体采样）；方向几何是 endgame.compassBearing/trackEyeFlight（纯函数，已单测）。',
     },
+    {
+        name: 'reviveDragon',
+        kind: 'action',
+        description:
+            '**把已经打完的末影龙叫回来**（这个世界可能已经通关了，拆水晶/床炸那段代码就没机会跑）：往返回门基座环的 4 个缺口各放一颗末影水晶（要 4 颗 end_crystal）。' +
+            '它会从世界读返回门位置（end_portal 方块 → 龙蛋柱 → Memory Bank），从真实方块推导 4 个缺口（不写死 (0,62,0)），**放一颗复验一颗**；' +
+            '缺口被占 / 水晶没放成 / 龙没回来都会停手并如实说，绝不把 4 颗水晶一次烧光。放完柱子上的 10 颗水晶也会一起回来——先 clearEndCrystals 再 bedBombDragon。',
+        params: {},
+        timeoutMinutes: 3,
+        backing: '新增动作命令；找门 world.getNearestBlock(end_portal/dragon_egg) + Memory Bank，缺口纯逻辑在 endgame.planDragonReviveSpots，放置用 skills.placeBlock，验证看新出现的 end_crystal 实体（1.20 里它不是方块）。',
+    },
 ];
 
 // ============================ 二、把 bot 状态读成信号 ============================
@@ -309,6 +323,14 @@ export function readDragonPerched(bot: any): boolean {
     return horizontalDistance(position, END_PODIUM) < 6 && position.y < 70;
 }
 
+/**
+ * 龙"复活了没有"的判据：实体回来 **或** boss bar 回来（两个都要等一会儿，
+ * 放第四颗水晶之后不是零延迟）。这里只看当前状态，等待交给调用方。
+ */
+export function readDragonRevived(bot: any): boolean {
+    return findDragonEntity(bot) != null || readDragonHealth(bot) != null;
+}
+
 function findDragonEntity(bot: any): any | null {
     const entities = bot?.entities;
     if (entities == null || typeof entities !== 'object') return null;
@@ -332,6 +354,8 @@ export interface EndSignals {
     eyesOfEnder: number;
     arrows: number;
     beds: number;
+    /** 末影水晶数量（复活龙用：要 4 颗）。 */
+    endCrystals: number;
     position: Vec3 | null;
     crystals: EndCrystalInfo[];
     crystalsAlive: number;
@@ -387,6 +411,7 @@ export function readEndSignals(bot: any): EndSignals {
         eyesOfEnder: count('ender_eye'),
         arrows: count('arrow') + count('spectral_arrow') + count('tipped_arrow'),
         beds: countOf(bot, (name) => /(^|_)bed$/.test(name)),
+        endCrystals: count('end_crystal'),
         position,
         crystals,
         crystalsAlive: crystals.length,
@@ -1007,8 +1032,21 @@ export function pickBedItemName(bot: any): string | null {
  * - **床炸闸门现在过不过**（和 `bedBombDragon` 同一段判定，不用真放床就能先知道行不行）；
  * - 龙息：以前只在"有云"时才提示，漏了最有价值的那条——龙低头 + 我在 20 格内。
  */
-export function endgameStatusReport(bot: any): string {
+export function endgameStatusReport(bot: any, agent?: any): string {
     const signals = readEndSignals(bot);
+    // 记过主世界传送门坐标 == 那个门**激活过**（`enterEndSkill` 只在找到/点亮门时才记）。
+    // 有它在，主世界这一段就不该再让模型去掷眼找要塞——它已经知道门在哪了。
+    const rememberedPortal = (() => {
+        try {
+            return agent?.memory_bank?.recallPlace?.('overworld_end_portal');
+        } catch {
+            return undefined;
+        }
+    })();
+    const portalKnown =
+        Array.isArray(rememberedPortal) &&
+        rememberedPortal.length >= 3 &&
+        rememberedPortal.every((n: unknown) => Number.isFinite(Number(n)));
     const advice = nextEndgameStep({
         gearReady: signals.gear.ok,
         inNether: signals.inNether,
@@ -1019,6 +1057,9 @@ export function endgameStatusReport(bot: any): string {
         eyesOfEnder: signals.eyesOfEnder,
         arrows: signals.arrows,
         beds: signals.beds,
+        endCrystals: signals.endCrystals,
+        strongholdFound: portalKnown ? true : undefined,
+        portalActivated: portalKnown ? true : undefined,
         inEnd: signals.inEnd,
         crystalsAlive: signals.crystalsAlive,
         dragonHealth: signals.dragonHealth,
@@ -1067,6 +1108,25 @@ export function endgameStatusReport(bot: any): string {
             dragonPerched: signals.dragonPerched,
         });
         if (escape.urgency !== 'none') lines.push(`【龙息】${escape.reason}`);
+    }
+    // 龙已经死了的世界：先把"能不能复活"干跑一遍（缺口 + 水晶够不够），
+    // 让模型在花掉 4 颗末影水晶之前就知道这一趟值不值。
+    if (signals.inEnd && !signals.dragonAlive && signals.dragonHealth == null) {
+        const portal = findExitPortalForRevive(bot, undefined);
+        if (portal == null) {
+            lines.push('【复活龙】找不到返回门（64 格内没有 end_portal / dragon_egg）：先走到末地主岛中心的基座附近。');
+        } else {
+            const spots = planDragonReviveSpots({ center: portal.center, probe: (p) => blockNameAt(bot, p) });
+            lines.push(
+                `【复活龙】${spots.ok ? '门上有 4 个缺口可用' : '缺口不齐'}（中心来源：${portal.reason}）｜末影水晶 ${signals.endCrystals}/${DRAGON_REVIVE_CRYSTALS}`
+            );
+            lines.push(`  ${spots.reason}`);
+            if (signals.endCrystals < DRAGON_REVIVE_CRYSTALS) {
+                lines.push(`  还差 ${DRAGON_REVIVE_CRYSTALS - signals.endCrystals} 颗：${END_CRYSTAL_SHOPPING_LIST.join('；')}`);
+            } else if (spots.ok) {
+                lines.push('  够材料了：调 reviveDragon 就能把龙叫回来（柱子上的 10 颗水晶也会一起回来）。');
+            }
+        }
     }
     if (signals.inEnd && signals.dragonAlive && signals.dragonPerched && signals.position != null) {
         // 干跑一次床炸闸门：让模型在"放床之前"就知道现在能不能炸。
@@ -1695,6 +1755,217 @@ export async function clearEndCrystalsSkill(bot: any): Promise<string> {
         killed ? '拆掉一颗水晶。' : '这一箭没拆掉水晶，再来一次（或者换个角度/换打法）。',
         details,
     );
+}
+
+// ============================ 四·B、复活末影龙（把打完的世界变回能打） ============================
+
+/** 返回门中心的来源：世界里的门方块 / 龙蛋柱 / 记下来的坐标。 */
+export type RevivePortalSource = 'end_portal' | 'dragon_egg' | 'memory';
+
+export interface RevivePortalSite {
+    center: Vec3;
+    source: RevivePortalSource;
+    reason: string;
+}
+
+/**
+ * 找返回门的中心——**从世界读，不从常量读**。
+ *
+ * 优先级：
+ * 1. 世界里的 `end_portal` 方块（激活过的返回门一直亮着）；
+ * 2. `dragon_egg` 方块（蛋就在中心柱顶上，往下 3 格就是环那一层）；
+ * 3. 记下来的 `exit_portal` 坐标（Memory Bank）。
+ *
+ * 三样都没有 → null（回执里说清"找不到门"，绝不退回写死的 (0,62,0) 去乱放水晶）。
+ */
+export function findExitPortalForRevive(bot: any, agent?: any): RevivePortalSite | null {
+    try {
+        const portal = world.getNearestBlock(bot, 'end_portal', 64);
+        const position = toVec(portal?.position);
+        if (position != null) {
+            return {
+                center: vec(Math.round(position.x), Math.round(position.y), Math.round(position.z)),
+                source: 'end_portal',
+                reason: `世界里的返回门方块 (${Math.round(position.x)},${Math.round(position.y)},${Math.round(position.z)})`,
+            };
+        }
+    } catch {
+        // 没有 minecraft-data / 没有世界数据：继续往下试
+    }
+    try {
+        const egg = world.getNearestBlock(bot, 'dragon_egg', 64);
+        const position = toVec(egg?.position);
+        if (position != null) {
+            return {
+                center: vec(Math.round(position.x), Math.round(position.y) - 3, Math.round(position.z)),
+                source: 'dragon_egg',
+                reason: `龙蛋 (${Math.round(position.x)},${Math.round(position.y)},${Math.round(position.z)}) 下面 3 格的中心柱`,
+            };
+        }
+    } catch {
+        // 同上
+    }
+    const recalled = agent?.memory_bank?.recallPlace?.('exit_portal');
+    if (Array.isArray(recalled) && recalled.length >= 3 && recalled.every((n: unknown) => Number.isFinite(Number(n)))) {
+        return {
+            center: vec(Number(recalled[0]), Number(recalled[1]), Number(recalled[2])),
+            source: 'memory',
+            reason: `之前记下来的返回门 (${Math.round(Number(recalled[0]))},${Math.round(Number(recalled[1]))},${Math.round(Number(recalled[2]))})`,
+        };
+    }
+    return null;
+}
+
+/** 末影水晶实体的 id 集合（放水晶前后各取一次，用来确认"真的多了一颗"）。 */
+function crystalEntityIds(bot: any): Set<string> {
+    const ids = new Set<string>();
+    const entities = bot?.entities;
+    if (entities == null || typeof entities !== 'object') return ids;
+    for (const [id, entity] of Object.entries(entities as Record<string, any>)) {
+        const e: any = entity;
+        if (typeof e?.name === 'string' && e.name.includes('end_crystal')) ids.add(String(id));
+    }
+    return ids;
+}
+
+/**
+ * 那一格（附近）是不是真的出现了一颗**新的**末影水晶。
+ *
+ * ⚠️ 不能按"读方块名 == end_crystal"来验：**1.20.4 的 minecraft-data 里根本没有
+ * `end_crystal` 这个方块**（末影水晶是实体，方块表里查不到）。只查方块的话每一步都会
+ * 判失败、把水晶白白烧掉。所以主判据是"附近多了一颗没见过的 end_crystal 实体"，
+ * 顺带兼容"某些版本/服务端把它当方块"的情况。
+ */
+export function verifyReviveCrystalAt(bot: any, cell: Vec3, beforeIds: Set<string>): string | null {
+    const entities = bot?.entities;
+    if (entities != null && typeof entities === 'object') {
+        for (const [id, entity] of Object.entries(entities as Record<string, any>)) {
+            const e: any = entity;
+            if (typeof e?.name !== 'string' || !e.name.includes('end_crystal')) continue;
+            const position = toVec(e.position);
+            if (position == null) continue;
+            if (horizontalDistance(position, cell) > 1.6) continue;
+            if (Math.abs(position.y - cell.y) > 2.5) continue;
+            if (!beforeIds.has(String(id))) return `新出现的末影水晶实体 #${id}`;
+            return `已存在的末影水晶实体 #${id}`;
+        }
+    }
+    const block = blockObjectAt(bot, cell);
+    if (typeof block?.name === 'string' && block.name.includes('end_crystal')) return `方块 ${block.name}`;
+    return null;
+}
+
+/**
+ * 复活末影龙：往返回门基座环的四个缺口各放一颗末影水晶。
+ *
+ * 这个世界**已经通关**（`DragonFight.DragonKilled=1`），拆水晶/床炸那段代码在真机上
+ * 永远跑不到；这是原版给的唯一回头路。纪律和其他危险动作一致：
+ * - 不在末地 / 龙还活着 / 水晶不够 → 直接拒绝，并说清缺几个（附采购清单）；
+ * - 找门**从世界读**（`end_portal` → `dragon_egg` → Memory Bank），找不到就说找不到；
+ * - 四个缺口**从方块推导**（`planDragonReviveSpots`），有一个被占就**停手**，不烧剩下的水晶；
+ * - 每放一颗都**复验**（新出现的末影水晶实体），失败就停、如实报；
+ * - 最后**等龙真的回来**（实体或 boss bar），没回来就说没回来。
+ */
+export async function reviveDragon(
+    bot: any,
+    agent?: any,
+    options: { waitMs?: number; pollMs?: number } = {}
+): Promise<string> {
+    const signals = readEndSignals(bot);
+    if (!signals.inEnd) return '你现在不在末地：复活仪式要在返回门旁边做，先 enterEnd。';
+    if (signals.dragonAlive || readDragonHealth(bot) != null) {
+        return '末影龙还活着（实体或 boss bar 都在），不用复活——直接走 clearEndCrystals / bedBombDragon。';
+    }
+
+    const have = countOf(bot, (name) => name === 'end_crystal');
+    if (have < DRAGON_REVIVE_CRYSTALS) {
+        return endgameReceipt(
+            `末影水晶不够，没动手（需要 ${DRAGON_REVIVE_CRYSTALS} 颗，你有 ${have} 颗，还差 ${DRAGON_REVIVE_CRYSTALS - have} 颗）。`,
+            [
+                ...END_CRYSTAL_SHOPPING_LIST.map((line) => `材料：${line}`),
+                '合成：end_crystal ×4（工作台，每颗 1 恶魂之泪 + 1 末影之眼 + 7 玻璃）。',
+                '**一颗都没放**，返回门保持原样。',
+            ],
+        );
+    }
+
+    const portal = findExitPortalForRevive(bot, agent);
+    if (portal == null) {
+        return endgameReceipt('找不到返回门，没动手。', [
+            '64 格内既没有 end_portal 方块，也没有 dragon_egg，Memory Bank 里也没记过 exit_portal。',
+            '先 goToCoordinates 走到末地主岛中心的返回门附近（龙死后 (0,62,0) 那个基座），再调一次。',
+        ]);
+    }
+    try {
+        agent?.memory_bank?.rememberPlace?.('exit_portal', portal.center.x, portal.center.y, portal.center.z);
+    } catch {
+        // 记不住不影响这次复活
+    }
+
+    const plan = planDragonReviveSpots({ center: portal.center, probe: (p) => blockNameAt(bot, p) });
+    if (!plan.ok) {
+        return endgameReceipt('返回门的缺口不齐，没动手（一颗水晶都没放）。', [
+            `中心来源：${portal.reason}`,
+            plan.reason,
+        ]);
+    }
+
+    const details: string[] = [`中心来源：${portal.reason}`, plan.reason];
+    const placedSpots: Vec3[] = [];
+    const placedText = (): string => placedSpots.map((s) => `(${s.x},${s.y},${s.z})`).join('、') || '无';
+    for (const spot of plan.spots) {
+        const beforeIds = crystalEntityIds(bot);
+        // 每次放之前重新探一次那一格：世界会变（这段时间里可能被谁堵上）
+        const here = blockNameAt(bot, spot);
+        if (here == null || (here !== 'air' && here !== 'cave_air' && here !== 'void_air')) {
+            return endgameReceipt(`第 ${placedSpots.length + 1} 个缺口 (${spot.x},${spot.y},${spot.z}) 现在放着 ${here ?? '读不到'}，停手。`, [
+                ...details,
+                `已经放了 ${placedSpots.length} 颗（${placedText()}）。`,
+                '把那一格清成空格（底下要留基座）再调一次；**剩下的水晶没动**。',
+            ]);
+        }
+        const ok = await skills.placeBlock(bot, 'end_crystal', spot.x, spot.y, spot.z);
+        const evidence = ok ? verifyReviveCrystalAt(bot, spot, beforeIds) : null;
+        if (!ok || evidence == null) {
+            return endgameReceipt(`第 ${placedSpots.length + 1} 颗水晶没放成（(${spot.x},${spot.y},${spot.z})），停手。`, [
+                ...details,
+                ok
+                    ? 'placeBlock 说成功，但那一格附近**没有出现新的末影水晶**——不能当放上了。'
+                    : 'placeBlock 直接失败（够不着/被挡）。',
+                `已经放了 ${placedSpots.length} 颗（${placedText()}）。`,
+                '走近一点、清掉挡路的方块再调一次；**剩下的水晶没动**。',
+            ]);
+        }
+        placedSpots.push(spot);
+        details.push(`第 ${placedSpots.length} 颗已就位 ${describeCell(spot)}（${evidence}）。`);
+    }
+
+    // 等龙回来：放完第四颗不是零延迟，给它几秒（默认每 200ms 看一次，最多 5 秒）。
+    const waitMs = Math.max(0, options.waitMs ?? 5000);
+    const pollMs = Math.max(1, options.pollMs ?? 200);
+    const deadline = Date.now() + waitMs;
+    let revived = readDragonRevived(bot);
+    while (!revived && Date.now() < deadline) {
+        if (bot?.interrupt_code) break;
+        await skills.wait(bot, pollMs);
+        revived = readDragonRevived(bot);
+    }
+
+    if (!revived) {
+        return endgameReceipt('四颗水晶都放上了，但**没看到龙回来**。', [
+            ...details,
+            '可能：服务端没把仪式判成完整（有一格位置不对/被替换），或者实体还没同步过来。',
+            '先调 endFightStatus 看龙头/龙血；如果水晶还在门上，别重复放（会白烧）。',
+        ]);
+    }
+
+    const health = readDragonHealth(bot);
+    return endgameReceipt('末影龙回来了，可以按正常流程打。', [
+        ...details,
+        `龙血：${health == null ? 'boss bar 还没出来（实体已经在视野里）' : `${health.toFixed(0)}/${DRAGON_MAX_HEALTH}`}。`,
+        '**柱子上的 10 颗水晶也一起回来了**：先 clearEndCrystals 拆干净，再 bedBombDragon——只要剩一颗水晶，龙就一直回血。',
+        '开打前先 drinkPotion（缓降）并确认背包里有床/方块/箭。',
+    ]);
 }
 
 /**

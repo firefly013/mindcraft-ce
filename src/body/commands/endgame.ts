@@ -83,6 +83,15 @@ export const ENDGAME_TOOL_TEXT: Record<string, { description: string; params: Re
             '没采到位置时它会**如实说"没看清"**、绝不编方向。末影珍珠是位移/免摔伤，**正在下坠时会自动往脚下扔**。',
         params: {},
     },
+    reviveDragon: {
+        description:
+            '**把已经打完的末影龙叫回来**（这个世界已经通关了，不然拆水晶/床炸那段代码永远跑不到）：往返回门基座环上的 **4 个缺口**各放一颗末影水晶（背包要有 4 颗 end_crystal）。' +
+            '它会**从世界读**返回门位置（end_portal 方块 → 龙蛋柱 → 记下来的坐标），**从真实方块推导** 4 个缺口（不写死 (0,62,0)），**放一颗复验一颗**（新出现的末影水晶实体）——' +
+            '缺口被占 / 水晶没放成 / 龙没回来都会**停手并如实说**，不会把 4 颗水晶一次烧光。' +
+            '不在末地、龙还活着、水晶不够（会告诉你还差几颗 + 采购清单：4 恶魂之泪 + 4 末影之眼 + 28 玻璃）都会直接拒绝。' +
+            '放完龙会带着**柱子上那 10 颗水晶**一起回来：先 clearEndCrystals 拆干净，再 bedBombDragon。',
+        params: {},
+    },
 };
 
 /** 取描述（键名打错会在编译期就红）。 */
@@ -132,7 +141,8 @@ export const endgameQueryList: AgentCommand[] = [
         description: DESCRIPTION('endFightStatus'),
         params: {},
         perform: function (agent: any): string {
-            return endgame.endgameStatusReport(agent.bot);
+            // 传 agent：报告要读 Memory Bank 里记过的末地传送门坐标（知道门在哪就不用再掷眼找要塞）。
+            return endgame.endgameStatusReport(agent.bot, agent);
         },
     },
 ];
@@ -207,6 +217,15 @@ export const endgameActionList: AgentCommand[] = [
         name: '!throwHeld',
         description: DESCRIPTION('throwHeld'),
         params: {},
-        perform: runEndgameAction('throwHeld', 1, (agent) => logReceipt(agent, () => endgame.throwHeldSkill(agent.bot))),
+        perform: runEndgameAction('throwHeld', 1, (agent) => logReceipt(agent, () => endgame.throwHeldSkill(agent.bot, agent))),
+    },
+    {
+        name: '!reviveDragon',
+        description: DESCRIPTION('reviveDragon'),
+        params: {},
+        // 找门 + 放 4 颗水晶 + 等龙回来，给 3 分钟。
+        perform: runEndgameAction('reviveDragon', 3, (agent) =>
+            logReceipt(agent, () => endgame.reviveDragon(agent.bot, agent)),
+        ),
     },
 ];

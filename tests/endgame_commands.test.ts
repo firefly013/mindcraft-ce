@@ -29,6 +29,7 @@ const ENDGAME_TOOLS = [
     'drinkMilk',
     'recoverAfterDeath',
     'throwHeld',
+    'reviveDragon',
 ] as const;
 
 function stack(name: string, count = 1, extra: Record<string, any> = {}) {
@@ -167,6 +168,7 @@ describe('接线：registry 里的 9 条末地命令', () => {
         expect(ENDGAME_TOOL_TEXT.drinkPotion.description).toContain('缓降');
         expect(ENDGAME_TOOL_TEXT.dodgeDragonBreath.description).toContain('20 格');
         expect(ENDGAME_TOOL_TEXT.recoverAfterDeath.description).toContain('5 分钟');
+        expect(ENDGAME_TOOL_TEXT.reviveDragon.description).toContain('end_crystal');
     });
 });
 

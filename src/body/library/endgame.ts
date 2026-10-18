@@ -1345,7 +1345,12 @@ export function planDragonReviveSpots(input: {
     const isBase = (p: Vec3): boolean => nameAt(p) === base;
 
     const candidates = new Map<CardinalDirection, { cell: Vec3; score: number }>();
-    const blockedFirst = new Map<CardinalDirection, { cell: Vec3; block: string | null }>();
+    // 被占的格子：优先报"长得像缺口但被占了"的那一格（底下是基座 + 两侧是基座），
+    // 否则报最靠外的那一格。不然会把环本身的基座（r=1）误报成"缺口被堵"。
+    const blockedFirst = new Map<
+        CardinalDirection,
+        { cell: Vec3; block: string | null; shaped: boolean; radius: number; dyAbs: number }
+    >();
 
     for (const dir of CARDINAL_DIRECTIONS) {
         for (let dy = -tolerance; dy <= tolerance; dy++) {
@@ -1353,16 +1358,25 @@ export function planDragonReviveSpots(input: {
                 const cell = vec(cx + dir.dx * r, cy + dy, cz + dir.dz * r);
                 const here = nameAt(cell);
                 if (here == null) continue; // 读不到 → 不猜
-                if (here !== 'air' && here !== 'cave_air' && here !== 'void_air') {
-                    // 有东西占着：记住第一格，最后如实报出来
-                    if (!blockedFirst.has(dir.point)) blockedFirst.set(dir.point, { cell, block: here });
-                    continue;
-                }
-                if (!isBase(vec(cell.x, cell.y - 1, cell.z))) continue; // 缺口底下得是基座
-                // 环的签名：垂直于半径方向的两侧同层也是基座
+                const belowIsBase = isBase(vec(cell.x, cell.y - 1, cell.z));
                 const sideA = vec(cell.x - dir.dz, cell.y, cell.z - dir.dx);
                 const sideB = vec(cell.x + dir.dz, cell.y, cell.z + dir.dx);
-                if (!isBase(sideA) || !isBase(sideB)) continue;
+                const shaped = belowIsBase && isBase(sideA) && isBase(sideB);
+                if (here !== 'air' && here !== 'cave_air' && here !== 'void_air') {
+                    const previous = blockedFirst.get(dir.point);
+                    const candidate = { cell, block: here, shaped, radius: r, dyAbs: Math.abs(dy) };
+                    // 优先"长得像缺口"的；同样像就取**更靠外**的（缺口在环的外沿 r=2，
+                    // r=1 是环本身的基座，不能报成"缺口被堵"）；再同样就取更贴近中心层的。
+                    const better =
+                        previous == null ||
+                        (candidate.shaped && !previous.shaped) ||
+                        (candidate.shaped === previous.shaped &&
+                            (candidate.radius > previous.radius ||
+                                (candidate.radius === previous.radius && candidate.dyAbs < previous.dyAbs)));
+                    if (better) blockedFirst.set(dir.point, candidate);
+                    continue;
+                }
+                if (!shaped) continue; // 缺口底下得是基座、两侧也得是环
                 const score = Math.abs(dy) * 10 + r;
                 const current = candidates.get(dir.point);
                 if (current == null || score < current.score) candidates.set(dir.point, { cell, score });
@@ -1382,7 +1396,7 @@ export function planDragonReviveSpots(input: {
         }
         missing.push(dir.point);
         const blockedCell = blockedFirst.get(dir.point);
-        if (blockedCell != null) blocked.push({ direction: dir.point, ...blockedCell });
+        if (blockedCell != null) blocked.push({ direction: dir.point, cell: blockedCell.cell, block: blockedCell.block });
     }
 
     const ok = spots.length === DRAGON_REVIVE_CRYSTALS;
@@ -1603,8 +1617,12 @@ export function nextEndgameStep(state: EndgameState): EndgameStepAdvice {
 
     // —— 主世界/下界段：材料链 → 找要塞 → 激活 → 进末地 ——
     if (state.inEnd !== true) {
-        const materials = eyeMaterialAdvice(state);
-        if (materials != null) return materials;
+        // 门**已经激活**了就不用再刷眼：末影之眼只有"填门"这一个用途，
+        // 再让人回下界刷烈焰棒纯属浪费（而且会挡住"进门去复活龙/回收尸体"这类正当理由）。
+        if (state.portalActivated !== true) {
+            const materials = eyeMaterialAdvice(state);
+            if (materials != null) return materials;
+        }
 
         if (state.strongholdFound !== true) {
             const eyes = state.eyesOfEnder;
@@ -1678,21 +1696,13 @@ export function nextEndgameStep(state: EndgameState): EndgameStepAdvice {
             state.dragonHealth === 0
                 ? 'Boss 已经打完（血量 0）。'
                 : '龙实体和 boss bar 都不在了，按"打完"处理；**如果还能看见它在飞，先调 endFightStatus 复核**再走。';
-        return state.inEnd === true
-            ? {
-                  phase: 'done',
-                  action: `龙已经死了。两个选择：**要走**就进 (0,62,0) 的出口传送门（返回门）回主世界（会放终末之诗，别忘了捡龙蛋和 12000 经验）；${reviveDoor}`,
-                  tool: hasCrystals ? 'reviveDragon' : 'craft',
-                  nextPhase: 'done',
-                  reason: reasonTail,
-              }
-            : {
-                  phase: 'done',
-                  action: `龙已经死了（你在末地外面）。要回末地就从记下来的传送门再进去（激活过的门一直亮着）；${reviveDoor}`,
-                  tool: 'enterEnd',
-                  nextPhase: 'done',
-                  reason: reasonTail,
-              };
+        return {
+            phase: 'done',
+            action: `龙已经死了。两个选择：**要走**就进 (0,62,0) 的出口传送门（返回门）回主世界（会放终末之诗，别忘了捡龙蛋和 12000 经验）；${reviveDoor}`,
+            tool: hasCrystals ? 'reviveDragon' : 'craft',
+            nextPhase: 'done',
+            reason: reasonTail,
+        };
     }
     if (state.beds != null && state.beds <= 0) {
         // 没床 = 主输出没了。在末地出不去（出口要龙死才开），所以只能改打法。
