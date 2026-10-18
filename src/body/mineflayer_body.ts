@@ -799,6 +799,11 @@ export class MineflayerBody {
 
         console.log(this.name, 'logging into minecraft...');
         this.bot = initBot(this.name);
+        // 容器包转储入口：skills 侧只认这两个方法名，不 import 身体内部实现。
+        (this.bot as { __armContainerPacketDump?: unknown }).__armContainerPacketDump = (reason: string): void =>
+            this.armContainerPacketDump(reason);
+        (this.bot as { __disarmContainerPacketDump?: unknown }).__disarmContainerPacketDump = (outcome: string): void =>
+            this.finishContainerPacketDump(outcome);
         // 背包在登录后才会由服务端推下来；在此之前"空"是不可信的（见 inventorySynced）。
         this.inventorySynced = false;
         try {
@@ -1032,6 +1037,121 @@ export class MineflayerBody {
             inventorySynced: this.inventorySynced !== false,
         };
     }
+
+    /**
+     * **容器包转储**：只在下一次"开容器"期间武装，回答两个问题：
+     *   (a) 服务端到底有没有发 `open_screen` / `window_items`？
+     *   (b) 我们到底发了什么（`block_place` / `use_item_on` 的位置、朝向、sequence、手持）？
+     *
+     * 为什么必须有它：真机 2026-10-19 overnight_a 报了 18 次 chest/furnace 的
+     * `windowOpen` 超时，而 `crafting_table` 完全正常——`windowPackets === 0` 只是
+     * **证据**（"服务端没发"），不是**原因**。有了这一行，下一次失败就能直接读出
+     * 是我们没发包 / 发了服务端不认的包 / 服务端拒发。
+     *
+     * 纪律（Lead 的要求）：**只有失败才武装**（成功即解除）、**有界**（8 秒 /
+     * 最多 24 条 / 约 1800 字符）、**脱敏**（只留名字和几个判定字段，不留整包）、
+     * 最后落成**一行** lifecycle 日志——绝不常开、绝不刷屏。
+     */
+    private containerDumpArmed = false;
+    private containerDumpTimer: ReturnType<typeof setTimeout> | null = null;
+    private containerDumpLines: string[] = [];
+    private containerDumpRestore: (() => void) | null = null;
+
+    /** 武装一次转储（重复调用无害；已经在录就不重开）。 */
+    armContainerPacketDump(reason: string): void {
+        if (this.containerDumpArmed) return;
+        const client = (this.bot as { _client?: any } | null)?._client;
+        if (client == null || typeof client.on !== 'function') return;
+        this.containerDumpArmed = true;
+        this.containerDumpLines = [`reason=${reason}`];
+        const record = (line: string): void => {
+            if (!this.containerDumpArmed) return;
+            if (this.containerDumpLines.length >= 24) return;
+            const joined = this.containerDumpLines.join(' | ');
+            if (joined.length >= 1800) return;
+            this.containerDumpLines.push(line);
+        };
+        // 收包：只关心"开界面"这一族。
+        try {
+            this.onContainerIncoming = (_data: unknown, meta: { name?: unknown }): void => {
+                const name = String(meta?.name ?? '');
+                if (!/open_screen|window_items|window_properties|close_window|set_content|container_set_content|open_sign_editor|merchant_offers/i.test(name)) return;
+                record(`in:${name}`);
+                // 只要真的来了开界面包，就说明服务端认了这次交互——立刻收尾。
+                if (/open_screen|window_items/i.test(name)) this.finishContainerPacketDump('window-arrived');
+            };
+            client.on('packet', this.onContainerIncoming);
+        } catch {
+            // 挂不上就当没武装（不阻塞打开流程）。
+            this.containerDumpArmed = false;
+            return;
+        }
+        // 发包：临时包住 write，只记"我们发了什么"。
+        try {
+            const rawWrite = client.write;
+            const original = typeof rawWrite === 'function' ? rawWrite.bind(client) : null;
+            if (original != null) {
+                client.write = (name: string, params: any): unknown => {
+                    if (/block_place|use_item_on|block_dig|arm_animation|close_window|held_item_slot|player_action|entity_action/i.test(String(name))) {
+                        const p = params ?? {};
+                        const loc = p.location ?? p.position;
+                        const bits = [
+                            typeof loc?.x === 'number' ? `${Math.round(loc.x)},${Math.round(loc.y)},${Math.round(loc.z)}` : null,
+                            p.direction != null ? `dir=${p.direction}` : null,
+                            p.sequence != null ? `seq=${p.sequence}` : null,
+                            p.hand != null ? `hand=${p.hand}` : null,
+                            p.cursorX != null ? `cur=${p.cursorX},${p.cursorY},${p.cursorZ}` : null,
+                            p.action != null ? `action=${p.action}` : null,
+                        ].filter((x): x is string => x != null);
+                        record(`out:${String(name)}(${bits.join(' ')})`);
+                    }
+                    return original(name, params);
+                };
+                this.containerDumpRestore = () => {
+                    try {
+                        client.write = rawWrite;
+                    } catch {
+                        // 还原失败也不影响后续（只是多记几条）。
+                    }
+                };
+            }
+        } catch {
+            // 包不住 write 就只留收包证据。
+        }
+        this.containerDumpTimer = setTimeout(() => this.finishContainerPacketDump('window-expired'), 8_000);
+        (this.containerDumpTimer as { unref?: () => void }).unref?.();
+    }
+
+    /** 收尾：**一行** lifecycle 日志（成功、超时、或显式解除都走这里，且只走一次）。 */
+    finishContainerPacketDump(outcome: string): void {
+        if (!this.containerDumpArmed) return;
+        this.containerDumpArmed = false;
+        if (this.containerDumpTimer != null) {
+            clearTimeout(this.containerDumpTimer);
+            this.containerDumpTimer = null;
+        }
+        try {
+            const client = (this.bot as { _client?: any } | null)?._client;
+            if (client != null && this.onContainerIncoming != null) client.removeListener?.('packet', this.onContainerIncoming);
+        } catch {
+            // 摘不掉监听不影响日志。
+        }
+        this.onContainerIncoming = null;
+        this.containerDumpRestore?.();
+        this.containerDumpRestore = null;
+        try {
+            this.log.with('lifecycle').info({
+                event: 'container-packet-dump',
+                outcome,
+                lines: this.containerDumpLines,
+            });
+        } catch {
+            // 日志失败不能影响动作。
+        }
+        this.containerDumpLines = [];
+    }
+
+    private onContainerIncoming: ((data: unknown, meta: { name?: unknown }) => void) | null = null;
 
     /** 背包数据到过一次了（服务端 window_items / heldItemChanged 触发）。 */
     private markInventorySynced(): void {

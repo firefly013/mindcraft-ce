@@ -5579,6 +5579,14 @@ export async function openBlockUi(
     } catch {
         // 同上。
     }
+    // **只在开容器期间**武装包转储（失败/超时才落一行日志；成功立刻解除）。
+    // 这是"0 个窗口包"那个诊断的下一级：直接记下我们发了什么、服务端有没有回。
+    try {
+        const arm = (bot as { __armContainerPacketDump?: (reason: string) => void }).__armContainerPacketDump;
+        arm?.(`useBlock ${name}`);
+    } catch {
+        // 转储不是功能，武装失败不影响打开。
+    }
     // 诊断计数：**这次尝试里到底有没有窗口包到达**（0 = 服务端根本没发；>0 = 到了没接住）。
     let windowPackets = 0;
     const onWindowOpen = (): void => {
@@ -5606,6 +5614,13 @@ export async function openBlockUi(
                 const opened = await openWithTimeout(bot, block, furnaceLike, timeoutMs);
                 if (attempt > 0) log(bot, `清掉残留界面后重试成功，${name} 打开正常。`);
                 recordContainerOpenResult(name, true);
+                try {
+                    const disarm = (bot as { __disarmContainerPacketDump?: (outcome: string) => void })
+                        .__disarmContainerPacketDump;
+                    disarm?.('opened');
+                } catch {
+                    // 解除失败最多多记几行，不影响结果。
+                }
                 return opened;
             } catch (err: unknown) {
                 lastError = err;
