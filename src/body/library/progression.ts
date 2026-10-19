@@ -749,6 +749,13 @@ export interface HuntOutcome {
     retractions?: number;
     /** 攻击说死了但读不到实体表的次数（没证据，不算击杀）。 */
     unverifiedKills?: number;
+    /** 最后一次捡拾的四个事实（看到/踩到/到手/读不到）——回执要分开说。 */
+    loot?: DropSweep | null;
+    /**
+     * body 侧落点诊断（`receipts-dev` 的仪器）：`bot.output` 里最后一条 `drop-seen{…}`。
+     * 它解释"为什么没捡到"，我们这边只负责**不再声称没掉东西**——两边对齐、不重复。
+     */
+    dropDiagnostics?: string | null;
     warnings: string[];
     progress: HuntProgressLine[];
 }
@@ -773,6 +780,25 @@ export function huntReceipt(o: HuntOutcome): string {
     const head = `huntFor ${o.entity}：**${counter}**（起手 ${o.baseline}）`;
     const tail = `攻击 ${o.attacks} 次、击杀 ${o.kills} 只，用了 ${Math.round(o.elapsedMs / 1000)} 秒；停止原因：${STOP_REASON_TEXT[o.stopReason]}。`;
     lines.push(`${head}；${tail}`);
+    // **四个事实分开说**（击杀 / 看到掉落物 / 踩到没 / 背包增量）——真机教训：
+    // 只写「捡到 0 个」会让模型读成"这种怪不掉东西"，而真相是"东西在地上、没去踩"。
+    if (o.loot != null) {
+        lines.push(`捡拾四个事实：击杀 ${o.kills} 只（已验证）；${describeDropSweep(o.loot)}；背包实测增量 ${o.gained}。`);
+        if (o.loot.seen > 0 && o.loot.picked === 0) {
+            lines.push(
+                '⚠️ **怪死了、地上有掉落物，但一个都没到手**——这**不是**"这种怪不掉东西"，是**没捡到**：' +
+                    '照下一步走过去踩它（自动拾取会收）。别把它记成"掉率为 0"。',
+            );
+        } else if (!o.loot.readable && o.loot.seen === 0) {
+            lines.push(
+                '⚠️ **掉落物实体读不到**（实体表不可用）⇒ 这条回执只能说"**没读到**"，' +
+                    '**不能说"没有掉落物"**；以 stats 的背包为准。',
+            );
+        }
+        if (o.dropDiagnostics != null && o.dropDiagnostics !== '') {
+            lines.push(`（body 侧落点诊断：${o.dropDiagnostics}）`);
+        }
+    }
     if (o.items.length === 0) {
         lines.push('⚠️ 掉落表里没有这种怪：**只报攻击/击杀次数**，没有可靠的"到手几个"依据——请用 stats 核对背包。');
     }
@@ -871,6 +897,14 @@ export function huntReceipt(o: HuntOutcome): string {
 /** 和 `exploreNextAction` 同一条理由：只给**一条**能照抄的调用，别给菜单。 */
 export function huntNextAction(o: HuntOutcome): string {
     const remaining = Math.max(1, o.want - o.gained);
+    // **地上有东西就别收工**：击杀已确认、掉落物看到过、但一个都没到手 ⇒ 下一步是**去踩它**
+    // （真机 overnight_b：回执说"没捡到"就结束了，模型于是以为"这种怪不掉东西"）。
+    if (o.loot != null && o.loot.seen > 0 && o.loot.picked === 0 && o.loot.nearest != null) {
+        const p = o.loot.nearest.position;
+        if (Number.isFinite(p?.x) && Number.isFinite(p?.y) && Number.isFinite(p?.z)) {
+            return `goToCoordinates(x=${Math.round(p.x)}, y=${Math.round(p.y)}, z=${Math.round(p.z)}, closeness=1)`;
+        }
+    }
     switch (o.stopReason) {
         case 'reached':
             return 'stats(type="inventory")';
@@ -1284,6 +1318,8 @@ export interface HuntDeps {
     findEntity?: (bot: any, entity: string, radius: number) => any | null;
     /** 找最近的地面掉落物（模型动作期间自动拾取是停的，得自己走过去踩）。 */
     findDrop?: (bot: any, radius: number) => any | null;
+    /** 数一数附近有几个掉落物实体；**读不到实体表返回 null**（"没读到" ≠ "没有"）。 */
+    countDrops?: (bot: any, radius: number) => number | null;
     /** 打一只；返回是否击杀。默认走 skills.attackTarget。 */
     attack?: (bot: any, entity: string) => Promise<boolean>;
     /** 走过去（捡掉落物用）。默认 skills.goToPosition。 */
@@ -1385,6 +1421,8 @@ export async function huntForSkill(
     let lastFailedTargetId: number | null = null;
     const maxAttempts = huntMaxAttempts(want);
     let stopReason: HuntOutcome['stopReason'] = 'budget';
+    /** 最后一次捡拾的四个事实（回执要分开说：看到/踩到/到手/读不到）。 */
+    let lastSweep: DropSweep | null = null;
 
     if (dropSpec.note != null) warnings.push(`ℹ️ ${dropSpec.note}`);
     const netherBlaze = isInNether(bot) && entity === 'blaze';
@@ -1517,7 +1555,9 @@ export async function huntForSkill(
             now,
             items,
             baselineAtStart,
+            countDrops: deps.countDrops,
         });
+        lastSweep = looted.sweep;
         const after = looted.total;
         const delta = after - before;
         const counter = items.length > 0 ? `${items[0]} ${after}/${want}` : `背包总件数 ${after}/${want}`;
@@ -1531,7 +1571,9 @@ export async function huntForSkill(
                 : `没打死 ${entity}`;
         progress.push({
             attempt: attempts,
-            text: `${outcomeText}；捡到 ${looted.picked} 个掉落物；${counter}${delta > 0 ? '' : '（这次没涨）'}`,
+            // **四个事实分开说**（击杀 / 看到掉落物 / 踩到没 / 背包增量）——揉成一个
+            // "捡到 0 个"会让模型读成"这种怪不掉东西"（真机 overnight_b）。
+            text: `${outcomeText}；${describeDropSweep(looted.sweep)}；${counter}${delta > 0 ? '' : '（这次没涨）'}`,
         });
         if (progress.length > HUNT_MAX_PROGRESS_LINES) progress.splice(0, progress.length - HUNT_MAX_PROGRESS_LINES);
 
@@ -1630,9 +1672,28 @@ export async function huntForSkill(
         teleportFailures,
         retractions,
         unverifiedKills,
+        loot: lastSweep,
+        dropDiagnostics: lastDropDiagnostics(bot),
         warnings,
         progress,
     });
+}
+
+/**
+ * 从 `bot.output` 里取**最后一条** body 侧落点诊断（`receipts-dev` 的仪器：
+ * `drop-seen{id, distance, willAttempt, blockedBy[]}`）。
+ *
+ * 我们这边**不重复实现**它：他们解释"为什么没捡到"，我们只负责"不再声称没掉东西"。
+ * 找不到就返回 null（不编）。
+ */
+export function lastDropDiagnostics(bot: any): string | null {
+    try {
+        const output = typeof bot?.output === 'string' ? bot.output : '';
+        const matches = output.match(/drop-seen\{[^}]*\}/g);
+        return matches != null && matches.length > 0 ? (matches[matches.length - 1] ?? null) : null;
+    } catch {
+        return null;
+    }
 }
 
 /** 当前累计到手数（相对起手基线的真实增量，只算正数）。 */
@@ -1648,37 +1709,160 @@ interface CollectDeps {
     now: () => number;
     items: readonly string[];
     baselineAtStart: number;
+    /** 数一数附近有几个掉落物实体；**读不到实体表返回 null**（"没读到" ≠ "没有"）。 */
+    countDrops?: (bot: any, radius: number) => number | null;
+}
+
+/** 踩到多近算"人真的到了掉落物身上"（格）。 */
+export const DROP_OVERLAP_EPS = 1.5;
+
+/**
+ * 把一次捡拾的**四个事实分开说**（纯函数，可单测）。
+ *
+ * 真机教训：回执只写「捡到 0 个掉落物」，模型读成"这种怪不掉东西"✗——
+ * 而真相是"怪死了、东西在地上、没去踩"。所以这里必须分开说：
+ * ① 看到几个（+ 最近几格）② 踩到几次 ③ 到手几个（背包增量）④ 读不到就说读不到。
+ */
+export function describeDropSweep(sweep: DropSweep | null | undefined): string {
+    if (sweep == null) return '掉落物：**没读到**（这次没有捡拾记录）';
+    const nearest = sweep.nearest;
+    const where =
+        nearest == null
+            ? ''
+            : `（现在最近 ${Number.isFinite(nearest.distance) ? nearest.distance.toFixed(1) : '?'} 格` +
+              `${Number.isFinite(nearest.position?.x) ? ` @(${Math.round(nearest.position.x)}, ${Math.round(nearest.position.y)}, ${Math.round(nearest.position.z)})` : ''}` +
+              `${nearest.name != null ? `，${nearest.name}` : ''}）`;
+    if (!sweep.readable && sweep.seen === 0) {
+        return '掉落物：**没读到**（实体表读不到 ⇒ 这只说明"没读到"，**不等于没有掉落物**）';
+    }
+    if (sweep.seen === 0) {
+        return '掉落物：范围内**没看到**掉落物实体';
+    }
+    const pickedText = sweep.picked > 0 ? `**到手 ${sweep.picked} 个**` : '**一个都没到手**';
+    return (
+        `掉落物：**看到 ${sweep.seen} 个**${where}；走过去试了 ${sweep.attempts} 次、` +
+        `**踩到 ${sweep.overlapped} 次**；${pickedText}`
+    );
 }
 
 /**
- * 走过去把附近的掉落物踩掉，返回**核对出来的**累计到手数。
+ * 一次"捡掉落物"的**四个事实**（回执绝不许把它们揉成一个数）。
  *
- * 返回的 `total` 一律走背包计数（不是"我走了几步"），所以调用方可以直接拿它当
- * "到手几个"用——这就是"只认真实增量"的落点。
+ * 真机（overnight_b）：怪**死了**、掉落物实体**真的刷出来了**（`item.drop.nearby id=…` 停了 8 秒），
+ * 但回执只写「捡到 0 个掉落物」⇒ 模型读成"这种怪不掉东西"✗。
+ */
+export interface DropSweep {
+    /** 扫到过几个掉落物实体（0 = 一次都没扫到）。 */
+    seen: number;
+    /** 掉落物实体**读不到**（实体表不可用）——这时候只能说"没读到"，不能说"没有"。 */
+    readable: boolean;
+    /** 最近那个（回执要能说"最近 N 格 @(x,y,z)"，下一步也照它走）。 */
+    nearest: { name: string | null; id: number | null; distance: number; position: FlatPosition } | null;
+    /** 走过去尝试了几次。 */
+    attempts: number;
+    /** 有几次**人真的踩到它身上**（≤ `DROP_OVERLAP_EPS` 格）。 */
+    overlapped: number;
+    /** 背包增量（**唯一算数的"到手几个"**）。 */
+    picked: number;
+}
+
+/**
+ * 默认的"数掉落物"：读 `bot.entities` 里的 item 实体。
+ *
+ * 返回 `null` = **读不到**（实体表没有/读异常）——调用方必须把它和 0 分开说。
+ */
+export function countNearbyDrops(bot: any, radius: number): number | null {
+    try {
+        const entities = bot?.entities;
+        if (entities == null || typeof entities !== 'object') return null;
+        const pos = bot?.entity?.position;
+        if (pos == null) return null;
+        let count = 0;
+        for (const key of Object.keys(entities)) {
+            const entity = (entities as Record<string, any>)[key];
+            if (entity == null) continue;
+            const kind = String(entity?.name ?? entity?.entityType ?? entity?.type ?? '').toLowerCase();
+            const isItem =
+                kind === 'item' ||
+                kind === 'item_stack' ||
+                kind === 'item_entity' ||
+                String(entity?.objectType ?? '').toLowerCase() === 'item';
+            if (!isItem) continue;
+            const p = entity?.position;
+            if (p == null) continue;
+            const d = Math.hypot(Number(p.x) - Number(pos.x), Number(p.y) - Number(pos.y), Number(p.z) - Number(pos.z));
+            if (Number.isFinite(d) && d <= radius) count += 1;
+        }
+        return count;
+    } catch {
+        return null;
+    }
+}
+
+/**
+ * 走过去把附近的掉落物踩掉，返回**核对出来的**累计到手数 + 四个事实。
+ *
+ * `total` 一律走背包计数（不是"我走了几步"），所以调用方可以直接拿它当
+ * "到手几个"用——这就是"只认真实增量"的落点。`sweep` 则把"看到没看到/踩到没踩到"
+ * 分开记下来（回执要能说"地上有、没捡到"）。
  */
 export async function collectDrops(
     bot: any,
     radius: number,
     budgetMs: number,
     deps: CollectDeps,
-): Promise<{ picked: number; total: number }> {
+): Promise<{ picked: number; total: number; sweep: DropSweep }> {
     const deadline = deps.now() + budgetMs;
     const startTotal = currentGain(bot, deps.items, deps.baselineAtStart);
+    const countDrops = deps.countDrops ?? countNearbyDrops;
+    const sweep: DropSweep = { seen: 0, readable: true, nearest: null, attempts: 0, overlapped: 0, picked: 0 };
     let picked = 0;
+    const noteDrop = (drop: any): number => {
+        const p = drop?.position;
+        let distance = Number.POSITIVE_INFINITY;
+        try {
+            const self = bot?.entity?.position;
+            if (self != null && p != null) {
+                distance = Math.hypot(Number(p.x) - Number(self.x), Number(p.y) - Number(self.y), Number(p.z) - Number(self.z));
+            }
+        } catch {
+            distance = Number.POSITIVE_INFINITY;
+        }
+        if (sweep.nearest == null || distance < sweep.nearest.distance) {
+            sweep.nearest = {
+                name: typeof drop?.name === 'string' ? drop.name : null,
+                id: Number.isFinite(Number(drop?.id)) ? Number(drop.id) : null,
+                distance,
+                position: { x: Number(p?.x), y: Number(p?.y), z: Number(p?.z) },
+            };
+        }
+        return distance;
+    };
     while (deps.now() < deadline) {
         if (bot?.interrupt_code === true) break;
+        const counted = countDrops(bot, radius);
+        if (counted == null) sweep.readable = false;
+        else sweep.seen = Math.max(sweep.seen, counted);
         const drop = deps.findDrop(bot, radius);
         if (drop?.position == null) break;
+        sweep.seen = Math.max(sweep.seen, 1); // findDrop 找到了 ⇒ 至少看到过一个
+        noteDrop(drop);
+        sweep.attempts += 1;
         const before = currentGain(bot, deps.items, deps.baselineAtStart);
         const arrived = await deps.travel(bot, drop.position.x, drop.position.y, drop.position.z, 1);
         await deps.sleep(250);
-        const after = currentGain(bot, deps.items, deps.baselineAtStart);
-        picked += Math.max(0, after - before);
+        const afterGain = currentGain(bot, deps.items, deps.baselineAtStart);
+        const gained = Math.max(0, afterGain - before);
+        picked += gained;
+        sweep.picked += gained;
+        // **踩到没有**：用"人的位置 vs 掉落物位置"量，不看 travel 的返回值。
+        const distanceAfter = noteDrop(drop);
+        if (distanceAfter <= DROP_OVERLAP_EPS) sweep.overlapped += 1;
         // 走不过去 + 没进账：别再对着同一个掉落物死循环。
-        if (!arrived && after === before) break;
+        if (!arrived && afterGain === before) break;
     }
     const total = Math.max(startTotal, currentGain(bot, deps.items, deps.baselineAtStart));
-    return { picked, total };
+    return { picked, total, sweep };
 }
 
 // ─────────────────────────── 直线隧道（mineTunnel） ───────────────────────────

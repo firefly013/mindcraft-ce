@@ -377,3 +377,37 @@ export function summarizePickupTrace(samples: PickupSample[]): PickupTraceSummar
     if (closest != null) parts.push(`最近时 Δ=(${closest.dx.toFixed(2)},${closest.dy.toFixed(2)},${closest.dz.toFixed(2)})`);
     return { samples: list.length, botTravel, overlapEver, closest, note: parts.join('；') };
 }
+
+/**
+ * **击杀后的拾取优先窗口**（Lead 2026-10-19 裁定）。
+ *
+ * 真机：杀死骷髅后掉落物 id 434443 就在击杀点躺着 8 秒以上，`huntFor` 报
+ * 「Picked up 0 items.」——因为"附近有敌对生物就跳过拾取"这条闸门在**最该捡东西的
+ * 时刻**（刚打完怪）恰好关着。战利品在地上躺 5 分钟就会消失，所以击杀后给一个**有界**的
+ * 优先窗口：允许在"附近有怪"时也去踩一下。
+ *
+ * 两条约束（都由调用方提供事实）：
+ *   - **正在挨打就不抢**（`hurtRecently` ⇒ 保命优先）；
+ *   - **有界 + 有日志**（`pickup-priority-window{ms, reason}`）。
+ */
+export function shouldBypassThreatGateForPickup(input: {
+    now: number;
+    /** 击杀后优先窗口的截止时刻（0 = 没有窗口）。 */
+    priorityUntil: number;
+    /** 最近一次受伤的时刻（0 = 没受过伤）。 */
+    lastHurtAt: number;
+    /** 受伤后多久内算"正在挨打"。 */
+    hurtGuardMs?: number;
+}): boolean {
+    // **对缺失值必须 fail-closed**：`Object.create(proto)` 出来的 fixture（以及任何
+    // 没初始化类字段的调用方）会让 `priorityUntil` 是 undefined，而 JS 里
+    // `undefined <= 数字` 求值为 **false** ⇒ 用 `<=` 判断会让"没有窗口"被读成
+    // "窗口开着"，于是僵尸在旁边也去捡东西（真机测试 reflex_preemption 当场抓到这个）。
+    // 所以这里只认"明确的数字且确实在窗口内"，其余一律不开窗。
+    const until = input.priorityUntil;
+    if (typeof until !== 'number' || !Number.isFinite(until) || !(until > input.now)) return false;
+    const guard = Math.max(0, Number(input.hurtGuardMs ?? 2_000) || 0);
+    const hurt = input.lastHurtAt;
+    if (typeof hurt === 'number' && Number.isFinite(hurt) && hurt > 0 && input.now - hurt <= guard) return false;
+    return true;
+}

@@ -40,6 +40,7 @@ import {
     countItem,
     countTotalItems,
     describeCoverage,
+    describeDropSweep,
     dropForEntity,
     exploreForSkill,
     exploreNextAction,
@@ -642,6 +643,165 @@ describe('huntFor：刷到够数 / 只认真实增量', () => {
         expect(receipt).toContain('停止原因：够数了');
         expect(receipt).toContain('进度：');
         expect(receipt.trimEnd().split('\n').at(-1)).toBe('下一步（照做即可）：stats(type="inventory")');
+    });
+
+    it('**怪死了、地上有掉落物、没捡到** ⇒ 四个事实分开说 + 下一步是"去踩它"（真机 overnight_b）', async () => {
+        const bot = makeBot({ items: [stack('bone', 0)] });
+        let clock = 0;
+        const receipt = await huntForSkill(bot, 'skeleton', 8, 48, 6_000, {
+            findEntity: () => ({ name: 'skeleton', position: { x: 3, y: 64, z: 0 } }),
+            // 地上**有**掉落物（真机那条：id=434443 在 (-43.16, 58, 6.25) 停了 8 秒），但人走不过去
+            findDrop: () => ({ id: 434443, name: 'item', position: { x: -43.16, y: 58, z: 6.25 } }),
+            countDrops: () => 1,
+            travel: async () => false,
+            attack: async () => {
+                clock += 2_000;
+                return true; // 打死了
+            },
+            entityPresent: () => false, // 实体没了 = 真死
+            sleep: noSleep,
+            now: () => clock,
+        });
+
+        // ① 四个事实分开说，不再是一句"捡到 0 个"
+        expect(receipt).toContain('捡拾四个事实');
+        expect(receipt).toContain('看到 1 个');
+        expect(receipt).toContain('踩到 0 次');
+        expect(receipt).toContain('一个都没到手');
+        expect(receipt).toContain('背包实测增量 0');
+        // ② 明确"不是不掉东西，是没捡到"（回执里那句警告本身就是在纠正这个误解）
+        expect(receipt).toContain('地上有掉落物，但一个都没到手');
+        expect(receipt).toContain('没捡到');
+        expect(receipt).toContain('这**不是**"这种怪不掉东西"');
+        // ③ 下一步是**去踩它**（可执行），不是收工
+        expect(receipt.trimEnd().split('\n').at(-1)).toBe(
+            '下一步（照做即可）：goToCoordinates(x=-43, y=58, z=6, closeness=1)',
+        );
+    });
+
+    it('**读不到掉落物实体** ⇒ 说"没读到"，绝不说"没有掉落物"', async () => {
+        const bot = makeBot({ items: [stack('bone', 0)] });
+        let clock = 0;
+        const receipt = await huntForSkill(bot, 'skeleton', 8, 48, 4_000, {
+            findEntity: () => ({ name: 'skeleton', position: { x: 3, y: 64, z: 0 } }),
+            findDrop: () => null,
+            countDrops: () => null, // 实体表读不到
+            attack: async () => {
+                clock += 2_000;
+                return true;
+            },
+            entityPresent: () => false,
+            sleep: noSleep,
+            now: () => clock,
+        });
+
+        expect(receipt).toContain('没读到');
+        expect(receipt).toContain('不能说"没有掉落物"');
+        expect(receipt).not.toContain('范围内**没看到**');
+    });
+
+    it('实体读得到、范围内真没有 ⇒ 才说"没看到"；到手了就报"到手 N 个"', async () => {
+        const bot = makeBot({ items: [stack('bone', 0)] });
+        let clock = 0;
+        const none = await huntForSkill(bot, 'skeleton', 8, 48, 4_000, {
+            findEntity: () => ({ name: 'skeleton', position: { x: 3, y: 64, z: 0 } }),
+            findDrop: () => null,
+            countDrops: () => 0,
+            attack: async () => {
+                clock += 2_000;
+                return true;
+            },
+            entityPresent: () => false,
+            sleep: noSleep,
+            now: () => clock,
+        });
+        expect(none).toContain('范围内**没看到**掉落物实体');
+
+        const bot2 = makeBot({ items: [stack('bone', 0)] });
+        let clock2 = 0;
+        let dropsLeft = 1; // 只喂一次：捡到就没了（否则 collectDrops 会在假时钟里空转）
+        const got = await huntForSkill(bot2, 'skeleton', 8, 48, 4_000, {
+            findEntity: () => ({ name: 'skeleton', position: { x: 3, y: 64, z: 0 } }),
+            findDrop: () =>
+                dropsLeft > 0 ? { id: 7, name: 'item', position: { x: 1, y: 64, z: 0 } } : null,
+            countDrops: () => 1,
+            travel: async (b: any) => {
+                clock2 += 500;
+                b.inventory.items()[0].count += 1; // 踩到了 ⇒ 背包真的涨
+                b.entity.position = { x: 1, y: 64, z: 0 };
+                dropsLeft -= 1;
+                return true;
+            },
+            attack: async () => {
+                clock2 += 2_000;
+                return true;
+            },
+            entityPresent: () => false,
+            sleep: noSleep,
+            now: () => clock2,
+        });
+        expect(got).toContain('到手 1 个');
+        expect(got).toContain('踩到 1 次');
+    });
+
+    it('对齐 body 侧仪器：`bot.output` 里有 `drop-seen{…}` 就原样引一句（不重复实现）', async () => {
+        const bot = makeBot({ items: [stack('bone', 0)] });
+        bot.output = '…\ndrop-seen{id=434443, distance=3.2, willAttempt=true, blockedBy=[threat]}\n';
+        let clock = 0;
+        const receipt = await huntForSkill(bot, 'skeleton', 8, 48, 4_000, {
+            findEntity: () => ({ name: 'skeleton', position: { x: 3, y: 64, z: 0 } }),
+            findDrop: () => ({ id: 434443, name: 'item', position: { x: -43.16, y: 58, z: 6.25 } }),
+            countDrops: () => 1,
+            travel: async () => false,
+            attack: async () => {
+                clock += 2_000;
+                return true;
+            },
+            entityPresent: () => false,
+            sleep: noSleep,
+            now: () => clock,
+        });
+
+        expect(receipt).toContain('drop-seen{id=434443, distance=3.2, willAttempt=true, blockedBy=[threat]}');
+        // 没有那条线时**不许编**
+        const clean = makeBot({ items: [stack('bone', 0)] });
+        const noLine = await huntForSkill(clean, 'skeleton', 8, 48, 4_000, {
+            findEntity: () => ({ name: 'skeleton', position: { x: 3, y: 64, z: 0 } }),
+            findDrop: () => null,
+            countDrops: () => 0,
+            attack: async () => true,
+            entityPresent: () => false,
+            sleep: noSleep,
+            now: () => clock,
+        });
+        expect(noLine).not.toContain('drop-seen');
+    });
+
+    it('describeDropSweep：四种状态逐字可核（纯函数）', () => {
+        const pos = { x: 1, y: 64, z: 2 };
+        expect(
+            describeDropSweep({ seen: 0, readable: false, nearest: null, attempts: 0, overlapped: 0, picked: 0 }),
+        ).toContain('没读到');
+        expect(
+            describeDropSweep({ seen: 0, readable: true, nearest: null, attempts: 0, overlapped: 0, picked: 0 }),
+        ).toContain('范围内**没看到**');
+        const seenNotPicked = describeDropSweep({
+            seen: 2,
+            readable: true,
+            nearest: { name: 'item', id: 9, distance: 3.25, position: pos },
+            attempts: 2,
+            overlapped: 1,
+            picked: 0,
+        });
+        expect(seenNotPicked).toContain('看到 2 个');
+        expect(seenNotPicked).toContain('现在最近 3.3 格');
+        expect(seenNotPicked).toContain('@(1, 64, 2)');
+        expect(seenNotPicked).toContain('踩到 1 次');
+        expect(seenNotPicked).toContain('一个都没到手');
+        expect(
+            describeDropSweep({ seen: 1, readable: true, nearest: null, attempts: 1, overlapped: 1, picked: 1 }),
+        ).toContain('到手 1 个');
+        expect(describeDropSweep(null)).toContain('没读到');
     });
 
     it('打了但背包没涨 → 绝不算到手（击杀数照报，drop 计数保持 0）', async () => {

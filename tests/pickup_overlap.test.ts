@@ -10,7 +10,7 @@
  *   ② bot 到底**动没动**？（"move 方向反 / jump 无效"会让每次靠近都是空操作）
  */
 import { describe, expect, it } from 'vitest';
-import { pickupOverlapVerdict, summarizePickupTrace } from '../src/body/auto_pickup.js';
+import { pickupOverlapVerdict, shouldBypassThreatGateForPickup, summarizePickupTrace } from '../src/body/auto_pickup.js';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
@@ -86,5 +86,68 @@ describe('summarizePickupTrace：bot 动没动 / 有没有真的靠近', () => {
     expect(src).toContain('summarizePickupTrace(traceSamples)');
     expect(src).toContain('拾取轨迹：');
     expect(src).toContain('setInterval(sampleTrace, 250)');
+  });
+});
+
+describe('掉落物"出现了但没人去捡"要能分开（真机 2026-10-19 骷髅击杀）', () => {
+  it('源码守卫：掉落物出现时记 drop-seen（id/距离/是否会去捡/被什么挡住）', () => {
+    const src = readFileSync(join(process.cwd(), 'src', 'body', 'mineflayer_body.ts'), 'utf8');
+    expect(src).toContain("event: 'drop-seen'");
+    expect(src).toContain('willAttempt');
+    expect(src).toContain('blockedBy');
+    // 常见闸门都要能被点名，否则日志还是说不清"为什么没去捡"
+    for (const reason of ['背包未同步', '退避中', '保命后静默期', '反射在跑', '模型动作占用身体', '附近有敌对生物']) {
+      expect(src).toContain(reason);
+    }
+  });
+
+  it('四条事实互不等价：实体存在 ≠ 重叠 ≠ 入包（用现有判定函数分别表达）', () => {
+    // (b) 实体存在：由 item.drop.nearby / drop-seen 记录
+    // (c) 是否重叠过：
+    const overlapped = pickupOverlapVerdict({ bot: botAt(0, 64, 0), item: { x: 0.9, y: 64, z: 0 } });
+    expect(overlapped.overlap).toBe(true);
+    const neverReached = pickupOverlapVerdict({ bot: botAt(0, 64, 0), item: { x: 3.5, y: 64, z: 0 } });
+    expect(neverReached.overlap).toBe(false);
+    // (d) 入包与否：由 summarizePickupTrace / inventory 增量表达（此处只需证明两者可以不一致）
+    const trace = summarizePickupTrace([{ botMoved: 1.2, dx: 0.9, dy: 0, dz: 0, overlap: true }]);
+    expect(trace.overlapEver).toBe(true);
+    expect(trace.note).toContain('几何上早该能捡');
+  });
+});
+
+describe('击杀后的拾取优先窗口（有界 + 挨打就让位）', () => {
+  const input = (over: Record<string, unknown> = {}) => ({
+    now: 10_000,
+    priorityUntil: 0,
+    lastHurtAt: 0,
+    ...over,
+  });
+
+  it('窗口内且没挨打 ⇒ 绕过"附近有怪"闸门（刚打完怪正是要捡战利品）', () => {
+    expect(shouldBypassThreatGateForPickup(input({ priorityUntil: 15_000 }))).toBe(true);
+  });
+
+  it('窗口过期 ⇒ 不绕过（有界）', () => {
+    expect(shouldBypassThreatGateForPickup(input({ priorityUntil: 9_999 }))).toBe(false);
+    expect(shouldBypassThreatGateForPickup(input({ priorityUntil: 10_000 }))).toBe(false);
+  });
+
+  it('**正在挨打 ⇒ 不绕过**（保命优先于捡东西）', () => {
+    expect(shouldBypassThreatGateForPickup(input({ priorityUntil: 15_000, lastHurtAt: 9_500 }))).toBe(false);
+    expect(shouldBypassThreatGateForPickup(input({ priorityUntil: 15_000, lastHurtAt: 7_000 }))).toBe(true);
+  });
+
+  it('接线：击杀确认开 5 秒窗口、有日志、threatNear 走这条判定（源码守卫）', () => {
+    const src = readFileSync(join(process.cwd(), 'src', 'body', 'mineflayer_body.ts'), 'utf8');
+    expect(src).toContain("event: 'pickup-priority-window'");
+    expect(src).toContain('this.pickupPriorityUntil = Date.now() + 5_000;');
+    expect(src).toContain('shouldBypassThreatGateForPickup({');
+    // 四件事分开写给模型：出现/距离/去不去
+    expect(src).toContain('【掉落物出现】');
+    // progression.ts 侧（feedback-analyst）从 bot.output 取最后一条 `drop-seen{…}`：
+    // 标记必须真的存在，否则他们的集成会一直拿到 null。
+    expect(src).toContain('drop-seen{id=');
+    expect(src).toContain('blockedBy=[');
+    expect(src).toContain('它**不代表**你捡到了');
   });
 });

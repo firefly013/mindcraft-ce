@@ -67,7 +67,7 @@ import {
     snapshotFromBot,
 } from './edges.js';
 import { renderEventText } from '../shared/event_stream.js';
-import { pickupOverlapVerdict, summarizePickupTrace, isDiscardedDrop, isDiscardedDropById, nearestDropWithin, noteDiscardedEntity, PICKUP_GIVE_UP_ATTEMPTS, PICKUP_GIVE_UP_MS, PICKUP_RADIUS, PICKUP_SURVIVAL_SUPPRESS_MS, PICKUP_THREAT_RADIUS, PICKUP_TIMEOUT_MS, shouldGiveUpPickup } from './auto_pickup.js';
+import { pickupOverlapVerdict, shouldBypassThreatGateForPickup, summarizePickupTrace, isDiscardedDrop, isDiscardedDropById, nearestDropWithin, noteDiscardedEntity, PICKUP_GIVE_UP_ATTEMPTS, PICKUP_GIVE_UP_MS, PICKUP_RADIUS, PICKUP_SURVIVAL_SUPPRESS_MS, PICKUP_THREAT_RADIUS, PICKUP_TIMEOUT_MS, shouldGiveUpPickup } from './auto_pickup.js';
 import {
     confirmedPickupGains,
     formatInventoryGains,
@@ -1338,6 +1338,9 @@ export class MineflayerBody {
     private lastMovedAt = 0;
     /** 最近 3 分钟里呼吸反射触发的时刻（三方互锁的证据）。 */
     private surfaceTriggerTimes: number[] = [];
+    /** 击杀后拾取优先窗口的截止时刻 + 最近一次受伤时刻（保命优先于捡东西）。 */
+    private pickupPriorityUntil = 0;
+    private lastDamageAt = 0;
 
     /** 本进程里一共抓到几条解析类错误（**不管有没有在开容器**）。 */
     private protocolFaultCount = 0;
@@ -2767,6 +2770,9 @@ export class MineflayerBody {
             if (this.bot.health < prev_health) {
                 this.bot.lastDamageTime = Date.now();
                 this.bot.lastDamageTaken = prev_health - this.bot.health;
+                // **"正在挨打"**：击杀后的拾取优先窗口靠它决定要不要让位给保命
+                // （见 shouldBypassThreatGateForPickup）。
+                this.lastDamageAt = Date.now();
                 // 挨打即事件（带伤害量）：阈值越线是另一组检测器的事，
                 // 这里只管"挨打了"这个事实；持续掉血 1.5 秒只报一次。
                 //
@@ -3320,6 +3326,59 @@ export class MineflayerBody {
         // **事件与处理一起走**：事件让模型知道地上出现了什么（L2，不唤醒），
         // 处理是身体自己走过去踩进背包（不用等一轮推理）。
         this.notify('item.drop.nearby', KIND.WORLD, LEVEL.STATE, target, { reflex: 'pickup' });
+        // **掉落物出现这一刻，把"要不要去捡、为什么不去"记下来。**
+        // 真机 2026-10-19（harness 追问「怪物击杀后掉落物恒为 0」）：日志里
+        // `item.drop.nearby` 出现了（id 434443，就在击杀点 (-43.16,58,6.25)），
+        // 但**一个都没进背包**——所以"没掉落"和"掉了但没人去踩"是两件事，
+        // 必须由这一行分开：它回答 (b) 实体出现了吗、(c) 为什么没去捡。
+        try {
+            const threat = this.threatNearRelative(PICKUP_THREAT_RADIUS);
+            const gate = {
+                busy: this.actions.executing || this.hasModelActionInFlight(),
+                pickingUp: this.pickingUp,
+                sinceLastAttemptMs: Date.now() - this.lastPickupAt,
+                backoffRemainingMs: this.pickupBackoffUntil - Date.now(),
+                reflexBusy: this.reflexRunning === true || (this.reflexQueue?.length ?? 0) > 0,
+                threatNear: threat != null,
+            };
+            const reasons: string[] = [];
+            if (this.inventorySynced === false) reasons.push('背包未同步');
+            if (this.pickupAbortRequested) reasons.push('已被要求中止');
+            if (gate.backoffRemainingMs > 0) reasons.push(`退避中 ${Math.round(gate.backoffRemainingMs)}ms`);
+            if (this.pickupSuppressedUntil > Date.now()) reasons.push('保命后静默期');
+            if (this.survivalCooldownUntil > Date.now()) reasons.push('保命交还冷却期');
+            if (gate.reflexBusy) reasons.push(`反射在跑(${this.reflexRunning === true ? this.currentReflexName ?? '?' : 'queue'})`);
+            if (gate.busy) reasons.push('模型动作占用身体');
+            if (gate.threatNear) reasons.push(`附近有敌对生物(${threat?.name ?? '?'} ${Math.round(threat?.distance ?? 0)}格)`);
+            if (this.pickingUp) reasons.push('已经在捡另一件');
+            const metres = Math.round(Math.hypot(target.x - (this.bot as any).entity.position.x, target.y - (this.bot as any).entity.position.y, target.z - (this.bot as any).entity.position.z) * 10) / 10;
+            this.log.with('lifecycle').info({
+                event: 'drop-seen',
+                id: target.id ?? null,
+                distance: metres,
+                willAttempt: reasons.length === 0,
+                blockedBy: reasons,
+            });
+            // **把四件事里的 (b)(c) 作为事实写给模型**（Lead 2026-10-19 裁定 ①）：
+            // 「怪物掉落恒为 0」是错的——真机是"掉在地上 8 秒没人踩"。所以这里**不声称
+            // 有没有掉落、也不声称捡没捡到**，只说三件我们知道的事：实体出现了（坐标）、
+            // 距离多少、自动拾取会不会去（不去的话被什么挡住）。
+            //
+            // **首行是稳定的机器可读标记 `drop-seen{…}`**：`progression.ts`（feedback-analyst）
+            // 会从 `bot.output` 里取最后一条 `drop-seen{…}` 当 `dropDiagnostics`，用来把
+            // 「捡到 0 个」拆成四个事实。两边对齐、不重复——标记在前，人话在后。
+            const marker =
+                `drop-seen{id=${target.id ?? '?'}, ` +
+                `pos=(${Number(target.x).toFixed(1)},${Number(target.y).toFixed(1)},${Number(target.z).toFixed(1)}), ` +
+                `dist=${metres}m, willAttempt=${reasons.length === 0}, blockedBy=[${reasons.join('、')}]}`;
+            void this.writeAdvice(
+                `${marker}\n    【掉落物出现】Item id=${target.id ?? '?'} @(${Number(target.x).toFixed(1)},${Number(target.y).toFixed(1)},${Number(target.z).toFixed(1)})，` +
+                    `距离 ${metres} 格。自动拾取：${reasons.length === 0 ? '**会去踩**' : `**暂时不会去**（${reasons.join('、')}）`}。` +
+                    '这三句是事实：**实体已经存在**、距离多少、去不去捡——它**不代表**你捡到了，也不代表没有掉落。',
+            );
+        } catch {
+            // 诊断失败不影响拾取。
+        }
         this.schedulePickup(target);
     }
 
@@ -3434,7 +3493,15 @@ export class MineflayerBody {
             backoffRemainingMs: this.pickupBackoffUntil - now,
             // 保命反射在跑（或队列里还有）：非保命反射让路。
             reflexBusy: this.reflexRunning === true || (this.reflexQueue?.length ?? 0) > 0,
-            threatNear: threat != null,
+            // **击杀后 5 秒内，"附近有怪"不再挡住拾取**——刚打完怪正是要踩战利品的时候
+            // （战利品在地上躺 5 分钟就没了）。但**正在挨打就不抢**：保命优先。
+            threatNear:
+                threat != null &&
+                !shouldBypassThreatGateForPickup({
+                    now,
+                    priorityUntil: this.pickupPriorityUntil,
+                    lastHurtAt: this.lastDamageAt,
+                }),
         });
         if (!go) {
             if (threat != null && this.pickupThreatSkippedId !== String(target.id)) {
@@ -4270,6 +4337,17 @@ export class MineflayerBody {
                     }
                     try {
                         text = await executeToolCall(this, name, args);
+                        // **击杀确认 ⇒ 开 5 秒拾取优先窗口**：战利品就躺在脚下，而
+                        // "附近有怪就跳过拾取"这条闸门恰好在这一刻最容易关着（真机：
+                        // 骷髅死后 id 434443 在击杀点躺了 8 秒以上没人踩）。有界 + 有日志。
+                        if (/Successfully killed|击杀已验证|已被你击杀/.test(String(text ?? ''))) {
+                            this.pickupPriorityUntil = Date.now() + 5_000;
+                            this.log.with('lifecycle').info({
+                                event: 'pickup-priority-window',
+                                ms: 5_000,
+                                reason: 'kill-confirmed',
+                            });
+                        }
                         // 提醒**追加在末尾**（见 annotateReceipt）：第一行留给"放行 + 实际发生了什么"。
                         text = annotateReceipt(text, departureWarning);
                     } catch (err: unknown) {
