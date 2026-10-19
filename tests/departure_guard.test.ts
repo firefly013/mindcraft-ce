@@ -105,6 +105,49 @@ describe('判定：明显必死才硬拦，边界只提醒', () => {
     expect(String(verdict.warning)).toContain('没有食物来源');
   });
 
+  describe('未知 ≠ 坏（许可问题：未知必须 fail OPEN）', () => {
+    it('**食物读不到** ⇒ 放行，并且明说"这不作为拒绝理由"', () => {
+      const verdict = departureVerdict(facts({ food: null }));
+      expect(verdict.allowed).toBe(true);
+      expect(verdict.text).toBeUndefined();
+      expect(String(verdict.warning)).toContain('食物**读不到**');
+      expect(String(verdict.warning)).toContain('**这不作为拒绝理由**');
+      expect(String(verdict.warning)).toContain('stats(type="body")');
+      // 绝不能把"读不到"写成"食物 0"（那就是拿未知当坏消息）
+      expect(String(verdict.warning)).not.toContain('食物只有 0');
+      expect(String(verdict.warning)).not.toContain('食物 0');
+    });
+
+    it('**垫脚方块读不到** ⇒ 放行 + 说明（这条本来就是 null 不当理由，钉住它）', () => {
+      const verdict = departureVerdict(facts({ blocks: null }));
+      expect(verdict.allowed).toBe(true);
+      expect(String(verdict.warning)).toContain('垫脚方块**读不到**');
+      expect(String(verdict.warning)).toContain('**这不作为拒绝理由**');
+    });
+
+    it('**血量读不到**（null）⇒ 放行、不加血量相关的坏话', () => {
+      const verdict = departureVerdict(facts({ health: null }));
+      expect(verdict.allowed).toBe(true);
+      expect(String(verdict.warning ?? '')).not.toContain('血量');
+    });
+
+    it('反过来：**已知的坏照拦**（未知才放行；食物 2/0 仍然拒）', () => {
+      for (const food of [2, 0]) {
+        const verdict = departureVerdict(facts({ food }));
+        expect(verdict.allowed, `food=${food}`).toBe(false);
+        expect(String(verdict.text)).toContain('没有回血手段');
+      }
+    });
+
+    it('食物未知 + 没武器 ⇒ 拒的是**武器**，不是食物（清单里不许出现食物数字）', () => {
+      const verdict = departureVerdict(facts({ food: null, weapon: null }));
+      expect(verdict.allowed).toBe(false);
+      expect(String(verdict.text)).toContain('没有武器');
+      expect(String(verdict.text)).not.toContain('食物 0');
+      expect(String(verdict.text)).not.toContain('食物**');
+    });
+  });
+
   it('方块 12（够进但低于建议）⇒ 放行 + 提醒；方块 7 ⇒ 拒', () => {
     expect(departureVerdict(facts({ blocks: 12 })).allowed).toBe(true);
     expect(String(departureVerdict(facts({ blocks: 12 })).warning)).toContain('垫脚方块只有 12 个');
