@@ -67,7 +67,7 @@ import {
     snapshotFromBot,
 } from './edges.js';
 import { renderEventText } from '../shared/event_stream.js';
-import { isDiscardedDrop, isDiscardedDropById, nearestDropWithin, noteDiscardedEntity, PICKUP_GIVE_UP_ATTEMPTS, PICKUP_GIVE_UP_MS, PICKUP_RADIUS, PICKUP_SURVIVAL_SUPPRESS_MS, PICKUP_THREAT_RADIUS, PICKUP_TIMEOUT_MS, shouldGiveUpPickup } from './auto_pickup.js';
+import { pickupOverlapVerdict, summarizePickupTrace, isDiscardedDrop, isDiscardedDropById, nearestDropWithin, noteDiscardedEntity, PICKUP_GIVE_UP_ATTEMPTS, PICKUP_GIVE_UP_MS, PICKUP_RADIUS, PICKUP_SURVIVAL_SUPPRESS_MS, PICKUP_THREAT_RADIUS, PICKUP_TIMEOUT_MS, shouldGiveUpPickup } from './auto_pickup.js';
 import {
     confirmedPickupGains,
     formatInventoryGains,
@@ -3263,11 +3263,42 @@ export class MineflayerBody {
             //   ① 从没捡到（账目没变）；② 捡到了又丢（先 + 后 -）；③ 只是读错了（读数不可用）。
             const invBeforeWalk = this.readInventoryCounts();
             let arrived: boolean;
+            // **轨迹采样**：走路期间每 250ms 记一次"掉落物相对 bot 的位置 + bot 有没有动"，
+            // 最多 6 次（有界）。真机 overnight_a：「0.9m 同层第 6 次捡不到；move 方向反；
+            // jump 无效」——到底有没有真正靠近、还是原地没动，只能靠这段轨迹回答。
+            const traceSamples: Array<{ botMoved: number; dx: number; dy: number; dz: number; overlap: boolean }> = [];
+            let lastBotPos: { x: number; y: number; z: number } | null = null;
+            const sampleTrace = (): void => {
+                if (traceSamples.length >= 6) return;
+                try {
+                    const p = (this.bot as any)?.entity?.position;
+                    const entity = (this.bot as any)?.entities?.[String(target.id)] ?? (this.bot as any)?.entities?.[target.id as any];
+                    const itemPos = entity?.position;
+                    if (p == null || itemPos == null) return;
+                    const botPos = { x: Number(p.x), y: Number(p.y), z: Number(p.z) };
+                    const botMoved =
+                        lastBotPos == null
+                            ? 0
+                            : Math.hypot(botPos.x - lastBotPos.x, botPos.y - lastBotPos.y, botPos.z - lastBotPos.z);
+                    lastBotPos = botPos;
+                    const verdict = pickupOverlapVerdict({
+                        bot: { x: botPos.x, y: botPos.y, z: botPos.z, height: Number((this.bot as any)?.entity?.height ?? 1.8) },
+                        item: { x: Number(itemPos.x), y: Number(itemPos.y), z: Number(itemPos.z) },
+                    });
+                    traceSamples.push({ botMoved, dx: verdict.dx, dy: verdict.dy, dz: verdict.dz, overlap: verdict.overlap });
+                } catch {
+                    // 采样失败不影响拾取。
+                }
+            };
+            const traceTimer = setInterval(sampleTrace, 250);
+            (traceTimer as { unref?: () => void }).unref?.();
             try {
                 arrived = await this.walkToPickup(target);
             } catch {
                 arrived = false;
             } finally {
+                clearInterval(traceTimer);
+                sampleTrace();
                 this.pickingUp = false;
                 this.pickupCancel = null;
                 this.pickupTargetName = null;
@@ -3275,6 +3306,23 @@ export class MineflayerBody {
                 // 模型动作的抢占标志由拾取任务收尾时清掉，确保它至少被本次
                 // walkToPickup/gotoPickupInterruptibly 看到一次。
                 this.pickupAbortRequested = false;
+            }
+            const pickupTrace = summarizePickupTrace(traceSamples);
+            if (!arrived && pickupTrace.samples > 0) {
+                try {
+                    this.log.with('lifecycle').info({
+                        event: 'pickup-trace',
+                        target: target.name,
+                        id: target.id ?? null,
+                        samples: pickupTrace.samples,
+                        botTravel: Math.round(pickupTrace.botTravel * 100) / 100,
+                        overlapEver: pickupTrace.overlapEver,
+                        closest: pickupTrace.closest,
+                        note: pickupTrace.note,
+                    });
+                } catch {
+                    // 日志失败不影响拾取流程。
+                }
             }
             const invAfterWalk = this.readInventoryCounts();
             const walkDiff = this.describeInventoryDelta(invBeforeWalk, invAfterWalk, target.name);
@@ -3341,7 +3389,9 @@ export class MineflayerBody {
                         // 有变化 ⇒ 点名变化（含"原有物品减少"这种数据丢失形态），别让模型猜。
                         (walkDiff.changed
                             ? `；走路期间背包变化：${walkDiff.note}`
-                            : '；走路期间背包**没有变化**（没捡到 ≠ 捡了又丢）。'),
+                            : '；走路期间背包**没有变化**（没捡到 ≠ 捡了又丢）。') +
+                        // **几何证据**：没走到时把轨迹摘要也带上（有没有真靠近、bot 动没动）。
+                        (!arrived && pickupTrace.samples > 0 ? `；拾取轨迹：${pickupTrace.note}` : ''),
                     ms: Date.now() - started,
                     failures: arrived ? 0 : this.pickupFailures,
                     backoffMs,

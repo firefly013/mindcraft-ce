@@ -295,3 +295,85 @@ export default {
   isDiscardedDropById,
   clearDiscards,
 };
+
+/**
+ * 拾取几何判定 + 轨迹摘要 —— 真机 2026-10-19（overnight_a 请求干预）：
+ * 「掉落物在 0.9m 同层第 6 次捡不到；move 方向反；jump 无效」。
+ *
+ * 原版拾取的条件不是"脚下距离 < 1"，而是**掉落物的包围盒与玩家包围盒（水平各扩 1 格、
+ * 垂直扩 0.5 格）相交**（`Player.take` / `AABB.inflate(1.0, 0.5, 1.0)`）。所以要做两件事：
+ *   ① 用**包围盒相交**判断"服务端会不会认为重叠"，而不是拿脚底距离猜；
+ *   ② 采一小段轨迹（掉落物位置 vs bot 位置），回答"bot 到底有没有动"——
+ *      如果 `move` 方向反了/没动，那么每次靠近都是空操作。
+ */
+export interface PickupSample {
+    /** bot 相对采样的位移（米）。 */
+    botMoved: number;
+    /** 掉落物相对 bot 的差值（米）。 */
+    dx: number;
+    dy: number;
+    dz: number;
+    /** 按原版规则，这一刻是否已经重叠（重叠了还没捡到 ⇒ 不是几何问题）。 */
+    overlap: boolean;
+}
+
+/** 玩家包围盒：宽 0.6（半宽 0.3）、高 1.8（调用方可给别的值）。 */
+export function pickupOverlapVerdict(input: {
+    bot: { x: number; y: number; z: number; height?: number };
+    item: { x: number; y: number; z: number };
+    /** 掉落物实体半边长（原版物品实体约 0.125~0.25）。 */
+    itemHalfSize?: number;
+}): { overlap: boolean; dx: number; dy: number; dz: number; reason: string } {
+    const halfWidth = 0.3;
+    const height = Number.isFinite(Number(input.bot.height)) ? Number(input.bot.height) : 1.8;
+    const half = Number.isFinite(Number(input.itemHalfSize)) ? Number(input.itemHalfSize) : 0.25;
+    const dx = input.item.x - input.bot.x;
+    const dy = input.item.y - input.bot.y;
+    const dz = input.item.z - input.bot.z;
+    // 玩家盒子水平各扩 1 格、垂直上下各扩 0.5 格，再与掉落物小盒相交。
+    const overlapX = Math.abs(dx) <= halfWidth + 1 + half;
+    const overlapZ = Math.abs(dz) <= halfWidth + 1 + half;
+    const overlapY = dy >= -0.5 - half && dy <= height + 0.5 + half;
+    const overlap = overlapX && overlapY && overlapZ;
+    const reason = overlap
+        ? '包围盒相交 ⇒ 服务端应当判定可拾取（还捡不到就不是几何问题）'
+        : `包围盒不相交（|dx|=${Math.abs(dx).toFixed(2)} |dz|=${Math.abs(dz).toFixed(2)} dy=${dy.toFixed(2)}）`;
+    return { overlap, dx, dy, dz, reason };
+}
+
+export interface PickupTraceSummary {
+    samples: number;
+    /** 采样期间 bot 一共移动了多少米（< 0.2 = 基本没动）。 */
+    botTravel: number;
+    /** 是否出现过"包围盒相交"的时刻。 */
+    overlapEver: boolean;
+    /** 最接近时与掉落物的差值。 */
+    closest: { dx: number; dy: number; dz: number } | null;
+    note: string;
+}
+
+export function summarizePickupTrace(samples: PickupSample[]): PickupTraceSummary {
+    const list = samples.filter((s) => s != null);
+    if (list.length === 0) {
+        return { samples: 0, botTravel: 0, overlapEver: false, closest: null, note: '没有采到轨迹（掉落物可能已经消失）' };
+    }
+    let botTravel = 0;
+    let overlapEver = false;
+    let closest: { dx: number; dy: number; dz: number } | null = null;
+    let closestDist = Number.POSITIVE_INFINITY;
+    for (const sample of list) {
+        botTravel += Math.max(0, Number(sample.botMoved) || 0);
+        if (sample.overlap) overlapEver = true;
+        const dist = Math.hypot(sample.dx, sample.dy, sample.dz);
+        if (dist < closestDist) {
+            closestDist = dist;
+            closest = { dx: sample.dx, dy: sample.dy, dz: sample.dz };
+        }
+    }
+    const parts: string[] = [`采样 ${list.length} 次`];
+    parts.push(botTravel < 0.2 ? `bot **几乎没动**（共 ${botTravel.toFixed(2)} 米）——"靠近"这一步没生效` : `bot 移动了 ${botTravel.toFixed(1)} 米`);
+    if (overlapEver) parts.push('期间**出现过包围盒相交**⇒ 几何上早该能捡，问题在别处（拾取延迟/服务端/免疫）');
+    else parts.push('**从未出现过包围盒相交**⇒ 一直没真正靠近到可拾取范围');
+    if (closest != null) parts.push(`最近时 Δ=(${closest.dx.toFixed(2)},${closest.dy.toFixed(2)},${closest.dz.toFixed(2)})`);
+    return { samples: list.length, botTravel, overlapEver, closest, note: parts.join('；') };
+}

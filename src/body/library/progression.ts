@@ -1811,6 +1811,8 @@ export const TUNNEL_ARRIVE_EPS = 0.75;/** 判定"这一动真的挪了位置"的
 export const TUNNEL_MOVE_EPS = 0.5;
 /** 连续这么多步既没挖到东西、人也没挪动 → 熔断（不许空转刷"进度"）。 */
 export const TUNNEL_MAX_STALLS = 3;
+/** 续跑建议的最小长度：**绝不给 1**（模型会一段一段啃到死）。 */
+export const MIN_TUNNEL_RESUME = 16;
 /** 搭桥时最多换几种材料（换依附面已经在里面循环了）。 */
 export const BRIDGE_MAX_MATERIALS = 3;
 
@@ -2002,7 +2004,12 @@ export interface TunnelOutcome {
 
 /** 挖了多少格 → 下一步还挖多少（原地接着挖同一条线）。 */
 export function tunnelRemaining(o: TunnelOutcome): number {
-    return Math.max(1, o.requested - o.dug);
+    const left = o.requested - o.dug;
+    // **续跑绝不给 1 格**（真机：模型拿到 length=1 就原地打转，一段一段啃）。
+    // 这一段挖满了 ⇒ 接着挖就用默认长度；还剩一点 ⇒ 至少给 MIN_TUNNEL_RESUME 格
+    // （同一条直线，多挖几格只是"这一次试多远"）。
+    if (left <= 0) return DEFAULT_TUNNEL_LENGTH;
+    return Math.max(MIN_TUNNEL_RESUME, left);
 }
 
 export function tunnelNextAction(o: TunnelOutcome): string {
@@ -2045,10 +2052,19 @@ export function tunnelReceipt(o: TunnelOutcome): string {
     // **进度只报量出来的数**：位移（3D 直线距离）+ 验证变空气的方块数 + 尝试次数。
     const displacement = Math.hypot(o.here.x - o.start.x, o.here.y - o.start.y, o.here.z - o.start.z);
     lines.push(
-        `mineTunnel：**净前进 ${o.dug}/${o.requested} 格**（实测位移 ${displacement.toFixed(1)} 格：` +
+        `mineTunnel：**沿 ${o.dir.label} 净前进 ${o.dug}/${o.requested} 格**（实测位移 ${displacement.toFixed(1)} 格：` +
             `${formatPoint(o.start)} → 现在 ${where}），挖掉并**验证变空气**的方块 ${o.blocksDug} 个` +
-            `${o.digAttempts > o.blocksDug ? `（尝试 ${o.digAttempts} 次）` : ''}，方向 ${dirText}。`,
+            `${o.digAttempts > o.blocksDug ? `（尝试 ${o.digAttempts} 次）` : ''}。`,
     );
+    // **方向是推出来的就要说清楚**（真机："方向挖反了"最常见的原因就是没给 direction、
+    // 而当时的朝向是反的）。而且要指路去那个不会猜反的工具。
+    if (o.dir.fromYaw) {
+        lines.push(
+            `⚠️ 你没给 direction：这个 **${o.dir.label}** 是**按你当时的朝向推出来的**——` +
+                `如果你其实想往另一个方向（比如目标在背后），就明确写 direction="${o.dir.label === '+x' ? '-x' : o.dir.label === '-x' ? '+x' : o.dir.label === '+z' ? '-z' : '+z'}"。` +
+                '**要去某个坐标就用 travelTo(x=…, z=…)**：它按坐标算方向，不会猜反。',
+        );
+    }
     lines.push(`停止原因：${TUNNEL_STOP_TEXT[o.stop]}${o.detail === '' ? '' : `——${o.detail}`}。`);
     // **三项证据不一致就不许只报大的那个数**（两条可以同时成立，所以用独立的 if）。
     if (o.dug === 0 && (o.digAttempts > 0 || o.moved === 0)) {
@@ -2065,6 +2081,14 @@ export function tunnelReceipt(o: TunnelOutcome): string {
     }
     if (o.moved < o.dug) {
         lines.push(`ℹ️ 有 ${o.dug - o.moved} 步是"人到了但位移判不出来"，已按证据从低计。`);
+    }
+    // **保险**：`dug` 现在由位置量出来（`dug ≤ 实测位移`），这条理论上永远不会触发；
+    // 留着是为了"万一以后有人又改成数循环"，回执会当场自曝而不是骗人。
+    if (o.dug > 0 && displacement + 0.75 < o.dug * TUNNEL_MOVE_EPS) {
+        lines.push(
+            `⚠️ **矛盾**：格数（${o.dug}）和实测位移（${displacement.toFixed(1)} 格）对不上——` +
+                '**按位移算**，格数不算数。',
+        );
     }
     if (o.stalls > 0) {
         lines.push(`ℹ️ 有 ${o.stalls} 步既没挖到东西、人也没挪动（反复空转会被判"卡住了"并停手）。`);
@@ -2294,8 +2318,7 @@ export async function digLine(
         bridges: 0,
     };
 
-    /** 一手工具的描述（每次都重新读，因为挖着挖着就磨损了）。 */
-    const refreshTool = (): { name: string | null; remaining: number | null; max: number | null; low: boolean } => {
+    /** 一手工具的描述（每次都重新读，因为挖着挖着就磨损了）。 */    const refreshTool = (): { name: string | null; remaining: number | null; max: number | null; low: boolean } => {
         const g = tool(bot);
         outcome.toolName = g.name;
         outcome.toolRemaining = g.remaining;
@@ -2305,6 +2328,18 @@ export async function digLine(
     refreshTool();
 
     const cellText = (p: FlatPosition, name: string | null): string => `${formatPoint(p)} 是 ${name ?? '读不到'}`;
+
+    /**
+     * 把脚的位置投影到隧道轴线上：**沿这条线真的走进了第几格**。
+     *
+     * 原点取"起手那一格的格心"（`round`），所以站在 x=0.4 起步、走到 x=1.0 时读数是 1.0 ✓。
+     * `dug`（前进格数）只由它决定——位置是唯一算数的证据；**来回晃 0.5 格不算一格**
+     * （读数要够 0.75 格才进位，见下面的 `+ 0.25`）。
+     */
+    const originX = Math.round(start.x);
+    const originZ = Math.round(start.z);
+    const alongAxis = (p: FlatPosition): number =>
+        request.dir.axis === 'x' ? (p.x - originX) * request.dir.sign : (p.z - originZ) * request.dir.sign;
 
     /** 上一轮看到的手上工具：**中途换手本身就是事实**，必须写进回执（哪怕没卡住）。 */
     let lastToolName: string | null = outcome.toolName;
@@ -2579,37 +2614,47 @@ export async function digLine(
         }
         const here = position(bot);
         outcome.here = here;
-        // 3D 判定（旧的只比 x/z、还容忍 1.5 格 → **差一格就算"到了"**，于是原地 64 轮
-        // 也报"已挖 64 格"）。现在必须真的站进那一格。
+        // **格数从位移里量出来，不是数循环**：把脚的位置投影到隧道轴线上，
+        // "沿轴真的走进了第几格"就是 `dug`。
+        //
+        // 为什么必须这样（真机 overnight_b 的回归）：「已挖 64 格 + 实测位移 0.5 格」——
+        // 上一版要求"3D 距离 ≤ 0.75 就算站进那一格"，而站在 x=0.4 时到 (1,70,0) 只有 0.6 格，
+        // 于是**一步没走也能算"到了"**，64 轮下来 `dug=64` 而位移 0.5。
+        // 现在 `dug` 只由位置决定 ⇒ **结构上不可能大于实测位移**。
+        const reachedNow = Math.max(
+            0,
+            // `+ 0.25`：读数要够 0.75 格才进位 ⇒ **被顶回/来回晃的半格不算一格**。
+            Math.min(Math.floor(alongAxis(here) + 0.25), requested),
+        );
         const distToFeet = Math.hypot(here.x - step.feet.x, here.y - step.feet.y, here.z - step.feet.z);
         const stepDist = Math.hypot(here.x - beforeStep.x, here.y - beforeStep.y, here.z - beforeStep.z);
         const reallyArrived = distToFeet <= TUNNEL_ARRIVE_EPS;
         const reallyMoved = stepDist >= TUNNEL_MOVE_EPS;
-        if (!reallyArrived && !reallyMoved) {
-            // 既没到目标格、也没挪动 → **这一步没有进度**（不管 travel 返回了什么）。
+        if (reachedNow <= outcome.dug) {
+            // 沿轴**没有前进**（原地、被顶回、来回晃都算）→ 这一步没有进度，不管 travel 返回什么。
             outcome.stalls += 1;
             if (outcome.stalls >= TUNNEL_MAX_STALLS) {
                 outcome.stop = 'stalled';
                 outcome.detail =
-                    `连续 ${outcome.stalls} 步既没挖到东西、人也没挪动（` +
-                    `${arrived ? '寻路"报成功"但位移 0' : '走不进去'}）；` +
+                    `连续 ${outcome.stalls} 步沿 ${request.dir.label} **一格都没前进**（` +
+                    `${arrived ? '寻路"报成功"但位移 0' : '走不进去'}；实测位移只有 ${stepDist.toFixed(2)} 格）；` +
                     `现在 ${formatPoint(here)}，目标格 ${formatPoint(step.feet)}`;
                 break;
             }
             await sleep(settleMs);
             continue;
         }
+        outcome.dug = reachedNow;
         outcome.moved += 1;
         outcome.stalls = 0;
         if (!reallyArrived) {
-            // 动了但没到：如实记，**不算一步**（进度按"真的站进新格子"算）。
+            // 前进了但没站进那一格：如实记，**停在这里**（进度按量出来的算）。
             outcome.stop = 'travel_failed';
             outcome.detail = `第 ${index} 步挖通了 ${formatPoint(step.feet)}，但人只挪到 ${formatPoint(here)}（没站进去）`;
             break;
         }
-        outcome.dug += 1;
         if (outcome.dug % progressEvery === 0) {
-            outcome.progress.push(`- 已挖 ${outcome.dug} 格，现在 ${formatPoint(outcome.here)}`);
+            outcome.progress.push(`- 沿 ${request.dir.label} 已前进 ${outcome.dug} 格，现在 ${formatPoint(outcome.here)}`);
         }
     }
 

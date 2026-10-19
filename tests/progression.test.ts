@@ -25,6 +25,7 @@ import {
     MAX_LEG_PER_SCAN_RATIO,
     MAX_TUNNEL_HEIGHT,
     MAX_TUNNEL_LENGTH,
+    MIN_TUNNEL_RESUME,
     HUNT_ATTACK_BACKOFF_MAX_MS,
     HUNT_ATTACK_TYPE,
     HUNT_MAX_ATTEMPTS,
@@ -1189,6 +1190,125 @@ describe('mineTunnel：**不许挖穿容器/功能方块**（真机：travelTo �
     });
 });
 
+describe('mineTunnel：格数**只能由位置量出来**（真机回归：「已挖 64 格 + 位移 0.5 格」）', () => {
+    it('**站在格子边缘、一步没走** ⇒ 格数必须是 0（旧判定"3D ≤0.75 就算到了"会算成 64 格）', async () => {
+        // 人在 x=0.4：到 (1,70,0) 只有 0.6 格 ≤ 0.75 —— 旧代码每轮都算"到了"，
+        // travel 又原地不动 ⇒ 64 轮全计数。现在格数由沿轴位移量出来 ⇒ 0。
+        const h = tunnelHarness({ pos: { x: 0.4, y: 70, z: 0 } });
+        h.deps.travel = async () => true; // 报成功、但人不动（真机那种"到了"其实没到）
+        const receipt = await mineTunnelSkill(h.bot, 64, 2, '+x', h.deps);
+
+        expect(receipt).toContain('净前进 0/64 格');
+        expect(receipt).not.toContain('净前进 64/64');
+        expect(receipt).toContain('实测位移');
+        expect(receipt).toContain('没有一格真的变成空气，人也没往前挪');
+        expect(receipt).toContain('卡住了');
+    });
+
+    it('**来回晃**（前进 0.5 又被顶回 0.5）⇒ 格数 0、标题显示实测位移，并写出矛盾', async () => {
+        const h = tunnelHarness();
+        let n = 0;
+        h.deps.travel = async (b: any) => {
+            n += 1;
+            // 奇数步往前 0.5，偶数步退回原地：位移有、**沿轴净前进为 0**
+            b.entity.position = n % 2 === 1 ? { x: 0.5, y: 70, z: 0 } : { x: 0, y: 70, z: 0 };
+            return true; // 而且"报成功"
+        };
+        const receipt = await mineTunnelSkill(h.bot, 8, 2, '+x', h.deps);
+
+        expect(receipt).toContain('净前进 0/8 格'); // 沿轴一格都没前进
+        expect(receipt).toMatch(/实测位移 0\.[05] 格/); // 标题给的是量出来的数
+        expect(receipt).toContain('一格都没前进');
+    });
+
+    it('真的往前走 ⇒ 格数 ≤ 实测位移（结构上不可能再矛盾）', async () => {
+        const h = tunnelHarness();
+        const receipt = await mineTunnelSkill(h.bot, 5, 2, '+x', h.deps);
+
+        const dug = Number(/净前进 (\d+)\//.exec(receipt)?.[1] ?? '0');
+        const moved = Number(/实测位移 ([\d.]+) 格/.exec(receipt)?.[1] ?? '0');
+        expect(dug).toBe(5);
+        expect(moved).toBeGreaterThanOrEqual(dug); // 沿轴 ≤ 3D
+        expect(receipt).toContain('沿 +x 净前进');
+    });
+});
+
+describe('mineTunnel：方向端到端（模型参数 ⇒ 执行 ⇒ 回执 ⇒ 续跑建议）', () => {
+    it('yaw → 方向的符号是对的（0=+z、π=-z、π/2=-x、-π/2=+x）', () => {
+        const cases: Array<[number, string]> = [
+            [0, '+z'],
+            [Math.PI, '-z'],
+            [Math.PI / 2, '-x'],
+            [-Math.PI / 2, '+x'],
+        ];
+        for (const [yaw, expected] of cases) {
+            const resolved = resolveTunnelDirection(undefined, yaw);
+            expect(resolved?.label, `yaw=${yaw}`).toBe(expected);
+            expect(resolved?.fromYaw, `yaw=${yaw}`).toBe(true);
+        }
+    });
+
+    it('**朝前**（yaw=π/2 ⇒ -x）⇒ 真的往 -x 挖、回执写 -x、续跑建议也是 -x', async () => {
+        const h = tunnelHarness({ yaw: Math.PI / 2 });
+        const receipt = await mineTunnelSkill(h.bot, 3, 2, 'forward', h.deps);
+
+        // 执行：挖的格子都在 -x 侧
+        for (const cell of h.dugOrder) expect(cell.x).toBeLessThan(0);
+        // 回执 + 续跑建议
+        expect(receipt).toContain('沿 -x 净前进 3/3 格');
+        expect(receipt).toContain('按你当时的朝向推出来的');
+        expect(receipt.trimEnd().split('\n').at(-1)).toBe('下一步（照做即可）：mineTunnel(length=32, direction="-x")');
+    });
+
+    it('明确给 -x ⇒ 不会被朝向改写（fromYaw=false，回执不出现"按朝向推"）', async () => {
+        const h = tunnelHarness({ yaw: 0 }); // 朝向指着 +z
+        const receipt = await mineTunnelSkill(h.bot, 2, 2, '-x', h.deps);
+
+        for (const cell of h.dugOrder) expect(cell.x).toBeLessThan(0);
+        expect(receipt).toContain('沿 -x 净前进');
+        expect(receipt).not.toContain('按你当时的朝向推出来的');
+    });
+
+    it('续跑建议**永远不给 length=1**；被挡住时要点名障碍', () => {
+        const base = {
+            dir: { axis: 'x' as const, sign: 1 as const, label: '+x', fromYaw: false },
+            height: 2,
+            requested: 32,
+            dug: 0,
+            blocksDug: 0,
+            digAttempts: 0,
+            moved: 0,
+            toolChanges: [],
+            stalls: 0,
+            protectedHits: [],
+            detours: 0,
+            start: { x: 0, y: 70, z: 0 },
+            here: { x: 0, y: 70, z: 0 },
+            detail: '',
+            hintEquip: null,
+            progress: [],
+            toolName: 'diamond_pickaxe',
+            toolRemaining: 900,
+            toolMax: 1561,
+            handMining: false,
+            bridges: 0,
+        } as const;
+        const stops = ['done', 'budget', 'interrupted', 'low_health', 'damaged', 'stalled', 'protected_block', 'liquid_ahead', 'travel_failed', 'dig_failed'] as const;
+        for (const stop of stops) {
+            const next = tunnelNextAction({ ...base, stop } as any);
+            expect(next, stop).not.toContain('length=1)');
+            expect(next, stop).not.toMatch(/length=1,/);
+        }
+        // 挖满一段的续跑是"默认长度"，不是 1
+        expect(tunnelNextAction({ ...base, stop: 'done', dug: 32 } as any)).toBe('mineTunnel(length=32, direction="+x")');
+        // 还剩一点点时至少给 MIN_TUNNEL_RESUME
+        expect(tunnelNextAction({ ...base, stop: 'budget', dug: 30 } as any)).toBe(`mineTunnel(length=${MIN_TUNNEL_RESUME}, direction="+x")`);
+        // 被容器挡住：点名 + 横着挪开（不是"再挖一次同样的"）
+        const blocked = tunnelNextAction({ ...base, stop: 'protected_block' } as any);
+        expect(blocked).toBe('mineTunnel(length=2, direction="+z")');
+    });
+});
+
 describe('mineTunnel：进度必须是**量出来的**，不是数出来的（真机 02:0x 事故）', () => {
     // 真机：回执「已挖 64 格」但**位移 0、背包 0 增量**。
     // 机制：这一步前面本来就是空气（洞穴里很常见）→ 没挖任何东西；`travel` 没把 bot 挪动，
@@ -1233,7 +1353,7 @@ describe('mineTunnel：进度必须是**量出来的**，不是数出来的（�
         const h = stuckInCave();
         const receipt = await mineTunnelSkill(h.bot, 64, 2, '+x', h.deps);
 
-        expect(receipt).toContain('**净前进 0/64 格**');
+        expect(receipt).toContain('净前进 0/64 格**');
         expect(receipt).not.toContain('净前进 64/64');
         expect(receipt).toContain('0 格');
         expect(receipt).toContain('没有一格真的变成空气');
@@ -1272,7 +1392,7 @@ describe('mineTunnel：进度必须是**量出来的**，不是数出来的（�
         };
         const receipt = await mineTunnelSkill(bot, 8, 2, '+x', deps);
 
-        expect(receipt).toContain('**净前进 0/8 格**');
+        expect(receipt).toContain('净前进 0/8 格**');
         expect(receipt).toContain('位移是 0 格');
         expect(receipt).toContain('矛盾');
         expect(receipt).not.toMatch(/已挖 [1-9]\d* 格/);
@@ -1282,7 +1402,7 @@ describe('mineTunnel：进度必须是**量出来的**，不是数出来的（�
         const h = tunnelHarness();
         const receipt = await mineTunnelSkill(h.bot, 5, 2, '+x', h.deps);
 
-        expect(receipt).toContain('**净前进 5/5 格**');
+        expect(receipt).toContain('净前进 5/5 格**');
         expect(h.dugOrder).toHaveLength(10); // 5 步 × 2 格
         expect(h.bot.entity.position).toEqual({ x: 5, y: 70, z: 0 });
         // 位移与格数一致（1 格 = 1 步）
@@ -1404,10 +1524,10 @@ describe('mineTunnel：直线隧道', () => {
             expect(h.bot.entity.position, direction).toEqual(end);
             expect(receipt, direction).toContain('净前进 3/3 格');
             expect(receipt, direction).toContain(`现在 (${end.x}, ${end.y}, ${end.z})`);
-            expect(receipt, direction).toContain(`方向 ${direction}`);
+            expect(receipt, direction).toContain(`沿 ${direction} 净前进`);
             expect(receipt, direction).toContain('验证变空气**的方块 6 个');
             expect(receipt.trimEnd().split('\n').at(-1), direction).toBe(
-                `下一步（照做即可）：mineTunnel(length=1, direction="${direction}")`,
+                `下一步（照做即可）：mineTunnel(length=32, direction="${direction}")`,
             );
         }
     });
@@ -1544,7 +1664,7 @@ describe('mineTunnel：直线隧道', () => {
         expect(receipt).toContain('净前进 2/5 格');
         expect(receipt).toContain('被 Stop/保命打断');
         expect(receipt.trimEnd().split('\n').at(-1)).toBe(
-            '下一步（照做即可）：mineTunnel(length=3, direction="+x")',
+            '下一步（照做即可）：mineTunnel(length=16, direction="+x")',
         );
     });
 
@@ -1590,8 +1710,8 @@ describe('mineTunnel：直线隧道', () => {
     it('每 16 格报一次进度（20 格 → 只有一次 16 格进度）', async () => {
         const h = tunnelHarness();
         const receipt = await mineTunnelSkill(h.bot, 20, 2, '+x', h.deps);
-        expect(receipt).toContain('已挖 16 格');
-        expect(receipt).not.toContain('已挖 20 格');
+        expect(receipt).toContain('已前进 16 格');
+        expect(receipt).not.toContain('已前进 20 格');
         expect(h.dugOrder.length).toBe(40);
     });
 
@@ -1609,7 +1729,7 @@ describe('mineTunnel：直线隧道', () => {
         expect(receipt).toContain('时间到');
         expect(receipt).toContain('净前进 2/10 格');
         expect(receipt.trimEnd().split('\n').at(-1)).toBe(
-            '下一步（照做即可）：mineTunnel(length=8, direction="+x")',
+            '下一步（照做即可）：mineTunnel(length=16, direction="+x")',
         );
     });
 
@@ -1634,7 +1754,7 @@ describe('mineTunnel：直线隧道', () => {
     it('不给方向时按朝向挖，回执写明"是推出来的"（下一次照抄即可）', async () => {
         const h = tunnelHarness({ yaw: 0 }); // 朝南 → +z
         const receipt = await mineTunnelSkill(h.bot, 2, 2, undefined, h.deps);
-        expect(receipt).toContain('方向 +z（按当时的朝向推出来的');
+        expect(receipt).toContain('按你当时的朝向推出来的');
         expect(h.bot.entity.position).toEqual({ x: 0, y: 70, z: 2 });
     });
 
