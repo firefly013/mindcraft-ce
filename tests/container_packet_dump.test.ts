@@ -333,7 +333,7 @@ describe('确证失效 ⇒ 工具层快速失败（不烧 6 秒 × 重试）', (
     expect(text).toContain('直接失败');
     expect(text).toContain('从不发窗口内容');
     expect(text).toContain('零协议解析错误');
-    expect(text).toContain('别再开任何箱子');
+    expect(text).toContain('换另一种容器类型再试');
     expect(text).toContain('takeFromChest');
   });
 

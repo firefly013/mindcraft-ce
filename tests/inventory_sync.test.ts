@@ -10,6 +10,8 @@
  * 把它当成 0。
  */
 import { describe, expect, it } from 'vitest';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { renderLiveState } from '../src/shared/live_state.js';
 import { sampleLiveState } from '../src/body/live_state.js';
 import { countInInventory, countInInventoryWithSync } from '../src/body/commands/interact.js';
@@ -85,5 +87,28 @@ describe('① 背包还没同步：说"还没同步"，不许说"空"', () => {
   it('没挂 __inventorySynced 的老调用方行为不变（兼容）', () => {
     const bot = botWithItems([{ name: 'dirt', count: 11 }], null);
     expect(countInInventory(bot, 'dirt')).toBe(11);
+  });
+});
+
+describe('开窗/关窗不许把背包渲染成"空"（真机 2026-10-19「一开 crafting_table 背包立刻被清空」）', () => {
+  const src = () => readFileSync(join(process.cwd(), 'src', 'body', 'mineflayer_body.ts'), 'utf8');
+
+  it('windowOpen ⇒ 标成未同步（只影响渲染口径，不是物品丢了）', () => {
+    const code = src();
+    expect(code).toContain("this.bot.on('windowOpen', () => {");
+    expect(code).toContain("why: 'window-open'");
+  });
+
+  it('windowClose ⇒ 先标未同步，再按"关窗后的读数"采信（有界 300ms，窗口还开着就继续未知）', () => {
+    const code = src();
+    expect(code).toContain("this.bot.on('windowClose', () => {");
+    expect(code).toContain("why: 'window-close'");
+    expect(code).toContain('if ((this.bot as any)?.currentWindow != null) return;');
+    expect(code).toContain("event: 'inventory-resynced'");
+  });
+
+  it('渲染层契约未变：inventorySynced=false 时必须写"还没同步（不是空的）"', () => {
+    const live = readFileSync(join(process.cwd(), 'src', 'body', 'live_state.ts'), 'utf8');
+    expect(live).toContain('这个字段为 false 时，渲染层必须写"还没同步上来（**不是空的**）"');
   });
 });

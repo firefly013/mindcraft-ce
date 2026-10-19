@@ -844,8 +844,8 @@ export class MineflayerBody {
             this.finishContainerPacketDump(outcome);
         (this.bot as { __containerProtocolFault?: unknown }).__containerProtocolFault = (withinMs?: number) =>
             this.recentProtocolFault(withinMs);
-        (this.bot as { __slottedContainerStatus?: unknown }).__slottedContainerStatus = () =>
-            this.slottedContainerStatus();
+        (this.bot as { __slottedContainerStatus?: unknown }).__slottedContainerStatus = (name?: string) =>
+            this.slottedContainerStatus(name);
         // **抓错点铺到所有出口**（client-error / deserializer-error / uncaught）；
         // 见 installProtocolFaultCapture 的注释：一次没触发，不等于错误没发生。
         this.installProtocolFaultCapture();
@@ -905,6 +905,54 @@ export class MineflayerBody {
             }
             try {
                 this.bot.on('heldItemChanged', () => this.markInventorySynced());
+            // **开/关窗口也要把背包标成"未知"，而不是让"空"顶上来。**
+            // 真机 2026-10-19/20（overnight_a）：「useBlock 一打开 crafting_table 界面，
+            // 背包立刻被清空（已复现 2 次）」——那不是物品没了，是开窗时本地背包视图
+            // 在重读的一瞬间是空的；而 `stats` 把"读不到/空"渲染成 `Backpack: empty`，
+            // 模型据此相信家当没了，甚至推出"主线不可能完成"的全局结论。
+            // 这是今晚第三次"未知被渲染成空"（复活窗口、容器槽位、现在是开窗）。
+            this.bot.on('windowOpen', () => {
+                this.inventorySynced = false;
+                try {
+                    (this.bot as { __inventorySynced?: boolean }).__inventorySynced = false;
+                } catch {
+                    // 挂不上不影响身体判断。
+                }
+                try {
+                    this.log.with('lifecycle').info({
+                        event: 'inventory-unsynced',
+                        why: 'window-open',
+                        windowId: Number((this.bot as any)?.currentWindow?.id ?? -1),
+                    });
+                } catch {
+                    // 日志失败不影响。
+                }
+            });
+            // 关窗之后客户端会重新收一遍玩家背包：**先标未知，再按"关窗后的读数"采信**。
+            // 这样既不会把过渡态的空读成"清空"，也不会让背包永远停在未知。
+            this.bot.on('windowClose', () => {
+                this.inventorySynced = false;
+                try {
+                    (this.bot as { __inventorySynced?: boolean }).__inventorySynced = false;
+                } catch {
+                    // 同上。
+                }
+                try {
+                    this.log.with('lifecycle').info({ event: 'inventory-unsynced', why: 'window-close' });
+                } catch {
+                    // 同上。
+                }
+                const timer = setTimeout(() => {
+                    try {
+                        if ((this.bot as any)?.currentWindow != null) return; // 还有窗口开着：继续未知
+                        this.markInventorySynced();
+                        this.log.with('lifecycle').info({ event: 'inventory-resynced', why: 'window-close' });
+                    } catch {
+                        // 读不到就保持未知（渲染层会说"还没同步，不是空的"）。
+                    }
+                }, 300);
+                (timer as { unref?: () => void }).unref?.();
+            });
             } catch {
                 // 同上。
             }
@@ -1269,6 +1317,13 @@ export class MineflayerBody {
                 // 短路下界/末地的尝试（这是"跨维度串味"里我们自己能制造的那一种）。
                 const dim = (this.bot?.game as { dimension?: unknown })?.dimension;
                 this.slottedContainerBlockedDim = typeof dim === 'string' ? dim : null;
+                // **结论只属于失败的那一种方块**（真机 2026-10-20：B 报「容器全坏」，
+                // 几行后自我纠正「熔炉其实完全可用，21 块玻璃已产出」——箱子失败不等于
+                // 熔炉失败，它们是不同路径，不许互相短路）。
+                const armReason = String(this.containerDumpReason ?? '');
+                this.slottedContainerBlockedFor = armReason.startsWith('useBlock ')
+                    ? armReason.slice('useBlock '.length).trim()
+                    : null;
                 this.slottedContainerBlockedReason =
                     '服务端开窗但不发内容（open_window 到了，window_items/set_content 一个都没有，且本进程零协议解析错误）';
             } else if (verdict === 'window-arrived') {
@@ -1348,6 +1403,8 @@ export class MineflayerBody {
     /** 这次转储是开容器还是合成窗口（合成走 bot.craft，不经过 openBlockUi）。 */
     private containerDumpLabel: 'container' | 'craft' = 'container';
     private containerDumpReason = '';
+    /** 上一条容器结论是针对**哪种方块**的（不同容器类型是不同路径，不许互相短路）。 */
+    private slottedContainerBlockedFor: string | null = null;
     private slottedContainerBlockedUntil = 0;
     /** 上一条容器不可用结论是在哪个维度得出的（跨维度不串用）。 */
     private slottedContainerBlockedDim: string | null = null;
@@ -1508,7 +1565,7 @@ export class MineflayerBody {
      * 带槽位容器现在还能不能试：**最近的失败结论会短路它**（快速失败，不烧 45 秒 + 重试）。
      * 结论带 TTL，且一旦有窗口内容真的到达就会被清掉（见 finishContainerPacketDump）。
      */
-    slottedContainerStatus(): { blocked: boolean; reason: string | null; msLeft: number } {
+    slottedContainerStatus(askingFor?: string | null): { blocked: boolean; reason: string | null; msLeft: number } {
         const left = Math.max(0, this.slottedContainerBlockedUntil - Date.now());
         // **只在同一维度里生效**：跨维度不串用旧结论（主世界打不开箱子，不许直接
         // 短路下界/末地的尝试——这是"跨维度串味"里我们自己能制造的那一种）。
@@ -1518,6 +1575,17 @@ export class MineflayerBody {
             this.slottedContainerBlockedDim != null &&
             typeof here === 'string' &&
             this.slottedContainerBlockedDim !== here
+        ) {
+            return { blocked: false, reason: null, msLeft: 0 };
+        }
+        // **不同类型不互相短路**：上次失败的是箱子，熔炉/合成台照试
+        // （真机 2026-10-20：B 报「容器全坏」，随后自我纠正「熔炉可用，21 块玻璃已产出」）。
+        if (
+            left > 0 &&
+            this.slottedContainerBlockedFor != null &&
+            typeof askingFor === 'string' &&
+            askingFor !== '' &&
+            askingFor !== this.slottedContainerBlockedFor
         ) {
             return { blocked: false, reason: null, msLeft: 0 };
         }

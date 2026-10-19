@@ -131,3 +131,24 @@ describe('跨维度不串用"容器打不开"的结论（Lead 2026-10-19 ②）'
     expect(src()).toContain('this.slottedContainerBlockedDim = null;');
   });
 });
+
+describe('结论只属于失败的那一种方块（B 自我纠正：熔炉可用、21 块玻璃）', () => {
+  const src = () => readFileSync(join(process.cwd(), 'src', 'body', 'mineflayer_body.ts'), 'utf8');
+  const skills = () => readFileSync(join(process.cwd(), 'src', 'body', 'library', 'skills.ts'), 'utf8');
+
+  it('按方块类型记录结论，不同类型不互相短路', () => {
+    const code = src();
+    expect(code).toContain('this.slottedContainerBlockedFor');
+    expect(code).toContain('askingFor !== this.slottedContainerBlockedFor');
+    expect(code).toContain('slottedContainerStatus(askingFor?: string | null)');
+    // 调用方把方块名传进去
+    expect(skills()).toContain('read(name)');
+  });
+
+  it('回执不再下"容器全坏"的全局结论，而是 attempt-scoped + 指出换一种类型', () => {
+    const text = skills();
+    expect(text).not.toContain('**别再开任何箱子/熔炉/柜子**');
+    expect(text).toContain('换另一种容器类型再试');
+    expect(text).toContain('21 块玻璃');
+  });
+});

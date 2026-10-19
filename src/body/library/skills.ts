@@ -5865,10 +5865,10 @@ export async function openBlockUi(
         try {
             const read = (
                 bot as {
-                    __slottedContainerStatus?: () => { blocked?: boolean; reason?: string | null; msLeft?: number } | null;
+                    __slottedContainerStatus?: (name?: string) => { blocked?: boolean; reason?: string | null; msLeft?: number } | null;
                 }
             ).__slottedContainerStatus;
-            return typeof read === 'function' ? read() : null;
+            return typeof read === 'function' ? read(name) : null;
         } catch {
             return null;
         }
@@ -5876,11 +5876,11 @@ export async function openBlockUi(
     if (slotted?.blocked === true) {
         const minutesLeft = Math.max(1, Math.round(Number(slotted.msLeft ?? 0) / 60_000));
         throw new Error(
-            `打开 ${name} **直接失败（没有尝试、没有空等）**：这个服务端的**带槽位容器在本会话里打不开**——` +
+            `打开 ${name} **直接失败（没有尝试、没有空等）**：**上一种方块**在这个服务端打开了窗却拿不到内容——` +
                 `服务端会回"开窗"（open_window）但**从不发窗口内容**（window_items/set_content 一个都没有），` +
                 `而且本进程**零协议解析错误**；mineflayer 要等槽位数据才会发 windowOpen，所以必然超时。` +
-                `这不是站位/角度/协议问题，重试和换箱子都不会变好（这条结论约 ${minutesLeft} 分钟后自动失效，之后才值得再试一次）。` +
-                `下一步（照做即可）：**别再开任何箱子/熔炉/柜子**，走非容器路径——让队友把要用的东西丢在约定点自己捡，` +
+                `这是**那一种容器**在那一次尝试里的证据，重试同一种意义不大（但别的类型是别的路径）（这条结论约 ${minutesLeft} 分钟后自动失效，之后才值得再试一次）。` +
+                `下一步（照做即可）：**换另一种容器类型再试**（箱子/熔炉/合成台是不同路径；真机 2026-10-20 熔炉产出过 21 块玻璃，别把一次箱子失败当成全局）——让队友把要用的东西丢在约定点自己捡，` +
                 `或让对方用 takeFromChest 取/存；需要合成就直接 craft（工作台不需要窗口）。` +
                 (slotted.reason ? `（判定依据：${slotted.reason}）` : ''),
         );
