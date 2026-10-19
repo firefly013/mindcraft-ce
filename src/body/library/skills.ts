@@ -6099,7 +6099,26 @@ export async function craftWithStaleWindowGuard(
             log(bot, '合成之前先关掉了残留的界面（上一次会话/动作留下的）。');
         }
         try {
+            // **合成窗口也要取证**（Lead 2026-10-19 ①）：`bot.craft` 自己开 3×3 窗口，
+            // **不经过** `openBlockUi` 的那套转储，所以工作台 0/4 之前没有任何证据。
+            // 武装同一套包转储，失败时由身体落一行 `craft-window-diagnosis{recipe,
+            // verdict, openWindow, contents, protocolFaults}`，用来区分"两条 crafting
+            // 实现一条死"和"偶发无内容"。
+            try {
+                const arm = (bot as { __armContainerPacketDump?: (reason: string, label?: 'container' | 'craft') => void })
+                    .__armContainerPacketDump;
+                arm?.(`craft ${String(recipe?.result?.id ?? count)}`, 'craft');
+            } catch {
+                // 取证不是功能，武装失败不影响合成。
+            }
             await withWindowTimeout(Promise.resolve(bot.craft(recipe, count, craftingTable)), timeoutMs);
+            try {
+                const disarm = (bot as { __disarmContainerPacketDump?: (outcome: string) => void })
+                    .__disarmContainerPacketDump;
+                disarm?.('crafted');
+            } catch {
+                // 解除失败最多多记几行。
+            }
             return;
         } catch (err: unknown) {
             lastError = err;

@@ -95,6 +95,7 @@ import { chooseSafeFleeTarget } from './safety/flee.js';
 import { planFallRecovery, readFallMedium, shouldEmitFallNotice } from './safety/fall_recovery.js';
 import { isEdibleName, shouldEmitUnrecoverable, unrecoverableVerdict } from './safety/unrecoverable.js';
 import type { DeadlockFacts } from './safety/deadlock.js';
+import { voidWalkVerdict } from './safety/void_walk.js';
 
 type EdgeWatcher = ReturnType<typeof createEdgeWatcher>;
 
@@ -1130,7 +1131,8 @@ export class MineflayerBody {
     private containerDumpSawOpen = false;
 
     /** 武装一次转储（重复调用无害；已经在录就不重开）。 */
-    armContainerPacketDump(reason: string): void {
+    armContainerPacketDump(reason: string, label: 'container' | 'craft' = 'container'): void {
+        this.containerDumpLabel = label;
         if (this.containerDumpArmed) return;
         const client = (this.bot as { _client?: any } | null)?._client;
         if (client == null || typeof client.on !== 'function') return;
@@ -1274,6 +1276,21 @@ export class MineflayerBody {
                 this.slottedContainerBlockedReason = null;
                 this.slottedContainerBlockedDim = null;
             }
+            // **合成窗口的单行结论**（Lead 2026-10-19 ①）：crafting 走 `bot.craft`，
+            // 不经过 `openBlockUi`，所以必须单独出一行——否则工作台 0/4 没有任何证据，
+            // 就分不清"(a) 两条 crafting 实现一条死"和"(b) 窗口偶发无内容"。
+            if (this.containerDumpLabel === 'craft') {
+                this.log.with('lifecycle').info({
+                    event: 'craft-window-diagnosis',
+                    recipe: this.containerDumpReason,
+                    outcome,
+                    verdict,
+                    openWindow: this.containerDumpSawOpen,
+                    contents: inbound.some((n) => /window_items|set_content|container_set_content/i.test(n)),
+                    protocolFaults: this.protocolFaultCount,
+                    inboundNames: [...new Set(inbound)].slice(0, 12),
+                });
+            }
             this.log.with('lifecycle').info({
                 event: 'container-packet-dump',
                 outcome,
@@ -1328,6 +1345,9 @@ export class MineflayerBody {
         via: string;
     } | null = null;
     /** "带槽位容器在本服务端不可用"结论的过期时刻；0 = 当前没被判定为坏。 */
+    /** 这次转储是开容器还是合成窗口（合成走 bot.craft，不经过 openBlockUi）。 */
+    private containerDumpLabel: 'container' | 'craft' = 'container';
+    private containerDumpReason = '';
     private slottedContainerBlockedUntil = 0;
     /** 上一条容器不可用结论是在哪个维度得出的（跨维度不串用）。 */
     private slottedContainerBlockedDim: string | null = null;
@@ -1894,6 +1914,45 @@ export class MineflayerBody {
             this.lastPosSample = { ...here, at: now };
         } catch {
             // 追踪失败不影响别的。
+        }
+    }
+
+/**
+     * **void 预检**（走路工具专用）：拒绝"必须跨越无支撑空间"的 `move`/`goToCoordinates`。
+     * 边界见 `void_walk.ts`：搭桥工具不受影响；空中不拦；读不到方块就不拦。
+     */
+    private voidWalkRefusalFor(toolName: string, args: Record<string, unknown>): string | null {
+        const name = stripBang(toolName);
+        if (name !== 'move' && name !== 'goToCoordinates') return null;
+        try {
+            const p = (this.bot as any)?.entity?.position;
+            if (p == null) return null;
+            const velocityY = Number((this.bot as any)?.entity?.velocity?.y ?? 0);
+            const airborne =
+                Number.isFinite(velocityY) && velocityY < -0.5 ? true : (this.bot as any)?.entity?.onGround === false;
+            // 两种工具的坐标参数形状不同：move 用 direction/distance，goToCoordinates 用 xyz。
+            // move 的方向语义我们**不在这里猜**（它可能相对朝向），所以只对 goToCoordinates
+            // 做点位预检；move 留空并交给到达时的支撑检查（见 goToPosition）。
+            const target =
+                name === 'move'
+                    ? null
+                    : {
+                          x: Number(args.x),
+                          y: Number(args.y),
+                          z: Number(args.z),
+                      };
+            if (target == null || ![target.x, target.y, target.z].every((v) => Number.isFinite(v))) return null;
+            const verdict = voidWalkVerdict({
+                tool: name,
+                from: { x: p.x, y: p.y, z: p.z },
+                to: target,
+                blockAt: (bx, by, bz) => (this.bot as any).blockAt?.(new Vec3(bx, by, bz)) ?? null,
+                airborne,
+            });
+            return verdict.refuse ? verdict.text : null;
+        } catch {
+            // 预检自己出错就不拦（不许让守卫的 bug 变成新的墙）。
+            return null;
         }
     }
 
@@ -4427,6 +4486,19 @@ export class MineflayerBody {
                             ok: true,
                             op: 'action',
                             result: { ok: false, text: combatRefusal, code: 'REFUSED_CRITICAL_HEALTH' },
+                        };
+                    }
+                    // **void 预检：走路工具不许把 bot 走进没有支撑的空间**（Lead 2026-10-19
+                    // ②-3）。只在 `move`/`goToCoordinates` 上生效，边界写死：
+                    //   走路工具拒绝"必须跨越无支撑空间"的目标；
+                    //   搭桥工具（travelTo/placeBlock）才是过缺口的合法手段。
+                    // 已经在空中不拦（那是保命反射的事）；其它工具一律原样放行。
+                    const voidRefusal = this.voidWalkRefusalFor(baseName, args);
+                    if (voidRefusal != null) {
+                        return {
+                            ok: true,
+                            op: 'action',
+                            result: { ok: false, text: voidRefusal, code: 'REFUSED_VOID_WALK' },
                         };
                     }
                     // **出发前准备检查**（末地/下界是单向 + 致死地形）：空手走进去不是
