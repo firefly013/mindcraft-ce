@@ -4,11 +4,14 @@
  * 真机 overnight_b：从 y≈79 自由落体进 y≈25 的岩浆烧死，x/z 一格没动——刹车生效了，
  * 但"下方是岩浆"时刹车就是死刑。末地那套"横移会走进虚空"的判据不能套到岩浆上。
  */
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
   isLethalDestination,
   planFallRecovery,
   readFallMedium,
+  shouldEmitFallNotice,
 } from '../src/body/safety/fall_recovery.js';
 
 const col = (table: Record<number, string>) => (x: number, y: number, z: number) => {
@@ -103,5 +106,22 @@ describe('目标格守卫：不许朝致死格移动', () => {
     expect(isLethalDestination(col({ 64: 'lava' }), { x: 0, y: 64, z: 0 })).toBe(true);
     expect(isLethalDestination(col({}), { x: 0, y: 64, z: 0 })).toBe(true); // 没支撑
     expect(isLethalDestination(col({ 63: 'stone' }), { x: 0, y: 64, z: 0 })).toBe(false);
+  });
+});
+
+describe('同一条刹车回执不许每 tick 重播（真机审计：B 里 152 次、A 里 54 次）', () => {
+  it('第一次一定说；同一状态 5 秒内不重复；5 秒后再说一次；状态变了立刻说', () => {
+    const prev = { key: 'brake:void:-,-', at: 1_000 };
+    expect(shouldEmitFallNotice(null, 'brake:void:-,-', 1_000)).toBe(true);
+    expect(shouldEmitFallNotice(prev, 'brake:void:-,-', 2_000)).toBe(false);
+    expect(shouldEmitFallNotice(prev, 'brake:void:-,-', 5_999)).toBe(false);
+    expect(shouldEmitFallNotice(prev, 'brake:void:-,-', 6_000)).toBe(true);
+    expect(shouldEmitFallNotice(prev, 'lateral:lava:3,0', 1_100)).toBe(true);
+  });
+
+  it('回执里带"第几次/已持续多久"，所以少说不等于丢掉信息', () => {
+    const src = readFileSync(join(process.cwd(), 'src', 'body', 'mineflayer_body.ts'), 'utf8');
+    expect(src).toContain('第 ${this.fallBrakeNotices} 次刹车');
+    expect(src).toContain('shouldEmitFallNotice(this.lastFallNotice');
   });
 });

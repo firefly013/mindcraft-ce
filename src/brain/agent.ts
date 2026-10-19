@@ -46,7 +46,7 @@ import {
   createStopTool,
   createUpdatePlanTool,
 } from './tools/control_tools.js';
-import { longRangeNudge } from './tools/long_range_hint.js';
+import { longRangeNudge, type ReceiptHint } from './tools/long_range_hint.js';
 import { EventIntake } from './runtime/events.js';
 import type { GameEvent } from './runtime/events.js';
 import type { EventHandler } from './runtime/handlers.js';
@@ -1037,7 +1037,7 @@ export class Agent {
      * 依赖：plan（goal/todos，大脑侧）＋ places（地名→坐标，会话文档）＋ 当前位置（身体采样）。
      * **任何一步读不到就返回 null**——宁可不提醒，也不指错地方、更不能因为提醒把回执搞坏。
      */
-    private async longRangeHint(name: string): Promise<string | null> {
+    private async longRangeHint(name: string): Promise<ReceiptHint | null> {
         try {
             const plan = this.plan.snapshot();
             const planText = [plan.goal ?? '', ...plan.todos.map((todo) => todo.text)].join(' ');

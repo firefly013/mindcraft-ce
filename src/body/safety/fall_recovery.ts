@@ -134,3 +134,21 @@ export function isLethalDestination(
     const spot = assessStandingSpot(blockAt, target.x, target.y, target.z);
     return !spot.ok;
 }
+
+/**
+ * 同一条下坠/刹车回执**不要每 tick 重复播报**。
+ *
+ * 真机审计（2026-10-19）：「逃生**刹车**」在 overnight_b 的日志里出现 **152 次**、
+ * A 里 54 次——内容一模一样的行被反复送给模型，正是 Lead 说的那种"说太多等于没说"。
+ * 判据：**状态（档位+介质+目标）变了立刻说；没变则最多每 `minIntervalMs` 说一次。**
+ */
+export function shouldEmitFallNotice(
+    prev: { key: string; at: number } | null,
+    key: string,
+    now: number,
+    minIntervalMs = 5_000,
+): boolean {
+    if (prev == null) return true;
+    if (prev.key !== key) return true;
+    return now - prev.at >= Math.max(1, minIntervalMs);
+}

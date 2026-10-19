@@ -92,7 +92,7 @@ import settings from '../shared/settings.js';
 import pf from 'mineflayer-pathfinder';
 import Vec3 from 'vec3';
 import { chooseSafeFleeTarget } from './safety/flee.js';
-import { planFallRecovery, readFallMedium } from './safety/fall_recovery.js';
+import { planFallRecovery, readFallMedium, shouldEmitFallNotice } from './safety/fall_recovery.js';
 
 type EdgeWatcher = ReturnType<typeof createEdgeWatcher>;
 
@@ -1323,6 +1323,10 @@ export class MineflayerBody {
     /** "带槽位容器在本服务端不可用"结论的过期时刻；0 = 当前没被判定为坏。 */
     private slottedContainerBlockedUntil = 0;
     private slottedContainerBlockedReason: string | null = null;
+    /** 一次逃生里刹车了几次 + 上一次刹车回执（重复内容不重播，见 shouldEmitFallNotice）。 */
+    private fallBrakeNotices = 0;
+    private lastFallNotice: { key: string; at: number } | null = null;
+
     /** 本进程里一共抓到几条解析类错误（**不管有没有在开容器**）。 */
     private protocolFaultCount = 0;
     /** 最近一次"开容器尝试"的武装时刻；用来回答"错误是不是发生在这次尝试期间"。 */
@@ -3671,12 +3675,23 @@ export class MineflayerBody {
                                 return;
                             }
                             stopTranslation();
-                            if (this.currentReflexName != null) {
+                            // **同一条刹车回执不要每 tick 重播**：真机审计发现它在 B 的日志里
+                            // 出现 152 次、A 里 54 次（内容一模一样）——"说太多等于没说"。
+                            // 状态变了立刻说；没变最多每 5 秒说一次，并带上"第几次/已持续多久"。
+                            this.fallBrakeNotices += 1;
+                            const brakeKey = `brake:${mediumProbe.medium}:${fallPlan.target?.x ?? '-'},${fallPlan.target?.z ?? '-'}`;
+                            if (
+                                this.currentReflexName != null &&
+                                shouldEmitFallNotice(this.lastFallNotice, brakeKey, Date.now())
+                            ) {
+                                this.lastFallNotice = { key: brakeKey, at: Date.now() };
                                 // 说清"为什么这一棒什么都没做"，而不是让它像是逃成功了。
                                 this.notify('reflex.done', KIND.WORLD, LEVEL.STATE, {
                                     reflex: this.currentReflexName,
                                     outcome: 'in_progress',
-                                    detail: '逃生**刹车**：' + fallPlan.text + ' 请立刻用方块垫脚或往回走上实地。',
+                                    detail:
+                                        '逃生**刹车**：' + fallPlan.text +
+                                        ` 请立刻用方块垫脚或往回走上实地。（第 ${this.fallBrakeNotices} 次刹车，已持续 ${Math.round((this.currentReflexStartedAt > 0 ? Date.now() - this.currentReflexStartedAt : 0) / 1000)} 秒）`,
                                     ms: this.currentReflexStartedAt > 0 ? Date.now() - this.currentReflexStartedAt : 0,
                                 });
                             }

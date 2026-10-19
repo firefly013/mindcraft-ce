@@ -15,7 +15,7 @@ import type { ToolRegistration } from '@earendil-works/pi-durable';
 import type { ToolDeclaration } from '../../shared/tools.js';
 import { paramNames } from './tool_schema.js';
 import { commandToRegistration, loopResultText, type ToolOutcome } from './tools.js';
-import { withLongRangeNudge } from './long_range_hint.js';
+import { applyReceiptHint, type ReceiptHint } from './long_range_hint.js';
 
 export interface GameToolDeps {
   /**
@@ -66,14 +66,16 @@ export interface ActionChannel {
  * 「动作类工具真的占用了身体通道」这条断言会红——那是 E1/E3 失效的前兆，
  * 而它们在契约层是测不出来的（见 `runtime_action_boundary.test.ts` 的说明）。
  *
- * `options.hint` 是**大脑侧的回执追加**（例如"这个工具不是干这件事的，去用 travelTo"）：
+ * `options.hint` 是**大脑侧的回执修正**（例如"这个工具不是干这件事的，去用 travelTo"）：
  * 身体不知道 goal/places，只有大脑知道；而模型**跟回执比跟散文说明可靠得多**。
- * hint 抛错/返回 null 都只是"没有提醒"，绝不影响回执本身。
+ * hint 返回 `nextCall` 时会**显式顶掉**最后一行「下一步」（工具自己那条降级成
+ * "- 工具自己的建议（**不要照做**）：…"留在可见处，并说明为什么）。
+ * hint 抛错/返回 null 都只是"没有提醒"，**回执原样返回**，绝不影响它。
  */
 export function actionChannelInvoker(
   channel: ActionChannel,
   options: {
-    hint?: (name: string, args: Record<string, unknown>, text: string) => string | null | Promise<string | null>;
+    hint?: (name: string, args: Record<string, unknown>, text: string) => ReceiptHint | null | Promise<ReceiptHint | null>;
   } = {},
 ): (name: string, args: Record<string, unknown>) => Promise<string> {
   return async (name, args) => {
@@ -82,9 +84,8 @@ export function actionChannelInvoker(
     if (options.hint == null) return text;
     try {
       const hint = await options.hint(name, args, text);
-      if (hint == null || hint === '') return text;
-      // **插在「下一步」之前**：回执最后一行必须还是那条能照抄的调用。
-      return withLongRangeNudge(text, hint);
+      if (hint == null) return text;
+      return applyReceiptHint(text, hint);
     } catch {
       return text;
     }
