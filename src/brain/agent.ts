@@ -1025,7 +1025,7 @@ export class Agent {
         const text = await actionChannelInvoker(runner, {
             // **回执里提醒**：模型用 mineTunnel 去很远的目标时，点名那个目标并给出 travelTo 的坐标
             // （今晚量过：模型跟回执比跟工具说明可靠得多）。身体不知道 goal/places，所以只能在这里做。
-            hint: (name) => this.longRangeHint(name),
+            hint: (name, args) => this.longRangeHint(name, args),
         })(name, args);
         log.info({ name, args, ms: Date.now() - started, result: text });
         return text;
@@ -1036,8 +1036,12 @@ export class Agent {
      *
      * 依赖：plan（goal/todos，大脑侧）＋ places（地名→坐标，会话文档）＋ 当前位置（身体采样）。
      * **任何一步读不到就返回 null**——宁可不提醒，也不指错地方、更不能因为提醒把回执搞坏。
+     *
+     * 另外它是**交接循环的闸门**：如果这次调用带着 `handoff="travelTo"`（是 travelTo 把它
+     * 交过来的），那就**不许再交回 travelTo**——只报循环 + 给一条不是兄弟工具的出路
+     * （真机：两个工具来回踢皮球、同一位置都 0 位移）。
      */
-    private async longRangeHint(name: string): Promise<ReceiptHint | null> {
+    private async longRangeHint(name: string, args?: Record<string, unknown>): Promise<ReceiptHint | null> {
         try {
             const plan = this.plan.snapshot();
             const planText = [plan.goal ?? '', ...plan.todos.map((todo) => todo.text)].join(' ');
@@ -1045,7 +1049,14 @@ export class Agent {
             const live = (await this.body?.sample()) as { position?: { x?: number; z?: number } } | null;
             const p = live?.position;
             const here = p?.x == null || p?.z == null ? null : { x: Number(p.x), z: Number(p.z) };
-            return longRangeNudge({ toolName: name, here, planText, places });
+            const rawHandoff = args?.['handoff'];
+            return longRangeNudge({
+                toolName: name,
+                here,
+                planText,
+                places,
+                handoffFrom: typeof rawHandoff === 'string' ? rawHandoff : null,
+            });
         } catch {
             return null;
         }

@@ -15,11 +15,13 @@
 import { describe, expect, it } from 'vitest';
 import { actionChannelInvoker } from '../src/brain/tools/game_tools.js';
 import {
+    HANDOFF_CYCLE_ESCAPE_CALL,
     LONG_RANGE_MIN_BLOCKS,
     NEXT_CALL_PREFIX,
     applyReceiptHint,
     longRangeNudge,
     longRangeNextCall,
+    normalizeToolName,
     pickLongRangeTarget,
 } from '../src/brain/tools/long_range_hint.js';
 
@@ -131,6 +133,37 @@ describe('覆盖最后一行：三条性质', () => {
         expect(applyReceiptHint(out, hintFor())).toBe(out); // 幂等
         const once = applyReceiptHint(bodyReceipt, hintFor());
         expect(applyReceiptHint(once, hintFor())).toBe(once);
+    });
+});
+
+describe('交接循环闸门：travelTo 交过来的，不许再交回 travelTo', () => {
+    it('handoffFrom="travelTo" ⇒ 报循环 + 给一条**不是兄弟工具**的出路', () => {
+        const hint = hintFor({ handoffFrom: 'travelTo' });
+        expect(hint).not.toBeNull();
+        expect(hint?.note).toContain('两个工具在互相踢皮球');
+        expect(hint?.note).toContain('不要再交回 travelTo');
+        expect(hint?.note).toContain('挖不动的具体原因');
+        expect(hint?.nextCall).toBe(HANDOFF_CYCLE_ESCAPE_CALL);
+        expect(hint?.nextCall).not.toContain('travelTo');
+    });
+
+    it('应用到回执：最后一行是**出路**，工具自己那条被降级；全文只剩一条「照做即可」', () => {
+        const out = applyReceiptHint(bodyReceipt, hintFor({ handoffFrom: 'travelTo' }));
+        expect(out.split('\n').at(-1)).toBe(`${NEXT_CALL_PREFIX}${HANDOFF_CYCLE_ESCAPE_CALL}`);
+        expect(out).toContain(demoted);
+        expect(out.split(NEXT_CALL_PREFIX)).toHaveLength(2);
+        expect(out).not.toContain('travelTo(x=');
+    });
+
+    it('handoff 大小写/前导 ! 都认；别的工具名当没给（照常给 travelTo 建议）', () => {
+        for (const raw of ['travelTo', '!travelTo', 'TRAVELTO']) {
+            expect(hintFor({ handoffFrom: raw })?.nextCall, raw).toBe(HANDOFF_CYCLE_ESCAPE_CALL);
+        }
+        for (const raw of ['mineTunnel', 'goToCoordinates', '', null]) {
+            expect(hintFor({ handoffFrom: raw })?.nextCall, String(raw)).toBe('travelTo(x=-332, z=88)');
+        }
+        expect(normalizeToolName('!MineTunnel')).toBe('mineTunnel');
+        expect(normalizeToolName(42)).toBeNull();
     });
 });
 

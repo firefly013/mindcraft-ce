@@ -143,3 +143,62 @@ describe('事实采集：从 agent 读得出该读的东西', () => {
     expect(disableSafeguardsVerdict(read).allowed).toBe(false);
   });
 });
+
+describe('三方互锁例外：确认卡死时只放行呼吸反射 60 秒（Lead 2026-10-19 授权）', () => {
+  const lock = (over: Record<string, unknown> = {}) => ({
+    stuckSec: 2_400,
+    health: 0.375,
+    food: 0,
+    hasDigTool: false,
+    hasDiggableNeighbour: false,
+    surfaceTriggers: 60,
+    keepInventory: true,
+    immediateRespawn: true,
+    ...over,
+  });
+  const trapped = (over: Record<string, unknown> = {}) =>
+    facts({ health: 0.375, food: 0, reflex: 'surface', reflexMs: 90_000, submerged: true, deadlock: lock(over) as any });
+
+  it('三个拒绝条款同时成立 + 确认卡死 ⇒ **放行**，但只给 60 秒呼吸反射', () => {
+    const verdict = disableSafeguardsVerdict(trapped());
+    expect(verdict.allowed).toBe(true);
+    expect(verdict.grantSurfaceMs).toBe(60_000);
+    expect(String(verdict.text)).toContain('你被卡死了');
+    expect(String(verdict.text)).toContain('引擎的死锁');
+    expect(String(verdict.text)).toContain('只让 surface 这一条规则停手 60 秒');
+    expect(String(verdict.text)).toContain('下一步（照做即可）');
+  });
+
+  it('背包里有镐 ⇒ **拒绝**（它能挖，所以不是被困）', () => {
+    const verdict = disableSafeguardsVerdict(trapped({ hasDigTool: true, hasDiggableNeighbour: true }));
+    expect(verdict.allowed).toBe(false);
+    expect(verdict.grantSurfaceMs).toBeUndefined();
+  });
+
+  it('身边没有可挖的邻居 ⇒ 仍算被困（挖不动那一条成立）', () => {
+    expect(disableSafeguardsVerdict(trapped({ hasDigTool: true, hasDiggableNeighbour: false })).allowed).toBe(true);
+  });
+
+  it('有食物/食物非 0 ⇒ 拒绝（不是卡死，是饿，去吃）', () => {
+    expect(disableSafeguardsVerdict(trapped({ food: 3 })).allowed).toBe(false);
+  });
+
+  it('位置没卡够 3 分钟 / 呼吸反射只触发几次 ⇒ 拒绝（不许瞬时状态触发例外）', () => {
+    expect(disableSafeguardsVerdict(trapped({ stuckSec: 60 })).allowed).toBe(false);
+    expect(disableSafeguardsVerdict(trapped({ surfaceTriggers: 2 })).allowed).toBe(false);
+  });
+
+  it('岩浆/溺水但**不满足**完整卡死谓词 ⇒ 照旧拒绝（本例的读不到/缺字段）', () => {
+    expect(disableSafeguardsVerdict(facts({ health: 1, food: 0, inLava: true })).allowed).toBe(false);
+    expect(disableSafeguardsVerdict(facts({ health: 1, food: 0, submerged: true })).allowed).toBe(false);
+  });
+
+  it('血量/食物/背包读不到（deadlock=null）⇒ 拒绝', () => {
+    expect(disableSafeguardsVerdict(facts({ health: 0.5, food: 0, submerged: true, deadlock: null })).allowed).toBe(false);
+  });
+
+  it('keepInventory 不是 true ⇒ 放行但**不给**死亡出路（standDown=0 ⇒ 走拒绝）', () => {
+    const verdict = disableSafeguardsVerdict(trapped({ keepInventory: false }));
+    expect(verdict.allowed).toBe(false);
+  });
+});

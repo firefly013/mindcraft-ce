@@ -60,6 +60,7 @@ import {
     maxLegPerScan,
     mineTunnelSkill,
     normalizeName,
+    parseHandoff,
     resolveBlockName,
     resolveEntityName,
     resolveTunnelDirection,
@@ -985,8 +986,8 @@ describe('接线：registry 与 schema', () => {
     it('参数签名就是任务要求的那四个/三个/六个，且参数顺序 = perform 的位置参数顺序', () => {
         expect(Object.keys(findCommand('exploreFor')?.params ?? {})).toEqual(['block', 'max_steps', 'step']);
         expect(Object.keys(findCommand('huntFor')?.params ?? {})).toEqual(['entity', 'want', 'radius', 'max_ms']);
-        expect(Object.keys(findCommand('mineTunnel')?.params ?? {})).toEqual(['length', 'height', 'direction']);
-        expect(Object.keys(findCommand('travelTo')?.params ?? {})).toEqual(['x', 'y', 'z', 'max_ms', 'layer', 'dimension']);
+        expect(Object.keys(findCommand('mineTunnel')?.params ?? {})).toEqual(['length', 'height', 'direction', 'handoff']);
+        expect(Object.keys(findCommand('travelTo')?.params ?? {})).toEqual(['x', 'y', 'z', 'max_ms', 'layer', 'dimension', 'handoff']);
         expect(progressionActionList[0].params?.block.optional).toBeUndefined(); // block 必填
         expect(progressionActionList[1].params?.entity.optional).toBeUndefined(); // entity 必填
         expect(progressionActionList[0].params?.max_steps.default).toBe(DEFAULT_EXPLORE_MAX_STEPS);
@@ -1048,7 +1049,7 @@ describe('接线：registry 与 schema', () => {
 
     it('mineTunnel 的三个参数全可选 + 方向/长度上限与常量同源', () => {
         const params = progressionActionList[2].params ?? {};
-        expect(Object.keys(params)).toEqual(['length', 'height', 'direction']);
+        expect(Object.keys(params)).toEqual(['length', 'height', 'direction', 'handoff']);
         expect(params.length.optional).toBe(true);
         expect(params.length.default).toBe(DEFAULT_TUNNEL_LENGTH);
         expect(params.length.domain).toEqual([1, MAX_TUNNEL_LENGTH]);
@@ -1306,6 +1307,40 @@ describe('mineTunnel：方向端到端（模型参数 ⇒ 执行 ⇒ 回执 ⇒ 
         // 被容器挡住：点名 + 横着挪开（不是"再挖一次同样的"）
         const blocked = tunnelNextAction({ ...base, stop: 'protected_block' } as any);
         expect(blocked).toBe('mineTunnel(length=2, direction="+z")');
+    });
+});
+
+describe('mineTunnel 收到兄弟工具的交接（handoff）', () => {
+    it('是 travelTo 交过来的 ⇒ 回执点名这件事，并要求"说清原因、别再交回去"', async () => {
+        const h = tunnelHarness({
+            cells: { '1,70,0': 'chest', '1,71,0': 'chest', '1,72,0': 'chest' },
+            inventory: [{ name: 'diamond_pickaxe', count: 1 }],
+        });
+        const receipt = await mineTunnelSkill(h.bot, 3, 2, '+x', h.deps, { handoff: 'travelTo' });
+
+        expect(receipt).toContain('这条是 **travelTo** 交过来的');
+        expect(receipt).toContain('handoff="travelTo"');
+        expect(receipt).toContain('不要再交回 travelTo');
+        // 0 位移写在标题里，而且点名卡在什么
+        expect(receipt).toContain('净前进 0/3 格');
+        expect(receipt).toContain('**卡在**：');
+        expect(receipt).toContain('chest');
+    });
+
+    it('没有 handoff ⇒ 不提交接（不会无端说"别再交回去"）', async () => {
+        const h = tunnelHarness({ inventory: [{ name: 'diamond_pickaxe', count: 1 }] });
+        const receipt = await mineTunnelSkill(h.bot, 2, 2, '+x', h.deps);
+        expect(receipt).not.toContain('交过来的');
+        expect(receipt).not.toContain('handoff=');
+    });
+
+    it('handoff 解析只认这两个工具名（乱写的当没给）', () => {
+        expect(parseHandoff('travelTo')).toBe('travelTo');
+        expect(parseHandoff('!mineTunnel')).toBe('mineTunnel');
+        expect(parseHandoff('MINETUNNEL')).toBe('mineTunnel');
+        expect(parseHandoff('goToCoordinates')).toBeNull();
+        expect(parseHandoff('')).toBeNull();
+        expect(parseHandoff(null)).toBeNull();
     });
 });
 

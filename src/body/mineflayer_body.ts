@@ -93,6 +93,8 @@ import pf from 'mineflayer-pathfinder';
 import Vec3 from 'vec3';
 import { chooseSafeFleeTarget } from './safety/flee.js';
 import { planFallRecovery, readFallMedium, shouldEmitFallNotice } from './safety/fall_recovery.js';
+import { isEdibleName, shouldEmitUnrecoverable, unrecoverableVerdict } from './safety/unrecoverable.js';
+import type { DeadlockFacts } from './safety/deadlock.js';
 
 type EdgeWatcher = ReturnType<typeof createEdgeWatcher>;
 
@@ -1326,6 +1328,16 @@ export class MineflayerBody {
     /** 一次逃生里刹车了几次 + 上一次刹车回执（重复内容不重播，见 shouldEmitFallNotice）。 */
     private fallBrakeNotices = 0;
     private lastFallNotice: { key: string; at: number } | null = null;
+    /** 上一次"无法自愈"提示的时间 + 进入该状态的时刻（去重 + 报"已持续多久"）。 */
+    private unrecoverableNotice: { at: number } | null = null;
+    private unrecoverableSince = 0;
+    /** 三方互锁的呼吸反射临时停用截止时间（只停 surface 一条，见 deadlock.ts）。 */
+    private surfaceStandDownUntil = 0;
+    /** 位置卡住追踪：上次采样 + 最近一次"动过"的时刻。 */
+    private lastPosSample: { x: number; y: number; z: number; at: number } | null = null;
+    private lastMovedAt = 0;
+    /** 最近 3 分钟里呼吸反射触发的时刻（三方互锁的证据）。 */
+    private surfaceTriggerTimes: number[] = [];
 
     /** 本进程里一共抓到几条解析类错误（**不管有没有在开容器**）。 */
     private protocolFaultCount = 0;
@@ -1681,6 +1693,185 @@ export class MineflayerBody {
             parts.push('（目标物品并没有增加）');
         }
         return { changed, gained, lost, note: parts.join('') };
+    }
+
+    /**
+     * **"僵尸状态"检测**：活着但无法自愈（血 ≤4、食物 0、背包无食物）。
+     *
+     * **纯建议，不是锁**：不拦任何工具、不动身体、不取消反射；只是把状态和一个
+     * 有条件的出口说清楚。是否推荐"主动死"完全取决于**当场**读到的 `keepInventory`：
+     * true 才说；false 或读不到 ⇒ 明说"不要主动死"并指向找吃的（见 unrecoverable.ts）。
+     */
+    checkUnrecoverableState(): void {
+        try {
+            const bot = this.bot as { health?: unknown; food?: unknown } | null;
+            const health = Number(bot?.health);
+            const food = Number(bot?.food);
+            if (!Number.isFinite(health) || !Number.isFinite(food)) return;
+            if (health > 4 || food > 0) {
+                // 离开状态 ⇒ 清掉去重记录，下次再进入能立刻说。
+                this.unrecoverableNotice = null;
+                this.unrecoverableSince = 0;
+                return;
+            }
+            const names = (() => {
+                if (this.inventorySynced === false) return null; // 未同步 ⇒ 不判定
+                try {
+                    return ((bot as any)?.inventory?.items?.() ?? []).map((item: any) => String(item?.name ?? ''));
+                } catch {
+                    return null;
+                }
+            })();
+            if (names == null) return;
+            const gameplay = (settings as any)?.gameplay ?? {};
+            const keepInventory =
+                gameplay.keepInventoryOnDeath === true ? true : gameplay.keepInventoryOnDeath === false ? false : null;
+            const immediateRespawn =
+                gameplay.doImmediateRespawn === true ? true : gameplay.doImmediateRespawn === false ? false : null;
+            if (this.unrecoverableSince === 0) this.unrecoverableSince = Date.now();
+            const elapsedSec = Math.round((Date.now() - this.unrecoverableSince) / 1000);
+            const verdict = unrecoverableVerdict({
+                health,
+                food,
+                itemNames: names,
+                keepInventory,
+                immediateRespawn,
+                elapsedSec,
+            });
+            if (!verdict.unrecoverable || verdict.advice == null) return;
+            const now = Date.now();
+            if (!shouldEmitUnrecoverable(this.unrecoverableNotice, now)) return;
+            this.unrecoverableNotice = { at: now };
+            // 一行有界证据：以后能回答"多常进入这个状态、以及它们有没有走那个出口"。
+            try {
+                this.log.with('lifecycle').info({
+                    event: 'unrecoverable-state',
+                    health,
+                    food,
+                    foodItems: names.filter((itemName: string) => isEdibleName(itemName)).slice(0, 5),
+                    keepInventory,
+                    elapsedSec,
+                });
+            } catch {
+                // 日志失败不影响建议。
+            }
+            void this.writeAdvice(verdict.advice);
+        } catch {
+            // 检测自身出错绝不影响身体。
+        }
+    }
+
+    /** 把一段建议写进 bot.output（模型下一轮就能看到）；不拦任何工具。 */
+    private async writeAdvice(text: string): Promise<void> {
+        try {
+            const bot = this.bot as { output?: unknown } | null;
+            if (bot == null) return;
+            if (typeof bot.output !== 'string') (bot as { output?: string }).output = '';
+            (bot as { output: string }).output += `\n${text}\n`;
+        } catch {
+            // 写不进去也不影响别的。
+        }
+    }
+
+/**
+     * **三方互锁的事实**：只有全部可读、且都成立时才算"真的出不去"。
+     * 任何一项读不到 ⇒ 返回 null ⇒ 拒绝照旧（不许拿读不到当放行理由）。
+     */
+    deadlockFacts(): DeadlockFacts | null {
+        try {
+            const bot = this.bot as any;
+            const health = Number(bot?.health);
+            const food = Number(bot?.food);
+            if (!Number.isFinite(health) || !Number.isFinite(food)) return null;
+            if (this.inventorySynced === false) return null;
+            const items = ((bot?.inventory?.items?.() ?? []) as Array<{ name?: unknown }>).map((item) =>
+                String(item?.name ?? ''),
+            );
+            const hasDigTool = items.some((name) =>
+                ['_pickaxe', '_shovel', '_axe', '_hoe'].some((suffix) => name.endsWith(suffix)),
+            );
+            // 身边（含脚下）有没有可挖的方块：镐子有没有先不管，这里只回答"挖出去这条路成立吗"。
+            const p = bot?.entity?.position;
+            const hasDiggableNeighbour = (() => {
+                if (p == null) return false;
+                const base = { x: Math.floor(Number(p.x)), y: Math.floor(Number(p.y)), z: Math.floor(Number(p.z)) };
+                for (const d of [[0, 0, 0], [1, 0, 0], [-1, 0, 0], [0, 0, 1], [0, 0, -1], [0, -1, 0], [0, 1, 0]]) {
+                    const b = bot.blockAt?.(new Vec3(base.x + d[0]!, base.y + d[1]!, base.z + d[2]!));
+                    const name = String(b?.name ?? '');
+                    if (name === '' || name === 'air' || name === 'cave_air' || name === 'void_air') continue;
+                    if (name === 'bedrock' || name === 'lava' || name === 'water') continue;
+                    return true;
+                }
+                return false;
+            })();
+            const now = Date.now();
+            const window = this.surfaceTriggerTimes.filter((at) => now - at <= 180_000);
+            const gameplay = (settings as any)?.gameplay ?? {};
+            const keepInventory =
+                gameplay.keepInventoryOnDeath === true ? true : gameplay.keepInventoryOnDeath === false ? false : null;
+            const immediateRespawn =
+                gameplay.doImmediateRespawn === true ? true : gameplay.doImmediateRespawn === false ? false : null;
+            return {
+                stuckSec: this.lastMovedAt > 0 ? Math.round((now - this.lastMovedAt) / 1000) : 0,
+                health,
+                food,
+                hasDigTool,
+                hasDiggableNeighbour,
+                surfaceTriggers: window.length,
+                keepInventory,
+                immediateRespawn,
+            };
+        } catch {
+            return null;
+        }
+    }
+
+    /** **只停呼吸反射**这么多毫秒（三方互锁的唯一出口）；带响亮日志与自动恢复。 */
+    enableSurfaceStandDown(ms: number): void {
+        const bounded = Math.min(Math.max(1_000, Math.floor(ms)), 60_000);
+        const until = Date.now() + bounded;
+        this.surfaceStandDownUntil = Math.max(this.surfaceStandDownUntil, until);
+        try {
+            this.log.with('lifecycle').info({
+                event: 'deadlock-override-granted',
+                scope: 'surface',
+                ms: bounded,
+                health: Number((this.bot as any)?.health ?? null),
+                food: Number((this.bot as any)?.food ?? null),
+            });
+        } catch {
+            // 日志失败不影响放行。
+        }
+        // 自动恢复（有界；到点后呼吸反射照旧）。
+        const timer = setTimeout(() => {
+            try {
+                this.log.with('lifecycle').info({ event: 'deadlock-override-reverted', scope: 'surface' });
+            } catch {
+                // 同上。
+            }
+        }, bounded);
+        (timer as { unref?: () => void }).unref?.();
+    }
+
+    /** 位置卡住追踪：每次采样路径更新一次（用来算"同一坐标多久没动"）。 */
+    trackPositionStuck(): void {
+        try {
+            const p = (this.bot as any)?.entity?.position;
+            if (p == null) return;
+            const now = Date.now();
+            const here = { x: Math.floor(Number(p.x)), y: Math.floor(Number(p.y)), z: Math.floor(Number(p.z)) };
+            if (this.lastPosSample == null) {
+                this.lastPosSample = { ...here, at: now };
+                this.lastMovedAt = now;
+                return;
+            }
+            const moved =
+                here.x !== this.lastPosSample.x || here.y !== this.lastPosSample.y || here.z !== this.lastPosSample.z;
+            if (moved) this.lastMovedAt = now;
+            this.lastPosSample = { ...here, at: now };
+        } catch {
+            // 追踪失败不影响别的。
+        }
     }
 
     /** 最近的敌对生物距离（米）；读不到 / 没有 = null。 */
@@ -3598,6 +3789,33 @@ export class MineflayerBody {
                                 // 走到这里就说明"脚下没有实心/正在下坠"，所以不是实地。
                                 onSolidGround: false,
                                 safeLanding: landedSpot.ok ? landedSpot.target : null,
+                                hasPlaceableBlocks: (() => {
+                                    try {
+                                        return ((bot.inventory?.items?.() ?? []) as Array<{ name?: unknown }>).some((item) => {
+                                            const name = String(item?.name ?? '');
+                                            const def = (bot as any)?.registry?.blocksByName?.[name];
+                                            return def != null && def.boundingBox === 'block';
+                                        });
+                                    } catch {
+                                        return false;
+                                    }
+                                })(),
+                                // 身边可依托的实心面（垫脚要靠在它侧面）：在 2 格内找一块非空、非危险方块。
+                                placeAgainst: (() => {
+                                    try {
+                                        const base = { x: Math.floor(p.x), y: Math.floor(p.y), z: Math.floor(p.z) };
+                                        for (const d of [[0, -1, 0], [0, 0, -1], [0, 0, 1], [-1, 0, 0], [1, 0, 0], [0, 1, 0]]) {
+                                            const b = bot.blockAt(new Vec3(base.x + d[0]!, base.y + d[1]!, base.z + d[2]!));
+                                            const name = String(b?.name ?? '');
+                                            if (name === '' || name === 'air' || name === 'cave_air' || name === 'void_air') continue;
+                                            if (name === 'lava' || name === 'flowing_lava' || name === 'water' || name === 'flowing_water') continue;
+                                            return { x: base.x + d[0]!, y: base.y + d[1]!, z: base.z + d[2]! };
+                                        }
+                                        return null;
+                                    } catch {
+                                        return null;
+                                    }
+                                })(),
                                 hasWaterBucket: (() => {
                                     try {
                                         return ((bot.inventory?.items?.() ?? []) as Array<{ name?: unknown }>).some(
@@ -3623,7 +3841,40 @@ export class MineflayerBody {
                                     }
                                 }
                             };
-                            if (fallPlan.rung === 'lateral' && fallPlan.target != null) {
+                            if (fallPlan.rung === 'place' && fallPlan.target != null) {
+                                // **垫脚，不横移**：末地虚空被击退时唯一的救命动作。
+                                // 靠在身边实心面的侧面，把方块放到自己脚下那一格。
+                                stopTranslation();
+                                const against = fallPlan.target;
+                                const feetCell = { x: Math.floor(p.x), y: Math.floor(p.y), z: Math.floor(p.z) };
+                                const offset = { x: against.x - feetCell.x, y: against.y - feetCell.y, z: against.z - feetCell.z };
+                                void (async (): Promise<void> => {
+                                    try {
+                                        const item = ((bot.inventory?.items?.() ?? []) as Array<{ name?: unknown }>).find((entry) => {
+                                            const name = String(entry?.name ?? '');
+                                            const def = (bot as any)?.registry?.blocksByName?.[name];
+                                            return def != null && def.boundingBox === 'block';
+                                        });
+                                        if (item == null) return;
+                                        await bot.equip(item, 'hand');
+                                        const refBlock = bot.blockAt(new Vec3(against.x, against.y, against.z));
+                                        if (refBlock == null) return;
+                                        // 面向"从依托块指向脚下格"的方向。
+                                        await bot.placeBlock(refBlock, new Vec3(offset.x, offset.y, offset.z));
+                                    } catch {
+                                        // 垫不上也要留下回执（下面统一报）。
+                                    }
+                                })();
+                                if (this.currentReflexName != null) {
+                                    this.notify('reflex.done', KIND.WORLD, LEVEL.STATE, {
+                                        reflex: this.currentReflexName,
+                                        outcome: 'in_progress',
+                                        detail: '逃生**下坠恢复（脚下垫方块）**：' + fallPlan.text,
+                                        ms: this.currentReflexStartedAt > 0 ? Date.now() - this.currentReflexStartedAt : 0,
+                                    });
+                                }
+                                return;
+                            }                            if (fallPlan.rung === 'lateral' && fallPlan.target != null) {
                                 // **横移这一档是"救命动作"**：目标已经过 `chooseSafeFleeTarget`
                                 // 验证（脚/头空气 + 脚下实心 + 不碰岩浆/水）。
                                 stopTranslation();
@@ -3747,6 +3998,13 @@ export class MineflayerBody {
                 swimUp: (): void => {
                     if (run.aborted) return;
                     try {
+                        // 记录"呼吸反射在把我们顶上去"的证据（三方互锁判定要用）。
+                        // 惰性初始化：测试 fixture 用 Object.create，拿不到类字段初值。
+                        if (!Array.isArray(this.surfaceTriggerTimes)) this.surfaceTriggerTimes = [];
+                        this.surfaceTriggerTimes.push(Date.now());
+                        if (this.surfaceTriggerTimes.length > 200) this.surfaceTriggerTimes.splice(0, 100);
+                        // **三方互锁例外**：确认卡死时只停呼吸反射 60 秒（其它保命照旧）。
+                        if (Date.now() < this.surfaceStandDownUntil) return;
                         // 水里/岩浆里按 jump 就是上浮；顺便抬头，免得贴着天花板原地顶。
                         bot.setControlState('jump', true);
                         void bot.look(bot.entity.yaw, -Math.PI / 2, true);
@@ -3922,6 +4180,10 @@ export class MineflayerBody {
                 // 报告路径上**有界等一次背包同步**：刚重连立刻读会读到空包，
                 // 而空包会被模型当成"家当没了"（真机事故见 inventorySynced）。
                 await this.waitForInventorySync();
+                // **"僵尸状态"检测放在这里**：模型每次采样都会经过，而它正是最需要
+                // 知道"你已经无法自愈、出口在哪"的时候（真机：0.375 血/食物 0/空背包
+                // 站了十多分钟，唯一恢复手段是人类在聊天里说了一句）。
+                this.checkUnrecoverableState();
                 return { ok: true, op: 'sample', state: sampleLiveState(this.sampleContext()) };
             }
             case 'image': {

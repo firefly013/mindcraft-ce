@@ -77,6 +77,7 @@ export const PROGRESSION_TOOL_TEXT: Record<string, { description: string; params
             length: '这次往前挖多少格（默认 32，1~256）。挖满就自己停并给"接着挖"的下一步；长距离就反复调用它。',
             height: '隧道高度（默认 2 = 能站着走，1~3）。2 格高才走得顺；1 格高会卡头。',
             direction: '方向：`+x`/`-x`/`+z`/`-z`（也认 east/west/north/south、东/南/西/北）。**留空 = 按当前朝向推**（回执会大声警告这一点）；要去某个坐标就用 travelTo，别靠朝向猜。回执里会写明实际用的方向，续挖照抄它。',
+            handoff: '交接标记（可选）：**照抄上一条回执里的调用就自动带着它**，不用自己想。它是用来堵"travelTo 和 mineTunnel 互相踢皮球"的：如果这条是另一个工具交过来的（`handoff="travelTo"`），回执会提醒你"挖不动就说清原因，别再交回去"；真出现循环时会当场停手并给别的出路。',
         },
     },
     travelTo: {
@@ -104,6 +105,7 @@ export const PROGRESSION_TOOL_TEXT: Record<string, { description: string; params
             max_ms: '这一趟的时间预算（毫秒，默认 300000 = 5 分钟，10000~360000）。到点停手并给续跑调用——**不要**为了"一次走完"把它调很大。',
             layer: '走哪一层（可选）。下界长途推荐 116（y=112~120 实心、少岩浆）；给了就按它先爬到那一层再横向挖。',
             dimension: '目标所在维度（可选，只用于**拒绝**）：overworld / the_nether / the_end（也认 下界/主世界/末地）。和当前维度不一致就不出发，并告诉你先 enterNether() 之类。',
+            handoff: '交接标记（可选）：**照抄上一条回执里的调用就自动带着它**，不用自己想。用来堵"两个工具互相踢皮球"：如果这条是 mineTunnel 交过来的，而你这边又被同一个障碍挡住，回执会当场报循环并给一条**不是 mineTunnel** 的出路，而不是把活儿再丢回去。',
         },
     },
 };
@@ -312,12 +314,17 @@ export const progressionActionList: AgentCommand[] = [
                 description: PROGRESSION_TOOL_TEXT.mineTunnel.params.direction,
                 optional: true,
             },
+            handoff: {
+                type: 'string',
+                description: PROGRESSION_TOOL_TEXT.mineTunnel.params.handoff,
+                optional: true,
+            },
         },
         perform: runProgressionAction(
             'mineTunnel',
             TUNNEL_TIMEOUT_MIN,
-            (agent, rawLength?: unknown, rawHeight?: unknown, rawDirection?: unknown) =>
-                progression.mineTunnelSkill(agent.bot, rawLength, rawHeight, rawDirection),
+            (agent, rawLength?: unknown, rawHeight?: unknown, rawDirection?: unknown, rawHandoff?: unknown) =>
+                progression.mineTunnelSkill(agent.bot, rawLength, rawHeight, rawDirection, {}, { handoff: rawHandoff }),
         ),
     },
     {
@@ -355,6 +362,11 @@ export const progressionActionList: AgentCommand[] = [
                 description: PROGRESSION_TOOL_TEXT.travelTo.params.dimension,
                 optional: true,
             },
+            handoff: {
+                type: 'string',
+                description: PROGRESSION_TOOL_TEXT.travelTo.params.handoff,
+                optional: true,
+            },
         },
         perform: runProgressionAction(
             'travelTo',
@@ -367,7 +379,8 @@ export const progressionActionList: AgentCommand[] = [
                 rawMaxMs?: unknown,
                 rawLayer?: unknown,
                 rawDimension?: unknown,
-            ) => progression.travelToSkill(agent.bot, rawX, rawY, rawZ, rawMaxMs, rawLayer, rawDimension),
+                rawHandoff?: unknown,
+            ) => progression.travelToSkill(agent.bot, rawX, rawY, rawZ, rawMaxMs, rawLayer, rawDimension, {}, { handoff: rawHandoff }),
         ),
     },
 ];

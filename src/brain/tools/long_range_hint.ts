@@ -35,6 +35,26 @@ export interface LongRangeNudgeInput {
   /** 记住的地方：名字 → [x, y, z]。 */
   places: Record<string, [number, number, number]>;
   minDistance?: number;
+  /**
+   * 这次调用带进来的 `handoff`（谁把它叫来的）。
+   *
+   * **循环闸门**：如果是 `travelTo` 把活儿交给 `mineTunnel`（`handoff="travelTo"`），
+   * 那我们**不能再把它交回 travelTo** —— 那就是真机那个"两个工具互相踢皮球、同一位置都 0 位移"。
+   * 这时只报循环 + 给一条**不是兄弟工具**的出路。
+   */
+  handoffFrom?: string | null;
+}
+
+/** 检测到循环时的出路：**不是兄弟工具**（先看清身体状态，再决定换路）。 */
+export const HANDOFF_CYCLE_ESCAPE_CALL = 'stats(type="body")';
+
+/** `handoff` 参数可能是 `"travelTo"`/`"!travelTo"`/大小写混写 ⇒ 归一到工具名。 */
+export function normalizeToolName(raw: unknown): 'travelTo' | 'mineTunnel' | null {
+  if (typeof raw !== 'string') return null;
+  const value = raw.trim().toLowerCase().replace(/^!/, '');
+  if (value === 'travelto') return 'travelTo';
+  if (value === 'minetunnel') return 'mineTunnel';
+  return null;
 }
 
 export interface LongRangeTarget {
@@ -96,6 +116,17 @@ export function longRangeNudge(input: LongRangeNudgeInput): ReceiptHint | null {
   if (input.toolName !== 'mineTunnel') return null; // travelTo 本来就是干这个的
   const target = pickLongRangeTarget(input);
   if (target == null) return null;
+  // **循环闸门**：这条是 travelTo 交过来的 ⇒ **不许再交回 travelTo**（真机：来回踢皮球、
+  // 同一位置都 0 位移）。只报循环 + 给一条**不是兄弟工具**的出路。
+  if (normalizeToolName(input.handoffFrom) === 'travelTo') {
+    return {
+      note:
+        '⚠️ **两个工具在互相踢皮球**：travelTo 把你交给 mineTunnel，**不要再交回 travelTo** —— ' +
+        '两边互相丢就是两边都不动。mineTunnel 必须自己说清**挖不动的具体原因**（脚下没有可站的方块 / ' +
+        '前面是容器·功能方块 / 手上没镐 / 读不到方块），然后换轴、换层，或先垫方块。',
+      nextCall: HANDOFF_CYCLE_ESCAPE_CALL,
+    };
+  }
   return {
     // **点名被顶掉的是哪一条**（"上面 mineTunnel 那条不要照做"）——悄悄换掉会留下两条
     // 互相矛盾的"照抄即可"，那正是我们整晚在删的"回执与世界不一致"。

@@ -1813,6 +1813,177 @@ export const TUNNEL_MOVE_EPS = 0.5;
 export const TUNNEL_MAX_STALLS = 3;
 /** 续跑建议的最小长度：**绝不给 1**（模型会一段一段啃到死）。 */
 export const MIN_TUNNEL_RESUME = 16;
+
+// ───────────────────────── 工具之间的"踢皮球"熔断 ─────────────────────────
+//
+// 真机（overnight_b）：`travelTo` 把活儿交给 `mineTunnel`，`mineTunnel` 又交回 `travelTo`，
+// **两边都没挪动、都报 0 位移**，同一个坐标上来回踢。这正是我们整晚在杀的形状
+// （回执说"去用另一个工具"，而世界没变），只不过这次是**我们自己的两个工具之间**。
+//
+// 结构性堵法（不靠模型自觉）：
+//   ① 谁要把活儿交给兄弟工具，**必须先说清自己为什么干不了**（点名障碍，不许只说"用另一个"）；
+//   ② 交出去的建议里**盖一个 `handoff="<我>"` 章**（模型照抄那条调用就带着章走）；
+//   ③ 身体记住"上一次是谁交给谁的"——如果**我刚交出去、兄弟跑了一趟、又回到我这儿**，
+//      那就是一个 2 环 ⇒ **拒绝再交一次**，当场报循环，并给一条**不是兄弟工具**的出路。
+
+/** 会互相交活的这两个工具。 */
+export type ProgressionTool = 'travelTo' | 'mineTunnel';
+
+/** 循环判定的时间窗：更久以前的交接不算同一条链。 */
+export const HANDOFF_CYCLE_WINDOW_MS = 10 * 60 * 1000;
+
+/** 检测到循环时给的出路：**不是兄弟工具**（先把身体/工具状态看清，再决定）。 */
+export const HANDOFF_CYCLE_ESCAPE_CALL = 'stats(type="body")';
+
+/** 解析 `handoff="…"` 参数（只认这两个工具名；别的一律当没给）。 */
+export function parseHandoff(raw: unknown): ProgressionTool | null {
+    if (typeof raw !== 'string') return null;
+    const value = raw.trim().toLowerCase().replace(/^!/, '');
+    if (value === 'travelto') return 'travelTo';
+    if (value === 'minetunnel') return 'mineTunnel';
+    return null;
+}
+
+/** 兄弟工具（这两个互为兄弟）。 */
+export function siblingTool(tool: ProgressionTool): ProgressionTool {
+    return tool === 'travelTo' ? 'mineTunnel' : 'travelTo';
+}
+
+/** 把交接章盖进一条建议调用里（幂等）。 */
+export function stampHandoff(call: string, from: ProgressionTool): string {
+    if (!call.startsWith(`${siblingTool(from)}(`)) return call; // 只给兄弟工具盖章
+    if (call.includes('handoff=')) return call;
+    return call.replace(/\)\s*$/, `, handoff="${from}")`);
+}
+
+/** 这条建议是不是交给兄弟工具的（用来判断"要不要盖章/查循环"）。 */
+export function isSiblingCall(call: string | null | undefined, tool: ProgressionTool): boolean {
+    return typeof call === 'string' && call.startsWith(`${siblingTool(tool)}(`);
+}
+
+export interface HandoffRecord {
+    from: ProgressionTool;
+    to: ProgressionTool;
+    at: number;
+}
+
+/** 每个 bot 一份：上一次跑的是谁、上一次把活儿交给谁（WeakMap，不泄漏、也不跨 bot 串味）。 */
+const HANDOFF_LEDGER = new WeakMap<
+    object,
+    { lastRun: { tool: ProgressionTool; at: number } | null; lastHandoff: HandoffRecord | null }
+>();
+
+function ledgerOf(bot: any): { lastRun: { tool: ProgressionTool; at: number } | null; lastHandoff: HandoffRecord | null } {
+    if (bot == null || (typeof bot !== 'object' && typeof bot !== 'function')) {
+        return { lastRun: null, lastHandoff: null };
+    }
+    let entry = HANDOFF_LEDGER.get(bot as object);
+    if (entry == null) {
+        entry = { lastRun: null, lastHandoff: null };
+        HANDOFF_LEDGER.set(bot as object, entry);
+    }
+    return entry;
+}
+
+/** 记下"这个工具跑过了"。 */
+export function recordToolRun(bot: any, tool: ProgressionTool, at: number): void {
+    ledgerOf(bot).lastRun = { tool, at };
+}
+
+/** 记下"这个工具把活儿交给谁了"。 */
+export function recordHandoff(bot: any, from: ProgressionTool, to: ProgressionTool, at: number): void {
+    ledgerOf(bot).lastHandoff = { from, to, at };
+}
+
+export function lastToolRun(bot: any): { tool: ProgressionTool; at: number } | null {
+    return ledgerOf(bot).lastRun;
+}
+
+export function lastHandoff(bot: any): HandoffRecord | null {
+    return ledgerOf(bot).lastHandoff;
+}
+
+/**
+ * 是不是"两个工具在互相踢皮球"（纯函数，可单测）。
+ *
+ * 判据（任一成立就是 2 环）：
+ *   - **显式**：这次的调用带着 `handoff="<兄弟>"`（是兄弟把我叫来的），而我又要把它交回给兄弟；
+ *   - **账本**：我上一次把活儿交给了兄弟（`lastHandoff.from === 我`），而且**兄弟真的跑过一趟**
+ *     （`lastRun.tool === 兄弟`），现在又轮到我 ⇒ 我 → 兄弟 → 我。
+ */
+export function detectHandoffCycle(options: {
+    tool: ProgressionTool;
+    /** 本次调用带进来的 `handoff`（谁把我叫来的）。 */
+    handoff: ProgressionTool | null;
+    /** 这次我准备建议的调用（可能为 null）。 */
+    suggestion: string | null;
+    lastRun: { tool: ProgressionTool; at: number } | null;
+    lastHandoffRecord: HandoffRecord | null;
+    now: number;
+    windowMs?: number;
+}): boolean {
+    const windowMs = options.windowMs ?? HANDOFF_CYCLE_WINDOW_MS;
+    const sibling = siblingTool(options.tool);
+    const fresh = (at: number): boolean => Math.abs(options.now - at) <= windowMs;
+    // 显式那条：兄弟叫我来，我又要交回给兄弟。
+    if (options.handoff === sibling && isSiblingCall(options.suggestion, options.tool)) return true;
+    // 账本那条：我交出去 → 兄弟跑过 → 又轮到我。
+    const record = options.lastHandoffRecord;
+    if (record != null && record.from === options.tool && record.to === sibling && fresh(record.at)) {
+        if (options.lastRun != null && options.lastRun.tool === sibling && fresh(options.lastRun.at)) return true;
+    }
+    return false;
+}
+
+/** 循环时写在回执里的那一行（点名两个工具 + 说明"都没动"）。 */
+export function handoffCycleNote(tool: ProgressionTool, reason: string): string {
+    const sibling = siblingTool(tool);
+    return (
+        `⚠️ **检测到两个工具在互相踢皮球**：${sibling} 把你交给 ${tool}、${tool} 又要交回 ${sibling}——**停**。` +
+        `两边都不动的具体原因：${reason}。` +
+        `下一步**不要**再用 ${sibling}（那就是把同一个圈再走一遍），先 ${HANDOFF_CYCLE_ESCAPE_CALL} 看清身体/工具，再决定换路。`
+    );
+}
+
+/**
+ * 把一个"要交给兄弟工具"的建议过一遍交接闸门（**纯逻辑 + 账本副作用**）：
+ *
+ * - 不是交给兄弟的 ⇒ 原样返回（自己续跑/换别的动作都不受影响）；
+ * - 是交给兄弟的 ⇒ 先查循环：
+ *   - **循环** ⇒ **拒绝这次交接**，改用 `HANDOFF_CYCLE_ESCAPE_CALL`，并把循环说明交给 `onCycle`
+ *     （回执必须说出来：两个工具都没动、为什么）；
+ *   - 不循环 ⇒ 给建议**盖 `handoff="<我>"` 章**并记账（模型照抄那条调用就带着章走）。
+ */
+export function handoffAwareNextCall(options: {
+    bot: any;
+    tool: ProgressionTool;
+    handoffFrom: ProgressionTool | null;
+    suggestion: string;
+    /** 我为什么干不了（要写进循环说明里）。 */
+    reason: string;
+    now: number;
+    /** **本次运行之前**账本里的"上一次跑的是谁"（调用方要先读再记自己，否则会覆盖掉证据）。 */
+    lastRun?: { tool: ProgressionTool; at: number } | null;
+    onCycle?: (note: string) => void;
+}): string {
+    const { bot, tool, handoffFrom, suggestion, reason, now } = options;
+    if (!isSiblingCall(suggestion, tool)) return suggestion;
+    const cycle = detectHandoffCycle({
+        tool,
+        handoff: handoffFrom,
+        suggestion,
+        lastRun: options.lastRun !== undefined ? options.lastRun : lastToolRun(bot),
+        lastHandoffRecord: lastHandoff(bot),
+        now,
+    });
+    if (cycle) {
+        options.onCycle?.(handoffCycleNote(tool, reason));
+        return HANDOFF_CYCLE_ESCAPE_CALL;
+    }
+    recordHandoff(bot, tool, siblingTool(tool), now);
+    return stampHandoff(suggestion, tool);
+}
+
 /** 搭桥时最多换几种材料（换依附面已经在里面循环了）。 */
 export const BRIDGE_MAX_MATERIALS = 3;
 
@@ -1986,6 +2157,8 @@ export interface TunnelOutcome {
     protectedHits: Array<{ name: string; position: FlatPosition; dug: boolean }>;
     /** 为了绕开它们抬/降了几次。 */
     detours: number;
+    /** 这条是被哪个兄弟工具交过来的（`handoff="travelTo"`），用来堵"互相踢皮球"。 */
+    handoffFrom?: ProgressionTool | null;
     start: FlatPosition;
     here: FlatPosition;
     stop: TunnelStop;
@@ -2054,8 +2227,20 @@ export function tunnelReceipt(o: TunnelOutcome): string {
     lines.push(
         `mineTunnel：**沿 ${o.dir.label} 净前进 ${o.dug}/${o.requested} 格**（实测位移 ${displacement.toFixed(1)} 格：` +
             `${formatPoint(o.start)} → 现在 ${where}），挖掉并**验证变空气**的方块 ${o.blocksDug} 个` +
-            `${o.digAttempts > o.blocksDug ? `（尝试 ${o.digAttempts} 次）` : ''}。`,
+            `${o.digAttempts > o.blocksDug ? `（尝试 ${o.digAttempts} 次）` : ''}。` +
+            // **0 位移必须是标题里的事**：把"卡在什么"直接写在第一行。
+            (displacement < TUNNEL_MOVE_EPS
+                ? `**卡在**：${o.detail === '' ? TUNNEL_STOP_TEXT[o.stop] : o.detail}。`
+                : ''),
     );
+    // **被兄弟工具交过来的**：说清"挖不动就报原因，别再交回去"（真机：两个工具互相踢皮球）。
+    if (o.handoffFrom != null) {
+        lines.push(
+            `ℹ️ 这条是 **${o.handoffFrom}** 交过来的（\`handoff="${o.handoffFrom}"\`）：**挖不动就把具体原因说出来**` +
+                '（脚下没有可站的方块 / 前面是容器·功能方块 / 手上没镐 / 读不到方块），**不要再交回 ' +
+                `${o.handoffFrom}**——来回踢皮球就是两边都不动。`,
+        );
+    }
     // **方向是推出来的就要说清楚**（真机："方向挖反了"最常见的原因就是没给 direction、
     // 而当时的朝向是反的）。而且要指路去那个不会猜反的工具。
     if (o.dir.fromYaw) {
@@ -2165,6 +2350,8 @@ export interface TunnelOptions {
     progressEvery?: number;
     /** 每一步之间的小停顿（让服务端把方块更新同步回来）。 */
     settleMs?: number;
+    /** 交接章：`handoff="travelTo"` = "这条是 travelTo 交过来的"（照抄上一条回执里的调用即可）。 */
+    handoff?: unknown;
 }
 
 function defaultBlockObject(bot: any, x: number, y: number, z: number): any | null {
@@ -2684,6 +2871,10 @@ export async function mineTunnelSkill(
     const height = clampInt(rawHeight, DEFAULT_TUNNEL_HEIGHT, 1, MAX_TUNNEL_HEIGHT);
     const yaw = deps.yaw ?? ((b: any) => (Number.isFinite(Number(b?.entity?.yaw)) ? Number(b.entity.yaw) : null));
     const tool = deps.tool ?? ((b: any) => skills.toolDurabilityGuard(b));
+    // 交接账本：记下"我跑过了"，并看看这条是谁交过来的。
+    const startedAtMs = (deps.now ?? Date.now)();
+    recordToolRun(bot, 'mineTunnel', startedAtMs);
+    const handoffFrom = parseHandoff(options.handoff);
     const resolved = resolveTunnelDirection(rawDirection, yaw(bot));
     if (resolved == null) {
         // 方向认不出来：保持原来的口径（回执里点名到底哪里不对，并给工具现状）。
@@ -2714,6 +2905,7 @@ export async function mineTunnelSkill(
             bridges: 0,
             protectedHits: [],
             detours: 0,
+            handoffFrom,
         };
         return tunnelReceipt(outcome);
     }
@@ -2723,6 +2915,7 @@ export async function mineTunnelSkill(
         deps,
         options,
     );
+    outcome.handoffFrom = handoffFrom;
     return tunnelReceipt(outcome);
 }
 
@@ -2981,6 +3174,8 @@ export interface TravelOutcome {
     here: FlatPosition;
     /** 起手时离目标多远（用来算"推进了多少格"）。 */
     distanceBefore: number;
+    /** 检测到"两个工具互相踢皮球"时的那一行（**必须说出来**：两个工具都没动、为什么）。 */
+    cycle?: string | null;
     /** 出发前后的零碎事实（例如"镐在背包里 → 已自动换上"），**不许静默**。 */
     notes?: string[];
     /** **实测位移**（起点 → 现在，3D 直线距离）——这是唯一能当"推进"用的数。 */
@@ -3062,11 +3257,22 @@ export function travelReceipt(o: TravelOutcome): string {
         lines.push(`travelTo：**没出发**（还站在 ${formatPoint(o.here)}）——${TRAVEL_STOP_TEXT[o.stop]}。`);
     } else {
         // **位移是标题**：挖了多少方块、计划了多少格，都不如"人到底挪了几格"。
-        lines.push(
-            `travelTo：这一趟**往前推进了 ${progressed} 格（实测位移 ${o.progressed.toFixed(1)} 格**：` +
-                `${formatPoint(o.start)} → 现在 ${formatPoint(o.here)}），**离目标还剩 ${Math.round(remaining)} 格**` +
-                `${label === '' ? '' : `（${label}）`}。`,
-        );
+        // **0 位移时标题直接写"卡在什么"**（真机：两个工具互相踢皮球、同一位置都 0 位移，
+        // 回执却看不出卡在哪儿）。
+        if (o.progressed < TUNNEL_MOVE_EPS) {
+            const why = o.detail !== '' ? o.detail : o.gate != null ? o.gate : TRAVEL_STOP_TEXT[o.stop];
+            lines.push(
+                `travelTo：这一趟**净前进 0 格**（实测位移 ${o.progressed.toFixed(1)} 格：` +
+                    `${formatPoint(o.start)} → 现在 ${formatPoint(o.here)}）：**卡在**「${why}」。` +
+                    `**离目标还剩 ${Math.round(remaining)} 格**${label === '' ? '' : `（${label}）`}。`,
+            );
+        } else {
+            lines.push(
+                `travelTo：这一趟**往前推进了 ${progressed} 格（实测位移 ${o.progressed.toFixed(1)} 格**：` +
+                    `${formatPoint(o.start)} → 现在 ${formatPoint(o.here)}），**离目标还剩 ${Math.round(remaining)} 格**` +
+                    `${label === '' ? '' : `（${label}）`}。`,
+            );
+        }
     }
     lines.push(`停止原因：${TRAVEL_STOP_TEXT[o.stop]}${o.detail === '' ? '' : `——${o.detail}`}。`);
     for (const note of o.notes ?? []) lines.push(`- ${note}`);
@@ -3098,6 +3304,7 @@ export function travelReceipt(o: TravelOutcome): string {
                 : `镐：${o.toolName} 还剩约 ${o.toolRemaining} 次（${o.toolMax ?? '?'} 上限）。`,
         );
     }
+    if (o.cycle != null && o.cycle !== '') lines.push(o.cycle);
     lines.push(`下一步（照做即可）：${travelNextAction(o)}`);
     return capReceipt(lines.join('\n'));
 }
@@ -3106,6 +3313,8 @@ export interface TravelOptions {
     budgetMs?: number;
     /** 允许"先试走路"（默认允许；下界横向的调用方可以关掉）。 */
     walkAllowed?: boolean;
+    /** 交接章：`handoff="mineTunnel"` = "这条是 mineTunnel 交过来的"。 */
+    handoff?: unknown;
 }
 
 export interface TravelDeps extends TunnelDeps {
@@ -3172,6 +3381,11 @@ export async function travelToSkill(
     const yGiven = Number.isFinite(Number(rawY)) && rawY != null && rawY !== '';
     const targetY = yGiven ? Math.max(-64, Math.min(320, Math.round(Number(rawY)))) : (layer ?? Math.round(start.y));
     const target: FlatPosition = { x: Number.isFinite(x) ? Math.round(x) : start.x, y: targetY, z: Number.isFinite(z) ? Math.round(z) : start.z };
+    // 交接账本：**先读上一次的状态**（谁跑的、谁交给谁），再记下"我跑过了"——
+    // 顺序反了就会把自己这次写进去，于是"兄弟刚跑过"这条证据被覆盖，循环永远查不出来。
+    const lastRunBefore = lastToolRun(bot);
+    recordToolRun(bot, 'travelTo', now());
+    const handoffFrom = parseHandoff(options.handoff);
 
     const outcome: TravelOutcome = {
         target,
@@ -3182,6 +3396,7 @@ export async function travelToSkill(
         blocksDug: 0,
         stop: 'arrived',
         detail: '',
+        cycle: null,
         layer,
         layerNote: layerChoice.note,
         legs: [],
@@ -3461,7 +3676,18 @@ export async function travelToSkill(
                 outcome.stop = 'blocked';
                 outcome.detail = tunnel.detail === '' ? TUNNEL_STOP_TEXT[tunnel.stop] : tunnel.detail;
                 outcome.gate = `${TUNNEL_STOP_TEXT[tunnel.stop]}${tunnel.detail === '' ? '' : `——${tunnel.detail}`}`;
-                outcome.gateNextCall = tunnelNextAction(tunnel);
+                outcome.gateNextCall = handoffAwareNextCall({
+                    bot,
+                    tool: 'travelTo',
+                    handoffFrom,
+                    suggestion: tunnelNextAction(tunnel),
+                    reason: outcome.detail,
+                    now: now(),
+                    lastRun: lastRunBefore,
+                    onCycle: (note) => {
+                        outcome.cycle = note;
+                    },
+                });
             }
             break;
         }

@@ -3773,7 +3773,20 @@ export async function goToPosition(
             return false;
         }
         const distance: number = bot.entity.position.distanceTo(new (Vec3 as any)(x, y, z));
-        if (distance <= min_distance+1) {
+        // **"到了"必须包含"站得住"。** 真机 2026-10-19（末地）：「goToCoordinates 在末地报
+        // 「已到达」，实际我悬空掉进虚空摔死」——坐标对上了，脚下却是空的。
+        const supported = ((): boolean => {
+            try {
+                if (bot?.entity?.onGround === true) return true;
+                const p = bot.entity.position;
+                const under = bot.blockAt(new (Vec3 as any)(Math.floor(p.x), Math.floor(p.y) - 1, Math.floor(p.z)));
+                const name = String(under?.name ?? '');
+                return name !== '' && name !== 'air' && name !== 'cave_air' && name !== 'void_air';
+            } catch {
+                return true; // 读不到就按旧行为（不因为守卫读不到而谎报失败）
+            }
+        })();
+        if (distance <= min_distance+1 && supported) {
             // **不许再说"已到达"就完事。** 寻路器的"到了"是"进了 min_distance
             // 这个球"，而模型关心的是"我够得着那个东西吗"——这两个不是一回事：
             // 真机上它站在 (-34.5,50,-13.5)，目标 (-33,53,-13) 在**头顶上方 3 格**，
@@ -3783,6 +3796,15 @@ export async function goToPosition(
             // 在头顶"和"到了"对模型的含义完全不同。
             log(bot, describeArrival(bot, x, y, z, distance));
             return true;
+        }
+        if (distance <= min_distance+1 && !supported) {
+            // **坐标到了、人悬着**：末地虚空就是这么摔死的，这**不算到达**。
+            log(
+                bot,
+                `到了 (${x},${y},${z}) 的坐标，但**脚下没有方块**（悬空/在虚空上方）——这不算到达。` +
+                    '先 placeHere 垫一块、或退回到最近的实心处再继续；别从这里往前走。',
+            );
+            return false;
         }
         else {
             log(bot, `Unable to reach ${x}, ${y}, ${z}, you are ${Math.round(distance)} blocks away. ${describeStuck(bot)}`);
@@ -5111,7 +5133,26 @@ export async function pillarUp(bot: any, blocks: number = 1): Promise<boolean> {
         log(bot, 'pillarUp 进度 ' + done + '/' + wanted + '：现在 y=' + Number(bot.entity.position.y).toFixed(1) + '。');
     }
     if (done >= wanted) {
-        log(bot, 'pillarUp 完成：上升 ' + done + ' 格。');
+        // **"完成"=人站在柱子上**，不是"方块放下了"。真机 2026-10-19：报「pillarUp 完成/
+        // 已到达」，实际人悬空掉进虚空。所以放完必须确认脚下有东西、且真的站住了。
+        let standing = false;
+        try {
+            await waitFor(bot, () => bot?.entity?.onGround === true, 1500, 50);
+            standing = bot?.entity?.onGround === true;
+            if (!standing) {
+                const p = bot.entity.position;
+                const under = bot.blockAt(new (Vec3 as any)(Math.floor(p.x), Math.floor(p.y) - 1, Math.floor(p.z)));
+                const name = String(under?.name ?? '');
+                standing = name !== '' && name !== 'air' && name !== 'cave_air' && name !== 'void_air';
+            }
+        } catch {
+            standing = true; // 读不到不谎报失败
+        }
+        if (!standing) {
+            log(bot, 'pillarUp：垫了 ' + done + ' 格，但**人没有站在柱子上**（脚下仍然没有方块）——不算完成，别往前走。');
+            return false;
+        }
+        log(bot, 'pillarUp 完成：上升 ' + done + ' 格（已确认站在柱子上）。');
         return true;
     }
     log(bot, 'pillarUp 结束：只垫了 ' + done + '/' + wanted + ' 格（背包里的 ' + material + ' 用完了）。');

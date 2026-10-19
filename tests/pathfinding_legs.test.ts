@@ -236,6 +236,11 @@ function fakePathBot(registry: any, start = { x: 0, y: 64, z: 0 }, gotoImpl?: (g
     inventory: { items: () => [] },
     entity: {
       effects: {},
+      // **假件要和真接口一样严格**：真实的 bot 走完一次 goto 是**站在地上**的。
+      // `goToPosition` 新增了"到达 = 有支撑"（onGround 或脚下 1 格实心）来堵末地
+      // "报已到达但悬空掉进虚空"那个洞，所以夹具必须给出这个事实；否则测的是
+      // 一个现实中不存在的 bot（脚下方块恒为空气且从不着地）。
+      onGround: true,
       position: {
         get x() {
           return pos.x;
@@ -279,6 +284,19 @@ function fakePathBot(registry: any, start = { x: 0, y: 64, z: 0 }, gotoImpl?: (g
 }
 
 describe('goToPosition：长目标真的分段走（每段一次 A*）', () => {
+  // 真机（2026-10-19 末地）：`goToCoordinates` 报「已到达」，而 bot 其实**悬在虚空上方**，
+  // 然后往前一步掉下去摔死。所以"到达"必须包含"有支撑"——坐标对上不算到达。
+  it('坐标对上但脚下没有方块 ⇒ **不算到达**，并说清是悬空', async () => {
+    const registry: any = minecraftData(MC_VERSION);
+    const bot = fakePathBot(registry);
+    bot.entity.onGround = false; // 悬空
+    bot.blockAt = () => ({ name: 'air' }); // 脚下也是空气
+    const ok = await goToPosition(bot, 20, 64, 0, 2);
+    expect(ok, bot.output).toBe(false);
+    expect(bot.output).toContain('脚下没有方块');
+    expect(bot.output).toContain('不算到达');
+  });
+
   it('130 格 → 5 次 goto，每次 ≤32 格，最后一次是目标，回执说明分段', async () => {
     const registry: any = minecraftData(MC_VERSION);
     const bot = fakePathBot(registry);

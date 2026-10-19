@@ -515,6 +515,13 @@ export const actionsList: AgentCommand[] = [
             const facts = collectOverrideFacts(agent);
             const verdict = disableSafeguardsVerdict(facts);
             if (!verdict.allowed) return pad(verdict.text);
+            // **三方互锁的放行只针对呼吸反射**：不碰全局 safeguards，只让 surface 停 60 秒
+            // （其它保命照旧）。这是"引擎造出来的墙由引擎拆"，不是"允许随便关保命"。
+            if (typeof verdict.grantSurfaceMs === 'number' && verdict.grantSurfaceMs > 0) {
+                const enable = (agent as { enableSurfaceStandDown?: (ms: number) => void }).enableSurfaceStandDown;
+                if (typeof enable === 'function') enable.call(agent, verdict.grantSurfaceMs);
+                return pad(verdict.text);
+            }
             const honesty =
                 '\n    说明：上面那句"原因"是**你自己写的理由**，不是安全评估；关掉之后出事由你承担。' +
                 '\n    ' + deathCostLine(facts);

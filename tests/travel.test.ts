@@ -28,6 +28,7 @@ import {
     type TravelOutcome,
 } from '../src/body/library/progression.js';
 import { TRAVEL_TIMEOUT_MIN, progressionActionList, PROGRESSION_TOOL_TEXT } from '../src/body/commands/progression.js';
+import { mineTunnelSkill } from '../src/body/library/progression.js';
 import { toolDeclarations } from '../src/body/commands/registry.js';
 import { TOOL_TEXT } from '../src/shared/prompts.js';
 import { getOpenAITools } from '../src/brain/tools/advertise.js';
@@ -425,7 +426,7 @@ describe('travelTo：不许挖穿容器 + 小推进必须点名拦路的东西�
         expect(receipt).toContain('卡在');
         expect(receipt).toContain('chest');
         expect(receipt).toContain('(1, 70, 0)');
-        expect(receipt.trimEnd().split('\n').at(-1)).toBe('下一步（照做即可）：mineTunnel(length=2, direction="+z")');
+        expect(receipt.trimEnd().split('\n').at(-1)).toBe('下一步（照做即可）：mineTunnel(length=2, direction="+z", handoff="travelTo")');
     });
 
     it('寻路卡住（一直不靠近）⇒ **15 秒熔断**、停手改挖隧道，而不是干等 90 秒', async () => {
@@ -447,6 +448,67 @@ describe('travelTo：不许挖穿容器 + 小推进必须点名拦路的东西�
         expect(receipt).toContain('没靠近');
         expect(receipt).toContain('改挖隧道');
         expect(displacementOf(receipt)).toBeGreaterThan(0); // 换成挖之后真的往前走了
+    });
+});
+
+describe('travelTo ↔ mineTunnel 不许互相踢皮球（真机：同一位置都 0 位移）', () => {
+    /** 一个"绕不开的箱子"场景：travelTo 走不动、也挖不过去 ⇒ 它必须停手。 */
+    const blockedHarness = () =>
+        travelHarness({
+            pos: { x: 0, y: 70, z: 0 },
+            dimension: 'overworld',
+            inventory: [{ name: 'diamond_pickaxe', count: 1 }],
+            canWalk: false,
+            cells: { [key(1, 70, 0)]: 'chest', [key(1, 71, 0)]: 'chest', [key(1, 72, 0)]: 'chest' },
+        });
+
+    it('交活给 mineTunnel 时：**点名障碍** + 盖交接章（不是干巴巴一句"用另一个工具"）', async () => {
+        const h = blockedHarness();
+        const receipt = await travelToSkill(h.bot, 8, 70, 0, 300_000, undefined, undefined, h.deps);
+
+        // 0 位移是标题，而且"卡在什么"写在标题里
+        expect(receipt).toContain('**净前进 0 格**');
+        expect(receipt).toContain('**卡在**');
+        // 点名障碍（不是泛泛的"用另一个工具"）
+        expect(receipt).toContain('chest');
+        expect(receipt).toContain('(1, 70, 0)');
+        expect(receipt).toContain('容器/功能方块');
+        // 交给 mineTunnel 的建议**盖了章**（模型照抄就带着 handoff 走）
+        expect(receipt.trimEnd().split('\n').at(-1)).toBe(
+            '下一步（照做即可）：mineTunnel(length=2, direction="+z", handoff="travelTo")',
+        );
+        expect(receipt).not.toContain('踢皮球');
+    });
+
+    it('**踢皮球熔断**：travelTo → mineTunnel → travelTo ⇒ 第二次拒绝再交回去，并报循环', async () => {
+        const h = blockedHarness();
+        const first = await travelToSkill(h.bot, 8, 70, 0, 300_000, undefined, undefined, h.deps);
+        expect(first).toContain('handoff="travelTo"'); // 第一次：正常交出去
+
+        // 兄弟跑一趟、**也动不了**（往 +x 就是那三个箱子：真机里两边都不动才是循环）
+        await mineTunnelSkill(h.bot, 2, 2, '+x', h.deps);
+        expect(h.bot.entity.position.x).toBe(0); // 确认它真的没挪窝
+
+        const second = await travelToSkill(h.bot, 8, 70, 0, 300_000, undefined, undefined, h.deps);
+        expect(second).toContain('检测到两个工具在互相踢皮球');
+        expect(second).toContain('travelTo');
+        expect(second).toContain('mineTunnel');
+        expect(second).toContain('卡在'); // 说清两边都不动的原因
+        // 拒绝再交回去：最后一行换成**不是兄弟工具**的出路
+        expect(second.trimEnd().split('\n').at(-1)).toBe('下一步（照做即可）：stats(type="body")');
+        expect(second).not.toContain('handoff="travelTo"');
+        expect(second).not.toContain('mineTunnel(length=2');
+    });
+
+    it('正常交接不受影响：兄弟没跑过 ⇒ 照样盖章交出去（不是"一律拒绝"）', async () => {
+        const h = blockedHarness();
+        const first = await travelToSkill(h.bot, 8, 70, 0, 300_000, undefined, undefined, h.deps);
+        expect(first).toContain('handoff="travelTo"');
+        expect(first).not.toContain('踢皮球');
+        // 换个 bot（没有账本）也一样：第一次永远放行
+        const fresh = blockedHarness();
+        const again = await travelToSkill(fresh.bot, 8, 70, 0, 300_000, undefined, undefined, fresh.deps);
+        expect(again).toContain('handoff="travelTo"');
     });
 });
 
@@ -624,7 +686,7 @@ describe('travelTo：进度必须是量出来的（真机 02:0x：挖了但位�
         const receipt = await travelToSkill(h.bot, 200, 70, 0, 300_000, undefined, undefined, h.deps);
 
         expect(displacementOf(receipt)).toBe(0);
-        expect(receipt).toContain('**往前推进了 0 格');
+        expect(receipt).toContain('**净前进 0 格');
         expect(receipt).toContain('**矛盾**');
         expect(receipt).toContain('别把挖掉的方块当成走过的路');
         // 位移 0 就不许给"接着走"的同一条调用
@@ -742,7 +804,7 @@ describe('travelTo：接线与门禁', () => {
         const command = progressionActionList.find((c) => c.name === '!travelTo');
         expect(command).toBeDefined();
         expect(command?.perform.longRunning).toBe(true);
-        expect(Object.keys(command?.params ?? {})).toEqual(['x', 'y', 'z', 'max_ms', 'layer', 'dimension']);
+        expect(Object.keys(command?.params ?? {})).toEqual(['x', 'y', 'z', 'max_ms', 'layer', 'dimension', 'handoff']);
 
         const declaration = toolDeclarations().find((d) => d.name === 'travelTo');
         expect(declaration?.kind).toBe('action');
@@ -750,7 +812,7 @@ describe('travelTo：接线与门禁', () => {
 
         const tool = getOpenAITools(toolDeclarations()).find((t) => t.function.name === 'travelTo');
         const props = Object.keys((tool?.function.parameters as any).properties ?? {});
-        expect(props).toEqual(['x', 'y', 'z', 'max_ms', 'layer', 'dimension']);
+        expect(props).toEqual(['x', 'y', 'z', 'max_ms', 'layer', 'dimension', 'handoff']);
         expect((tool?.function.parameters as any).required).toContain('x');
         expect((tool?.function.parameters as any).required).toContain('z');
         for (const param of props) {

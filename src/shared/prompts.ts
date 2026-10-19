@@ -290,6 +290,7 @@ export const TOOL_TEXT: Record<string, { description: string; params: Record<str
       max_ms: '这一趟时间预算（毫秒，默认 300000，10000~360000）。到点停手并给续跑调用。',
       layer: '走哪一层（可选）。下界长途推荐 116（实心、少岩浆）。',
       dimension: '目标维度（可选，只用于拒绝）：overworld / the_nether / the_end。',
+      handoff: '交接标记（可选）：照抄上一条回执里的调用就自动带着它。用来堵两个工具互相踢皮球——真出现循环时当场停手并给别的出路。',
     },
   },
   makeObsidian: {
@@ -390,6 +391,7 @@ export const TOOL_TEXT: Record<string, { description: string; params: Record<str
       length: '这次往前挖多少格（默认 32，1~256）。长距离反复调用它。',
       height: '隧道高度（默认 2 = 能站着走，1~3）。',
       direction: '方向 `+x`/`-x`/`+z`/`-z`（也认 east/west/north/south、东南西北）。留空 = 按当前朝向推；回执写明实际方向，续挖照抄。',
+      handoff: '交接标记（可选）：照抄上一条回执里的调用就自动带着它。用来堵两个工具互相踢皮球——真出现循环时当场停手并给别的出路。',
     },
   },
   throwItem: {

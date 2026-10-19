@@ -31,6 +31,7 @@ import Vec3 from 'vec3';
 import { isHostile } from '../data/mcdata.js';
 import { headInWater } from './water_safety.js';
 import settings from '../../shared/settings.js';
+import { deadlockVerdict, type DeadlockFacts } from './deadlock.js';
 
 /** 这些反射的名字/意图一旦在跑，就不许关保命。 */
 export const LIFE_SAVING_REFLEXES: ReadonlySet<string> = new Set([
@@ -47,6 +48,8 @@ export const LIFE_SAVING_REFLEXES: ReadonlySet<string> = new Set([
 export interface OverrideFacts {
     health: number | null;
     food: number | null;
+    /** 三方互锁的事实（只有能证明"这个 bot 真的出不去"时才填）。 */
+    deadlock?: DeadlockFacts | null;
     /** 最近的敌对生物距离（米）；没有就是 null。 */
     hostileMeters: number | null;
     /** 正在跑的保命反射名（没有就是 null）。 */
@@ -63,6 +66,8 @@ export interface OverrideFacts {
 export interface OverrideVerdict {
     allowed: boolean;
     text: string;
+    /** 非空 = 这次放行**只针对呼吸反射**这么多毫秒（其它保命照旧）。 */
+    grantSurfaceMs?: number;
 }
 
 const REFLEX_HOSTILE_RADIUS_M = 16;
@@ -144,6 +149,16 @@ export function collectOverrideFacts(agent: any): OverrideFacts {
         belowVoid,
         keepInventory: gameplay.keepInventoryOnDeath === true ? true : gameplay.keepInventoryOnDeath === false ? false : null,
         immediateRespawn: gameplay.doImmediateRespawn === true ? true : gameplay.doImmediateRespawn === false ? false : null,
+        // **三方互锁的事实**：由身体提供（它才知道位置卡了多久、呼吸反射触发了几次）。
+        // 读不到就是 null ⇒ 上面那三条拒绝照旧，不放行。
+        deadlock: (() => {
+            try {
+                const read = (agent as { deadlockFacts?: () => DeadlockFacts | null })?.deadlockFacts;
+                return typeof read === "function" ? read.call(agent) : null;
+            } catch {
+                return null;
+            }
+        })(),
     };
 }
 
@@ -171,6 +186,29 @@ export function disableSafeguardsVerdict(facts: OverrideFacts): OverrideVerdict 
         text: `**拒绝**：${why}，现在关掉保命等于自杀。${advice}\n    ${cost}\n    下一步（照做即可）：${nextCall}`,
     });
 
+    // ⓪ **三方互锁例外**（Lead 2026-10-19 授权）：确认过的"卡死"状态下，
+    // 只放行**呼吸反射（surface）60 秒**，其它保命一律照旧。
+    //
+    // 为什么必须开这个口子：真机 overnight_a 同时踩中下面三条——
+    //   ① `surface` 每秒触发 ⇒ "反射正在跑"永远成立；
+    //   ② 头在水里 ⇒ "先出水"；
+    //   ③ 0.375 血 ⇒ "先把血回到 8"。
+    // 而它挖不动（空背包）、走不动（1×1×1 封闭）、饿不死也淹不死（反射每秒把它顶上去）。
+    // 三条拒绝各自都对，**合起来是一堵墙**：拒绝给出的"下一步"在当前状态下做不到。
+    // 可推广的规则：**"下一步"做不到的拒绝，不是拒绝，是墙。**
+    if (facts.deadlock != null) {
+        const lock = deadlockVerdict(facts.deadlock);
+        if (lock.deadlocked && lock.standDownSurfaceMs > 0 && lock.text != null) {
+            return {
+                allowed: true,
+                text:
+                    lock.text +
+                    '\n    下一步（照做即可）：趁这 60 秒**别做任何挣扎动作**（不要 moveAway/jump），' +
+                    '就待在原地让氧气耗尽；60 秒后呼吸反射会自动恢复。',
+                grantSurfaceMs: lock.standDownSurfaceMs,
+            };
+        }
+    }
     // ① 正在跑保命反射：中途静音就是 F-23 那个洞的另一扇门。
     if (facts.reflex != null && LIFE_SAVING_REFLEXES.has(facts.reflex)) {
         const seconds = Math.max(0, Math.round(facts.reflexMs / 1000));
