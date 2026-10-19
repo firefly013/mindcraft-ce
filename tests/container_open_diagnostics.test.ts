@@ -8,6 +8,8 @@
  * 连续失败后回执**换形状**（不再劝它重发同一个调用）、成功路径/延迟到达都要成功。
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import {
   CONTAINER_OPEN_RETRIES,
   CONTAINER_OPEN_TIMEOUT_MS,
@@ -112,5 +114,20 @@ describe('成功路径不许被诊断代码破坏', () => {
   it('常量仍是"有界 + 重试一次"（不许靠拉长超时掩盖）', () => {
     expect(CONTAINER_OPEN_TIMEOUT_MS).toBe(6_000);
     expect(CONTAINER_OPEN_RETRIES).toBe(1);
+  });
+});
+
+describe('跨维度不串用"容器打不开"的结论（Lead 2026-10-19 ②）', () => {
+  const src = () => readFileSync(join(process.cwd(), 'src', 'body', 'mineflayer_body.ts'), 'utf8');
+
+  it('结论记录**得出时的维度**，比较后才生效', () => {
+    const code = src();
+    expect(code).toContain('this.slottedContainerBlockedDim');
+    expect(code).toContain('this.slottedContainerBlockedDim !== here');
+    expect(code).toContain('return { blocked: false, reason: null, msLeft: 0 };');
+  });
+
+  it('窗口真的到达（window-arrived）时连维度一起清掉（结论可过期）', () => {
+    expect(src()).toContain('this.slottedContainerBlockedDim = null;');
   });
 });

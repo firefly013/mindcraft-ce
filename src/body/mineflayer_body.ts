@@ -1263,11 +1263,16 @@ export class MineflayerBody {
             // 否则 10 分钟后自动失效——不许让一条旧结论把容器永久焊死。
             if (verdict === 'opened-no-slots') {
                 this.slottedContainerBlockedUntil = Date.now() + SLOTTED_CONTAINER_BLOCK_MS;
+                // **记下结论是在哪个维度得出的**：主世界"容器打不开"的结论不许直接
+                // 短路下界/末地的尝试（这是"跨维度串味"里我们自己能制造的那一种）。
+                const dim = (this.bot?.game as { dimension?: unknown })?.dimension;
+                this.slottedContainerBlockedDim = typeof dim === 'string' ? dim : null;
                 this.slottedContainerBlockedReason =
                     '服务端开窗但不发内容（open_window 到了，window_items/set_content 一个都没有，且本进程零协议解析错误）';
             } else if (verdict === 'window-arrived') {
                 this.slottedContainerBlockedUntil = 0;
                 this.slottedContainerBlockedReason = null;
+                this.slottedContainerBlockedDim = null;
             }
             this.log.with('lifecycle').info({
                 event: 'container-packet-dump',
@@ -1324,6 +1329,8 @@ export class MineflayerBody {
     } | null = null;
     /** "带槽位容器在本服务端不可用"结论的过期时刻；0 = 当前没被判定为坏。 */
     private slottedContainerBlockedUntil = 0;
+    /** 上一条容器不可用结论是在哪个维度得出的（跨维度不串用）。 */
+    private slottedContainerBlockedDim: string | null = null;
     private slottedContainerBlockedReason: string | null = null;
     /** 一次逃生里刹车了几次 + 上一次刹车回执（重复内容不重播，见 shouldEmitFallNotice）。 */
     private fallBrakeNotices = 0;
@@ -1483,6 +1490,17 @@ export class MineflayerBody {
      */
     slottedContainerStatus(): { blocked: boolean; reason: string | null; msLeft: number } {
         const left = Math.max(0, this.slottedContainerBlockedUntil - Date.now());
+        // **只在同一维度里生效**：跨维度不串用旧结论（主世界打不开箱子，不许直接
+        // 短路下界/末地的尝试——这是"跨维度串味"里我们自己能制造的那一种）。
+        const here = (this.bot?.game as { dimension?: unknown })?.dimension;
+        if (
+            left > 0 &&
+            this.slottedContainerBlockedDim != null &&
+            typeof here === 'string' &&
+            this.slottedContainerBlockedDim !== here
+        ) {
+            return { blocked: false, reason: null, msLeft: 0 };
+        }
         return {
             blocked: left > 0,
             reason: left > 0 ? this.slottedContainerBlockedReason : null,
