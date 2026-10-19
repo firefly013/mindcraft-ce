@@ -92,6 +92,7 @@ import settings from '../shared/settings.js';
 import pf from 'mineflayer-pathfinder';
 import Vec3 from 'vec3';
 import { chooseSafeFleeTarget } from './safety/flee.js';
+import { planFallRecovery, readFallMedium } from './safety/fall_recovery.js';
 
 type EdgeWatcher = ReturnType<typeof createEdgeWatcher>;
 
@@ -926,6 +927,19 @@ export class MineflayerBody {
         // 每次复活（spawn）也清一次：死亡会让服务端关掉界面，客户端那个对象
         // 却可能还留着——留着就会让后续的 useBlock/placeBlock 全废。
         this.bot.on('spawn', () => {
+            // **复活/换维度后背包也先标"未知"。**
+            // 真机 2026-10-19（overnight_a）：「背包清空 4 次」——查 A 的日志：
+            // 14 次"背包变空"**全部落在死亡事件同一秒**，其中 12 次在几秒后又被
+            // `inventory.changed` 填回来（22:15:52 空 → 22:16:39 有 55 件）。
+            // 这个存档 keepInventory=true，物品**没有丢**：那是复活瞬间服务端重发
+            // 背包之前的本地视图清空。标成"未知"后，stats/回执会说"还没同步上来，
+            // 不是空的"，而不是让模型以为家当没了。
+            this.inventorySynced = false;
+            try {
+                (this.bot as { __inventorySynced?: boolean }).__inventorySynced = false;
+            } catch {
+                // 挂不上不影响身体自己的判断。
+            }
             try {
                 if (closeStaleWindow(this.bot)) {
                     this.log.with('lifecycle').info({ event: 'container-window-reset', why: 'spawn' });
@@ -3561,26 +3575,108 @@ export class MineflayerBody {
                         const velocityY = Number((bot.entity as { velocity?: { y?: unknown } })?.velocity?.y ?? 0);
                         const falling = Number.isFinite(velocityY) && velocityY < -0.5;
                         if (noFloor || falling || feetName === 'lava' || feetName === 'flowing_lava') {
-                            try {
-                                bot.pathfinder.stop();
-                            } catch {
-                                // 停不掉寻路也要把控制键松开。
-                            }
-                            for (const key of ['forward', 'back', 'left', 'right', 'jump', 'sprint']) {
+                            // **介质决定这一档怎么走**（Lead 2026-10-19 裁定）：
+                            //   虚空 / 读不到 ⇒ 保守只刹车（末地那四条命的教训）；
+                            //   岩浆 / 水 ⇒ 刹车之后必须试：先朝**验证过安全**的落点横移，
+                            //     再考虑水桶 MLG；都没有就诚实说"试过了，确实没有落点"。
+                            // 真机 overnight_b：y≈79 自由落体到 y≈25 的岩浆，x/z 一格没动
+                            // ——刹车对了，但"下方是岩浆"时刹车本身就是死刑。
+                            const mediumProbe = readFallMedium(
+                                (bx, by, bz) => bot.blockAt(new Vec3(bx, by, bz)),
+                                { x: p.x, y: p.y, z: p.z },
+                            );
+                            const landedSpot = chooseSafeFleeTarget(blockAt, from, awayFrom, Math.max(2, distance));
+                            const fallPlan = planFallRecovery({
+                                feet: { x: p.x, y: p.y, z: p.z },
+                                medium: mediumProbe.medium,
+                                mediumAtY: mediumProbe.atY,
+                                mediumName: mediumProbe.name,
+                                // 走到这里就说明"脚下没有实心/正在下坠"，所以不是实地。
+                                onSolidGround: false,
+                                safeLanding: landedSpot.ok ? landedSpot.target : null,
+                                hasWaterBucket: (() => {
+                                    try {
+                                        return ((bot.inventory?.items?.() ?? []) as Array<{ name?: unknown }>).some(
+                                            (item) => item?.name === 'water_bucket',
+                                        );
+                                    } catch {
+                                        return false;
+                                    }
+                                })(),
+                                dropDistance: mediumProbe.atY == null ? null : Math.floor(p.y) - mediumProbe.atY,
+                            });
+                            const stopTranslation = (): void => {
                                 try {
-                                    bot.setControlState(key as never, false);
+                                    bot.pathfinder.stop();
                                 } catch {
-                                    // 拿不到控制就尽力而为。
+                                    // 停不掉寻路也要把控制键松开。
                                 }
+                                for (const key of ['forward', 'back', 'left', 'right', 'jump', 'sprint']) {
+                                    try {
+                                        bot.setControlState(key as never, false);
+                                    } catch {
+                                        // 拿不到控制就尽力而为。
+                                    }
+                                }
+                            };
+                            if (fallPlan.rung === 'lateral' && fallPlan.target != null) {
+                                // **横移这一档是"救命动作"**：目标已经过 `chooseSafeFleeTarget`
+                                // 验证（脚/头空气 + 脚下实心 + 不碰岩浆/水）。
+                                stopTranslation();
+                                try {
+                                    bot.pathfinder.setMovements(movementsFor(bot));
+                                    bot.pathfinder.setGoal(
+                                        new (pf as any).goals.GoalNear(fallPlan.target.x, fallPlan.target.y, fallPlan.target.z, 1),
+                                    );
+                                } catch {
+                                    // 设不了目标就退回刹车（下面还会报一次）。
+                                }
+                                if (this.currentReflexName != null) {
+                                    this.notify('reflex.done', KIND.WORLD, LEVEL.STATE, {
+                                        reflex: this.currentReflexName,
+                                        outcome: 'in_progress',
+                                        detail:
+                                            '逃生**下坠恢复（横移）**：' + fallPlan.text +
+                                            ' 目标是那里而不是继续朝反方向跑；跑到就立刻站住。',
+                                        ms: this.currentReflexStartedAt > 0 ? Date.now() - this.currentReflexStartedAt : 0,
+                                    });
+                                }
+                                return;
                             }
+                            if (fallPlan.rung === 'mlg') {
+                                stopTranslation();
+                                // `fleeTo` 是同步接口，所以这里**不 await**：拿桶 + 低头是
+                                // "落地前倒水"的准备动作，fire-and-forget 即可，失败不影响回执。
+                                void (async (): Promise<void> => {
+                                    try {
+                                        const bucket = ((bot.inventory?.items?.() ?? []) as Array<{ name?: unknown }>).find(
+                                            (item) => item?.name === 'water_bucket',
+                                        );
+                                        if (bucket != null) {
+                                            await bot.equip(bucket, 'hand');
+                                            await bot.look(bot.entity.yaw, -Math.PI / 2, true);
+                                        }
+                                    } catch {
+                                        // 倒水失败也要留下回执（下面统一报）。
+                                    }
+                                })();
+                                if (this.currentReflexName != null) {
+                                    this.notify('reflex.done', KIND.WORLD, LEVEL.STATE, {
+                                        reflex: this.currentReflexName,
+                                        outcome: 'in_progress',
+                                        detail: '逃生**下坠恢复（水桶落地）**：' + fallPlan.text,
+                                        ms: this.currentReflexStartedAt > 0 ? Date.now() - this.currentReflexStartedAt : 0,
+                                    });
+                                }
+                                return;
+                            }
+                            stopTranslation();
                             if (this.currentReflexName != null) {
                                 // 说清"为什么这一棒什么都没做"，而不是让它像是逃成功了。
                                 this.notify('reflex.done', KIND.WORLD, LEVEL.STATE, {
                                     reflex: this.currentReflexName,
                                     outcome: 'in_progress',
-                                    detail:
-                                        '逃生**刹车**：脚下没有实心方块/正在下坠——横向逃跑只会把你带出岛。' +
-                                        '现在只停止平移（下落本身还能靠落地/水桶救）；请立刻用方块垫脚或往回走上实地。',
+                                    detail: '逃生**刹车**：' + fallPlan.text + ' 请立刻用方块垫脚或往回走上实地。',
                                     ms: this.currentReflexStartedAt > 0 ? Date.now() - this.currentReflexStartedAt : 0,
                                 });
                             }

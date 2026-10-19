@@ -46,6 +46,7 @@ import {
   createStopTool,
   createUpdatePlanTool,
 } from './tools/control_tools.js';
+import { longRangeNudge } from './tools/long_range_hint.js';
 import { EventIntake } from './runtime/events.js';
 import type { GameEvent } from './runtime/events.js';
 import type { EventHandler } from './runtime/handlers.js';
@@ -1021,9 +1022,33 @@ export class Agent {
         // 事的地方就是身体（它自己的 `action` 处理里扣，并且同样豁免申请额度的
         // 控制工具与只读查询）。以前为此专门有一条 `consumeCall` 协议指令，
         // 那是在同步一份身体本来就知道的事实。
-        const text = await actionChannelInvoker(runner)(name, args);
+        const text = await actionChannelInvoker(runner, {
+            // **回执里提醒**：模型用 mineTunnel 去很远的目标时，点名那个目标并给出 travelTo 的坐标
+            // （今晚量过：模型跟回执比跟工具说明可靠得多）。身体不知道 goal/places，所以只能在这里做。
+            hint: (name) => this.longRangeHint(name),
+        })(name, args);
         log.info({ name, args, ms: Date.now() - started, result: text });
         return text;
+    }
+
+    /**
+     * "这个工具不是干这件事的"提醒（`mineTunnel` → 远目标 ⇒ 用 `travelTo`）。
+     *
+     * 依赖：plan（goal/todos，大脑侧）＋ places（地名→坐标，会话文档）＋ 当前位置（身体采样）。
+     * **任何一步读不到就返回 null**——宁可不提醒，也不指错地方、更不能因为提醒把回执搞坏。
+     */
+    private async longRangeHint(name: string): Promise<string | null> {
+        try {
+            const plan = this.plan.snapshot();
+            const planText = [plan.goal ?? '', ...plan.todos.map((todo) => todo.text)].join(' ');
+            const places = await this.placesDeps().read();
+            const live = (await this.body?.sample()) as { position?: { x?: number; z?: number } } | null;
+            const p = live?.position;
+            const here = p?.x == null || p?.z == null ? null : { x: Number(p.x), z: Number(p.z) };
+            return longRangeNudge({ toolName: name, here, planText, places });
+        } catch {
+            return null;
+        }
     }
 
     /** CLI 事件缓冲（见 `runCliCommand`）。外部命令行靠它补看"不在场时"发生的事。 */
