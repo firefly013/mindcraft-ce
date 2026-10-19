@@ -3408,7 +3408,10 @@ export class MineflayerBody {
      */
     private async sweepPickupAtActionTail(): Promise<string | null> {
         const started = Date.now();
-        if (this.pickingUp || this.pickupAbortRequested) return null;
+        if (this.pickingUp) return null;
+        // **只有真保命在跑才放弃清扫。** 模型 Stop 留下的 `pickupAbortRequested` 不是危险，
+        // 而战利品**只会**在这一瞬间被捡到（Lead 2026-10-19：abort 窗口里掉的战利品
+        // 之前永远没人捡——`blockedBy=["已被要求中止","模型动作占用身体"]` 就是这么来的）。
         if (this.reflexRunning === true || (this.reflexQueue?.length ?? 0) > 0) return null;
         let target: PickupTarget | null = null;
         try {
@@ -3418,6 +3421,38 @@ export class MineflayerBody {
         }
         if (target == null) return null;
         const before = this.readInventoryCounts();
+        // **一次性几何取证**（Lead 2026-10-19 要求）：掉落在 0.2–0.5 米却不被捡，
+        // 必须能回答"是我们的距离算错了、还是实体是假的、还是服务端不干活"。
+        // 只记事实：双方 y、dy、实体 onGround、物品脚下方块、包围盒重叠判定、双方 onGround。
+        try {
+            const e: any = (this.bot as any)?.entities?.[target.id as any];
+            const bp: any = (this.bot as any)?.entity?.position;
+            const ip = e?.position;
+            const under = ip != null
+                ? (this.bot as any).blockAt?.(new Vec3(Math.floor(ip.x), Math.floor(ip.y) - 1, Math.floor(ip.z)))
+                : null;
+            const verdict =
+                ip != null && bp != null
+                    ? pickupOverlapVerdict({
+                          bot: { x: bp.x, y: bp.y, z: bp.z, height: Number((this.bot as any)?.entity?.height ?? 1.8) },
+                          item: { x: ip.x, y: ip.y, z: ip.z },
+                      })
+                    : null;
+            this.log.with('lifecycle').info({
+                event: 'drop-geometry',
+                id: target.id ?? null,
+                botY: bp != null ? Math.round(Number(bp.y) * 100) / 100 : null,
+                itemY: ip != null ? Math.round(Number(ip.y) * 100) / 100 : null,
+                dy: ip != null && bp != null ? Math.round((Number(ip.y) - Number(bp.y)) * 100) / 100 : null,
+                itemOnGround: e?.onGround ?? null,
+                underItem: String(under?.name ?? ''),
+                overlap: verdict?.overlap ?? null,
+                overlapReason: verdict?.reason ?? null,
+                botOnGround: (this.bot as any)?.entity?.onGround ?? null,
+            });
+        } catch {
+            // 取证失败不影响清扫。
+        }
         let collected = false;
         try {
             // 有界：最多 1.5 秒（超时就走人，不拖住回执）。
@@ -4417,6 +4452,10 @@ export class MineflayerBody {
                                 reason: 'kill-confirmed',
                             });
                         }
+                        // **清掉粘住的 abort 标记**：模型 Stop 设的 `pickupAbortRequested`
+                        // 若不清，之后**每一件**掉落物都会被判"已被要求中止"——真机里
+                        // 0.2 米的掉落物就是这样一直不被捡的。保命反射真在跑时不清。
+                        if (this.reflexRunning !== true) this.pickupAbortRequested = false;
                         // **动作收尾清扫掉落物**（有界 1.5 秒）：动作刚结束、东西就在刚才
                         // 干活的地方——这是捡战利品的最佳时机（真机：掉落物在 3.3 米外躺着没人踩）。
                         try {

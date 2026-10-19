@@ -211,3 +211,37 @@ describe('闸门不许把"测不出来"当成"不要去"（Lead 2026-10-19 裁�
     expect(code).toContain('await this.sweepPickupAtActionTail()');
   });
 });
+
+describe('0.2 米还不被捡：先取证，不先打补丁（Lead 2026-10-19）', () => {
+  const src = () => readFileSync(join(process.cwd(), 'src', 'body', 'mineflayer_body.ts'), 'utf8');
+
+  it('引擎自己怎么看 0.2 米：按原版包围盒规则**必须**判定为可拾取', () => {
+    // 三条 3D 距离 0.2–0.5 的实测样本，同层/略高略低都必须 overlap=true
+    for (const dy of [-0.2, 0, 0.2, 0.5]) {
+      const verdict = pickupOverlapVerdict({ bot: botAt(0, 64, 0), item: { x: 0.2, y: 64 + dy, z: 0.2 } });
+      expect(verdict.overlap).toBe(true);
+    }
+    // 所以：若服务端仍不吸收，问题**不在**"我们的距离/包围盒规则"
+  });
+
+  it('drop-geometry：一次性记录双方 y / dy / 物品 onGround / 脚下方块 / 重叠判定', () => {
+    const code = src();
+    expect(code).toContain("event: 'drop-geometry'");
+    for (const field of ['botY', 'itemY', 'dy', 'itemOnGround', 'underItem', 'overlap', 'overlapReason', 'botOnGround']) {
+      expect(code).toContain(`${field}:`);
+    }
+  });
+
+  it('**清扫不再因为"模型 Stop 的 abort 标记"而放弃**（真机：abort 窗口的掉落物永远没人捡）', () => {
+    const code = src();
+    const start = code.indexOf('private async sweepPickupAtActionTail');
+    const block = code.slice(start, start + 1500);
+    expect(block).not.toContain('if (this.pickingUp || this.pickupAbortRequested) return null;');
+    // 保命反射仍然让路（这是唯一该放弃的理由）
+    expect(block).toContain('if (this.reflexRunning === true || (this.reflexQueue?.length ?? 0) > 0) return null;');
+  });
+
+  it('动作结束时清掉粘住的 abort 标记（否则每件掉落物都被判"已被要求中止"）', () => {
+    expect(src()).toContain('if (this.reflexRunning !== true) this.pickupAbortRequested = false;');
+  });
+});

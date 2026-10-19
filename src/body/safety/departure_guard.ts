@@ -82,9 +82,19 @@ export function departureVerdict(facts: DepartureFacts): DepartureVerdict {
 
     const place = placeLabel(facts.tool);
     const health = facts.health;
-    const food = facts.food ?? 0;
+    // **读不到 ≠ 0**（Lead 2026-10-20 裁定）：这是**许可问题**（"这个 bot 可以出发吗"），
+    // 所以未知必须**fail OPEN**——不能拿一个没读到的数字去拦它。
+    // （反向的例子是"要不要跳过某个威胁"，那种未知必须 fail CLOSED。）
+    // 之前这里写 `facts.food ?? 0`，读不到就当成 0 直接拒绝 ⇒ 读不到食物 = 一堵墙。
+    const foodKnown = typeof facts.food === 'number' && Number.isFinite(facts.food);
+    const food = foodKnown ? (facts.food as number) : null;
     const blocks = facts.blocks;
     const hasWeapon = facts.weapon != null && facts.weapon !== '';
+
+    /** 读不到的那些读数（只用来"说明"，**绝不**当拒绝理由）。 */
+    const unread: string[] = [];
+    if (!foodKnown) unread.push('食物');
+    if (blocks == null) unread.push('垫脚方块');
 
     const missing: string[] = [];
     if (!hasWeapon) {
@@ -94,7 +104,7 @@ export function departureVerdict(facts: DepartureFacts): DepartureVerdict {
                 : '**没有武器**（下界的猪灵/猪灵蛮兵/烈焰人都会主动打你）',
         );
     }
-    if (food <= MIN_FOOD_HARD) missing.push(`**食物 ${Math.round(food)}**（进去就没有回血手段）`);
+    if (food != null && food <= MIN_FOOD_HARD) missing.push(`**食物 ${Math.round(food)}**（进去就没有回血手段）`);
     if (blocks != null && blocks < MIN_BLOCKS_HARD) {
         missing.push(`**垫脚方块只有 ${blocks} 个**（末地虚空桥/下界跨岩浆都要垫，至少 ${MIN_BLOCKS_HARD} 个）`);
     }
@@ -102,12 +112,13 @@ export function departureVerdict(facts: DepartureFacts): DepartureVerdict {
         missing.push(`血量 ${Math.round(health * 10) / 10}（低于建议的 ${MIN_HEALTH_SUGGESTED}）`);
     }
 
-    const hardRefuse = !hasWeapon || food <= MIN_FOOD_HARD || (blocks != null && blocks < MIN_BLOCKS_HARD);
+    // **已知的坏**才硬拦；**未知**一律不拦（`null` 当"没读到"）。
+    const hardRefuse = !hasWeapon || (food != null && food <= MIN_FOOD_HARD) || (blocks != null && blocks < MIN_BLOCKS_HARD);
     if (hardRefuse) {
         const wantBlocks = facts.tool === 'enterEnd' ? 32 : 16;
         const prep: string[] = [];
         if (!hasWeapon) prep.push('先弄一把武器（**空手就能起步**，见下一步那条链）');
-        if (food <= MIN_FOOD_SUGGESTED) prep.push('`getFood()` / `consume(item_name="…")` 把食物补到 12 以上');
+        if (food != null && food <= MIN_FOOD_SUGGESTED) prep.push('`getFood()` / `consume(item_name="…")` 把食物补到 12 以上');
         if (blocks == null || blocks < MIN_BLOCKS_SUGGESTED)
             prep.push(`\`collectBlocks(type="dirt", num=${wantBlocks})\` 收集 ${wantBlocks} 个方块`);
         if (health != null && health < MIN_HEALTH_SUGGESTED) prep.push('先把血回到 12 以上（吃食物）');
@@ -133,7 +144,7 @@ export function departureVerdict(facts: DepartureFacts): DepartureVerdict {
                           ' → ④ `craft(input="2 oak_planks, 1 stick", output="1 wooden_sword")`' +
                           '（剑是 3×3：`craft` 会自己用/放下背包里的工作台，**不用**你手动 `placeHere`）' +
                           `；然后再 \`${facts.tool}()\`。`
-                        : food <= MIN_FOOD_SUGGESTED
+                        : food !== null && food <= MIN_FOOD_SUGGESTED
                             ? '`getFood()`（或 `consume`）先把食物补够；'
                             : `\`collectBlocks(type="dirt", num=${wantBlocks})\` 先攒垫脚方块；`
                 }\n    ` +
@@ -143,7 +154,7 @@ export function departureVerdict(facts: DepartureFacts): DepartureVerdict {
 
     // 放行：低于建议值就给一句响亮提醒（不拦）。
     const warnings: string[] = [];
-    if (food < MIN_FOOD_SUGGESTED) {
+    if (food !== null && food < MIN_FOOD_SUGGESTED) {
         warnings.push(`你食物只有 ${Math.round(food)}，${place}里**没有食物来源**——进去之前最好补到 ${MIN_FOOD_SUGGESTED}。`);
     }
     if (blocks != null && blocks < MIN_BLOCKS_SUGGESTED) {
@@ -151,6 +162,14 @@ export function departureVerdict(facts: DepartureFacts): DepartureVerdict {
     }
     if (health != null && health < MIN_HEALTH_SUGGESTED) {
         warnings.push(`血量 ${Math.round(health * 10) / 10} 低于建议的 ${MIN_HEALTH_SUGGESTED}，挨一下就危险。`);
+    }
+    // **读不到的读数**：明确说"这不作为拒绝理由"，并且告诉它自己去看一眼
+    // （否则模型会把"读不到"读成"被拦了"，或者干脆不知道食物是未知的）。
+    if (unread.length > 0) {
+        warnings.push(
+            `${unread.join('、')}**读不到**（读数不可用）——**这不作为拒绝理由**：已经放行；` +
+                '进去之前自己 `stats(type="body")` 看一眼真实数值再决定。',
+        );
     }
     return warnings.length > 0
         ? {
