@@ -106,7 +106,7 @@ export function departureVerdict(facts: DepartureFacts): DepartureVerdict {
     if (hardRefuse) {
         const wantBlocks = facts.tool === 'enterEnd' ? 32 : 16;
         const prep: string[] = [];
-        if (!hasWeapon) prep.push('`equip(item_name="…")`（先做/找一把剑或斧）');
+        if (!hasWeapon) prep.push('先弄一把武器（**空手就能起步**，见下一步那条链）');
         if (food <= MIN_FOOD_SUGGESTED) prep.push('`getFood()` / `consume(item_name="…")` 把食物补到 12 以上');
         if (blocks == null || blocks < MIN_BLOCKS_SUGGESTED)
             prep.push(`\`collectBlocks(type="dirt", num=${wantBlocks})\` 收集 ${wantBlocks} 个方块`);
@@ -119,7 +119,20 @@ export function departureVerdict(facts: DepartureFacts): DepartureVerdict {
                 `。先补齐：${prep.join('；')}，然后再 \`${facts.tool}()\`。\n    ` +
                 `下一步（照做即可）：${
                     !hasWeapon
-                        ? '先弄到武器——`craft` 一把石剑（2 圆石 + 1 木棍）或从箱子里取；'
+                        ? // **拒绝的下一步必须在"当前状态"里可执行**：空手也能走通的一条链
+                          // （真机 overnight_a 的四路死锁就是"拒绝 + 无法执行的出路"）。
+                          // 材料账核过（receipts-dev 复核）：工作台 4 板 + 木剑 4 板（2 板 + 木棍 2 板）
+                          //   = 8 板 = **2 根原木** ⇒ 采 3 根留余量。1 根会在做剑那步才不够，
+                          //   然后模型又回到"空手死锁"的报告里。
+                          // 也别写 `placeHere` + `useBlock`：`craft` 自己会从背包放工作台、合完收回
+                          //   （`skills.craftRecipe` 的 3×3 分支）——那两步只是额外的失败点。
+                          '先弄到武器（**从空手开始就能走**，4 步）：' +
+                          '① `collectBlocks(type="oak_log", num=3)`（木头**不带工具要求**：徒手既挖得动、也掉木头，不要镐；**要 2 根以上**，1 根不够做剑）' +
+                          ' → ② `craft(input="3 oak_log", output="12 oak_planks")`' +
+                          ' → ③ `craft(input="4 oak_planks", output="1 crafting_table")` + `craft(input="2 oak_planks", output="4 stick")`' +
+                          ' → ④ `craft(input="2 oak_planks, 1 stick", output="1 wooden_sword")`' +
+                          '（剑是 3×3：`craft` 会自己用/放下背包里的工作台，**不用**你手动 `placeHere`）' +
+                          `；然后再 \`${facts.tool}()\`。`
                         : food <= MIN_FOOD_SUGGESTED
                             ? '`getFood()`（或 `consume`）先把食物补够；'
                             : `\`collectBlocks(type="dirt", num=${wantBlocks})\` 先攒垫脚方块；`

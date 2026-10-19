@@ -68,6 +68,29 @@ describe('判定：明显必死才硬拦，边界只提醒', () => {
     expect(verdict.text).toContain('出口/逃跑不受这条限制');
   });
 
+  it('没武器的下一步**必须在空手状态可执行**：4 步链 + 材料账够（2 根原木起，采 3）', () => {
+    const verdict = departureVerdict(facts({ weapon: null, food: 20, blocks: 20, health: 20 }));
+    expect(verdict.allowed).toBe(false);
+    const text = verdict.text ?? '';
+    // ① 起点是**徒手**能做的（不是"拿镐挖石头"，那对空手的 bot 是一堵墙）
+    expect(text).toContain('collectBlocks(type="oak_log", num=3)');
+    expect(text).toContain('徒手');
+    expect(text).not.toContain('石剑'); // 石剑要圆石 ⇒ 要木镐 ⇒ 对空手就是墙
+    // ② 材料账：1 根原木不够（工作台 4 板 + 剑 4 板 = 8 板 = 2 根）⇒ 回执必须点名
+    expect(text).toContain('要 2 根以上');
+    // ③ 4 步链每一环都在（模型照抄就能走），木板一次做够
+    expect(text).toContain('craft(input="3 oak_log", output="12 oak_planks")');
+    expect(text).toContain('craft(input="4 oak_planks", output="1 crafting_table")');
+    expect(text).toContain('craft(input="2 oak_planks", output="4 stick")');
+    expect(text).toContain('craft(input="2 oak_planks, 1 stick", output="1 wooden_sword")');
+    // ④ 3×3 由 craft 自己解决（别再让模型手动放/用工作台——那两步是额外的失败点）
+    expect(text).toContain('3×3');
+    expect(text).toContain('不用**你手动 `placeHere`');
+    expect(text).not.toContain('useBlock(type="crafting_table"');
+    // ⑤ 链走完还要回到"去哪"（这条 facts 是 enterEnd ⇒ 就该说 enterEnd）
+    expect(text).toContain('然后再 `enterEnd()`');
+  });
+
   it('食物 0 / 方块 10 / 没武器 ⇒ 拒（真机那次的三条同时成立）', () => {
     const verdict = departureVerdict(facts({ weapon: null, food: 0, blocks: 5 }));
     expect(verdict.allowed).toBe(false);

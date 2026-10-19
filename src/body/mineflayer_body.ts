@@ -3342,7 +3342,11 @@ export class MineflayerBody {
                 threatNear: threat != null,
             };
             const reasons: string[] = [];
-            if (this.inventorySynced === false) reasons.push('背包未同步');
+            // **"背包未同步"不再是拦路理由**：它只影响能不能**测量**，不影响要不要去捡。
+            // 真机 2026-10-19：`blockedBy=[背包未同步, 模型动作占用身体]` 让掉落物在
+            // 3.3 米外躺着没人踩——把"测不出来"当成"不要去"是尾巴摇狗。
+            const measurement: string[] = [];
+            if (this.inventorySynced === false) measurement.push('背包未同步（捡到了也暂时读不出增量，用 stats 核对）');
             if (this.pickupAbortRequested) reasons.push('已被要求中止');
             if (gate.backoffRemainingMs > 0) reasons.push(`退避中 ${Math.round(gate.backoffRemainingMs)}ms`);
             if (this.pickupSuppressedUntil > Date.now()) reasons.push('保命后静默期');
@@ -3358,6 +3362,8 @@ export class MineflayerBody {
                 distance: metres,
                 willAttempt: reasons.length === 0,
                 blockedBy: reasons,
+                // 只影响"能不能测出增量"，不影响"要不要去捡"。
+                measurement,
             });
             // **把四件事里的 (b)(c) 作为事实写给模型**（Lead 2026-10-19 裁定 ①）：
             // 「怪物掉落恒为 0」是错的——真机是"掉在地上 8 秒没人踩"。所以这里**不声称
@@ -3373,8 +3379,9 @@ export class MineflayerBody {
                 `dist=${metres}m, willAttempt=${reasons.length === 0}, blockedBy=[${reasons.join('、')}]}`;
             void this.writeAdvice(
                 `${marker}\n    【掉落物出现】Item id=${target.id ?? '?'} @(${Number(target.x).toFixed(1)},${Number(target.y).toFixed(1)},${Number(target.z).toFixed(1)})，` +
-                    `距离 ${metres} 格。自动拾取：${reasons.length === 0 ? '**会去踩**' : `**暂时不会去**（${reasons.join('、')}）`}。` +
-                    '这三句是事实：**实体已经存在**、距离多少、去不去捡——它**不代表**你捡到了，也不代表没有掉落。',
+                    `距离 ${metres} 格。自动拾取：${reasons.length === 0 ? '**会去踩**' : `**暂时不会去**（${reasons.join('、')}）`}` +
+                    (measurement.length > 0 ? `（注意：${measurement.join('；')}——这只影响读数，不阻止去捡）` : '') +
+                    '。这三句是事实：**实体已经存在**、距离多少、去不去捡——它**不代表**你捡到了，也不代表没有掉落。',
             );
         } catch {
             // 诊断失败不影响拾取。
@@ -3389,6 +3396,66 @@ export class MineflayerBody {
      * ActionManager 会 clearBotLogs 把 interrupt_code 清掉，拾取继续跑并和模型
      * 动作抢 pathfinder，把模型动作卡成 ACTION_BUSY（Feedback #64）。
      */
+/**
+     * **动作收尾的拾取清扫**（Lead 2026-10-19 裁定 ②）。
+     *
+     * 真机：`huntFor` 打死骷髅、掉落物 id=450058 就在 3.3 米外，因为
+     * `blockedBy=[背包未同步, 模型动作占用身体]` 一步都没走——战利品在地上躺 8 秒以上
+     * 直到消失。**动作刚结束的那一刻正是捡东西的最佳时机**（东西就在刚才干活的地方），
+     * 所以给一个**有界**（1.5 秒）的清扫：走过去、报告捡到了什么。
+     *
+     * 约束：只在动作收尾、身体空闲时跑；不抢保命（反射在跑就直接放弃）；有界 + 有日志。
+     */
+    private async sweepPickupAtActionTail(): Promise<string | null> {
+        const started = Date.now();
+        if (this.pickingUp || this.pickupAbortRequested) return null;
+        if (this.reflexRunning === true || (this.reflexQueue?.length ?? 0) > 0) return null;
+        let target: PickupTarget | null = null;
+        try {
+            target = nearestDropWithin(this.bot, 4);
+        } catch {
+            return null;
+        }
+        if (target == null) return null;
+        const before = this.readInventoryCounts();
+        let collected = false;
+        try {
+            // 有界：最多 1.5 秒（超时就走人，不拖住回执）。
+            const walk = this.walkToPickup(target);
+            const budget = new Promise<boolean>((resolve) => {
+                const timer = setTimeout(() => resolve(false), 1_500);
+                (timer as { unref?: () => void }).unref?.();
+            });
+            await Promise.race([walk, budget]);
+            // 判定"捡到"优先看实体是否消失（背包读数可能未同步，不能当唯一依据）。
+            const entity = (this.bot as any)?.entities?.[target.id as any];
+            const after = this.readInventoryCounts();
+            const gained = before != null && after != null
+                ? Object.keys(after).some((name) => (after[name] ?? 0) > (before[name] ?? 0))
+                : null;
+            collected = entity == null || gained === true;
+        } catch {
+            collected = false;
+        }
+        const ms = Date.now() - started;
+        try {
+            this.log.with('lifecycle').info({
+                event: 'pickup-tail-sweep',
+                attempted: true,
+                target: target.name,
+                id: target.id ?? null,
+                collected,
+                ms,
+            });
+        } catch {
+            // 日志失败不影响回执。
+        }
+        const delta = this.describeInventoryDelta(before, this.readInventoryCounts(), target.name);
+        return collected
+            ? `\n    【收尾清扫】动作结束后去捡了 ${target.name}（${ms}ms）：**捡到了**${delta.changed ? `（背包实测：${delta.note}）` : ''}。`
+            : `\n    【收尾清扫】动作结束后试着去捡 ${target.name}（${ms}ms），**这次没进包**（东西可能还在原地或已被别的东西挡住）。`;
+    }
+
     private async walkToPickup(target: PickupTarget): Promise<boolean> {
         try {
             const movements = movementsFor(this.bot);
@@ -3472,9 +3539,11 @@ export class MineflayerBody {
     private schedulePickup(target: PickupTarget): void {
         const now = Date.now();
         if (this.pickupAbortRequested) return;
-        // 背包还没同步：拾取的"是否捡到"核验读不到数，硬捡会被算成失败
-        // （连续两次失败就 60 秒不再捡）。等一两秒同步完再动手。
-        if (this.inventorySynced === false) return;
+        // **背包没同步不许再挡住"去捡"。** 走路踩到掉落物是无害且可逆的；同步状态只影响
+        // 我们**能不能测出**"捡没捡到"，不决定要不要去捡。（真机 2026-10-19：掉落物
+        // id=450058 就在 3.3 米外，`blockedBy=[背包未同步, 模型动作占用身体]`，一步都没走。）
+        // 没同步时照捡，回执写"捡了，但背包读数此刻不可用——用 stats 核对"。
+        const canMeasure = this.inventorySynced !== false;
         if (now < this.pickupBackoffUntil) return;
         // 保命抢占后的静默期：命保住了再谈捡东西。
         if (now < this.pickupSuppressedUntil) return;
@@ -4347,6 +4416,14 @@ export class MineflayerBody {
                                 ms: 5_000,
                                 reason: 'kill-confirmed',
                             });
+                        }
+                        // **动作收尾清扫掉落物**（有界 1.5 秒）：动作刚结束、东西就在刚才
+                        // 干活的地方——这是捡战利品的最佳时机（真机：掉落物在 3.3 米外躺着没人踩）。
+                        try {
+                            const sweep = await this.sweepPickupAtActionTail();
+                            if (sweep != null) text = String(text ?? '') + sweep;
+                        } catch {
+                            // 清扫失败绝不影响动作本身的回执。
                         }
                         // 提醒**追加在末尾**（见 annotateReceipt）：第一行留给"放行 + 实际发生了什么"。
                         text = annotateReceipt(text, departureWarning);

@@ -151,3 +151,63 @@ describe('击杀后的拾取优先窗口（有界 + 挨打就让位）', () => {
     expect(src).toContain('它**不代表**你捡到了');
   });
 });
+
+describe('优先窗口必须 fail-closed（Lead 修正的回归测试）', () => {
+  // `Object.create(MineflayerBody.prototype)` 的 fixture、以及任何没初始化字段的调用方，
+  // 传进来的都是 undefined；而 JS 里 `undefined <= 数字` 是 **false**，
+  // 用 `<=` 判断会把"没有窗口"读成"窗口开着" ⇒ 僵尸在旁边也去捡东西。
+  it('priorityUntil=undefined ⇒ 视为**没有窗口**（不开窗）', () => {
+    expect(shouldBypassThreatGateForPickup({ now: 10_000, priorityUntil: undefined as unknown as number, lastHurtAt: 0 })).toBe(false);
+  });
+
+  it('priorityUntil=NaN / Infinity / 字符串 ⇒ 一律不开窗', () => {
+    expect(shouldBypassThreatGateForPickup({ now: 10_000, priorityUntil: NaN, lastHurtAt: 0 })).toBe(false);
+    // Infinity 也不是真实截止时刻（Number.isFinite 为假）⇒ 按 fail-closed 不开窗。
+    expect(shouldBypassThreatGateForPickup({ now: 10_000, priorityUntil: Infinity, lastHurtAt: 0 })).toBe(false);
+    expect(shouldBypassThreatGateForPickup({ now: 10_000, priorityUntil: 5_000, lastHurtAt: 0 })).toBe(false);
+  });
+
+  it('lastHurtAt=undefined ⇒ 视为"没受过伤"（不是"一直在挨打"，也不是"忽略"）', () => {
+    // 有窗口 + 受伤时间未知 ⇒ 允许去捡（未知不代表正在挨打）
+    expect(shouldBypassThreatGateForPickup({ now: 10_000, priorityUntil: 15_000, lastHurtAt: undefined as unknown as number })).toBe(true);
+    // 有窗口 + 明确刚挨打 ⇒ 不让位
+    expect(shouldBypassThreatGateForPickup({ now: 10_000, priorityUntil: 15_000, lastHurtAt: 9_000 })).toBe(false);
+  });
+
+  it('**方向**：这个判定回答"能不能忽略威胁"，所以缺值一律关门（fail-closed）', () => {
+    expect(shouldBypassThreatGateForPickup({ now: 10_000, priorityUntil: undefined as unknown as number, lastHurtAt: undefined as unknown as number })).toBe(false);
+  });
+});
+
+describe('闸门不许把"测不出来"当成"不要去"（Lead 2026-10-19 裁定 ①）', () => {
+  const src = () => readFileSync(join(process.cwd(), 'src', 'body', 'mineflayer_body.ts'), 'utf8');
+
+  it('背包未同步**不再是拦路理由**，只出现在"测量"一栏', () => {
+    const code = src();
+    // schedulePickup 里不许再有"未同步就直接 return"
+    const start = code.indexOf('private schedulePickup');
+    const end = code.indexOf('private async walkToPickup');
+    const block = code.slice(start, end > start ? end : start + 4000);
+    expect(block).not.toContain('if (this.inventorySynced === false) return;');
+    // drop-seen 的 blockedBy 里不许再出现"背包未同步"，但 measurement 里要有
+    expect(code).toContain('const measurement: string[] = [];');
+    expect(code).toContain("measurement.push('背包未同步（捡到了也暂时读不出增量，用 stats 核对）')");
+    expect(code).toContain('measurement,');
+    // 真机那条真值行必须仍然声称"不是威胁"
+    expect(code).toContain('这只影响读数，不阻止去捡');
+  });
+
+  it('身体被占用的拾取要在动作收尾重试（有界 + 有日志 + 报告捡到什么）', () => {
+    const code = src();
+    expect(code).toContain('private async sweepPickupAtActionTail');
+    expect(code).toContain("event: 'pickup-tail-sweep'");
+    expect(code).toContain('attempted: true');
+    expect(code).toContain('collected');
+    expect(code).toContain('【收尾清扫】');
+    // 有界：1.5 秒预算；且不抢保命反射
+    expect(code).toContain('1_500');
+    expect(code).toContain('if (this.reflexRunning === true || (this.reflexQueue?.length ?? 0) > 0) return null;');
+    // 接线：动作收尾调用
+    expect(code).toContain('await this.sweepPickupAtActionTail()');
+  });
+});

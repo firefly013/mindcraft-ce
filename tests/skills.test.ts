@@ -139,7 +139,9 @@ describe('D2 安全：徒手挖不能挖自己的立足点', () => {
 
 describe('D2 徒手挖软方块', () => {
   it('isHandMineable：下界岩/泥土/沙/沙砾可以，石头/黑曜石/基岩不行', () => {
-    expect(BARE_HAND_MAX_DIG_MS).toBe(3000);
+    // 3000 → 3200：原木徒手正好 3000ms，<= 3000 零余量；留 200ms 给浮点/数据抖动
+    // （空手 bootstrap 的第一步是砍木头，见 tests/hand_mine_bootstrap.test.ts）。
+    expect(BARE_HAND_MAX_DIG_MS).toBe(3200);
     expect(isHandMineable(blockOf({ name: 'netherrack', hardness: 0.4, digTime: () => 2000 }))).toBe(true);
     expect(isHandMineable(blockOf({ name: 'dirt', hardness: 0.5, digTime: () => 2500 }))).toBe(true);
     expect(isHandMineable(blockOf({ name: 'sand', hardness: 0.5, digTime: () => 2500 }))).toBe(true);
