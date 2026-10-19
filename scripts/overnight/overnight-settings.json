@@ -2,7 +2,7 @@
   "auto_open_ui": false,
   "load_memory": false,
   "chat_ingame": true,
-  "allow_vision": false,
+  "allow_vision": true,
   "spawn_timeout": 60,
   "gameplay": {
     "keepInventoryOnDeath": true,
