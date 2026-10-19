@@ -5028,8 +5028,17 @@ function forwardDelta(yaw: number): { dx: number; dz: number } {
 }
 
 /** 柱子上行：跳起后在脚下放块，适合 digDown 挖出的 1x1 竖井。 */
+/** 一次调用最多垫/上多少格（再高就是调用方算错了——真机 2026-10-19 出现过 258 格）。 */
+export const MAX_VERTICAL_CLIMB_PER_CALL = 64;
+
 export async function pillarUp(bot: any, blocks: number = 1): Promise<boolean> {
-    const wanted = Math.max(1, Math.floor(blocks));
+    const requested = Math.max(1, Math.floor(blocks));
+    // **上限**：258 格柱子只花了 20 秒，是因为引擎允许；每一块都来自背包，
+    // 而且"要爬这么多"本身就是上游判定出错的信号。超上限就只爬上限，并说清。
+    const wanted = Math.min(requested, MAX_VERTICAL_CLIMB_PER_CALL);
+    if (requested > wanted) {
+        log(bot, `pillarUp：请求 ${requested} 格超过单次上限 ${MAX_VERTICAL_CLIMB_PER_CALL} 格，只垫 ${wanted} 格（要更高请分几次，或先确认目标高度是不是搞错了）。`);
+    }
     const choice = choosePillarMaterialChoice(
         bot?.inventory?.items?.() as Array<{ name?: unknown; count?: unknown }>,
         wanted,
@@ -5111,7 +5120,12 @@ export async function pillarUp(bot: any, blocks: number = 1): Promise<boolean> {
 
 /** 台阶上行：挖开前方/头顶，跳上高一层的实心格；空着就放一块垫脚。 */
 export async function stairUp(bot: any, blocks: number = 1): Promise<boolean> {
-    const wanted = Math.max(1, Math.floor(blocks));
+    const requested = Math.max(1, Math.floor(blocks));
+    // 同 pillarUp：单次上限（真机出现过 258 格的"上地表"）。
+    const wanted = Math.min(requested, MAX_VERTICAL_CLIMB_PER_CALL);
+    if (requested > wanted) {
+        log(bot, `stairUp：请求 ${requested} 格超过单次上限 ${MAX_VERTICAL_CLIMB_PER_CALL} 格，只上 ${wanted} 格（要更高请分几次，或先确认目标高度是不是搞错了）。`);
+    }
     const choice = choosePillarMaterialChoice(
         bot?.inventory?.items?.() as Array<{ name?: unknown; count?: unknown }>,
         wanted,
@@ -5260,6 +5274,117 @@ export async function digDown(bot: any, distance: number = 10): Promise<boolean>
     log(bot, 'Dug down ' + distance + ' blocks.');
     return true;
 }
+/** 地表候选往上最多允许的距离（格）。再高就不是"地表"，是人工结构/脚手架。 */
+export const SURFACE_MAX_CLIMB = 64;
+/** 判定"有支撑"时，往脚下看多少格要求至少有一个实心块。 */
+export const SURFACE_SUPPORT_PROBE = 4;
+
+export interface SurfaceCandidate {
+    y: number;
+    name: string;
+    /** 从这个 y 往脚下看，几格内会遇到实心块（-1 = 一路是空）。 */
+    supportWithin: number;
+}
+
+export interface SurfaceChoice {
+    /** 选中的地表（blockAt 坐标 + 站立高度）。null = 认不出地表。 */
+    chosen: { x: number; y: number; z: number; name: string; standY: number } | null;
+    reason: string;
+    /** 被判为"人工/无支撑"而拒绝的候选（用于回执，最多留几个）。 */
+    rejected: Array<{ y: number; name: string; why: string }>;
+}
+
+/**
+ * 从一列方块里挑出"真正的地表"。
+ *
+ * 真机 2026-10-19：`goToSurface` 在 (-1.5, 62, -9.5) 把 **y=319 的一块人工方块**
+ * 当成地表，于是 `pillarUp` 把 bot 顶上 **y=320**（+258 格）——一个承诺"回到地表"
+ * 的工具把 bot 送上了天，而且垫的每一块都来自它自己的背包。
+ *
+ * 两条判据：
+ *   ① **不许无限爬**：候选比 bot 高出超过 `maxClimb` ⇒ 不是地表（人工结构/脚手架），
+ *      继续往下找**够得着**的那个；
+ *   ② **要看着像地面**：往脚下探 `SURFACE_SUPPORT_PROBE` 格，有实心块才算"有支撑"；
+ *      悬空孤块不算地表（记进 rejected，回执里说明）。
+ * 找不到合格候选 ⇒ `chosen = null`，调用方**如实报"认不出地表"**，不做任何攀爬。
+ */
+export function chooseSurfaceCandidate(
+    blockAt: (x: number, y: number, z: number) => { name?: unknown } | null,
+    feet: { x: number; y: number; z: number },
+    options: { maxClimb?: number; supportProbe?: number; topY?: number; bottomY?: number } = {},
+): SurfaceChoice {
+    const maxClimb = Math.max(0, Number(options.maxClimb ?? SURFACE_MAX_CLIMB) || 0);
+    const probe = Math.max(1, Math.floor(Number(options.supportProbe ?? SURFACE_SUPPORT_PROBE) || 1));
+    const topY = Math.floor(Number(options.topY ?? 360));
+    const bottomY = Math.floor(Number(options.bottomY ?? -64));
+    const fx = Math.floor(feet.x);
+    const fz = Math.floor(feet.z);
+    const fy = Math.floor(feet.y);
+    const rejected: SurfaceChoice['rejected'] = [];
+    /**
+     * 正在跳过一整座"太高的人工结构"。
+     *
+     * 只跳过"太高的那一格"是不够的：一座 62 格高的实心塔，其**内部**每一格都满足
+     * "有支撑 + 高差 ≤ 上限"，于是工具会挑到塔身中间（y=126 这种）——那不是地表，
+     * 是站在别人脚手架上。所以一旦发现结构顶端超过上限，就把它**整座跳完**
+     * （连续实心都算同一座），到它脚下再继续找真正的地面。
+     */
+    let skippingStructure = false;
+
+    for (let y = topY; y > bottomY; y--) {
+        const block = blockAt(fx, y, fz);
+        const name = typeof block?.name === 'string' ? block.name : '';
+        const solid = name !== '' && name !== 'air' && name !== 'cave_air' && name !== 'void_air';
+        if (!solid) {
+            skippingStructure = false;
+            continue;
+        }
+        if (skippingStructure) continue; // 同一座结构的下面部分，一起跳过
+        const standY = y + 1;
+        const climb = standY - feet.y;
+        // ① 够不着的（太高）先跳过，但要留一句解释——真机那次就是栽在这里。
+        // 注意：**只限制记录条数，绝不停止扫描**（一条 100 格高的人工塔会有几十个
+        // 被拒的候选；早期版本在这里 break，等于一见高楼就放弃找真正的地面）。
+        if (climb > maxClimb) {
+            if (rejected.length < 4) {
+                rejected.push({ y: standY, name, why: `比你现在高 ${climb.toFixed(0)} 格，超过上限 ${maxClimb}——像是人工方块/脚手架，不当成地表` });
+            }
+            skippingStructure = true;
+            continue;
+        }
+        // ② 悬空孤块不算地表：往脚下探几格，得有实心支撑。
+        let supportWithin = -1;
+        for (let d = 1; d <= probe; d++) {
+            const under = blockAt(fx, y - d, fz);
+            const underName = typeof under?.name === 'string' ? under.name : '';
+            const solid = underName !== '' && underName !== 'air' && underName !== 'cave_air' && underName !== 'void_air';
+            if (solid) {
+                supportWithin = d;
+                break;
+            }
+        }
+        if (supportWithin < 0) {
+            if (rejected.length < 4) {
+                rejected.push({ y: standY, name, why: `脚下 ${probe} 格内没有支撑，是悬空的孤立方块` });
+            }
+            continue;
+        }
+        return {
+            chosen: { x: fx, y, z: fz, name, standY },
+            reason: `地表在 y=${standY}（${name}），高差 ${climb >= 0 ? '+' : ''}${climb.toFixed(0)} 格（脚下 ${supportWithin} 格内有支撑）`,
+            rejected,
+        };
+    }
+    return {
+        chosen: null,
+        reason:
+            rejected.length > 0
+                ? `认不出地表：只找到 ${rejected.map((r) => `y=${r.y}（${r.why}）`).join('；')}`
+                : '认不出地表：当前竖列没有读到任何实心方块（区块可能没加载）',
+        rejected,
+    };
+}
+
 export async function goToSurface(bot: any): Promise<boolean> {
     /**
      * Navigate to the surface (highest non-air block at current x,z).
@@ -5267,44 +5392,52 @@ export async function goToSurface(bot: any): Promise<boolean> {
      * @returns {Promise<boolean>} true if the surface was reached, false otherwise.
      **/
     const pos: any = bot.entity.position;
-    for (let y = 360; y > -64; y--) {
-        const block: any = bot.blockAt(new (Vec3 as any)(pos.x, y, pos.z));
-        if (!block || block.name === 'air' || block.name === 'cave_air') {
-            continue;
-        }
-        const targetY: number = block.position.y + 1;
-        const dy: number = targetY - pos.y;
-        log(bot, 'goToSurface：地表在 y=' + targetY + '（' + block.name + '），高差 ' + dy.toFixed(1) + ' 格。');
-        if (bot.interrupt_code) {
-            log(bot, 'goToSurface 中断：Stop/保命打断，一步没走。');
-            return false;
-        }
-        if (dy >= 4) {
-            const material = choosePillarMaterial(bot?.inventory?.items?.() as Array<{ name?: unknown; count?: unknown }>);
-            const need = Math.ceil(dy);
-            log(bot, 'goToSurface：高差 ' + dy.toFixed(1) + ' 格，先用 ' + (material != null ? 'pillarUp' : 'stairUp') + ' 垂直上行 ' + need + ' 格。');
-            const climbed = material != null ? await pillarUp(bot, need) : await stairUp(bot, need);
-            if (bot.interrupt_code) {
-                log(bot, 'goToSurface 中断：垂直上行被 Stop/保命打断。');
-                return false;
-            }
-            if (!climbed) {
-                log(bot, 'goToSurface：垂直上行没能完成，继续尝试普通寻路（失败会说明卡在哪）。');
-            }
-        }
-        const arrived = await goToPosition(bot, block.position.x, targetY, block.position.z, 0);
-        if (!arrived) {
-            log(
-                bot,
-                'Surface is at y=' + targetY + ' (' + block.name + ') but I could not get up there from here. 竖井/洞穴里常这样——用 stairUp/pillarUp 垂直上行，或者 mineBlock 挖头顶开路。',
-            );
-            return false;
-        }
-        log(bot, 'Reached the surface at y=' + targetY + '.');
-        return true;
+    // **"地表"必须是够得着、且看着像地面的那一格**（见 chooseSurfaceCandidate）：
+    // 真机 2026-10-19 这里曾把 y=319 的人工方块当地表，pillarUp 把 bot 顶到 y=320。
+    const choice = chooseSurfaceCandidate(
+        (bx, by, bz) => bot.blockAt(new (Vec3 as any)(bx, by, bz)),
+        { x: pos.x, y: pos.y, z: pos.z },
+    );
+    if (choice.chosen == null) {
+        log(bot, 'goToSurface 失败：' + choice.reason + '。没有做任何攀爬（不会把你往上垫）。');
+        return false;
     }
-    log(bot, 'goToSurface 失败：当前竖列读不到任何实心方块（区块可能没加载）。');
-    return false;
+    const block = { name: choice.chosen.name, position: { x: choice.chosen.x, y: choice.chosen.y, z: choice.chosen.z } };
+    const targetY: number = choice.chosen.standY;
+    const dy: number = targetY - pos.y;
+    log(bot, 'goToSurface：' + choice.reason + '。');
+    for (const rej of choice.rejected) {
+        log(bot, 'goToSurface：y=' + rej.y + ' 那格上面没有当成地表——' + rej.why + '。');
+    }
+    if (bot.interrupt_code) {
+        log(bot, 'goToSurface 中断：Stop/保命打断，一步没走。');
+        return false;
+    }
+    if (dy >= 4) {
+        // **再加上限**：即使判定通过，一次也不许垫超过 `SURFACE_MAX_CLIMB` 格
+        // （每一块都来自背包，而且"爬 258 格"本身就是判定出错的信号）。
+        const need = Math.min(Math.ceil(dy), SURFACE_MAX_CLIMB);
+        const material = choosePillarMaterial(bot?.inventory?.items?.() as Array<{ name?: unknown; count?: unknown }>);
+        log(bot, 'goToSurface：高差 ' + dy.toFixed(1) + ' 格，先用 ' + (material != null ? 'pillarUp' : 'stairUp') + ' 垂直上行 ' + need + ' 格（上限 ' + SURFACE_MAX_CLIMB + '）。');
+        const climbed = material != null ? await pillarUp(bot, need) : await stairUp(bot, need);
+        if (bot.interrupt_code) {
+            log(bot, 'goToSurface 中断：垂直上行被 Stop/保命打断。');
+            return false;
+        }
+        if (!climbed) {
+            log(bot, 'goToSurface：垂直上行没能完成，继续尝试普通寻路（失败会说明卡在哪）。');
+        }
+    }
+    const arrived = await goToPosition(bot, block.position.x, targetY, block.position.z, 0);
+    if (!arrived) {
+        log(
+            bot,
+            'Surface is at y=' + targetY + ' (' + block.name + ') but I could not get up there from here. 竖井/洞穴里常这样——用 stairUp/pillarUp 垂直上行，或者 mineBlock 挖头顶开路。',
+        );
+        return false;
+    }
+    log(bot, 'Reached the surface at y=' + targetY + '.');
+    return true;
 }
 export async function useToolOn(bot: any, toolName: string, targetName: string): Promise<boolean> {
     /**
