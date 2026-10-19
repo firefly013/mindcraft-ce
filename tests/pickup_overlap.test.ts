@@ -245,3 +245,22 @@ describe('0.2 米还不被捡：先取证，不先打补丁（Lead 2026-10-19）
     expect(src()).toContain('if (this.reflexRunning !== true) this.pickupAbortRequested = false;');
   });
 });
+
+describe('被 Stop/中断打断的动作也要捡战利品（abort 窗口）', () => {
+  const src = () => readFileSync(join(process.cwd(), 'src', 'body', 'mineflayer_body.ts'), 'utf8');
+
+  it('执行抛错（stop/中断/失败）后仍然做一次收尾清扫，结果接到失败回执', () => {
+    const code = src();
+    expect(code).toContain('this.actionTailNote = await this.sweepPickupAtActionTail();');
+    expect(code).toContain("+ (this.actionTailNote ?? '')");
+    // 保命反射在跑时不抢
+    expect(code).toContain('if (this.reflexRunning !== true) {');
+  });
+
+  it('清扫在"被打断"时也不因 abort 标记放弃（组合守卫）', () => {
+    const code = src();
+    const start = code.indexOf('private async sweepPickupAtActionTail');
+    const block = code.slice(start, start + 1200);
+    expect(block).not.toContain('this.pickupAbortRequested) return null;');
+  });
+});

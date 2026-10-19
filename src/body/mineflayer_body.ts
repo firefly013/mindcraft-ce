@@ -1340,6 +1340,8 @@ export class MineflayerBody {
     private surfaceTriggerTimes: number[] = [];
     /** 击杀后拾取优先窗口的截止时刻 + 最近一次受伤时刻（保命优先于捡东西）。 */
     private pickupPriorityUntil = 0;
+    /** 动作失败/被 Stop 打断时，收尾清扫的说明（接在失败回执末尾）。 */
+    private actionTailNote: string | null = null;
     private lastDamageAt = 0;
 
     /** 本进程里一共抓到几条解析类错误（**不管有没有在开容器**）。 */
@@ -4469,6 +4471,17 @@ export class MineflayerBody {
                     } catch (err: unknown) {
                         // 抛错也算"这次自救没成"：**不许给冷却**，让保命随时能回来。
                         if (rescueAttempt) this.settleModelRescue(false, baseName, preempted);
+                        // **被 Stop/中断打断的动作也要捡战利品**（Lead 2026-10-19 裁定：
+                        // 模型 Stop 不是危险；abort 窗口里掉的掉落物之前永远没人捡）。
+                        // 保命反射真在跑时才让路；结果接到失败回执末尾。
+                        if (this.reflexRunning !== true) {
+                            this.pickupAbortRequested = false;
+                            try {
+                                this.actionTailNote = await this.sweepPickupAtActionTail();
+                            } catch {
+                                this.actionTailNote = null;
+                            }
+                        }
                         throw err;
                     }
                     if (rescueAttempt) {
@@ -4484,7 +4497,11 @@ export class MineflayerBody {
                     return {
                         ok: true,
                         op: 'action',
-                        result: { ok: false, text: `Tool ${name} failed: ${message}`, code: ERR.BODY_ERROR },
+                        result: {
+                            ok: false,
+                            text: `Tool ${name} failed: ${message}` + (this.actionTailNote ?? ''),
+                            code: ERR.BODY_ERROR,
+                        },
                     };
                 } finally {
                     this.modelActionsInFlight = Math.max(0, this.modelActionsInFlight - 1);
