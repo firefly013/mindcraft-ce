@@ -5,6 +5,7 @@ import Vec3 from 'vec3';
 import { cellIntersectsBody, standingRoomOk } from '../safety/suffocation.js';
 import { isJustPlacedDrop, markPlaced, placementVerdict } from './placement_guard.js';
 import { formatProgressLine, formatTimeoutSummary, LONG_ACTION_MAX_MS, shouldEmitProgress } from './progress.js';
+import { estimateDigSeconds, formatNoObstacleDiagnosis, planClearStep } from '../safety/step_diagnosis.js';
 /**
  * ⚠️ **必须读共享单例，不许读根目录那份 `settings.ts`。**
  *
@@ -6871,7 +6872,33 @@ export async function stepIntoCellClearing(
         } catch {
             victim = null;
         }
-        if (victim == null) break;
+        if (victim == null) {
+            // **障碍物读不到 = 不是"挖不动"**：目标格是空的，说明挡路的是天花板/落脚点/身体。
+            if (result.obstacles.length === 0) {
+                let headName: string | null = null;
+                let floorName: string | null = null;
+                try {
+                    headName = String(bot.blockAt(new Vec3(target.x, target.y + 2, target.z))?.name ?? '');
+                    floorName = String(bot.blockAt(new Vec3(target.x, target.y - 1, target.z))?.name ?? '');
+                } catch { /* 读不到就走下面的通用建议 */ }
+                result = { ...result, reason: formatNoObstacleDiagnosis({ target, headSolid: headName, floorSolid: floorName, onGround: bot?.entity?.onGround === true, movedAny: false }) };
+            }
+            break;
+        }
+        // **挖之前先算工具够不够**：木镐挖石头可能超过预算，宁可说清也不耗到超时。
+        const hardness = (() => {
+            try { return Number((mc as any)?.blocksByName?.[String(victim.name ?? '')]?.hardness ?? NaN); } catch { return NaN; }
+        })();
+        const clearPlan = planClearStep({
+            blockName: String(victim.name ?? '方块'),
+            toolName: String(bot?.heldItem?.name ?? '' ) || null,
+            toolDurabilityLeft: (() => { try { return Number(bot?.heldItem?.durability ?? NaN); } catch { return null; } })(),
+            seconds: estimateDigSeconds({ hardness: Number.isFinite(hardness) ? hardness : null, toolName: String(bot?.heldItem?.name ?? '') }),
+        });
+        if (clearPlan.action !== 'ok') {
+            result = { ...result, reason: String(clearPlan.message) };
+            break;
+        }
         const dug = await digWithTimeout(
             bot,
             victim,

@@ -3029,9 +3029,10 @@ export async function digLine(
             }
             // 原语也走不进去 ⇒ **说实话 + 给具体的下一步**，不再只写"寻路失败"。
             outcome.stop = 'travel_failed';
+            const reasonText = String(stepped.reason ?? '').replace(/。+$/, '');
             outcome.detail =
-                `第 ${index} 步挖通了 ${formatPoint(step.feet)}，但**走不进去**：${String(stepped.reason)}` +
-                `。建议：mineBlock 掉 ${formatPoint(step.feet)} 那一格（或它头顶那格）后再走；若是水/岩浆，换 goToCoordinates 绕开。`;
+                `第 ${index} 步挖通了 ${formatPoint(step.feet)}，但**走不进去**：${reasonText}。` +
+                `建议：mineBlock 掉 ${formatPoint(step.feet)} 那一格（或它头顶那格）后再走；若是水/岩浆，换 goToCoordinates 绕开。`;
             break;
         }
         if (outcome.dug % progressEvery === 0) {
