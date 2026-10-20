@@ -582,10 +582,27 @@ function sampleBlocks(
 
 function screenshotOf(vision: unknown): LiveScreenshot {
   try {
-    const v = vision as { lastScreenshot?: unknown } | null | undefined;
+    const v = vision as
+      | { lastScreenshot?: unknown; lastFrameTrust?: unknown }
+      | null
+      | undefined;
     const last = v?.lastScreenshot as { file?: unknown; takenAt?: unknown } | null | undefined;
     if (last != null && typeof last.file === 'string' && typeof last.takenAt === 'number') {
-      return { ref: { file: last.file, takenAt: last.takenAt }, unavailableReason: null };
+      // **图照发，但坏帧要带上怀疑**：渲染器认不出这个版本的方块时，
+      // 画面里的「?」和蓝色空白会被模型读成"掉进虚空"（真机 overnight_a）。
+      const trust = v?.lastFrameTrust as
+        | { trusted?: unknown; line?: unknown; reason?: unknown }
+        | null
+        | undefined;
+      const trustInfo =
+        trust != null && typeof trust === 'object'
+          ? {
+              trusted: trust.trusted === true,
+              line: typeof trust.line === 'string' ? trust.line : '',
+              reason: typeof trust.reason === 'string' ? trust.reason : '',
+            }
+          : null;
+      return { ref: { file: last.file, takenAt: last.takenAt }, unavailableReason: null, trust: trustInfo };
     }
     if (v == null) return { ref: null, unavailableReason: 'vision disabled' };
     return { ref: null, unavailableReason: 'no screenshot taken yet' };

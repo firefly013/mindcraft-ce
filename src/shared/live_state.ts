@@ -116,6 +116,13 @@ export interface LiveScreenshot {
   ref: ScreenshotRef | null;
   /** 为 null 表示没有可用截图，这里写原因。 */
   unavailableReason: string | null;
+  /**
+   * 这张图**能不能当"世界的样子"用**（渲染器版本落后时方块会画成「?」，模型会读成"虚空"）。
+   *
+   * `line` 非空时**必须**跟着图一起给模型看 —— 这是"不许把坏帧当可信视图"的落点；
+   * 可信时 `line` 为空（零噪音）。
+   */
+  trust?: { trusted: boolean; line: string; reason: string } | null;
 }
 
 export interface LiveMeta {
@@ -437,7 +444,11 @@ const SECTION_RENDERERS: Record<LiveSectionKey, (s: LiveState) => string[]> = {
   screenshot: (s) => {
     if (s.screenshot.ref != null) {
       const age = Date.now() - s.screenshot.ref.takenAt;
-      return [`Screenshot: ${s.screenshot.ref.file} (taken ${Math.max(0, Math.round(age / 1000))}s ago)`];
+      const lines = [`Screenshot: ${s.screenshot.ref.file} (taken ${Math.max(0, Math.round(age / 1000))}s ago)`];
+      // **图照发，但坏帧必须当场说清楚**（否则模型会把「?」读成"掉进虚空/世界坏了"）。
+      const line = s.screenshot.trust?.line ?? '';
+      if (line !== '') lines.push(line);
+      return lines;
     }
     return [`Screenshot: none (${s.screenshot.unavailableReason ?? UNKNOWN})`];
   },

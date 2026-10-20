@@ -1,5 +1,6 @@
 import { Vec3 } from 'vec3';
 import { Camera } from "./camera.js";
+import { measureFrameTrust, type FrameTrust } from './frame_trust.js';
 import fs from 'fs';
 
 export class VisionInterpreter {
@@ -9,6 +10,11 @@ export class VisionInterpreter {
     camera: Camera | undefined;
     /** 最近一次拍摄，供 Live State 快照引用（文件名+拍摄时间）。 */
     lastScreenshot: { file: string; takenAt: number } | null = null;
+    /**
+     * 最近一张图**能不能当"世界的样子"用**（版本不一致时渲染器会把方块画成「?」，
+     * 模型会读成"掉进虚空"）。为 null = 还没拍过/没测。**这张图照发，但必须带上这句怀疑**。
+     */
+    lastFrameTrust: FrameTrust | null = null;
 
     constructor(agent: any, allow_vision: boolean) {
         this.agent = agent;
@@ -35,6 +41,13 @@ export class VisionInterpreter {
             if ((camera as { worldView?: unknown }).worldView == null) return null;
             const filename = await camera.capture();
             this.lastScreenshot = { file: filename, takenAt: Date.now() };
+            // **拍完立刻判定这张图可不可信**（版本/状态表可能对不上）。测不出来也不影响发图：
+            // 宁可让模型知道"图不可信"，也不能让它把「?」当成世界的样子。
+            try {
+                this.lastFrameTrust = measureFrameTrust(this.agent?.bot);
+            } catch {
+                this.lastFrameTrust = null;
+            }
             return fs.readFileSync(`${this.fp}/${filename}.jpg`).toString('base64');
         } catch (err: unknown) {
             console.warn('Screenshot capture failed:', err instanceof Error ? err.message : String(err));

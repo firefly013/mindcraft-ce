@@ -178,6 +178,48 @@ describe('sampleLiveState', () => {
     expect(neverShot.screenshot.unavailableReason).toBe('no screenshot taken yet');
   });
 
+  it('**坏帧的怀疑必须跟着图走**：图照发，但要说清「?」是渲染失败、不是虚空', () => {
+    const line =
+      '⚠️ **这张图不可信**：世界是 1.21.11，渲染器只到 1.21.4 ⇒ 附近**至少 100%** 的方块状态它不认识。' +
+      '画面里的「?」贴图和蓝色空白是**渲染失败**，**不是虚空、也不代表那里没有方块**；以方块数据为准。';
+    const s = sampleLiveState({
+      bot: stubBot(),
+      vision: {
+        lastScreenshot: { file: 'screenshot_bad.jpg', takenAt: Date.now() },
+        lastFrameTrust: { trusted: false, reason: 'version_skew', line },
+      },
+    });
+    expect(s.screenshot.trust?.trusted).toBe(false);
+    expect(s.screenshot.trust?.reason).toBe('version_skew');
+    // 图本身还在（**不靠删图来掩盖坏帧**）
+    expect(s.screenshot.ref?.file).toBe('screenshot_bad.jpg');
+
+    const text = renderLiveState(s);
+    expect(text).toContain('Screenshot: screenshot_bad.jpg');
+    expect(text).toContain('这张图不可信');
+    expect(text).toContain('不是虚空');
+    // 那一行必须紧跟在 Screenshot 行之后（模型最容易把图旁边的字当结论）
+    const lines = text.split('\n');
+    const idx = lines.findIndex((l) => l.startsWith('Screenshot:'));
+    expect(idx).toBeGreaterThanOrEqual(0);
+    expect(lines[idx + 1]).toContain('这张图不可信');
+  });
+
+  it('图可信时**一个字都不多**（零噪音）', () => {
+    const s = sampleLiveState({
+      bot: stubBot(),
+      vision: {
+        lastScreenshot: { file: 'screenshot_ok.jpg', takenAt: Date.now() },
+        lastFrameTrust: { trusted: true, reason: 'ok', line: '' },
+      },
+    });
+    expect(s.screenshot.trust?.trusted).toBe(true);
+    const text = renderLiveState(s);
+    expect(text).toContain('Screenshot: screenshot_ok.jpg');
+    expect(text).not.toContain('这张图不可信');
+    expect(text).not.toContain('渲染失败');
+  });
+
   it('key blocks are found by registry name within radius', () => {
     const bot = stubBot({
       blockAt: ({ x, y, z }: { x: number; y: number; z: number }) => {
