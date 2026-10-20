@@ -1,4 +1,5 @@
 import * as skills from '../library/skills.js';
+import * as mc from '../data/mcdata.js';
 import * as world from '../library/world.js';
 import { enterNether } from '../library/nether_portal.js';
 import { markDiscarded } from '../auto_pickup.js';
@@ -296,14 +297,34 @@ export const actionsList: AgentCommand[] = [
             // 前后背包对账 + 实际移动距离，让它不用猜。
             const before: number = world.getInventoryCounts(agent.bot)[type] ?? 0;
             const start = agent.bot.entity.position.clone();
+            // **按"掉落物"记账，不按"方块名"记账**（真机 2026-10-21 overnight_b：
+            // 人站在 200+ 块 coal_ore 中间，三次 collectBlocks 都报「背包 0 → 0，没变化」——
+            // 因为煤矿掉的是 `coal`，旧代码数的却是 `coal_ore`。同样的错会发生在所有矿石上。）
+            const dropNames = mc.getBlockDropNames(type);
+            const countDrops = (): number =>
+                dropNames.reduce((sum: number, name: string) => sum + Number(world.getInventoryCounts(agent.bot)[name] ?? 0), 0);
+            const bagTotal = (): number =>
+                Object.values(world.getInventoryCounts(agent.bot)).reduce((sum: number, value) => sum + Number(value ?? 0), 0);
+            const dropsBefore = countDrops();
+            const bagBefore = bagTotal();
+            const blockBefore = before;
             await skills.collectBlock(agent.bot, type, num);
             const after: number = world.getInventoryCounts(agent.bot)[type] ?? 0;
             const moved = Math.round(start.distanceTo(agent.bot.entity.position) * 10) / 10;
+            const dropGain = countDrops() - dropsBefore;
+            const bagGain = bagTotal() - bagBefore;
             skills.log(
                 agent.bot,
-                after > before
-                    ? `采集完成：${type} 背包 ${before} → ${after}（+${after - before}），移动 ${moved} 格。`
-                    : `采集结束：${type} 数量没变（仍是 ${after}）。移动 ${moved} 格——没挖到，可能目标太远或不可及。`,
+                dropGain > 0
+                    ? `采集完成：${type}（掉落 ${dropNames.join('/')}）背包 ${dropsBefore} → ${dropsBefore + dropGain}（+${dropGain}），移动 ${moved} 格。`
+                    : `采集结束：${type}（掉落 ${dropNames.join('/')}）数量没变。移动 ${moved} 格——没挖到，可能目标太远或不可及。`,
+            );
+            // **逐目标证据**：请求数 / 掉落物增量 / **全背包**总增量 / 方块名计数 / 位移。
+            // 回执层靠这行区分 (a) 根本没开始挖、(b) 方块已不在、(c) 记账口径错，
+            // 而不是只写一句"没变化"。
+            skills.log(
+                agent.bot,
+                `collect-evidence{requested=${num},dropNames=${dropNames.join('/')},dropGain=${dropGain},bagGain=${bagGain},blockNameCount=${blockBefore}→${after},moved=${moved}}`,
             );
         }, 6)
     },

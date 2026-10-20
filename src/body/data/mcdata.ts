@@ -539,6 +539,64 @@ export function getItemAnimalSource(itemName: string): string | undefined {
     return table[itemName];
 }
 
+/**
+ * **挖这个方块会掉什么物品**（真机 2026-10-21：`collectBlocks('coal_ore')` 用**方块名**
+ * 查背包，可煤矿掉的是 `coal` ⇒ 挖成功了也永远显示「背包 0 → 0，没变化」，
+ * 模型在 200+ 块煤矿中间反复说"没有采集到 coal_ore"）。
+ *
+ * 数据源：minecraft-data 的 `blocksByName[name].drops`（方块表里的掉落物品 id）。
+ * 读不到就退回最常见的矿石映射表；再不行就返回 [blockName]（有些方块掉自己）。
+ */
+export const BLOCK_DROP_FALLBACK: Record<string, string[]> = {
+    coal_ore: ['coal'],
+    deepslate_coal_ore: ['coal'],
+    iron_ore: ['raw_iron'],
+    deepslate_iron_ore: ['raw_iron'],
+    copper_ore: ['raw_copper'],
+    deepslate_copper_ore: ['raw_copper'],
+    gold_ore: ['raw_gold'],
+    deepslate_gold_ore: ['raw_gold'],
+    diamond_ore: ['diamond'],
+    deepslate_diamond_ore: ['diamond'],
+    emerald_ore: ['emerald'],
+    deepslate_emerald_ore: ['emerald'],
+    lapis_ore: ['lapis_lazuli'],
+    deepslate_lapis_ore: ['lapis_lazuli'],
+    redstone_ore: ['redstone'],
+    deepslate_redstone_ore: ['redstone'],
+    nether_quartz_ore: ['quartz'],
+    nether_gold_ore: ['gold_nugget'],
+    stone: ['cobblestone'],
+    deepslate: ['cobblestone'],
+    grass_block: ['dirt'],
+    tall_grass: ['wheat_seeds'],
+    gravel: ['gravel', 'flint'],
+    oak_leaves: ['oak_sapling', 'stick', 'apple', 'oak_leaves'],
+};
+
+export function getBlockDropNames(blockName: string): string[] {
+    const names = new Set<string>();
+    try {
+        const block: any = mcdata?.blocksByName?.[blockName];
+        const drops: unknown = block?.drops;
+        if (Array.isArray(drops)) {
+            for (const entry of drops as any[]) {
+                const drop = entry?.drop ?? entry;
+                const id = typeof drop === 'number' ? drop : drop?.id;
+                const name = id != null ? getItemName(id) : null;
+                if (name != null) names.add(name);
+            }
+        }
+    } catch {
+        // 读不到方块数据就走下面的兜底。
+    }
+    if (names.size === 0) {
+        for (const fallback of BLOCK_DROP_FALLBACK[blockName] ?? []) names.add(fallback);
+    }
+    if (names.size === 0) names.add(blockName);
+    return [...names];
+}
+
 export function getBlockTool(blockName: string): string | null {
     const block: any = mcdata.blocksByName[blockName];
     if (!block || !block.harvestTools) {

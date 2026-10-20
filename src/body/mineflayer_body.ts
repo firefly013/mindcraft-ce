@@ -50,9 +50,14 @@ import type { EmergencyIntent, EmergencyResult, ThreatEntity } from './safety/em
 import {
     closeStaleWindow,
     consume,
+    digWithTimeout,
     forceExitWater,
+    placeBlock,
+    stepIntoCell,
     stopPvp,
 } from './library/skills.js';
+import { formatShelterReceipt, planShelter } from './safety/shelter.js';
+import type { ShelterPlan } from './safety/shelter.js';
 import { headInWater } from './safety/water_safety.js';
 import { movementsFor } from './safety/movements.js';
 import {
@@ -2622,6 +2627,233 @@ export class MineflayerBody {
     private reflexRunning = false;
 
     /**
+     * 天黑庇护所辅助（Lead 2026-10-21：两小时两次满盘重置，一切改进都被这一件事抹掉）。
+     * 状态：是否在跑、上次尝试时间、本晚已躲几次（每天天亮重置）。
+     */
+    private shelterRunning = false;
+    private shelterLastAt = 0;
+    private shelterCountTonight = 0;
+    private shelterNightKey = -1;
+
+    // ===== 天黑庇护所辅助（assist，不是 gate） =====
+
+    /** 头顶几格内有实心方块 = "有遮蔽"。读不到返回 null（辅助据此什么都不做）。 */
+    private shelterHasRoof(): boolean | null {
+        try {
+            const bot = this.bot as any;
+            const p = bot?.entity?.position;
+            if (p == null) return null;
+            for (let dy = 2; dy <= 6; dy++) {
+                const block = bot.blockAt?.(new Vec3(Math.floor(p.x), Math.floor(p.y) + dy, Math.floor(p.z)));
+                if (block == null) return null;
+                if (block.name !== 'air' && block.name !== 'cave_air' && block.name !== 'void_air') return true;
+            }
+            return false;
+        } catch {
+            return null;
+        }
+    }
+
+    /** 附近有没有火把类光源（读不到 = null）。 */
+    private shelterHasLight(): boolean | null {
+        try {
+            const bot = this.bot as any;
+            const p = bot?.entity?.position;
+            if (p == null) return null;
+            let sawBlock = false;
+            for (let dx = -6; dx <= 6; dx += 2) {
+                for (let dy = -2; dy <= 3; dy += 1) {
+                    for (let dz = -6; dz <= 6; dz += 2) {
+                        const block = bot.blockAt?.(new Vec3(Math.floor(p.x) + dx, Math.floor(p.y) + dy, Math.floor(p.z) + dz));
+                        if (block == null) continue;
+                        sawBlock = true;
+                        const name = String(block.name ?? '');
+                        if (name.includes('torch') || name === 'lantern' || name === 'glowstone' || name === 'jack_o_lantern') {
+                            return true;
+                        }
+                    }
+                }
+            }
+            return sawBlock ? false : null;
+        } catch {
+            return null;
+        }
+    }
+
+    /** 背包里可放置的方块**数量**（封口用；读不到就 0 = 不封）。 */
+    private shelterPlaceableCount(): number {
+        try {
+            const bot = this.bot as any;
+            const items = (bot?.inventory?.items?.() ?? []) as Array<{ name?: string; count?: number }>;
+            let total = 0;
+            for (const item of items) {
+                const name = String(item?.name ?? '');
+                if (name === '' || name.includes('torch') || name.endsWith('_bucket')) continue;
+                if (bot?.registry?.blocksByName?.[name] == null) continue;
+                total += Number(item?.count ?? 0);
+            }
+            return total;
+        } catch {
+            return 0;
+        }
+    }
+
+    private shelterFirstPlaceableName(): string | null {
+        try {
+            const bot = this.bot as any;
+            const items = (bot?.inventory?.items?.() ?? []) as Array<{ name?: string; count?: number }>;
+            for (const item of items) {
+                const name = String(item?.name ?? '');
+                if (name === '' || name.includes('torch') || name.endsWith('_bucket')) continue;
+                if (bot?.registry?.blocksByName?.[name] == null) continue;
+                return name;
+            }
+            return null;
+        } catch {
+            return null;
+        }
+    }
+
+    private shelterHasTorch(): boolean {
+        try {
+            const items = ((this.bot as any)?.inventory?.items?.() ?? []) as Array<{ name?: string }>;
+            return items.some((item) => ['torch', 'soul_torch'].includes(String(item?.name ?? '')));
+        } catch {
+            return false;
+        }
+    }
+
+    /** 在脚边插一支火把（找一堵邻墙当依附）。 */
+    private async placeShelterTorch(): Promise<boolean> {
+        const bot = this.bot as any;
+        try {
+            const items = (bot?.inventory?.items?.() ?? []) as Array<{ name?: string }>;
+            const torch = items.find((item) => ['torch', 'soul_torch'].includes(String(item?.name ?? '')));
+            if (torch == null) return false;
+            await bot.equip(torch, 'hand');
+            const p = bot.entity.position;
+            const base = new Vec3(Math.floor(p.x), Math.floor(p.y), Math.floor(p.z));
+            for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]] as Array<[number, number]>) {
+                const ref = bot.blockAt(base.offset(dx, 0, dz));
+                if (ref == null || ref.boundingBox !== 'block') continue;
+                try {
+                    await bot.placeBlock(ref, new Vec3(-dx, 0, -dz));
+                    return true;
+                } catch {
+                    continue;
+                }
+            }
+            return false;
+        } catch {
+            return false;
+        }
+    }
+
+    /** 挖 1×2 侧洞、走进去、封住入口、放火把（有界；模型/Stop/保命可随时抢身体）。 */
+    private async performShelter(plan: ShelterPlan): Promise<void> {
+        const bot = this.bot as any;
+        let sealed = false;
+        let lit = false;
+        let position: { x: number; y: number; z: number } = { x: 0, y: 0, z: 0 };
+        try {
+            const p = bot.entity.position;
+            position = p;
+            const base = new Vec3(Math.floor(p.x), Math.floor(p.y), Math.floor(p.z));
+            if (plan.action === 'light-only') {
+                lit = await this.placeShelterTorch();
+            } else {
+                for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]] as Array<[number, number]>) {
+                    if (bot.interrupt_code != null) break;
+                    const front = base.offset(dx, 0, dz);
+                    const wall = bot.blockAt(front);
+                    if (wall == null || wall.boundingBox !== 'block') continue;
+                    // 洞要能站人：先把目标格头顶那格挖开。
+                    const head = bot.blockAt(front.offset(0, 1, 0));
+                    if (head != null && head.boundingBox === 'block') {
+                        await digWithTimeout(bot, head, `shelter-head@(${front.x},${front.y + 1},${front.z})`);
+                    }
+                    const dug = await digWithTimeout(bot, wall, `shelter@(${front.x},${front.y},${front.z})`);
+                    if (!dug) continue;
+                    const step = await stepIntoCell(bot, { x: front.x, y: front.y, z: front.z });
+                    if (!step.moved) continue;
+                    // 封口：至少留 2 块材料（绝不把自己砌死）
+                    if (this.shelterPlaceableCount() >= 2) {
+                        const material = this.shelterFirstPlaceableName();
+                        if (material != null) {
+                            sealed = await placeBlock(bot, material, base.x, base.y, base.z, 'bottom');
+                        }
+                    }
+                    lit = await this.placeShelterTorch();
+                    position = bot.entity.position;
+                    break;
+                }
+            }
+        } catch {
+            // 辅助失败静默：它不能比它想防的危险更危险。
+        }
+        const timeOfDay = typeof bot?.time?.timeOfDay === 'number' ? bot.time.timeOfDay : null;
+        const ticksToDawn =
+            timeOfDay == null ? 0 : timeOfDay >= 23000 ? 24_000 - timeOfDay : Math.max(0, 1_000 - timeOfDay);
+        try {
+            this.notify('reflex.done', KIND.WORLD, LEVEL.STATE, {
+                reflex: 'shelter',
+                outcome: sealed || lit ? 'ok' : 'partial',
+                detail: formatShelterReceipt({
+                    position,
+                    action: plan.action === 'shelter' ? 'shelter' : 'light-only',
+                    health: typeof bot.health === 'number' ? bot.health : null,
+                    ticksToDawn,
+                    sealed,
+                    lit,
+                }),
+            });
+        } catch {
+            // 回执失败不影响已做/已放弃的决定。
+        }
+    }
+
+    /** 每 tick 调一次（非阻塞）：天快黑/已黑且不安全 ⇒ 主动躲。 */
+    perhapsNightShelter(): void {
+        try {
+            if (this.shelterRunning) return;
+            if (this.reflexRunning === true) return;
+            if (this.reflexAbortRequested === true) return;
+            if (safeguards.isSuppressed(Date.now())) return;
+            const now = Date.now();
+            if (now - this.shelterLastAt < 8_000) return;
+            const bot = this.bot as any;
+            const p = bot?.entity?.position;
+            if (p == null) return;
+            if (bot.interrupt_code != null) return;
+            const timeOfDay = typeof bot?.time?.timeOfDay === 'number' ? bot.time.timeOfDay : null;
+            const dayKey = typeof bot?.time?.day === 'number' ? bot.time.day : -1;
+            if (dayKey !== this.shelterNightKey) {
+                this.shelterNightKey = dayKey;
+                this.shelterCountTonight = 0;
+            }
+            if (this.shelterCountTonight >= 2) return;
+            const plan = planShelter({
+                timeOfDay,
+                hasRoof: this.shelterHasRoof(),
+                hasLight: this.shelterHasLight(),
+                health: typeof bot.health === 'number' ? bot.health : null,
+                hasTorch: this.shelterHasTorch(),
+                placeableBlocks: this.shelterPlaceableCount(),
+            });
+            if (plan.action === 'none') return;
+            this.shelterRunning = true;
+            this.shelterLastAt = now;
+            this.shelterCountTonight += 1;
+            void this.performShelter(plan).finally(() => {
+                this.shelterRunning = false;
+            });
+        } catch {
+            // 同上：辅助出错必须静默。
+        }
+    }
+
+
+    /**
      * 一条 L5 事件 = **事件 + 身体侧的处理**。
      *
      * 顺序不能反：**事件先推出去**（大脑据此立刻打断在途推理、锁住动作通道），
@@ -3328,6 +3560,8 @@ export class MineflayerBody {
         this.maybeCloseStaleScreen();
         // 深水强制出水（见 maybeForceExitWater）。同样是后台行为，不能 await。
         this.maybeForceExitWater();
+        // 天黑/快黑且不安全 ⇒ 主动躲（assist，非阻塞；有界、可让位）。
+        this.perhapsNightShelter();
         this.pollEdges();
     }
 
