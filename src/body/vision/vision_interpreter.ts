@@ -1,5 +1,6 @@
 import { Vec3 } from 'vec3';
 import { Camera } from "./camera.js";
+import { frameRecordOf, type FrameView } from './frame_record.js';
 import { measureFrameTrust, type FrameTrust } from './frame_trust.js';
 import fs from 'fs';
 
@@ -10,6 +11,14 @@ export class VisionInterpreter {
     camera: Camera | undefined;
     /** 最近一次拍摄，供 Live State 快照引用（文件名+拍摄时间）。 */
     lastScreenshot: { file: string; takenAt: number } | null = null;
+    /**
+     * **最近一帧自己的朝向**（和 `lastScreenshot` 同一次拍摄时记录的）。
+     *
+     * 回执里的"视线"必须描述**这张图**，不能描述"现在身体朝哪"——两者可能差好几秒，
+     * 真机就此出现过"文字说朝天空、图里是水平隧道"，bot 于是正确地不信图、丢掉好画面。
+     * 为 null = 这一帧没记录朝向 ⇒ 回执**什么都不说**（绝不拿当前朝向顶替）。
+     */
+    lastFrameView: FrameView | null = null;
     /**
      * 最近一张图**能不能当"世界的样子"用**（版本不一致时渲染器会把方块画成「?」，
      * 模型会读成"掉进虚空"）。为 null = 还没拍过/没测。**这张图照发，但必须带上这句怀疑**。
@@ -39,8 +48,20 @@ export class VisionInterpreter {
                 await new Promise<void>((r) => setTimeout(r, 200));
             }
             if ((camera as { worldView?: unknown }).worldView == null) return null;
-            const filename = await camera.capture();
-            this.lastScreenshot = { file: filename, takenAt: Date.now() };
+            const shot = await camera.capture();
+            // **文件名 / 时间戳 / 朝向 来自同一次拍摄**，一起记（校验不过 ⇒ 整条作废，
+            // 回执就只说"没有可用截图"——宁可不描述，也不描述错的那一帧）。
+            const record = frameRecordOf(shot, Date.now());
+            if (record == null) {
+                this.lastScreenshot = null;
+                this.lastFrameView = null;
+                this.lastFrameTrust = null;
+                return null;
+            }
+            const filename = record.file;
+            this.lastScreenshot = { file: record.file, takenAt: record.takenAt };
+            // 回执里的视线行**只认这个**，不认"现在身体朝哪"。
+            this.lastFrameView = record.view;
             // **拍完立刻判定这张图可不可信**（版本/状态表可能对不上）。测不出来也不影响发图：
             // 宁可让模型知道"图不可信"，也不能让它把「?」当成世界的样子。
             try {

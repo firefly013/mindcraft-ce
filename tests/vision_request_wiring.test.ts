@@ -54,6 +54,7 @@ async function requestTextFor(pitchDeg: number, trust: { trusted: boolean; reaso
     vision: {
       lastScreenshot: { file: 'screenshot_live.jpg', takenAt: Date.now() },
       lastFrameTrust: trust,
+      lastFrameView: { pitch: (pitchDeg * Math.PI) / 180, yaw: 0 },
     },
   });
   const tail = liveTailFromText(renderLiveState(state));
@@ -108,10 +109,13 @@ describe('视线行：在**真实请求**里能出现，也能正确地不出现
 describe('读不到 pitch：请求里必须能看到，不许静默', () => {
   it('pitch 为 null ⇒ 请求里出现"读不到"（和平视的沉默区分开）', async () => {
     const bot = stubBot(0, 0);
-    bot.entity.pitch = null; // 模拟读数不可用
     const state = sampleLiveState({
       bot,
-      vision: { lastScreenshot: { file: 'screenshot_live.jpg', takenAt: Date.now() } },
+      vision: {
+        lastScreenshot: { file: 'screenshot_live.jpg', takenAt: Date.now() },
+        // **这一帧的朝向读不到**（不是"身体读不到"）
+        lastFrameView: { pitch: null, yaw: 0 },
+      },
     });
     const tail = liveTailFromText(renderLiveState(state));
     const hook = liveTailHook(
@@ -124,5 +128,47 @@ describe('读不到 pitch：请求里必须能看到，不许静默', () => {
     const parts = out!.messages.at(-1)!.content as Array<{ type: string; text?: string }>;
     const text = parts.filter((x) => x.type === 'text').map((x) => x.text ?? '').join('\n');
     expect(text).toContain('视线：**读不到**');
+  });
+});
+
+describe('同一帧同源：朝向、文件名、时间戳必须来自**同一次拍摄**', () => {
+  it('一次拍摄 = 一条自洽记录：文件名/时间戳/朝向一起进，一起出', async () => {
+    const { frameRecordOf } = await import('../src/body/vision/frame_record.js');
+    const record = frameRecordOf(
+      { file: 'captured_sky.jpg', view: { pitch: -88 * (Math.PI / 180), yaw: 0 } },
+      1_234,
+    );
+    expect(record).toEqual({
+      file: 'captured_sky.jpg',
+      takenAt: 1_234,
+      view: { yaw: 0, pitch: -88 * (Math.PI / 180) },
+    });
+  });
+
+  it('拍摄记录读不到朝向 ⇒ 记 `null`（回执**什么都不说**，不拿当前姿态顶替）', async () => {
+    const { frameRecordOf } = await import('../src/body/vision/frame_record.js');
+    // 关键：`null` 不能变成 0（`Number(null) === 0` 会把"没读到"读成"平视"）
+    const record = frameRecordOf({ file: 'f.jpg', view: { pitch: null, yaw: undefined } }, 7);
+    expect(record?.view).toEqual({ yaw: null, pitch: null });
+  });
+
+  it('形状不对（没有文件名/没有时间戳）⇒ 整条作废', async () => {
+    const { frameRecordOf } = await import('../src/body/vision/frame_record.js');
+    expect(frameRecordOf({ view: { pitch: 0, yaw: 0 } }, 1)).toBeNull();
+    expect(frameRecordOf({ file: '' }, 1)).toBeNull();
+    expect(frameRecordOf({ file: 'f.jpg' }, Number.NaN)).toBeNull();
+    expect(frameRecordOf(null, 1)).toBeNull();
+  });
+
+  it('渲染出来的视线行跟着**这一帧**走（同一份记录），不跟着 position 走', async () => {
+    const state = sampleLiveState({
+      bot: stubBot(0, 0), // 当前平视
+      vision: {
+        lastScreenshot: { file: 'f.jpg', takenAt: Date.now() },
+        lastFrameView: { pitch: -88 * (Math.PI / 180), yaw: 0 }, // 这一帧朝天空
+      },
+    });
+    const text = renderLiveState(state);
+    expect(text).toContain('视线：**朝天空**');
   });
 });

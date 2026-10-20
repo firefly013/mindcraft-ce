@@ -583,7 +583,7 @@ function sampleBlocks(
 function screenshotOf(vision: unknown): LiveScreenshot {
   try {
     const v = vision as
-      | { lastScreenshot?: unknown; lastFrameTrust?: unknown }
+      | { lastScreenshot?: unknown; lastFrameTrust?: unknown; lastFrameView?: unknown }
       | null
       | undefined;
     const last = v?.lastScreenshot as { file?: unknown; takenAt?: unknown } | null | undefined;
@@ -602,7 +602,21 @@ function screenshotOf(vision: unknown): LiveScreenshot {
               reason: typeof trust.reason === 'string' ? trust.reason : '',
             }
           : null;
-      return { ref: { file: last.file, takenAt: last.takenAt }, unavailableReason: null, trust: trustInfo };
+      // **这一帧自己的朝向**（拍摄时记录的）—— 不给"当前朝向"。
+      const view = v?.lastFrameView as { yaw?: unknown; pitch?: unknown } | null | undefined;
+      const viewInfo =
+        view != null && typeof view === 'object'
+          ? {
+              yaw: typeof view.yaw === 'number' && Number.isFinite(view.yaw) ? view.yaw : null,
+              pitch: typeof view.pitch === 'number' && Number.isFinite(view.pitch) ? view.pitch : null,
+            }
+          : null;
+      return {
+        ref: { file: last.file, takenAt: last.takenAt },
+        unavailableReason: null,
+        trust: trustInfo,
+        view: viewInfo,
+      };
     }
     if (v == null) return { ref: null, unavailableReason: 'vision disabled' };
     return { ref: null, unavailableReason: 'no screenshot taken yet' };

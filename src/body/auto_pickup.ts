@@ -411,3 +411,25 @@ export function shouldBypassThreatGateForPickup(input: {
     if (typeof hurt === 'number' && Number.isFinite(hurt) && hurt > 0 && input.now - hurt <= guard) return false;
     return true;
 }
+/**
+ * **回执自洽检查**（Lead 2026-10-21 真机 overnight_a：「autoPickup 判定 skipped（不去捡）
+ * 却仍 preempted:true，反复打断 stairUp 长动作」）。
+ *
+ * 语义：`skipped` = 这次**没有发起拾取**（所以不可能抢了谁的身体）；
+ *       `preempted` = 拾取**被**模型动作/保命/Stop 抢了（只可能出现在已经尝试过的路径）。
+ * 两者同时为真 ⇒ 同一份回执里两个互相矛盾的断言（和"合成成功+实测没产出"是同一类病）。
+ *
+ * 返回 null = 自洽；返回字符串 = 违反的不变量（给调用方/测试用，不面向模型）。
+ */
+export function pickupReceiptViolation(receipt: {
+    outcome?: unknown;
+    preempted?: unknown;
+}): string | null {
+    const outcome = String(receipt?.outcome ?? '');
+    const preempted = receipt?.preempted === true;
+    if (outcome === 'skipped' && preempted) {
+        return 'skipped 与 preempted:true 同时出现：没发起拾取就不可能抢占身体；要么真抢了就说预占，要么跳过就静默。';
+    }
+    return null;
+}
+

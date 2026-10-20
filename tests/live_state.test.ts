@@ -581,19 +581,68 @@ describe('视线方向：先给上下文，再谈可不可信（真机 overnight
     }
   });
 
-  it('渲染进截图块：紧跟 Screenshot 行（上下文在怀疑之前）', () => {
+  it('渲染进截图块：紧跟 Screenshot 行（上下文在怀疑之前；朝向来自**这一帧**）', () => {
     const bot: any = stubBot();
-    // 真机那一幕：pitch ≈ −88°（几乎垂直朝上）
-    bot.entity.pitch = (-88 * Math.PI) / 180;
-    bot.entity.yaw = 0;
     const s = sampleLiveState({
       bot,
-      vision: { lastScreenshot: { file: 'screenshot_sky.jpg', takenAt: Date.now() } },
+      vision: {
+        lastScreenshot: { file: 'screenshot_sky.jpg', takenAt: Date.now() },
+        lastFrameView: { pitch: (-88 * Math.PI) / 180, yaw: 0 },
+      },
     });
     const text = renderLiveState(s);
     const lines = text.split('\n');
     const idx = lines.findIndex((l) => l.startsWith('Screenshot:'));
     expect(idx).toBeGreaterThanOrEqual(0);
     expect(lines[idx + 1]).toContain('朝天空');
+  });
+});
+
+describe('视线行必须描述**这一帧**，不是"现在身体朝哪"（真机：文字说朝天空、图里是水平隧道）', () => {
+  const frame = (pitchDeg: number, yawDeg = 0) => ({
+    pitch: (pitchDeg * Math.PI) / 180,
+    yaw: (yawDeg * Math.PI) / 180,
+  });
+
+  it('**矛盾回归**：身体现在朝天空，但这一帧是平视 ⇒ 不许说"朝天空"', () => {
+    const bot: any = stubBot();
+    bot.entity.pitch = (-88 * Math.PI) / 180; // 现在的姿态（会骗人的那个）
+    bot.entity.yaw = 0;
+    const s = sampleLiveState({
+      bot,
+      vision: {
+        lastScreenshot: { file: 'screenshot_tunnel.jpg', takenAt: Date.now() },
+        lastFrameView: frame(-2), // 这一帧其实是水平隧道
+      },
+    });
+    const text = renderLiveState(s);
+    expect(text).toContain('Screenshot: screenshot_tunnel.jpg');
+    expect(text).not.toContain('朝天空');
+    expect(text).not.toContain('视线：');
+  });
+
+  it('反过来也只看帧：身体平视、这一帧朝天空 ⇒ 说"朝天空"', () => {
+    const bot: any = stubBot();
+    bot.entity.pitch = 0;
+    const s = sampleLiveState({
+      bot,
+      vision: {
+        lastScreenshot: { file: 'screenshot_sky.jpg', takenAt: Date.now() },
+        lastFrameView: frame(-88),
+      },
+    });
+    expect(renderLiveState(s)).toContain('朝天空');
+  });
+
+  it('这一帧没记朝向 ⇒ **什么都不说**（绝不拿当前姿态顶替）', () => {
+    const bot: any = stubBot();
+    bot.entity.pitch = (-88 * Math.PI) / 180; // 当前姿态很"吓人"，但不许用
+    const s = sampleLiveState({
+      bot,
+      vision: { lastScreenshot: { file: 'screenshot_x.jpg', takenAt: Date.now() } },
+    });
+    const text = renderLiveState(s);
+    expect(text).toContain('Screenshot: screenshot_x.jpg');
+    expect(text).not.toContain('视线：');
   });
 });

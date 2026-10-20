@@ -57,6 +57,7 @@ import {
     stopPvp,
 } from './library/skills.js';
 import { formatShelterReceipt, planShelter } from './safety/shelter.js';
+import { formatSuffocationReceipt, planSuffocationEscape } from './safety/suffocation.js';
 import type { ShelterPlan } from './safety/shelter.js';
 import { headInWater } from './safety/water_safety.js';
 import { movementsFor } from './safety/movements.js';
@@ -2634,6 +2635,90 @@ export class MineflayerBody {
     private shelterLastAt = 0;
     private shelterCountTonight = 0;
     private shelterNightKey = -1;
+    /** 窒息自救：是否在跑 / 上次尝试时间 / 健康变化追踪。 */
+    private suffocationRunning = false;
+    private suffocationLastAt = 0;
+    private lastHealthSeen: number | null = null;
+    private lastHealthDropAt = 0;
+
+    // ===== 窒息自救反射（与怪物无关：被方块埋住时逃跑没用，正确动作是挖开那一格） =====
+
+    /**
+     * 每 tick 调一次（非阻塞）。触发条件**便宜且无歧义**：
+     * 血在掉（最近 3 秒内）**且** 脚格或头格是实心 ⇒ 就地挖开那一格。
+     * 真机 2026-10-21：`pillarUp(14)` 把方块放进身体里，血 19→0 憋死、损失 82 件；
+     * `escape` 只找落点/看怪，看不见"身体里有方块"。
+     */
+    maybeSuffocationEscape(): void {
+        try {
+            const bot = this.bot as any;
+            const health = typeof bot?.health === 'number' ? bot.health : null;
+            const now = Date.now();
+            if (health != null) {
+                if (this.lastHealthSeen != null && health < this.lastHealthSeen) this.lastHealthDropAt = now;
+                this.lastHealthSeen = health;
+            }
+            const healthDropped = now - this.lastHealthDropAt <= 3_000;
+            if (!healthDropped) return;
+            if (this.suffocationRunning) return;
+            if (this.reflexRunning === true) return;
+            if (now - this.suffocationLastAt < 4_000) return;
+            if (bot?.interrupt_code != null) return;
+            const p = bot?.entity?.position;
+            if (p == null) return;
+            const cell = (dy: number): { name: string | null } => {
+                try {
+                    const block = bot.blockAt?.(new Vec3(Math.floor(p.x), Math.floor(p.y) + dy, Math.floor(p.z)));
+                    return { name: block == null ? null : String(block.name ?? '') };
+                } catch {
+                    return { name: null };
+                }
+            };
+            const feet = cell(0);
+            const head = cell(1);
+            const plan = planSuffocationEscape({
+                healthDropped,
+                feetBlock: feet.name,
+                headBlock: head.name,
+            });
+            if (plan.action === 'none') return;
+            const targetDy = plan.action === 'break-feet' ? 0 : 1;
+            const target = new Vec3(Math.floor(p.x), Math.floor(p.y) + targetDy, Math.floor(p.z));
+            const blockName = (plan.action === 'break-feet' ? feet.name : head.name) ?? 'block';
+            this.suffocationRunning = true;
+            this.suffocationLastAt = now;
+            void (async (): Promise<void> => {
+                let broke = false;
+                try {
+                    const block = bot.blockAt?.(target);
+                    if (block != null) {
+                        broke = await digWithTimeout(bot, block, `suffocation@(${target.x},${target.y},${target.z})`);
+                    }
+                } catch {
+                    broke = false;
+                } finally {
+                    this.suffocationRunning = false;
+                }
+                try {
+                    this.notify('reflex.done', KIND.WORLD, LEVEL.STATE, {
+                        reflex: 'suffocation',
+                        outcome: broke ? 'ok' : 'failed',
+                        detail: formatSuffocationReceipt({
+                            position: { x: Math.floor(p.x), y: Math.floor(p.y), z: Math.floor(p.z) },
+                            which: plan.action === 'break-feet' ? '脚' : '头',
+                            blockName,
+                            health: typeof bot?.health === 'number' ? bot.health : null,
+                            broke,
+                        }),
+                    });
+                } catch {
+                    // 回执失败不影响挖开动作。
+                }
+            })();
+        } catch {
+            // 自救反射出错必须静默：它不能比窒息本身更危险。
+        }
+    }
 
     // ===== 天黑庇护所辅助（assist，不是 gate） =====
 
@@ -3562,6 +3647,8 @@ export class MineflayerBody {
         this.maybeForceExitWater();
         // 天黑/快黑且不安全 ⇒ 主动躲（assist，非阻塞；有界、可让位）。
         this.perhapsNightShelter();
+        // 窒息自救：血在掉 + 脚/头那格实心 ⇒ 就地挖开（与怪物无关，优先级高于一切）。
+        this.maybeSuffocationEscape();
         this.pollEdges();
     }
 
@@ -4210,7 +4297,8 @@ export class MineflayerBody {
                         ms: 0,
                         failures: this.pickupFailures,
                         backoffMs: 0,
-                        preempted: true,
+                        // skipped = no attempt, so it cannot have preempted anything (Lead 2026-10-21: skipped+preempted broke stairUp).
+                        preempted: false,
                     },
                     { completes: 'pickup' },
                 );

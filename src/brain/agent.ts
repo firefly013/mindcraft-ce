@@ -850,6 +850,11 @@ export class Agent {
     private async bodyLiveTail(): Promise<string> {
         const body = this.body;
         if (body == null) return liveTailFromText('(身体未连接)');
+        // **先把这一轮要发的那张图拍下来，再采世界快照**：快照里的"这一帧"（文件名、朝向、
+        // 可信度）必须就是同一条消息里携带的那张图，否则会落后一帧 —— 真机由此出现过
+        // "快照说朝天空、图里是水平隧道"，bot 于是正确地不信图、把好画面丢掉。
+        // 拍不到也没关系：`captureScreenshot` 自己吞错，快照里就只说"没有可用截图"。
+        await this.captureScreenshot();
         let state: unknown;
         try {
             state = await body.sample();
@@ -947,14 +952,31 @@ export class Agent {
       };
     }
 
+    /**
+     * 同一轮里**复用同一张图**的窗口（毫秒）。
+     *
+     * 一轮请求里有两条路会要图：世界快照（`liveTail`，需要图里的朝向/可信度来描述"这一帧"）
+     * 和图片本身（`liveImage`）。如果它们各拍一次，快照描述的是 A 帧、发出去的是 B 帧
+     * —— 真机就出现了"文字说朝天空、图里是水平隧道"，bot 于是正确地不信图、丢掉好画面。
+     * 所以短窗口内复用同一张：**描述的就是发出去的那一张**。
+     */
+    private static readonly FRAME_REUSE_MS = 1500;
+    private frameCache: { base64: string; at: number } | null = null;
+
     private async captureScreenshot(): Promise<string | null> {
         const body = this.body;
         if (body == null) return null;
         // 能力表说没有截图能力就别问了——每个回合都白跑一次协议往返，
         // 而回执必然是 null。`allow_vision=false` 的那类部署正好走这条。
         if (this.caps != null && !this.caps.observations.includes('screenshot')) return null;
+        // **同一轮第二次要图 ⇒ 给同一张**（快照与图片必须指同一帧）。
+        if (this.frameCache != null && Date.now() - this.frameCache.at <= Agent.FRAME_REUSE_MS) {
+            return this.frameCache.base64;
+        }
         try {
-            return await body.image();
+            const base64 = await body.image();
+            if (base64 != null) this.frameCache = { base64, at: Date.now() };
+            return base64;
         } catch (err: unknown) {
             this.log.with('vision').warn({ phase: 'capture-failed', err: String(err) });
             return null;

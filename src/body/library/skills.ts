@@ -2,6 +2,7 @@ import * as mc from "../data/mcdata.js";
 import * as world from "./world.js";
 import pf from 'mineflayer-pathfinder';
 import Vec3 from 'vec3';
+import { cellIntersectsBody, standingRoomOk } from '../safety/suffocation.js';
 /**
  * ⚠️ **必须读共享单例，不许读根目录那份 `settings.ts`。**
  *
@@ -5315,9 +5316,23 @@ export async function pillarUp(bot: any, blocks: number = 1): Promise<boolean> {
         const rose = await waitFor(bot, () => Number(bot?.entity?.position?.y ?? 0) > startY + 0.4, 1200, 40);
         let placed = false;
         if (rose) {
+            // **放块前硬前置：方块绝不能放进自己身体里**（Lead 2026-10-21：pillarUp(14) 把自己埋住，
+            // 血 19→0 憋死、损失 82 件）。跳起来后必须已经离开脚下那一格，否则这一步不放。
+            if (cellIntersectsBody(bot?.entity?.position, { x: startX, y: Math.floor(startY), z: startZ }) !== false) {
+                log(bot, 'pillarUp 停止：脚下方块格 ' + startX + ',' + Math.floor(startY) + ',' + startZ + ' 仍与身体重叠（放进去会窒息），这一步不放。先跳离地面再试或改用 stairUp。');
+                bot.setControlState('jump', false);
+                return false;
+            }
             placed = await placeBlock(bot, material, startX, Math.floor(startY), startZ, 'bottom', true);
         }
         bot.setControlState('jump', false);
+        // 放完再验一次：万一位置抖动让方块落进身体，立刻挖掉它（**绝不把方块留在身体里继续垫**）。
+        const placedCell = { x: startX, y: Math.floor(startY), z: startZ };
+        if (placed && cellIntersectsBody(bot?.entity?.position, placedCell) === true) {
+            const rescued = await breakBlockAt(bot, placedCell.x, placedCell.y, placedCell.z);
+            log(bot, 'pillarUp 紧急自救：方块落进了身体里，' + (rescued ? '已立刻挖掉' : '**没能挖掉**——先 Stop 再 mineBlock') + '（位置 ' + placedCell.x + ',' + placedCell.y + ',' + placedCell.z + '）。');
+            return false;
+        }
         if (!placed) {
             log(bot, 'pillarUp 第 ' + (done + 1) + ' 格失败：没能把 ' + material + ' 垫到脚下。');
             return false;

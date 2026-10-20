@@ -123,6 +123,14 @@ export interface LiveScreenshot {
    * 可信时 `line` 为空（零噪音）。
    */
   trust?: { trusted: boolean; line: string; reason: string } | null;
+  /**
+   * **这一帧自己的朝向**（拍摄那一刻记录的，弧度）。
+   *
+   * 必须是"这一帧"的，不能是"现在身体朝哪"——真机事故：快照文字说"朝天空（pitch −88°）"、
+   * 图里却是水平隧道 ⇒ bot 正确地不信图、把一张好画面丢掉。`null`/缺失 ⇒ 回执**什么都不说**，
+   * 绝不拿当前朝向顶替。
+   */
+  view?: { yaw: number | null; pitch: number | null } | null;
 }
 
 export interface LiveMeta {
@@ -510,7 +518,14 @@ const SECTION_RENDERERS: Record<LiveSectionKey, (s: LiveState) => string[]> = {
       const lines = [`Screenshot: ${s.screenshot.ref.file} (taken ${Math.max(0, Math.round(age / 1000))}s ago)`];
       // **先说"这张图在拍什么"（上下文），再说"这张图可不可信"（怀疑）** —— 顺序是有意的：
       // 上下文明明可以把一张"全天空"的图解释清楚，先给怀疑会让模型把正常画面也当成坏的。
-      const view = describeViewDirection(s.position.pitch, s.position.yaw);
+      //
+      // **朝向只认这一帧自己的**（`screenshot.view`，拍摄时记录的）：绝不拿 `position.pitch`
+      // 顶替 —— 那是"现在身体朝哪"，和图可能差好几秒（真机：文字说朝天空、图里是水平隧道）。
+      // 没有这一帧的朝向 ⇒ **什么都不说**（宁可不说，也不说一个可能是假的朝向）。
+      const view =
+        s.screenshot.view != null
+          ? describeViewDirection(s.screenshot.view.pitch, s.screenshot.view.yaw)
+          : null;
       if (view != null) lines.push(view);
       const line = s.screenshot.trust?.line ?? '';
       if (line !== '') lines.push(line);

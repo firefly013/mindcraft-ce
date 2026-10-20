@@ -12,6 +12,7 @@ import { EventEmitter } from 'events';
 import worker_threads from 'worker_threads';
 
 import { remapChunkJson, remapBlockUpdateStateId } from './chunk_remap.js';
+import type { FrameView } from './frame_record.js';
 import { remapStateId, RENDERER_VERSION } from './state_remap.js';
 
 // prismarine-viewer 的 viewer 内部用的是**全局** THREE / Worker
@@ -25,6 +26,7 @@ import { remapStateId, RENDERER_VERSION } from './state_remap.js';
 (global as unknown as Record<string, unknown>).THREE = THREE;
 (global as unknown as Record<string, unknown>).Worker = worker_threads.Worker;
 
+// 朝向的类型在 `frame_record.ts`（纯逻辑，测试里不会把 `window` 带进来）。
 
 export class Camera extends EventEmitter {
     bot: any; // mineflayer 无类型，bot 统一 any
@@ -100,11 +102,22 @@ export class Camera extends EventEmitter {
         this.stateRemapInstalled = true;
     }
 
-    async capture(): Promise<string> {
+    /**
+     * 拍一张。
+     *
+     * **返回文件名 + 这一帧自己的朝向**：朝向在**渲染这一帧的那一行**读、
+     * 和 `setFirstPersonCamera` 用的是**同一次读数**，所以回执里说"这张图朝哪"
+     * 永远是**这一帧**的事实，不是"几秒后身体又转到哪了"（真机事故：
+     * 快照说"朝天空（pitch −88°）"、图里却是水平隧道 ⇒ bot 正确地不信图、丢掉好画面）。
+     */
+    async capture(): Promise<{ file: string; view: FrameView }> {
         const center = new Vec3(this.bot.entity.position.x, this.bot.entity.position.y+this.bot.entity.height, this.bot.entity.position.z);
         this.viewer.camera.position.set(center.x, center.y, center.z);
         await this.worldView.updatePosition(center);
-        this.viewer.setFirstPersonCamera(this.bot.entity.position, this.bot.entity.yaw, this.bot.entity.pitch);
+        // **这一帧的朝向**：就在喂给相机之前读一次，和下面 setFirstPersonCamera 同一个来源。
+        const yaw = Number(this.bot.entity.yaw);
+        const pitch = Number(this.bot.entity.pitch);
+        this.viewer.setFirstPersonCamera(this.bot.entity.position, yaw, pitch);
         this.viewer.update();
         this.renderer.render(this.viewer.scene, this.viewer.camera);
 
@@ -121,7 +134,11 @@ export class Camera extends EventEmitter {
         await this._ensureScreenshotDirectory();
         await fs.writeFile(`${this.fp}/${filename}.jpg`, buf);
         console.log('saved', filename);
-        return filename;
+        return {
+            file: filename,
+            // 读不到就记 null（回执会**什么都不说**，而不是拿当前朝向冒充这一帧）
+            view: { yaw: Number.isFinite(yaw) ? yaw : null, pitch: Number.isFinite(pitch) ? pitch : null },
+        };
     }
 
     async _ensureScreenshotDirectory(): Promise<void> {
