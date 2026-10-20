@@ -298,6 +298,11 @@ function makeBody(opts: { bot: any; events: any[] }): any {
   // 反射状态
   body.reflexQueue = [];
   body.reflexRunning = false;
+  // 逃生依赖的三个钩子：**中性默认值 = 修复前的生产行为**（不交还、不验证落点、不报进度），
+  // 这样这 10 条 End/虚空测试仍然只在测它们当初要测的东西。
+  body.hasVerifiedEscapeDestination = (): boolean => true;
+  body.escapeYieldVerdict = (): { yield: boolean; reason: string } | null => null;
+  body.reportEscapeProgress = (): void => {};
   body.reflexAbortRequested = false;
   // 直接调 rescue 时，等价于 drainReflexes 已经把这一棒记在名下（回执要用到）。
   body.currentReflexName = 'escape';

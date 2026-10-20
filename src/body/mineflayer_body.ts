@@ -1205,6 +1205,23 @@ export class MineflayerBody {
                 const name = String(meta?.name ?? '');
                 if (name === '') return;
                 this.containerDumpInbound.push(name);
+                // **合成窗口：内容包到达后 40ms 抓一次槽位快照**（材料进网格/产物取回都看这个）。
+                if (this.containerDumpLabel === 'craft' && /window_items|set_content|container_set_content/i.test(name)) {
+                    const snapshot = (): void => {
+                        try {
+                            const window = (this.bot as any)?.currentWindow;
+                            const slots: any[] = Array.isArray(window?.slots) ? window.slots : [];
+                            this.containerDumpSlots = slots
+                                .map((slot: any, index: number) => ({ slot: index, name: String(slot?.name ?? ''), count: Number(slot?.count ?? 0) }))
+                                .filter((entry) => entry.name !== '')
+                                .slice(0, 46);
+                        } catch {
+                            this.containerDumpSlots = null;
+                        }
+                    };
+                    const timer = setTimeout(snapshot, 40);
+                    (timer as { unref?: () => void }).unref?.();
+                }
                 // **开窗之后的头 12 个包按顺序单独留一份**（见 containerDumpAfterOpen 的注释：
                 // 这是判断"槽位包到没到"的唯一可靠证据，不能被 24 条上限吃掉）。
                 if (/open_window|open_screen/i.test(name)) {
@@ -1338,6 +1355,8 @@ export class MineflayerBody {
                 this.log.with('lifecycle').info({
                     event: 'craft-window-diagnosis',
                     recipe: this.containerDumpReason,
+                    // **槽位快照**：材料进了网格？产物槽里有没有东西？（读不到 = null，不猜）
+                    slots: this.containerDumpSlots,
                     outcome,
                     verdict,
                     openWindow: this.containerDumpSawOpen,
@@ -1403,6 +1422,8 @@ export class MineflayerBody {
     /** 这次转储是开容器还是合成窗口（合成走 bot.craft，不经过 openBlockUi）。 */
     private containerDumpLabel: 'container' | 'craft' = 'container';
     private containerDumpReason = '';
+    /** 合成窗口的**槽位实测快照**（craft 报 ok 但背包不变时，这是唯一能看穿"材料进网格、产物没取回"的仪器）。 */
+    private containerDumpSlots: Array<{ slot: number; name: string; count: number }> | null = null;
     /** 上一条容器结论是针对**哪种方块**的（不同容器类型是不同路径，不许互相短路）。 */
     private slottedContainerBlockedFor: string | null = null;
     private slottedContainerBlockedUntil = 0;
@@ -4469,6 +4490,11 @@ export class MineflayerBody {
                 },
                 // 模型用 !disableSafeguards 签了生死状 → 连溺水都不再上浮。
                 safeguardsOff: (): boolean => safeguards.isSuppressed(Date.now()),
+                // **逃生必须能"验证落点"和"及时交还身体"**（Lead 2026-10-20：
+                // escape 曾空转 30+ 秒、边掉血边把 bot 横移进怪堆、最后跑出 90 格）。
+                hasSafeDestination: (): boolean => this.hasVerifiedEscapeDestination(),
+                shouldYieldEscape: (): { yield: boolean; reason: string } | null => this.escapeYieldVerdict(),
+                reportProgress: (info): void => this.reportEscapeProgress(info),
                 // **逃跑必须有验证过的落点**：没有就在掉血时立刻交还身体（真机 2026-10-20：
                 // escape 空转 30+ 秒，一边掉血一边被"横移到实心落点"，最后跑出 90 格、连死三次）。
             }, {

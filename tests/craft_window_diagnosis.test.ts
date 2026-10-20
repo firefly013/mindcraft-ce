@@ -34,3 +34,18 @@ describe('craft 窗口取证', () => {
     expect(src).toContain("const hasOpen = inbound.some((n) => /open_window|open_screen/i.test(n));");
   });
 });
+
+describe('合成窗口槽位快照（Lead 2026-10-20：craft 报 ok 而背包不变）', () => {
+  it('合成窗口的内容包到达后抓槽位快照，并进 craft-window-diagnosis', () => {
+    const src = readFileSync(join(process.cwd(), 'src', 'body', 'mineflayer_body.ts'), 'utf8');
+    expect(src).toContain('private containerDumpSlots');
+    expect(src).toContain("this.containerDumpLabel === 'craft'");
+    expect(src).toContain('this.containerDumpSlots = slots');
+    expect(src).toContain('slots: this.containerDumpSlots,');
+  });
+
+  it('快照读不到时是 null（不猜），而不是空数组冒充"没有材料"', () => {
+    const src = readFileSync(join(process.cwd(), 'src', 'body', 'mineflayer_body.ts'), 'utf8');
+    expect(src).toContain('this.containerDumpSlots = null;');
+  });
+});
