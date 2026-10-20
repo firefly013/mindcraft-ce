@@ -23,8 +23,11 @@ import {
     craftingTableCall,
     edibleItemsFrom,
     firstLine,
+    foodDistributionLines,
+    foodNextCallFromSurvey,
     getFoodSkill,
     lastNextCall,
+    surveyFood,
     rodNextCall,
 } from '../src/body/library/get_food.js';
 import { FOOD_RESERVE_COMFORT, FOOD_RESERVE_LOW, FOOD_REGEN_THRESHOLD } from '../src/body/library/survival.js';
@@ -494,5 +497,115 @@ describe('getFood：纯函数与接线', () => {
         // 内部预算上限 6 分钟 → 命令 7 分钟 → 脑侧保险丝 8.5 分钟（action_runner.ACTION_MAX_MS）。
         expect(GETFOOD_MAX_MS_LIMIT).toBeLessThan(GETFOOD_TIMEOUT_MIN * 60 * 1000);
         expect(GETFOOD_TIMEOUT_MIN * 60 * 1000).toBeLessThan(ACTION_MAX_MS);
+    });
+});
+
+describe('失败时必须告诉模型"吃的在哪"（真机 overnight_a：血 8.575 卡 8 分钟）', () => {
+    const here = { x: 0, y: 64, z: 0 };
+    const at = (x: number, y: number, z: number) => ({ x, y, z });
+
+    it('看见动物 ⇒ 回执里有名字 + 坐标 + 距离（一条候选一行）', () => {
+        const survey = surveyFood({} as any, {
+            position: () => here,
+            nearbyEntities: () => [
+                { name: 'cow', position: at(10, 64, 4) },
+                { name: 'pig', position: at(2, 64, 1) },
+                { name: 'zombie', position: at(1, 64, 1) }, // 不是食物动物，不许出现
+            ],
+            findBlock: () => null,
+            water: () => null,
+        });
+        expect(survey.readable).toBe(true);
+        expect(survey.animals.map((a) => a.name)).toEqual(['pig', 'cow']); // 按距离排序
+        const text = foodDistributionLines(survey, {}).join('\n');
+        expect(text).toContain('最近的动物');
+        expect(text).toContain('cow 在 (10, 64, 4)，约');
+        expect(text).not.toContain('zombie');
+        // 可执行的下一步就是去猎它
+        expect(foodNextCallFromSurvey(survey, here)).toContain('huntFor(entity="pig"');
+    });
+
+    it('**看得见但没猎到** ⇒ 明说，别让模型以为"这一带没有动物"', () => {
+        const survey = surveyFood({} as any, {
+            position: () => here,
+            nearbyEntities: () => [{ name: 'cow', position: at(3, 64, 0) }],
+            findBlock: () => null,
+            water: () => null,
+        });
+        const text = foodDistributionLines(survey, { huntedWithoutGain: true }).join('\n');
+        expect(text).toContain('看得见但没猎到');
+        expect(text).not.toContain('确实没有食物来源');
+    });
+
+    it('**什么都没找到** ⇒ 说"确实没有" + 给方向和距离（绝不只写"没找到"）', () => {
+        const survey = surveyFood({} as any, {
+            position: () => here,
+            nearbyEntities: () => [],
+            findBlock: () => null,
+            water: () => null,
+            probeOpen: (_b: any, pos: { x: number }) => (pos.x >= 4 ? true : false), // -x 方向走不通
+        });
+        const lines = foodDistributionLines(survey, {});
+        const text = lines.join('\n');
+        expect(text).toContain('确实没有食物来源');
+        expect(text).toContain('往 +x 方向走约 48 格再 getFood');
+        expect(text).toContain('探了 4 个点、4 个能走');
+        // 下一步必须是"走过去换个地方"，不是再调一次 getFood
+        const call = foodNextCallFromSurvey(survey, here);
+        expect(call).toContain('goToCoordinates(');
+        expect(call).toContain('x=48');
+        expect(call).not.toContain('getFood(');
+    });
+
+    it('**扫描读不到** ⇒ 说"读不到"，绝不说"这一带没有"', () => {
+        const survey = surveyFood({} as any, {
+            position: () => here,
+            nearbyEntities: () => null, // 实体表读不到
+            findBlock: () => null,
+            water: () => null,
+        });
+        expect(survey.readable).toBe(false);
+        const text = foodDistributionLines(survey, {}).join('\n');
+        expect(text).toContain('读不到');
+        expect(text).toContain('不代表没有动物');
+        expect(text).not.toContain('确实没有食物来源');
+        expect(foodNextCallFromSurvey(survey, here)).toBeNull(); // 没读到就不指方向
+    });
+
+    it('**没有水/没有钓竿** ⇒ 水面那行明说"要先去弄竿"', () => {
+        const survey = surveyFood({} as any, {
+            position: () => here,
+            nearbyEntities: () => [],
+            findBlock: () => null,
+            water: () => ({ position: at(0, 62, 20), distance: 20 }),
+        });
+        const text = foodDistributionLines(survey, { hasRod: false }).join('\n');
+        expect(text).toContain('最近的水面');
+        expect(text).toContain('没有钓竿');
+        expect(foodNextCallFromSurvey(survey, here)).toContain('travelTo(');
+    });
+});
+
+describe('端到端：失败回执带上分布 + 一条可执行下一步', () => {
+    it('看得见作物 ⇒ 回执里有坐标/距离，下一步去采它（不再是 stats 空转）', async () => {
+        const h = harness({
+            items: [],
+            food: 14,
+            nearest: null,
+            blocks: { sweet_berry_bush: { x: 5, y: 64, z: 7 } },
+        });
+        const receipt = await getFoodSkill(h.bot, 3, 6_000, h.deps as any);
+        expect(receipt).toContain('可采的食物方块');
+        expect(receipt).toContain('sweet_berry_bush 在 (5, 64, 7)');
+        expect(lastLine(receipt)).toBe('下一步（照做即可）：collectBlocks(type="sweet_berry_bush", num=3)');
+    });
+
+    it('什么都看不见 ⇒ 回执明说"这一带确实没有食物来源"（实体读不到时则说读不到）', async () => {
+        const h = harness({ items: [], food: 14, nearest: null });
+        const receipt = await getFoodSkill(h.bot, 3, 6_000, h.deps as any);
+        // 假 bot 没有实体表 ⇒ 扫描读不到 ⇒ 必须说"读不到"，不许说"确实没有"
+        expect(receipt).toContain('食物分布');
+        expect(receipt).toContain('读不到');
+        expect(receipt).not.toContain('确实没有食物来源');
     });
 });

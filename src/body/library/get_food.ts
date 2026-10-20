@@ -108,6 +108,288 @@ export interface GetFoodOutcome {
     warnings: string[];
     /** 长期方案（种地）的一句话；没有就是 ''. */
     longTerm: string;
+    /**
+     * **失败时**的食物分布（量出来的）：能看见什么、多远、读没读到。
+     * `undefined` = 这一趟没扫（成功了就不必扫）；`null` = 扫了但读不到。
+     */
+    survey?: FoodSurvey | null;
+    /** 当时有没有钓竿（决定"水面"那行是说"能钓鱼"还是"先弄竿"）。 */
+    rodAvailable?: boolean;
+    /** 这次确实去猎了、但没进账（用来区分"看得见但没弄到"和"根本没看见"）。 */
+    huntedWithoutGain?: boolean;
+}
+
+// ───────────────────── 食物分布：失败时必须给"在哪" ─────────────────────
+//
+// 真机（overnight_a 2026-10-21 01:03~01:05）：血 8.575、食物 14 卡了 8 分钟，
+// 它**确实在试**（collectBlocks → escapeWater → collectBlocks → getFood → goToCoordinates），
+// 但 getFood 只说"没拿到"，模型没有可执行的下一步 ⇒ 空转。
+// 所以失败回执要带上**已经能看见的分布**：动物/作物/水的坐标与距离、四个方向的开阔度，
+// 以及"往哪走多少格"。**只报量到的**：扫描失败就说"读不到"，绝不等于"没有"。
+
+/** 动物扫描半径（实体表一次拿，便宜）。 */
+export const GETFOOD_ANIMAL_RADIUS = 48;
+/** 方块扫描半径（要按类型逐个查，必须更小）与**上限类型数**。 */
+export const GETFOOD_BLOCK_RADIUS = 24;
+/** 方块候选最多探这几种（有界，回执里会写明探了哪几种）。 */
+export const GETFOOD_SURVEY_BLOCK_TYPES: readonly string[] = [
+    'sweet_berry_bush',
+    'pumpkin',
+    'melon',
+    'kelp_plant',
+    'wheat',
+];
+/** 每类最多报几个候选（回执一行，不铺墙）。 */
+export const GETFOOD_SURVEY_CANDIDATE_CAP = 3;
+/** "往哪个方向走"建议的距离。 */
+export const GETFOOD_EXPAND_DISTANCE = 48;
+
+export interface FoodCandidate {
+    kind: 'animal' | 'crop' | 'water';
+    name: string;
+    position: FlatPosition;
+    distance: number;
+}
+
+export interface FoodSurvey {
+    /** 实体扫描读得到吗（**读不到 ≠ 没有**）。 */
+    readable: boolean;
+    animalRadius: number;
+    blockRadius: number;
+    animals: FoodCandidate[];
+    crops: FoodCandidate[];
+    water: FoodCandidate | null;
+    /** 实际探了哪几种方块（回执要写明"查过什么"）。 */
+    blockTypesProbed: string[];
+    /** 四个方向的开阔度：探了几个点、几个能走（读不到 ⇒ probed=0）。 */
+    open: Array<{ dir: '+x' | '-x' | '+z' | '-z'; open: number; probed: number }>;
+}
+
+export interface SurveyDeps {
+    position?: (bot: any) => FlatPosition;
+    /** 半径内的实体（**必须带位置**）；读不到返回 null。 */
+    nearbyEntities?: (
+        bot: any,
+        radius: number,
+    ) => Array<{ name?: unknown; position?: { x?: unknown; y?: unknown; z?: unknown } }> | null;
+    findBlock?: (bot: any, name: string, radius: number) => FlatPosition | null;
+    water?: (bot: any, from: FlatPosition, radius: number) => { position: FlatPosition; distance: number } | null;
+    /** 探一格能不能走：true/false，读不到 null。 */
+    probeOpen?: (bot: any, pos: FlatPosition) => boolean | null;
+}
+
+function flatOf(position: { x?: unknown; y?: unknown; z?: unknown } | null | undefined): FlatPosition | null {
+    if (position == null) return null;
+    const x = Number(position.x);
+    const y = Number(position.y);
+    const z = Number(position.z);
+    if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(z)) return null;
+    return { x, y, z };
+}
+
+function distanceBetween(a: FlatPosition, b: FlatPosition): number {
+    return Math.hypot(a.x - b.x, a.y - b.y, a.z - b.z);
+}
+
+/** 量一份"食物在哪"的分布。**任何一步读不到都不抛**（读不到就记 null/readable=false）。 */
+export function surveyFood(bot: any, deps: SurveyDeps = {}): FoodSurvey {
+    const position = deps.position ?? ((b: any) => {
+        const p = b?.entity?.position ?? {};
+        return { x: Number(p.x ?? 0), y: Number(p.y ?? 0), z: Number(p.z ?? 0) };
+    });
+    const nearbyEntities =
+        deps.nearbyEntities ??
+        ((b: any, radius: number) => {
+            try {
+                return world.getNearbyEntities(b, radius) as Array<{ name?: unknown; position?: any }>;
+            } catch {
+                return null;
+            }
+        });
+    const findBlock = deps.findBlock ?? ((_b: any, _name: string, _r: number) => null);
+    const waterLookup = deps.water ?? ((_b: any, _from: FlatPosition, _r: number) => null);
+    const probeOpen = deps.probeOpen ?? ((b: any, pos: FlatPosition) => {
+        try {
+            const block = b?.blockAt?.(pos);
+            if (block == null) return null;
+            const name = String(block.name ?? '');
+            if (name === '') return null;
+            return name === 'air' || name === 'cave_air' || name.includes('water');
+        } catch {
+            return null;
+        }
+    });
+
+    const here = position(bot);
+    const survey: FoodSurvey = {
+        readable: false,
+        animalRadius: GETFOOD_ANIMAL_RADIUS,
+        blockRadius: GETFOOD_BLOCK_RADIUS,
+        animals: [],
+        crops: [],
+        water: null,
+        blockTypesProbed: [],
+        open: [],
+    };
+
+    // ① 实体（一次扫描，最便宜）：只收"能吃的动物"
+    let entities: ReturnType<NonNullable<SurveyDeps['nearbyEntities']>> = null;
+    try {
+        entities = nearbyEntities(bot, GETFOOD_ANIMAL_RADIUS);
+    } catch {
+        entities = null;
+    }
+    if (entities != null) {
+        survey.readable = true;
+        for (const entity of entities) {
+            const name = typeof entity?.name === 'string' ? entity.name.trim().toLowerCase() : '';
+            if (name === '' || !isPassiveFoodAnimal(name)) continue;
+            const at = flatOf(entity.position);
+            if (at == null) continue;
+            survey.animals.push({ kind: 'animal', name, position: at, distance: Math.round(distanceBetween(here, at) * 10) / 10 });
+        }
+        survey.animals.sort((a, b) => a.distance - b.distance);
+        survey.animals = survey.animals.slice(0, GETFOOD_SURVEY_CANDIDATE_CAP);
+    }
+
+    // ② 方块（有界：固定几种 + 小半径）
+    for (const name of GETFOOD_SURVEY_BLOCK_TYPES) {
+        survey.blockTypesProbed.push(name);
+        let at: FlatPosition | null = null;
+        try {
+            at = flatOf(findBlock(bot, name, GETFOOD_BLOCK_RADIUS) as unknown as { x?: unknown; y?: unknown; z?: unknown } | null);
+        } catch {
+            at = null;
+        }
+        if (at == null) continue;
+        survey.crops.push({ kind: 'crop', name, position: at, distance: Math.round(distanceBetween(here, at) * 10) / 10 });
+    }
+    survey.crops.sort((a, b) => a.distance - b.distance);
+    survey.crops = survey.crops.slice(0, GETFOOD_SURVEY_CANDIDATE_CAP);
+
+    // ③ 水面（钓鱼路线；复用现有 nearestWater）
+    try {
+        const w = waterLookup(bot, here, GETFOOD_ANIMAL_RADIUS);
+        const at = flatOf(w?.position as unknown as { x?: unknown; y?: unknown; z?: unknown } | null);
+        if (w != null && at != null) {
+            survey.water = {
+                kind: 'water',
+                name: 'water',
+                position: at,
+                distance: Number.isFinite(w.distance) ? w.distance : Math.round(distanceBetween(here, at) * 10) / 10,
+            };
+        }
+    } catch {
+        survey.water = null;
+    }
+
+    // ④ 四个方向的开阔度（"往哪走"必须有测量依据，不能凭空指方向）
+    const dirs: Array<{ dir: '+x' | '-x' | '+z' | '-z'; dx: number; dz: number }> = [
+        { dir: '+x', dx: 1, dz: 0 },
+        { dir: '-x', dx: -1, dz: 0 },
+        { dir: '+z', dx: 0, dz: 1 },
+        { dir: '-z', dx: 0, dz: -1 },
+    ];
+    for (const d of dirs) {
+        let open = 0;
+        let probed = 0;
+        for (const step of [4, 8, 12, 16]) {
+            const sample = { x: Math.round(here.x + d.dx * step), y: Math.round(here.y), z: Math.round(here.z + d.dz * step) };
+            let passable: boolean | null = null;
+            try {
+                passable = probeOpen(bot, sample);
+            } catch {
+                passable = null;
+            }
+            if (passable == null) continue;
+            probed += 1;
+            if (passable) open += 1;
+        }
+        survey.open.push({ dir: d.dir, open, probed });
+    }
+    return survey;
+}
+
+/**
+ * 把分布渲染成**一行一类**的回执片段（纯函数）。
+ *
+ * 规矩：只报量到的；扫不到就说"读不到"，**绝不说"这一带没有"**；
+ * 什么候选都没有时才说"确实没有"，并且**必须给方向和距离**（否则就是"接着找"式空转）。
+ */
+export function foodDistributionLines(
+    survey: FoodSurvey | null,
+    options: { hasRod?: boolean; huntedWithoutGain?: boolean } = {},
+): string[] {
+    const lines: string[] = [];
+    if (survey == null) {
+        return ['食物分布：**没扫到**（这一趟没做成扫描）——这不代表这一带没有食物。'];
+    }
+    const fmt = (c: FoodCandidate): string => `(${Math.round(c.position.x)}, ${Math.round(c.position.y)}, ${Math.round(c.position.z)})，约 ${c.distance} 格`;
+    const animals = survey.animals;
+    const crops = survey.crops;
+    const water = survey.water;
+
+    if (!survey.readable) {
+        lines.push(
+            `食物分布：**实体读不到**（扫描失败）——这只说明**没读到**，不代表没有动物；` +
+                `用 \`stats(type="entities")\` 再看一次，或换个位置再 getFood。`,
+        );
+    } else if (animals.length > 0) {
+        lines.push(
+            `最近的动物：${animals.map((a) => `${a.name} 在 ${fmt(a)}`).join('；')}` +
+                `${options.huntedWithoutGain === true ? '——**这次看得见但没猎到**（别当成没有）' : ''}`,
+        );
+    }
+    if (crops.length > 0) {
+        lines.push(`可采的食物方块：${crops.map((c) => `${c.name} 在 ${fmt(c)}`).join('；')}（扫了 ${survey.blockRadius} 格）`);
+    }
+    if (water != null) {
+        lines.push(
+            `最近的水面：${fmt(water)}` +
+                (options.hasRod === true ? '（有钓竿 ⇒ 可以 fish）' : '（**可以钓鱼，但你现在没有钓竿**：先弄竿——蛛网→线，或 3 木棍 + 2 线）'),
+        );
+    }
+    const nothing = survey.readable && animals.length === 0 && crops.length === 0 && water == null;
+    if (nothing) {
+        // **说清"确实没有"再给方向**：光说"没找到"就是空转的源头。
+        const probed = survey.open.filter((o) => o.probed > 0);
+        const ranked = [...probed].sort((a, b) => b.open - a.open);
+        if (ranked.length > 0) {
+            const best = ranked[0]!;
+            const others = ranked.slice(1).map((o) => `${o.dir} ${o.open}/${o.probed}`).join('、');
+            lines.push(
+                `**这一带确实没有食物来源**（动物 ${survey.animalRadius} 格、方块 ${survey.blockRadius} 格内都没有）——` +
+                    `**往 ${best.dir} 方向走约 ${GETFOOD_EXPAND_DISTANCE} 格再 getFood**（那个方向探了 ${best.probed} 个点、${best.open} 个能走` +
+                    `${others === '' ? '' : `；其余方向 ${others}`}）。`,
+            );
+        } else {
+            lines.push(
+                `**这一带确实没有食物来源**（动物 ${survey.animalRadius} 格、方块 ${survey.blockRadius} 格内都没有）——` +
+                    `四个方向都探不到方块（读不到），**沿当前朝向往前走约 ${GETFOOD_EXPAND_DISTANCE} 格**再 getFood。`,
+            );
+        }
+    }
+    return lines;
+}
+
+/** 失败时的"一条可执行下一步"（候选优先；什么都没有就用方向 + 距离换地方）。 */
+export function foodNextCallFromSurvey(survey: FoodSurvey | null, here: FlatPosition | null): string | null {
+    if (survey == null) return null;
+    const nearest = [...survey.animals, ...survey.crops].sort((a, b) => a.distance - b.distance)[0];
+    if (nearest != null) {
+        if (nearest.kind === 'animal') return `huntFor(entity="${nearest.name}", want=1, max_ms=120000)`;
+        return `collectBlocks(type="${nearest.name}", num=3)`;
+    }
+    if (survey.water != null) {
+        return `travelTo(x=${Math.round(survey.water.position.x)}, y=${Math.round(survey.water.position.y)}, z=${Math.round(survey.water.position.z)})`;
+    }
+    if (here == null) return null;
+    const probed = survey.open.filter((o) => o.probed > 0);
+    if (probed.length === 0) return null;
+    const best = [...probed].sort((a, b) => b.open - a.open)[0]!;
+    const dx = best.dir === '+x' ? GETFOOD_EXPAND_DISTANCE : best.dir === '-x' ? -GETFOOD_EXPAND_DISTANCE : 0;
+    const dz = best.dir === '+z' ? GETFOOD_EXPAND_DISTANCE : best.dir === '-z' ? -GETFOOD_EXPAND_DISTANCE : 0;
+    return `goToCoordinates(x=${Math.round(here.x + dx)}, y=${Math.round(here.y)}, z=${Math.round(here.z + dz)}, closeness=3)`;
 }
 
 const STOP_TEXT: Record<GetFoodStopReason, string> = {
@@ -298,6 +580,14 @@ export function getFoodReceipt(o: GetFoodOutcome): string {
             `用了 ${Math.round(o.elapsedMs / 1000)} 秒。`,
     );
     for (const step of o.steps) lines.push(`- ${step.text}`);
+    // **失败时必须告诉模型"吃的在哪"**（真机 overnight_a：血 8.575 / 食物 14 卡了 8 分钟，
+    // 它确实在试 getFood，但回执只说"没拿到"，于是它 collectBlocks↔getFood↔goToCoordinates 空转）。
+    // 这一块是**量出来的分布**：能看见什么、多远、读没读到；一条候选一行。
+    if (o.survey !== undefined) {
+        for (const line of foodDistributionLines(o.survey, { hasRod: o.rodAvailable === true, huntedWithoutGain: o.huntedWithoutGain === true })) {
+            lines.push(line);
+        }
+    }
     if (o.eaten.length > 0) {
         lines.push(`吃了：${o.eaten.map((e) => e.name).join('、')}（走 consume 的规矩：数量与饱食度都核对过，前后值见上）。`);
     }
@@ -708,6 +998,30 @@ export async function getFoodSkill(
         outcome.warnings.unshift(
             `⚠️ 这一趟**什么都没变**（能吃的 ${outcome.ediblesBefore} 份、食物 ${outcome.foodBefore ?? '读不到'}）——按上面的断点接着做，别把这当成"找过了"。`,
         );
+    }
+    // **失败时补上"吃的在哪"**（真机 overnight_a：血 8.575、食物 14 卡了 8 分钟，
+    // 它确实在试 getFood，但回执只说"没拿到" ⇒ 模型只能在几个工具之间空转）。
+    // 只报量到的：实体扫描失败 ⇒ 写"读不到"，绝不说"这一带没有"。
+    // `interrupted` = 人按了 Stop：那不是"路走不通"，不要借机劝它往别处走。
+    if (outcome.ediblesAfter === outcome.ediblesBefore && stopReason !== 'enough' && stopReason !== 'interrupted') {
+        try {
+            const survey = surveyFood(bot, { position, findBlock, water });
+            outcome.survey = survey;
+            outcome.rodAvailable = countOf(bot, 'fishing_rod') > 0;
+            outcome.huntedWithoutGain = steps.some((step) => step.id === 'hunt' && step.gained <= 0);
+            const better = foodNextCallFromSurvey(survey, position(bot) ?? null);
+            // **只在下一步是死胡同时才换**（`stats`/再调一次 getFood 都是空转的形状）；
+            // 已经有具体动作（蛛网/水/烤）就不抢。
+            if (
+                better != null &&
+                (outcome.nextCall.startsWith('stats(') || outcome.nextCall.startsWith('getFood('))
+            ) {
+                outcome.nextCall = better;
+            }
+        } catch {
+            // 扫描本身炸了 ⇒ 明确说"没扫到"，不猜（`null` 会被渲染成"没扫到"）。
+            outcome.survey = null;
+        }
     }
     void sleep;
     void explore;
