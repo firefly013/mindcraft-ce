@@ -22,12 +22,70 @@ export interface FrameRecord {
     file: string;
     takenAt: number;
     view: FrameView | null;
+    /** **这一帧的颜色测过了吗**（测的是渲染出来的像素，不是 JPEG 字节）。 */
+    color?: FrameColor | null;
+}
+
+/**
+ * **颜色**：`chromaMean` = 采样像素上 `|R−G| + |G−B|` 的平均值（0~510）。
+ *
+ * 真机 overnight_b：同一会话里颜色**时有时无**——画面清晰可读却全灰（熔炉、石墙都在）。
+ * 这不是重映射的形状（那换的是"哪张贴图"，不是饱和度）。所以每帧量一次：
+ * 只报**测到的**，测不到就 `null`（不许猜"应该是彩色"）。
+ */
+export interface FrameColor {
+    chromaMean: number | null;
+    /** 平均彩度低于阈值 ⇒ 判为"丢了颜色"。`null` = 没测。 */
+    grayscale: boolean | null;
+}
+
+/** 低于这个平均彩度就算"这一帧没颜色"（纯灰 ≈ 0；正常地形画面通常 ≫ 10）。 */
+export const GRAYSCALE_CHROMA_MAX = 4;
+
+/**
+ * 采样一张 RGBA 缓冲的平均彩度。纯函数：不 import 任何渲染器/画布。
+ *
+ * @param step 采样步长（每 step 个像素取 1 个；默认 7 —— 800×512 约 8k 个样本，够且便宜）
+ */
+export function chromaMeanOf(
+    data: ArrayLike<number> | null | undefined,
+    width: number,
+    height: number,
+    step = 7,
+): number | null {
+    if (data == null) return null;
+    const w = Number(width);
+    const h = Number(height);
+    const stride = Math.max(1, Math.floor(Number(step) || 1));
+    if (!Number.isFinite(w) || !Number.isFinite(h) || w <= 0 || h <= 0) return null;
+    if (data.length < w * h * 4) return null;
+    let sum = 0;
+    let counted = 0;
+    for (let y = 0; y < h; y += stride) {
+        for (let x = 0; x < w; x += stride) {
+            const i = (y * w + x) * 4;
+            const r = Number(data[i] ?? 0);
+            const g = Number(data[i + 1] ?? 0);
+            const b = Number(data[i + 2] ?? 0);
+            sum += Math.abs(r - g) + Math.abs(g - b);
+            counted += 1;
+        }
+    }
+    if (counted === 0) return null;
+    return Math.round((sum / counted) * 100) / 100;
+}
+
+/** 由平均彩度得到"测过的颜色记录"；`null` 进 ⇒ `null` 出（不猜）。 */
+export function colorFromChroma(chromaMean: number | null | undefined): FrameColor | null {
+    if (chromaMean == null || !Number.isFinite(chromaMean)) return null;
+    return { chromaMean, grayscale: chromaMean < GRAYSCALE_CHROMA_MAX };
 }
 
 /** 相机返回的原始形状（不 import Camera，避免把 `window` 带进测试）。 */
 export interface CapturedShot {
     file?: unknown;
     view?: { yaw?: unknown; pitch?: unknown } | null;
+    color?: { chromaMean?: unknown; grayscale?: unknown } | null;
 }
 
 function finiteOrNull(value: unknown): number | null {
@@ -50,5 +108,10 @@ export function frameRecordOf(shot: unknown, takenAt: number): FrameRecord | nul
         view != null && typeof view === 'object'
             ? { yaw: finiteOrNull(view.yaw), pitch: finiteOrNull(view.pitch) }
             : null;
-    return { file: raw.file, takenAt, view: recordedView };
+    const chroma = finiteOrNull(raw.color?.chromaMean);
+    const recordedColor: FrameColor | null =
+        chroma == null
+            ? null
+            : { chromaMean: chroma, grayscale: typeof raw.color?.grayscale === 'boolean' ? raw.color.grayscale : chroma < GRAYSCALE_CHROMA_MAX };
+    return { file: raw.file, takenAt, view: recordedView, color: recordedColor };
 }

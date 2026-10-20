@@ -583,7 +583,7 @@ function sampleBlocks(
 function screenshotOf(vision: unknown): LiveScreenshot {
   try {
     const v = vision as
-      | { lastScreenshot?: unknown; lastFrameTrust?: unknown; lastFrameView?: unknown }
+      | { lastScreenshot?: unknown; lastFrameTrust?: unknown; lastFrameView?: unknown; lastFrameColor?: unknown }
       | null
       | undefined;
     const last = v?.lastScreenshot as { file?: unknown; takenAt?: unknown } | null | undefined;
@@ -615,11 +615,21 @@ function screenshotOf(vision: unknown): LiveScreenshot {
               pitch: typeof view.pitch === 'number' && Number.isFinite(view.pitch) ? view.pitch : null,
             }
           : null;
+      // **这一帧的颜色测量**：测过才给，没测就不提（不许猜"应该是彩色"）。
+      const colorRaw = v?.lastFrameColor as { chromaMean?: unknown; grayscale?: unknown } | null | undefined;
+      const colorInfo =
+        colorRaw != null &&
+        typeof colorRaw === 'object' &&
+        typeof colorRaw.chromaMean === 'number' &&
+        Number.isFinite(colorRaw.chromaMean)
+          ? { chromaMean: colorRaw.chromaMean, grayscale: colorRaw.grayscale === true }
+          : null;
       return {
         ref: { file: last.file, takenAt: last.takenAt },
         unavailableReason: null,
         trust: trustInfo,
         view: viewInfo,
+        color: colorInfo,
       };
     }
     if (v == null) return { ref: null, unavailableReason: 'vision disabled' };

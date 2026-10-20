@@ -128,27 +128,32 @@ const pctOf = (ratio: number | null | undefined): string | null =>
 export function frameVerdict(
     trust: Pick<FrameTrust, 'reason' | 'correctRatio' | 'unknownRatio' | 'wrongRatio'>,
     info: { worldVersion?: string | null; rendererVersion?: string | null } = {},
-): { usable: boolean; verdict: string } {
-    if (trust.reason === 'ok') return { usable: true, verdict: '' };
+): { usable: boolean; verdict: string; kind: 'ok' | 'measured_low' | 'unmeasurable' } {
+    if (trust.reason === 'ok') return { usable: true, verdict: '', kind: 'ok' };
     const exact = trust.correctRatio;
     const unknown = trust.unknownRatio;
     const wrong = trust.wrongRatio;
     const measuredAllExact =
         exact != null && exact >= FRAME_USABLE_MIN_EXACT_COVERAGE && (unknown ?? 1) === 0 && (wrong ?? 1) === 0;
-    if (measuredAllExact) return { usable: true, verdict: '' };
+    if (measuredAllExact) return { usable: true, verdict: '', kind: 'ok' };
     const world = (info.worldVersion ?? '').trim();
     const renderer = (info.rendererVersion ?? '').trim();
     const exactPct = pctOf(exact);
+    // **"核对不了" ≠ "已知是坏的"**（Lead 2026-10-21 裁定）：
+    // 没有覆盖数据时这张图既没被证明可用、也没被证明不可用 —— 说"无法核对"是警告，
+    // 不是禁令。反过来"测出来覆盖率很低"才是**已知坏**，那才说"不可信、不要用它认方块"。
     if (exact == null || world === '' || renderer === '') {
         return {
             usable: false,
+            kind: 'unmeasurable',
             verdict:
-                '—— **这张图不可信**（读不到渲染器/世界版本，没法确认画的是什么）：' +
-                '**不要用它认方块**，用下面的 `near key blocks` 方块数据。',
+                '—— **无法核对**（读不到渲染器/世界版本）：这张图**没有校对过**，可能对也可能错——' +
+                '**用方块数据交叉验证，别只凭它下结论**。',
         };
     }
     return {
         usable: false,
+        kind: 'measured_low',
         verdict:
             `—— **这张图不可信**（渲染器 ${renderer} vs 世界 ${world}，` +
             `${exactPct == null ? '测不出比例' : `只有 ${exactPct} 的方块一对一`}）：` +

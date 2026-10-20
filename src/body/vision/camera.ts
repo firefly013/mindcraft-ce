@@ -12,7 +12,7 @@ import { EventEmitter } from 'events';
 import worker_threads from 'worker_threads';
 
 import { remapChunkJson, remapBlockUpdateStateId } from './chunk_remap.js';
-import type { FrameView } from './frame_record.js';
+import { chromaMeanOf, colorFromChroma, type FrameColor, type FrameView } from './frame_record.js';
 import { remapStateId, RENDERER_VERSION } from './state_remap.js';
 
 // prismarine-viewer 的 viewer 内部用的是**全局** THREE / Worker
@@ -110,7 +110,7 @@ export class Camera extends EventEmitter {
      * 永远是**这一帧**的事实，不是"几秒后身体又转到哪了"（真机事故：
      * 快照说"朝天空（pitch −88°）"、图里却是水平隧道 ⇒ bot 正确地不信图、丢掉好画面）。
      */
-    async capture(): Promise<{ file: string; view: FrameView }> {
+    async capture(): Promise<{ file: string; view: FrameView; color: FrameColor | null }> {
         const center = new Vec3(this.bot.entity.position.x, this.bot.entity.position.y+this.bot.entity.height, this.bot.entity.position.z);
         this.viewer.camera.position.set(center.x, center.y, center.z);
         await this.worldView.updatePosition(center);
@@ -120,6 +120,26 @@ export class Camera extends EventEmitter {
         this.viewer.setFirstPersonCamera(this.bot.entity.position, yaw, pitch);
         this.viewer.update();
         this.renderer.render(this.viewer.scene, this.viewer.camera);
+
+        // **这一帧到底有没有颜色**（真机 overnight_b：画面清晰可读却全灰，同会话时有时无）。
+        // 量的是渲染出来的像素，不是 JPEG 字节：`readPixels` 拿的是渲染结果的 RGB，
+        // 正好覆盖"WebGL 上下文丢色/没开色彩缓冲 / 贴图退化成灰度"这两类。
+        // 量不到就记 null（回执**什么都不说**，不许猜"应该是彩色"）。
+        let color: FrameColor | null = null;
+        try {
+            const gl = this.renderer.getContext() as unknown as {
+                readPixels: (x: number, y: number, w: number, h: number, format: number, type: number, pixels: Uint8Array) => void;
+                RGBA: number;
+                UNSIGNED_BYTE: number;
+            };
+            const w = Number(this.canvas.width);
+            const h = Number(this.canvas.height);
+            const pixels = new Uint8Array(w * h * 4);
+            gl.readPixels(0, 0, w, h, gl.RGBA, gl.UNSIGNED_BYTE, pixels);
+            color = colorFromChroma(chromaMeanOf(pixels, w, h, 7));
+        } catch {
+            color = null;
+        }
 
         const imageStream = this.canvas.createJPEGStream({
             bufsize: 4096,
@@ -134,10 +154,14 @@ export class Camera extends EventEmitter {
         await this._ensureScreenshotDirectory();
         await fs.writeFile(`${this.fp}/${filename}.jpg`, buf);
         console.log('saved', filename);
+        if (color?.grayscale === true) {
+            console.warn('screenshot is grayscale', { file: filename, chromaMean: color.chromaMean });
+        }
         return {
             file: filename,
             // 读不到就记 null（回执会**什么都不说**，而不是拿当前朝向冒充这一帧）
             view: { yaw: Number.isFinite(yaw) ? yaw : null, pitch: Number.isFinite(pitch) ? pitch : null },
+            color,
         };
     }
 

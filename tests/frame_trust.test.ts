@@ -329,14 +329,31 @@ describe('裁决（frameVerdict）：可用/不可用 + 一句含数字的结论
         expect(v.verdict).toContain('50%');
     });
 
-    it('测不出来 ⇒ 不可用（fail-CLOSED），并说清读不到', () => {
+    it('测不出来 ⇒ **"无法核对"**（警告，不是禁令），仍 usable=false（fail-CLOSED）', () => {
         const v = frameVerdict({ reason: 'renderer_unsupported', correctRatio: null, unknownRatio: null, wrongRatio: null }, {
             worldVersion: '1.21.11',
             rendererVersion: null,
         });
-        expect(v.usable).toBe(false);
-        expect(v.verdict).toContain('读不到');
+        expect(v.usable).toBe(false); // 不声称可用
+        expect(v.kind).toBe('unmeasurable');
+        expect(v.verdict).toContain('无法核对');
+        expect(v.verdict).toContain('没有校对过');
+        expect(v.verdict).toContain('可能对也可能错');
+        expect(v.verdict).toContain('交叉验证');
+        // **不许把它说成"已知是坏的"**
+        expect(v.verdict).not.toContain('不可信');
+        expect(v.verdict).not.toContain('不要用它认方块');
+    });
+
+    it('测出来的低覆盖率 ⇒ 才是硬"不可信"（kind=measured_low）', () => {
+        const v = frameVerdict({ reason: 'version_skew', correctRatio: 0.12, unknownRatio: 0.1, wrongRatio: 0.78 }, {
+            worldVersion: '1.21.11',
+            rendererVersion: '1.21.4',
+        });
+        expect(v.kind).toBe('measured_low');
+        expect(v.verdict).toContain('这张图不可信');
         expect(v.verdict).toContain('不要用它认方块');
+        expect(v.verdict).not.toContain('无法核对');
     });
 });
 

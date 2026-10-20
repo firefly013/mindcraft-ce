@@ -1,6 +1,6 @@
 import { Vec3 } from 'vec3';
 import { Camera } from "./camera.js";
-import { frameRecordOf, type FrameView } from './frame_record.js';
+import { frameRecordOf, type FrameColor, type FrameView } from './frame_record.js';
 import { measureFrameTrust, type FrameTrust } from './frame_trust.js';
 import fs from 'fs';
 
@@ -19,6 +19,11 @@ export class VisionInterpreter {
      * 为 null = 这一帧没记录朝向 ⇒ 回执**什么都不说**（绝不拿当前朝向顶替）。
      */
     lastFrameView: FrameView | null = null;
+    /**
+     * **这一帧有没有颜色**（渲染后量的平均彩度）。测不到 = null ⇒ 回执不提名。
+     * 真机 overnight_b：同会话里颜色时有时无，画面清晰可读却全灰。
+     */
+    lastFrameColor: FrameColor | null = null;
     /**
      * 最近一张图**能不能当"世界的样子"用**（版本不一致时渲染器会把方块画成「?」，
      * 模型会读成"掉进虚空"）。为 null = 还没拍过/没测。**这张图照发，但必须带上这句怀疑**。
@@ -62,6 +67,7 @@ export class VisionInterpreter {
             this.lastScreenshot = { file: record.file, takenAt: record.takenAt };
             // 回执里的视线行**只认这个**，不认"现在身体朝哪"。
             this.lastFrameView = record.view;
+            this.lastFrameColor = record.color ?? null;
             // **拍完立刻判定这张图可不可信**（版本/状态表可能对不上）。测不出来也不影响发图：
             // 宁可让模型知道"图不可信"，也不能让它把「?」当成世界的样子。
             try {

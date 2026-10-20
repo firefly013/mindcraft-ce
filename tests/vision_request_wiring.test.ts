@@ -142,6 +142,7 @@ describe('同一帧同源：朝向、文件名、时间戳必须来自**同一�
       file: 'captured_sky.jpg',
       takenAt: 1_234,
       view: { yaw: 0, pitch: -88 * (Math.PI / 180) },
+      color: null, // 这次没量颜色 ⇒ 明确"没测"，不是"彩色"
     });
   });
 
@@ -203,5 +204,55 @@ describe('裁决进真实请求（不只进渲染函数）', () => {
     expect(head).toContain('这张图不可信');
     expect(head).toContain('12%');
     expect(head).toContain('不要用它认方块');
+  });
+});
+
+describe('颜色测量（chroma）：只报测到的，测不到就不提', () => {
+  it('纯灰缓冲 ⇒ 彩度 0 ⇒ grayscale=true', async () => {
+    const { chromaMeanOf, colorFromChroma } = await import('../src/body/vision/frame_record.js');
+    const w = 8;
+    const h = 8;
+    const gray = new Uint8Array(w * h * 4);
+    for (let i = 0; i < gray.length; i += 4) {
+      gray[i] = 120;
+      gray[i + 1] = 120;
+      gray[i + 2] = 120;
+      gray[i + 3] = 255;
+    }
+    const chroma = chromaMeanOf(gray, w, h, 1);
+    expect(chroma).toBe(0);
+    expect(colorFromChroma(chroma)).toEqual({ chromaMean: 0, grayscale: true });
+  });
+
+  it('彩色缓冲 ⇒ 彩度明显 > 阈值 ⇒ grayscale=false', async () => {
+    const { chromaMeanOf, colorFromChroma, GRAYSCALE_CHROMA_MAX } = await import('../src/body/vision/frame_record.js');
+    const w = 8;
+    const h = 8;
+    const colorful = new Uint8Array(w * h * 4);
+    for (let i = 0; i < colorful.length; i += 4) {
+      colorful[i] = 200; // R
+      colorful[i + 1] = 90; // G
+      colorful[i + 2] = 40; // B
+      colorful[i + 3] = 255;
+    }
+    const chroma = chromaMeanOf(colorful, w, h, 1);
+    expect(chroma).toBeGreaterThan(GRAYSCALE_CHROMA_MAX);
+    expect(colorFromChroma(chroma)?.grayscale).toBe(false);
+  });
+
+  it('坏输入 ⇒ null（不猜"应该是彩色"）', async () => {
+    const { chromaMeanOf, colorFromChroma } = await import('../src/body/vision/frame_record.js');
+    expect(chromaMeanOf(null, 8, 8)).toBeNull();
+    expect(chromaMeanOf(new Uint8Array(4), 8, 8)).toBeNull(); // 长度不够
+    expect(chromaMeanOf(new Uint8Array(8 * 8 * 4), 0, 8)).toBeNull();
+    expect(colorFromChroma(null)).toBeNull();
+  });
+
+  it('frameRecordOf 把颜色一起记下（没测 ⇒ null）', async () => {
+    const { frameRecordOf } = await import('../src/body/vision/frame_record.js');
+    const withColor = frameRecordOf({ file: 'f.jpg', view: { pitch: 0, yaw: 0 }, color: { chromaMean: 1.5 } }, 5);
+    expect(withColor?.color?.grayscale).toBe(true);
+    const withoutColor = frameRecordOf({ file: 'f.jpg', view: { pitch: 0, yaw: 0 } }, 5);
+    expect(withoutColor?.color).toBeNull();
   });
 });

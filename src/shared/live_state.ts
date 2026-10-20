@@ -135,6 +135,14 @@ export interface LiveScreenshot {
    * 绝不拿当前朝向顶替。
    */
   view?: { yaw: number | null; pitch: number | null } | null;
+  /**
+   * **这一帧有没有颜色**（渲染后量的平均彩度 `|R−G|+|G−B|`，0~510）。
+   *
+   * 真机 overnight_b：同一会话里颜色时有时无（画面清晰可读却全灰）。这是一个**独立事实**，
+   * 不能混进"可不可信"：丢颜色的图**认方块可以**，只是**别靠颜色认材质**。
+   * `null`/缺失 ⇒ 没测 ⇒ 回执不提名。
+   */
+  color?: { chromaMean: number; grayscale: boolean } | null;
 }
 
 export interface LiveMeta {
@@ -537,6 +545,15 @@ const SECTION_RENDERERS: Record<LiveSectionKey, (s: LiveState) => string[]> = {
           ? describeViewDirection(s.screenshot.view.pitch, s.screenshot.view.yaw)
           : null;
       if (view != null) lines.push(view);
+      // **颜色是独立事实，不并进"可不可信"**：丢颜色的图画质可读（认方块可以），
+      // 只是不能靠颜色认材质（真机 overnight_b：同会话里全灰帧时有时无）。
+      const color = s.screenshot.color;
+      if (color != null && color.grayscale === true) {
+        lines.push(
+          `颜色：**这张图丢了颜色**（已测：无彩度，平均 |R−G|+|G−B| = ${color.chromaMean}）——` +
+            '**认方块可以，但别靠颜色认材质/判断"这是不是同一种方块"**。',
+        );
+      }
       // 裁决为空串时（老数据/异常）回落到详细说明，**绝不静默**；
       // 但**可用**的帧一个字都不加（不误报 —— 否则视觉通道会被"每帧都警告"淹掉）。
       const line = trust?.line ?? '';

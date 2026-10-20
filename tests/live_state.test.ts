@@ -710,3 +710,69 @@ describe('裁决进 Screenshot 第一行（不让模型每帧自己猜哪张能�
     expect(lines[idx + 1]).toContain('朝天空');
   });
 });
+
+describe('颜色是独立事实：丢颜色 ≠ 不可信（三件事分开说）', () => {
+  const shot = (opts: { color?: any; trust?: any }) =>
+    sampleLiveState({
+      bot: stubBot(),
+      vision: {
+        lastScreenshot: { file: 'frame_color.jpg', takenAt: Date.now() },
+        ...(opts.trust === undefined ? {} : { lastFrameTrust: opts.trust }),
+        ...(opts.color === undefined ? {} : { lastFrameColor: opts.color }),
+      },
+    });
+
+  it('丢颜色 ⇒ 说"丢了颜色/无彩度/认方块可以但别靠颜色认材质"，且**不说"不可信"**', () => {
+    const text = renderLiveState(shot({ color: { chromaMean: 0.4, grayscale: true } }));
+    expect(text).toContain('这张图丢了颜色');
+    expect(text).toContain('无彩度');
+    expect(text).toContain('0.4');
+    expect(text).toContain('认方块可以');
+    expect(text).toContain('别靠颜色认材质');
+    expect(text).not.toContain('不可信');
+  });
+
+  it('彩色帧 ⇒ 一个字都不提颜色（不误报）', () => {
+    const text = renderLiveState(shot({ color: { chromaMean: 41.2, grayscale: false } }));
+    expect(text).not.toContain('丢了颜色');
+    expect(text).not.toContain('无彩度');
+  });
+
+  it('没量颜色 ⇒ 不提（没测就是没测，不猜）', () => {
+    const text = renderLiveState(shot({}));
+    expect(text).not.toContain('丢了颜色');
+  });
+
+  it('三态可区分：测出来低覆盖率 / 无法核对 / 丢颜色，三种文字互不混用', () => {
+    const low = renderLiveState(
+      shot({
+        trust: {
+          trusted: false,
+          reason: 'version_skew',
+          usable: false,
+          verdict: '—— **这张图不可信**（渲染器 1.21.4 vs 世界 1.21.11，只有 12% 的方块一对一）：**不要用它认方块**，用下面的 near key blocks 方块数据。',
+          line: '',
+        },
+      }),
+    );
+    const unknown = renderLiveState(
+      shot({
+        trust: {
+          trusted: false,
+          reason: 'renderer_unsupported',
+          usable: false,
+          verdict: '—— **无法核对**（读不到渲染器/世界版本）：这张图**没有校对过**，可能对也可能错——**用方块数据交叉验证，别只凭它下结论**。',
+          line: '',
+        },
+      }),
+    );
+    const gray = renderLiveState(shot({ color: { chromaMean: 0.2, grayscale: true } }));
+    expect(low).toContain('这张图不可信');
+    expect(low).not.toContain('无法核对');
+    expect(unknown).toContain('无法核对');
+    expect(unknown).not.toContain('这张图不可信');
+    expect(gray).toContain('丢了颜色');
+    expect(gray).not.toContain('无法核对');
+    expect(gray).not.toContain('这张图不可信');
+  });
+});
