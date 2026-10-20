@@ -1415,6 +1415,9 @@ export class MineflayerBody {
     /** 上一次"无法自愈"提示的时间 + 进入该状态的时刻（去重 + 报"已持续多久"）。 */
     private unrecoverableNotice: { at: number } | null = null;
     private unrecoverableSince = 0;
+    /** 最近一次死亡时刻（刺激"刚死且身上空"的逃生交还判定）+ 进度回执节流。 */
+    private lastDeathAt = 0;
+    private escapeProgressAt = 0;
     /** 三方互锁的呼吸反射临时停用截止时间（只停 surface 一条，见 deadlock.ts）。 */
     private surfaceStandDownUntil = 0;
     /** 位置卡住追踪：上次采样 + 最近一次"动过"的时刻。 */
@@ -2021,6 +2024,89 @@ export class MineflayerBody {
         } catch {
             // 预检自己出错就不拦（不许让守卫的 bug 变成新的墙）。
             return null;
+        }
+    }
+
+    /**
+     * **有没有验证过的逃跑落点**（真机 2026-10-20：escape 把一个 bot 从 (28,60,15) "横移到
+     * 实心落点"，结果跑到 (-65,65,-24)、连死三次——落点"实心"不等于"安全"）。
+     * 判据：脚下实心 + 不是岩浆/水 + **附近没有敌对生物**（isHostile，mcdata category 权威）。
+     * 读不到就返回 true（守卫坏了不许变成新的墙）。
+     */
+    hasVerifiedEscapeDestination(): boolean {
+        try {
+            const bot = this.bot;
+            const p = bot?.entity?.position;
+            if (p == null) return true;
+            const from = { x: p.x, y: p.y, z: p.z };
+            const blockAt = (bx: number, by: number, bz: number): { name?: unknown } | null =>
+                bot.blockAt(new Vec3(bx, by, bz));
+            // 朝"远离最近威胁"的方向找，但**候选必须没有怪**才作数。
+            const threat = this.threatNearRelative(16);
+            const away = threat == null ? { x: from.x + 1, y: from.y, z: from.z } : { x: from.x - (from.x - (from.x + 1)), y: from.y, z: from.z };
+            const safe = chooseSafeFleeTarget(blockAt, from, away, 6);
+            if (!safe.ok) return false;
+            const under = blockAt(safe.target.x, safe.target.y - 1, safe.target.z)?.name;
+            const underName = String(under ?? '');
+            if (underName === 'lava' || underName === 'flowing_lava' || underName === 'water' || underName === 'flowing_water') {
+                return false;
+            }
+            return this.threatNear({ x: safe.target.x, y: safe.target.y, z: safe.target.z }, 8) == null;
+        } catch {
+            return true;
+        }
+    }
+
+    /** 该立刻交还身体吗：**刚死过、身上没东西**时再逃只是再死一次（Hard 档掉光装备）。 */
+    escapeYieldVerdict(): { yield: boolean; reason: string } | null {
+        try {
+            if (this.lastDeathAt > 0 && Date.now() - this.lastDeathAt <= 120_000) {
+                const items = this.bot?.inventory?.items?.() ?? [];
+                if (items.length === 0) {
+                    return { yield: true, reason: 'empty-after-death' };
+                }
+            }
+            if (this.reflexAbortRequested === true) return { yield: true, reason: 'aborted' };
+            return null;
+        } catch {
+            return null;
+        }
+    }
+
+    /** 进度/放弃回执：32 秒只看到一句 "in_progress" 等于把模型蒙住眼睛。 */
+    reportEscapeProgress(info: { step: number; ms: number; health: number; safeDestination: boolean; final: string | null }): void {
+        try {
+            const nowMs = Date.now();
+            if (info.final == null && nowMs - this.escapeProgressAt < 5_000) return;
+            this.escapeProgressAt = nowMs;
+            if (info.final == null) {
+                const detail =
+                    `escape 第 ${info.step} 步 / 已用 ${Math.round(info.ms / 1000)} 秒 / 血 ${Math.round(info.health * 10) / 10} / ` +
+                    (info.safeDestination ? '正在朝验证过的落点撤' : '**还没有验证过安全的落点**（不会盲目横移）') +
+                    '。急的话先 Stop，身体立刻归你。';
+                this.notify('reflex.done', KIND.WORLD, LEVEL.STATE, {
+                    reflex: this.currentReflexName ?? 'escape',
+                    outcome: 'in_progress',
+                    detail,
+                    ms: info.ms,
+                });
+                return;
+            }
+            const reason = info.final;
+            const next =
+                reason === 'no-safe-destination-and-losing-health'
+                    ? '下一步：`stop()` 确认身体在你手上，然后**挖洞自封**（mineBlock 脚下/侧身一格）或用 `placeHere` 把入口封住；别继续朝开阔地跑。'
+                    : reason.startsWith('yield:empty-after-death')
+                      ? '下一步：你已经死过且身上没东西了，**不要再重试同一条逃生链**；先 respawn 后收装备、再决定去哪。'
+                      : '下一步：`stop()` 接管身体；要么挖洞自封，要么用 placeHere 放方块挡出一条路，再决定往哪跑。';
+            this.notify('reflex.done', KIND.WORLD, LEVEL.STATE, {
+                reflex: this.currentReflexName ?? 'escape',
+                outcome: 'in_progress',
+                detail: `**escape 放弃并交还身体**（${Math.round(info.ms / 1000)} 秒 / ${info.step} 步，原因：${reason}）。` + next,
+                ms: info.ms,
+            });
+        } catch {
+            // 回执失败不影响交还身体。
         }
     }
 
@@ -3030,6 +3116,7 @@ export class MineflayerBody {
                     .slice(0, 12)
                     .join('、');
                 const text = MESSAGES.death(death_pos_text || 'unknown', dimention, message, carried);
+                this.lastDeathAt = Date.now();
                 // **先写一条 L2 被动记录**。L4 会走 `abort()`，而 `abort()` 撤回
                 // 排队中的输入——真机上这条死亡消息 19 秒后才落地，最后连同被
                 // abort 的那一轮一起丢了，模型全程不知道自己死了。
@@ -4382,6 +4469,8 @@ export class MineflayerBody {
                 },
                 // 模型用 !disableSafeguards 签了生死状 → 连溺水都不再上浮。
                 safeguardsOff: (): boolean => safeguards.isSuppressed(Date.now()),
+                // **逃跑必须有验证过的落点**：没有就在掉血时立刻交还身体（真机 2026-10-20：
+                // escape 空转 30+ 秒，一边掉血一边被"横移到实心落点"，最后跑出 90 格、连死三次）。
             }, {
                 // **处理按事件类型选定**：溺水只上浮，威胁只逃跑，不互相代劳。
                 intent,

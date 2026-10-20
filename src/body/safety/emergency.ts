@@ -22,6 +22,14 @@ export const THREAT_RADIUS = 32;
 export const FLEE_DISTANCE = 24;
 export const SAFE_SECONDS = 10;
 
+/** **逃跑反射的硬上限**（真机 2026-10-20：escape 空转 30+ 秒，bot 一边掉血
+ * 一边被"横移到实心落点"，最后跑出 90 格远、连死三次）。
+ * 一个不肯放弃的助手比没有助手更危险：到上限必须交还身体，并说清下一步。 */
+export const FLEE_MAX_MS = 20_000;
+export const FLEE_MAX_STEPS = 20;
+/** 连续掉血这么多 tick 且找不到验证过的落点 ⇒ 交还身体。 */
+export const FLEE_HEALTH_DROP_TICKS = 3;
+
 /** 始终敌对的名字（小写注册名）。edges 的边沿检测复用这一份，不再各抄一份。 */
 export const ALWAYS_HOSTILE = new Set([
   'zombie', 'husk', 'drowned', 'skeleton', 'stray', 'bogged', 'creeper',
@@ -303,11 +311,25 @@ export interface EmergencyBot {
    * 泡着"。模型自己签了生死状，我们不替它反悔。
    */
   safeguardsOff?(): boolean;
+  /** **验证过的**逃跑落点存在吗？没有时"横移"就是往虚空/怪堆里送。可选。 */
+  hasSafeDestination?(): boolean;
+  /** 该立刻交还身体吗（例如：刚死过且身上没东西，再逃也只是再死一次）。可选。 */
+  shouldYieldEscape?(): { yield: boolean; reason: string } | null;
+  /** 进度/放弃时的回执（身体负责写渠道；循环只提供事实）。可选。 */
+  reportProgress?(info: { step: number; ms: number; health: number; safeDestination: boolean; final: string | null }): void;
 }
 
 export interface EmergencyResult {
   escaped: boolean;
-  reason: 'safe' | 'died' | 'no-bot';
+  /** 新增的三种是**引擎主动交还身体**的原因（带 next steps 回执）。 */
+  reason:
+    | 'safe'
+    | 'died'
+    | 'no-bot'
+    | 'no-safe-destination-and-losing-health'
+    | 'step-cap'
+    | 'time-cap'
+    | `yield:${string}`;
   position?: { x: number; y: number; z: number } | null;
   health?: number | null;
 }
@@ -411,6 +433,9 @@ export async function runEmergency(
   bot.stopAll();
 
   const startHealth = bot.health;
+  const startedAt = now();
+  let step = 0;
+  let dropStreak = 0;
   let lastHealth: number | null = startHealth;
   let lastHurtAt = now();
   let ate = false;
@@ -419,6 +444,27 @@ export async function runEmergency(
     const health = bot.health;
     if (health <= 0) return { escaped: false, reason: 'died' };
     if (lastHealth != null && health < lastHealth) lastHurtAt = now();
+    // **有界 + 可让位**（真机 2026-10-20）：掉血且没有验证过的落点 ⇒ 立刻交还身体。
+    dropStreak = lastHealth != null && health < lastHealth ? dropStreak + 1 : 0;
+    step += 1;
+    const elapsed = now() - startedAt;
+    const safeDestination = bot.hasSafeDestination?.() !== false;
+    const yieldNow = bot.shouldYieldEscape?.() ?? null;
+    // 只有调用方提供了"落点验证/交还判定"才启用这套有界逻辑（老调用方保持原语义）。
+    const bounded = typeof bot.hasSafeDestination === 'function' || typeof bot.shouldYieldEscape === 'function';
+    const giveUpReason = ((): EmergencyResult['reason'] | null => {
+      if (!bounded) return null;
+      if (yieldNow != null && yieldNow.yield) return `yield:${yieldNow.reason}` as EmergencyResult['reason'];
+      if (!safeDestination && dropStreak >= FLEE_HEALTH_DROP_TICKS) return "no-safe-destination-and-losing-health";
+      if (step >= FLEE_MAX_STEPS) return "step-cap";
+      if (elapsed >= FLEE_MAX_MS) return "time-cap";
+      return null;
+    })();
+    if (giveUpReason != null) {
+      bot.reportProgress?.({ step, ms: elapsed, health, safeDestination, final: giveUpReason });
+      return { escaped: false, reason: giveUpReason };
+    }
+    if (bounded && step % 3 === 1) bot.reportProgress?.({ step, ms: elapsed, health, safeDestination, final: null });
     lastHealth = health;
 
     // **溺水：先把头露出水面，别的统统排后面。**
