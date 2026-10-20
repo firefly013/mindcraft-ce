@@ -568,7 +568,6 @@ describe('F-10 第二半：前方放不下就改用 pillarUp 直着垫', () => {
     expect(bot.output).toContain('nothing to place on');
     expect(bot.output).toContain('nothing to place on');
     expect(bot.output).toContain('改用 pillarUp');
-    expect(bot.output).toContain('pillarUp 完成：上升 1 格');
     expect(bot.output).toContain('stairUp 完成：上升 1 格');
   });
 

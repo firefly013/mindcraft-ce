@@ -61,6 +61,16 @@ import { formatSuffocationReceipt, planSuffocationEscape } from './safety/suffoc
 import { isJustPlacedDrop } from './library/placement_guard.js';
 import { shouldYieldBePreempted } from './safety/respawn_loop.js';
 import {
+    CREEPER_BLOCK_MAX_MS,
+    CREEPER_REFLEX_COOLDOWN_MS,
+    CREEPER_RUN_MAX_MS,
+    CREEPER_RUN_MAX_STEPS,
+    CREEPER_SAFE_DISTANCE,
+    formatCreeperReflexReceipt,
+    planCreeperResponse,
+} from './safety/creeper_reflex.js';
+import type { CreeperPlan, CreeperResult } from './safety/creeper_reflex.js';
+import {
     appendDeath,
     formatRespawnEscapeReceipt,
     RESPAWN_DANGER_RADIUS,
@@ -2707,6 +2717,200 @@ export class MineflayerBody {
      * 叫来看一眼）。`reflex` / `completes` 是身体在声明"这条事件我已经交给哪个
      * 处理了 / 这是哪个处理的完成报告"。
      */
+    /**
+     * **苦力怕反射**（Lead 2026-10-21，用户 spec）：倒地窗口只有 ~1.5 秒，模型来不及。
+     * 每 tick 评估一次：逼近的苦力怕 ≤6 格 ⇒ 有盾举盾、没盾跑；让位给更高优先级反射；
+     * 一次 episode 结束后释放身体并进入 3 秒冷却；**每 episode 只报一次**（不刷屏）。
+     */
+    maybeCreeperReflex(): void {
+        try {
+            const bot = this.bot as any;
+            const now = Date.now();
+            if (this.creeperReflexActive) return;
+            if (now < this.creeperCooldownUntil) return;
+            const position = bot?.entity?.position;
+            if (position == null) return;
+            const creepers: Array<{ name: string; distance: number; prevDistance: number | null }> = [];
+            try {
+                for (const entity of Object.values(bot?.entities ?? {}) as any[]) {
+                    const name = String(entity?.name ?? '');
+                    if (!name.toLowerCase().includes('creeper')) continue;
+                    const p = entity?.position;
+                    if (p == null) continue;
+                    const distance = Math.hypot(Number(p.x) - Number(position.x), Number(p.z) - Number(position.z));
+                    const key = String(entity?.id ?? `${Math.round(Number(p.x))},${Math.round(Number(p.z))}`);
+                    creepers.push({ name, distance, prevDistance: this.creeperLastDistance.get(key) ?? null });
+                    this.creeperLastDistance.set(key, distance);
+                }
+            } catch {
+                return;
+            }
+            let hasShield = false;
+            try {
+                hasShield = ((bot?.inventory?.items?.() ?? []) as any[]).some((item) => String(item?.name ?? '') === 'shield');
+            } catch {
+                hasShield = false;
+            }
+            const plan = planCreeperResponse({
+                health: typeof bot?.health === 'number' ? bot.health : null,
+                creepers,
+                hasShield,
+                sheltered: this.shelterHasRoof() === true,
+                cooldownActive: false,
+                otherReflexActive:
+                    this.reflexRunning === true ||
+                    this.suffocationRunning === true ||
+                    this.respawnEscapeRunning === true,
+            });
+            if (plan.action !== 'block' && plan.action !== 'run') return;
+            this.creeperReflexActive = true;
+            void this.performCreeperReflex(plan, hasShield)
+                .catch(() => {})
+                .finally(() => {
+                    this.creeperReflexActive = false;
+                    this.creeperCooldownUntil = Date.now() + CREEPER_REFLEX_COOLDOWN_MS;
+                });
+        } catch {
+            // 反射坏了不许拖垮 tick。
+        }
+    }
+
+    /** 执行一次苦力怕 episode：举盾（≤2.5 s）或远离（≤20 步/20 s），然后报一条事实回执。 */
+    private async performCreeperReflex(plan: CreeperPlan, hasShield: boolean): Promise<void> {
+        const bot = this.bot as any;
+        const healthBefore = typeof bot?.health === 'number' ? bot.health : null;
+        const startedAt = Date.now();
+        let healthAfter = healthBefore;
+        let ranBlocks: number | null = null;
+        let steps = 0;
+        try {
+            if (plan.action === 'block' && hasShield) {
+                let raised = false;
+                try {
+                    const shield = ((bot?.inventory?.items?.() ?? []) as any[]).find(
+                        (item) => String(item?.name ?? '') === 'shield',
+                    );
+                    if (shield != null) {
+                        try {
+                            await bot.equip(shield, 'off-hand');
+                        } catch {
+                            await bot.equip(shield, 'hand');
+                        }
+                        try {
+                            bot.activateItem();
+                            raised = true;
+                        } catch {
+                            raised = false;
+                        }
+                    }
+                } catch {
+                    raised = false;
+                }
+                const until = Date.now() + CREEPER_BLOCK_MAX_MS;
+                while (Date.now() < until) {
+                    healthAfter = typeof bot?.health === 'number' ? bot.health : healthAfter;
+                    if (healthBefore != null && healthAfter != null && healthAfter < healthBefore) break;
+                    await new Promise((resolve) => setTimeout(resolve, 100));
+                }
+                try {
+                    bot.deactivateItem?.();
+                } catch {
+                    /* 收盾失败不影响结论 */
+                }
+                const damage =
+                    healthBefore != null && healthAfter != null ? Math.max(0, Math.round((healthBefore - healthAfter) * 10) / 10) : null;
+                const outcome = !raised ? 'tooLate' : damage != null && damage > 0 ? 'tookDamage' : 'blocked';
+                this.notifyCreeperReflex({ action: 'block', outcome, distance: plan.distance, healthBefore, healthAfter, elapsedMs: Date.now() - startedAt });
+                return;
+            }
+            // 没盾：朝远离向量跑，直到 >10 格 / 威胁消失 / 20 步 / 20 秒。
+            const away = plan.away ?? { x: 0, z: 1 };
+            const startPos = bot?.entity?.position;
+            const startDistance = plan.distance;
+            try {
+                bot.setControlState('sprint', true);
+            } catch {
+                /* 允许关不掉 */
+            }
+            while (steps < CREEPER_RUN_MAX_STEPS && Date.now() - startedAt < CREEPER_RUN_MAX_MS) {
+                const position = bot?.entity?.position;
+                if (position == null) break;
+                let nearest: number | null = null;
+                try {
+                    for (const entity of Object.values(bot?.entities ?? {}) as any[]) {
+                        if (!String(entity?.name ?? '').toLowerCase().includes('creeper')) continue;
+                        const p = entity?.position;
+                        if (p == null) continue;
+                        const distance = Math.hypot(Number(p.x) - Number(position.x), Number(p.z) - Number(position.z));
+                        nearest = nearest == null || distance < nearest ? distance : nearest;
+                    }
+                } catch {
+                    nearest = null;
+                }
+                if (nearest == null || nearest > CREEPER_SAFE_DISTANCE) break;
+                try {
+                    await bot.lookAt(new Vec3(position.x + away.x, position.y, position.z + away.z));
+                    bot.setControlState('forward', true);
+                    bot.setControlState('sprint', true);
+                } catch {
+                    break;
+                }
+                await new Promise((resolve) => setTimeout(resolve, 250));
+                steps += 1;
+                if (startPos != null && bot?.entity?.position != null) {
+                    ranBlocks = Math.hypot(
+                        Number(bot.entity.position.x) - Number(startPos.x),
+                        Number(bot.entity.position.z) - Number(startPos.z),
+                    );
+                }
+                if (startDistance != null && startDistance > CREEPER_SAFE_DISTANCE) break;
+            }
+            try {
+                bot.setControlState('forward', false);
+                bot.setControlState('sprint', false);
+            } catch {
+                /* 停不下来也要报事实 */
+            }
+            healthAfter = typeof bot?.health === 'number' ? bot.health : healthAfter;
+            const took = healthBefore != null && healthAfter != null && healthAfter < healthBefore;
+            this.notifyCreeperReflex({
+                action: 'run',
+                outcome: took ? 'tookDamage' : 'ran',
+                distance: plan.distance,
+                healthBefore,
+                healthAfter,
+                ranBlocks,
+                steps,
+                elapsedMs: Date.now() - startedAt,
+            });
+        } catch {
+            this.notifyCreeperReflex({
+                action: plan.action,
+                outcome: 'tooLate',
+                distance: plan.distance,
+                healthBefore,
+                healthAfter,
+                elapsedMs: Date.now() - startedAt,
+            });
+        }
+    }
+
+    private notifyCreeperReflex(result: CreeperResult): void {
+        try {
+            this.notify('reflex.done', KIND.WORLD, LEVEL.STATE, {
+                reflex: 'creeper',
+                outcome: result.outcome,
+                detail: formatCreeperReflexReceipt(result),
+                healthBefore: result.healthBefore,
+                healthAfter: result.healthAfter,
+                ranBlocks: result.ranBlocks ?? null,
+                steps: result.steps ?? null,
+                ms: result.elapsedMs ?? null,
+            });
+        } catch {
+            // 记日志失败不影响反射本身。
+        }
+    }
     private notify(
         type: string,
         kind: Kind,
@@ -2760,6 +2964,9 @@ export class MineflayerBody {
     /** 最近几次死亡（时间+位置）；由死亡事件写入。 */
     private respawnDeaths: Array<{ at: number; x: number; y: number; z: number }> = [];
     private respawnEscapeRunning = false;
+    private creeperReflexActive = false;
+    private creeperCooldownUntil = 0;
+    private creeperLastDistance = new Map<string, number>();
     /** yield 被循环 verdict 顶掉 / 真的赢了（写进 respawn-loop 日志，供 Lead 定位）。 */
     private lastYieldBeatenReason = '';
     private lastYieldReason = '';
@@ -4036,6 +4243,8 @@ export class MineflayerBody {
         this.perhapsNightShelter();
         // 窒息自救：血在掉 + 脚/头那格实心 ⇒ 就地挖开（与怪物无关，优先级高于一切）。
         this.maybeSuffocationEscape();
+        // 苦力怕反射：逼近 ≤6 格 ⇒ 有盾举盾 / 没盾跑（让位给更高优先级反射）。
+        this.maybeCreeperReflex();
         // 重生循环：窗口内死过 ≥2 次 ⇒ **不等模型回合**，直接跑/挖洞封顶。
         this.maybeBreakRespawnLoop();
         this.pollEdges();
