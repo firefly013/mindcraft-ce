@@ -21,6 +21,17 @@ import {
     WORLD_VERSION,
 } from './generated/render_remap.js';
 
+/**
+ * ## 验证状态（**只写验过的**）
+ *
+ * - **地表剖面：已真机验证**（2026-10-20，`6e623bc` 重启后一帧 800×512）：
+ *   画面是连贯的 1.21.11 地形 —— 草地/梯田状崖壁（草皮压边）、短草与高草**分辨正确**、
+ *   树、石质崖面上的矿石斑点；**零「?」贴图、零错贴图、零悬浮几何**。
+ *   对照重映射前的签名（9.6% 对 / 84.3% 静默画错 / 6.1% 「?」），地表这条频率剖面**修好了**。
+ * - **地下剖面（y≈-10，最初报的那处）：尚未验证** —— 拿到那一帧之前，
+ *   不许收紧回执里的残余数字，也不许声称地下也修好了。
+ */
+
 export { RENDER_REMAP, RENDER_REMAP_SUMMARY, RENDERER_VERSION, WORLD_VERSION };
 
 export type RemapKind = 'exact' | 'approx' | 'none';
