@@ -44,7 +44,7 @@ describe('assessFrameTrust：坏帧 = 版本对不上，不是虚空', () => {
         expect(trust.unknownRatio).toBeCloseTo(1 / 4, 5);
         expect(trust.wrongRatio).toBeCloseTo(2 / 4, 5);
         expect(trust.correctRatio).toBeCloseTo(1 / 4, 5);
-        expect(trust.line).toContain('这张图不可信');
+        expect(trust.line).toContain('这张图的渲染不可全信');
         expect(trust.line).toContain('世界是 1.21.11');
         expect(trust.line).toContain('渲染器只到 1.21.4');
         expect(trust.line).toContain('至少 25%');
@@ -52,10 +52,10 @@ describe('assessFrameTrust：坏帧 = 版本对不上，不是虚空', () => {
         expect(trust.line).toContain('被画成**别的方块**');
         expect(trust.line).toContain('只有 25% 是对的');
         // 关键三句：不许把坏帧读成虚空/没有方块
-        expect(trust.line).toContain('渲染失败');
-        expect(trust.line).toContain('不是虚空、也不代表那里没有方块');
-        expect(trust.line).toContain('以方块数据为准');
-        expect(trust.line).toContain('你并没有掉进虚空');
+        expect(trust.line).toContain('地形判断以 near key blocks 的方块数据为准');
+        expect(trust.line).toContain('整片天空/空白也可能只是这一侧确实没有方块');
+        expect(trust.line).toContain('以 near key blocks 的方块数据为准');
+        expect(trust.line).not.toContain('掉进虚空');
     });
 
     it('**静默画错**是最危险的那类：表里有 id 但名字不同 ⇒ 单独计数，不能混进"没坏"', () => {
@@ -88,7 +88,7 @@ describe('assessFrameTrust：坏帧 = 版本对不上，不是虚空', () => {
         expect(trust.trusted).toBe(false);
         expect(trust.unknownRatio).toBeNull();
         expect(trust.line).toContain('比例测不出来');
-        expect(trust.line).toContain('这张图不可信');
+        expect(trust.line).toContain('这张图的渲染不可全信');
     });
 
     it('没有名字表时退化成"越界比例"（只报能测到的）', () => {
@@ -117,7 +117,7 @@ describe('assessFrameTrust：坏帧 = 版本对不上，不是虚空', () => {
         expect(trust.reason).toBe('renderer_unsupported');
         expect(trust.line).toContain('不支持');
         expect(trust.line).toContain('1.22.0');
-        expect(trust.line).toContain('以方块数据为准');
+        expect(trust.line).toContain('以 near key blocks 的方块数据为准');
     });
 
     it('版本一致 ⇒ **零噪音**（可信就是可信，不写一句废话）', () => {
@@ -189,7 +189,7 @@ describe('measureFrameTrust：读 bot 实际情况，永不抛', () => {
         });
         expect(trust.trusted).toBe(false);
         expect(trust.unknownRatio).toBeNull();
-        expect(trust.line).toContain('这张图不可信');
+        expect(trust.line).toContain('这张图的渲染不可全信');
     });
 
     it('真依赖链也能量（本仓 prismarine-viewer 只认到 1.21.4 ⇒ 1.21.11 必须判不可信）', () => {
@@ -202,7 +202,50 @@ describe('measureFrameTrust：读 bot 实际情况，永不抛', () => {
         } else {
             expect(trust.trusted).toBe(false);
             expect(trust.line).toContain('1.21.11');
-            expect(trust.line).toContain('不可信');
+            expect(trust.line).toContain('不可全信');
         }
+    });
+});
+
+describe('重映射生效后：报的是**残余误差**，不是旧数字', () => {
+    const base = {
+        worldVersion: '1.21.11',
+        rendererVersion: '1.21.4',
+        rendererMaxState: RENDERER_MAX_1214,
+        worldMaxState: WORLD_MAX_1211,
+        remapApplied: true,
+    };
+
+    it('全部一对一 ⇒ 画面可信、**零噪音**（不再拿旧数字吓模型）', () => {
+        const trust = assessFrameTrust({
+            ...base,
+            sampledBlocks: [{ stateId: 1, name: 'stone' }],
+            remapOf: () => ({ stateId: 5, kind: 'exact' }),
+        });
+        expect(trust.trusted).toBe(true);
+        expect(trust.line).toBe('');
+        expect(trust.unknownRatio).toBeNull(); // 旧数字不许漏出来
+    });
+
+    it('混合 ⇒ 三类残余都说清（一致 / 近似 / 仍无法渲染）', () => {
+        const trust = assessFrameTrust({
+            ...base,
+            sampledBlocks: [
+                { stateId: 1, name: 'stone' },
+                { stateId: 2, name: 'bush' },
+                { stateId: 3, name: 'test_block' },
+            ],
+            remapOf: (id) =>
+                id === 1 ? { stateId: 5, kind: 'exact' } : id === 2 ? { stateId: 6, kind: 'approx' } : { stateId: null, kind: 'none' },
+        });
+        expect(trust.trusted).toBe(false);
+        expect(trust.unknownRatio).toBeCloseTo(1 / 3, 5);
+        expect(trust.wrongRatio).toBeCloseTo(1 / 3, 5);
+        expect(trust.correctRatio).toBeCloseTo(1 / 3, 5);
+        expect(trust.line).toContain('已启用 state 重映射');
+        expect(trust.line).toContain('33% 一致');
+        expect(trust.line).toContain('33% 是近似');
+        expect(trust.line).toContain('33% 仍无法渲染');
+        expect(trust.line).toContain('以 near key blocks 的方块数据为准');
     });
 });

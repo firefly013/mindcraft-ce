@@ -25,6 +25,13 @@
  */
 
 import { createRequire } from 'node:module';
+import { mappingForStateId } from './state_remap.js';
+
+/** 默认的"世界 state id → 重映射结果"（用 checked-in 的表）。 */
+function remapFromStateId(stateId: number): { stateId: number | null; kind: 'exact' | 'approx' | 'none' } | null {
+    const mapping = mappingForStateId(stateId);
+    return mapping == null ? null : { stateId: mapping.stateId, kind: mapping.kind };
+}
 
 export interface FrameTrustInput {
     /** 世界版本（`bot.version`）。 */
@@ -42,6 +49,15 @@ export interface FrameTrustInput {
      * （会画 `missing_texture`，即「?」）。
      */
     rendererNameOf?: ((stateId: number) => string | null) | null;
+    /**
+     * **重映射是否已经生效**（`camera` 把世界 state id 翻成了渲染器 id）。
+     *
+     * 生效时这里报的必须是**重映射之后**的残余误差，不是旧数字 —— 否则回执会夸大
+     * 不可靠程度（同样是"声称超过证据"）。
+     */
+    remapApplied?: boolean;
+    /** 世界 state id → 重映射结果；null = 表里查不到。仅在 `remapApplied` 时有意义。 */
+    remapOf?: ((stateId: number) => { stateId: number | null; kind: 'exact' | 'approx' | 'none' } | null) | null;
 }
 
 export interface FrameTrust {
@@ -113,9 +129,41 @@ export function compareSampledBlocks(
     };
 }
 
+/**
+ * 重映射之后的残余误差：**exact**（一对一）/ **approx**（换成视觉近邻）/ **none**（仍画「?」）。
+ * 名字缺失的样本不计（不猜）。
+ */
+export function compareRemappedBlocks(
+    sampled: ReadonlyArray<{ stateId: number; name?: string | null }> | undefined,
+    remapOf: ((stateId: number) => { stateId: number | null; kind: 'exact' | 'approx' | 'none' } | null) | null | undefined,
+): { exactRatio: number | null; approxRatio: number | null; noneRatio: number | null; counted: number } {
+    const none = { exactRatio: null, approxRatio: null, noneRatio: null, counted: 0 } as const;
+    if (sampled == null || sampled.length === 0 || remapOf == null) return none;
+    let exact = 0;
+    let approx = 0;
+    let unmappable = 0;
+    let counted = 0;
+    for (const block of sampled) {
+        const id = Number(block?.stateId);
+        if (!Number.isFinite(id)) continue;
+        let mapping: { stateId: number | null; kind: 'exact' | 'approx' | 'none' } | null = null;
+        try {
+            mapping = remapOf(id);
+        } catch {
+            mapping = null;
+        }
+        counted += 1;
+        if (mapping == null || mapping.kind === 'none') unmappable += 1;
+        else if (mapping.kind === 'approx') approx += 1;
+        else exact += 1;
+    }
+    if (counted === 0) return none;
+    return { exactRatio: exact / counted, approxRatio: approx / counted, noneRatio: unmappable / counted, counted };
+}
+
 const CLOSE =
-    '画面里的「?」贴图和蓝色空白是**渲染失败**，**不是虚空、也不代表那里没有方块**；' +
-    '以方块数据为准（near key blocks 是真实读数）。';
+    '**地形判断以 near key blocks 的方块数据为准**，不要只凭画面' +
+    '（整片天空/空白也可能只是这一侧确实没有方块，比如视线朝上）。';
 
 const pct = (ratio: number | null): string | null => (ratio == null ? null : `${Math.round(ratio * 100)}%`);
 
@@ -131,7 +179,7 @@ export function assessFrameTrust(input: FrameTrustInput): FrameTrust {
             trusted: false,
             ...none,
             reason: 'renderer_unsupported',
-            line: `⚠️ **这张图不可信**：读不到世界版本。${CLOSE}`,
+            line: `⚠️ **这张图的渲染不可全信**：读不到世界版本。${CLOSE}`,
         };
     }
     if (renderer == null || renderer === '') {
@@ -139,10 +187,38 @@ export function assessFrameTrust(input: FrameTrustInput): FrameTrust {
             trusted: false,
             ...none,
             reason: 'renderer_unsupported',
-            line: `⚠️ **这张图不可信**：渲染器**不支持**世界版本 ${world}（它没有这个版本的方块数据）。${CLOSE}`,
+            line: `⚠️ **这张图的渲染不可全信**：渲染器**不支持**世界版本 ${world}（它没有这个版本的方块数据）。${CLOSE}`,
         };
     }
     if (renderer !== world) {
+        // **重映射生效时，报的是重映射之后的残余误差**（否则回执会夸大不可靠程度）。
+        if (input.remapApplied === true && input.remapOf != null) {
+            const remapped = compareRemappedBlocks(input.sampledBlocks, input.remapOf);
+            if (remapped.counted > 0) {
+                const approxPct = pct(remapped.approxRatio);
+                const nonePct = pct(remapped.noneRatio);
+                const exactPct = pct(remapped.exactRatio);
+                // 全部一对一 ⇒ 画面是可信的 ⇒ **零噪音**（不再拿旧数字吓模型）。
+                if ((remapped.approxRatio ?? 0) === 0 && (remapped.noneRatio ?? 0) === 0) {
+                    return { trusted: true, ...none, reason: 'ok', line: '' };
+                }
+                const parts: string[] = [];
+                if (exactPct != null) parts.push(`**${exactPct} 一致**`);
+                if (approxPct != null) parts.push(`**${approxPct} 是近似**（同族/同色系，形状可能不同）`);
+                if (nonePct != null) parts.push(`**${nonePct} 仍无法渲染**（画成「?」）`);
+                return {
+                    trusted: false,
+                    unknownRatio: remapped.noneRatio,
+                    wrongRatio: remapped.approxRatio,
+                    correctRatio: remapped.exactRatio,
+                    reason: 'version_skew',
+                    line:
+                        `ℹ️ **已启用 state 重映射**（世界 ${world} → 渲染器 ${renderer}）：` +
+                        `附近方块里 ${parts.join('，')}。` +
+                        `**地形判断以 near key blocks 的方块数据为准**，近似的那部分不要当作精确地形。`,
+                };
+            }
+        }
         const compared = compareSampledBlocks(input.sampledBlocks, input.rendererNameOf);
         const unknownRatio = compared.unknownRatio ?? outOfRangeRatio(input.sampledBlocks, input.rendererMaxState);
         const parts: string[] = [];
@@ -164,13 +240,12 @@ export function assessFrameTrust(input: FrameTrustInput): FrameTrust {
             correctRatio: compared.correctRatio,
             reason: 'version_skew',
             line:
-                `⚠️ **这张图不可信（不能当现场照）**：世界是 ${world}，渲染器只到 ${renderer}` +
+                `⚠️ **这张图的渲染不可全信**：世界是 ${world}，渲染器只到 ${renderer}` +
                 '（`prismarine-viewer` 只认到那个版本）⇒ 附近方块里 ' +
                 numbers +
                 '。' +
                 caveat +
-                CLOSE +
-                '（这只是渲染问题，**你并没有掉进虚空**；看画面之前先看这条。）',
+                CLOSE,
         };
     }
     // 版本一致 ⇒ 渲染数据是同一份；采样越界只可能是脏数据，不当成"不可信"的理由。
@@ -190,6 +265,10 @@ export interface FrameTrustDeps {
     sampleBlocks?: (count: number) => Array<{ stateId?: unknown; name?: unknown }>;
     /** 采样多少个点（默认 24）。 */
     sampleCount?: number;
+    /** 重映射是否已生效（默认 false；camera 装上了才传 true）。 */
+    remapApplied?: boolean;
+    /** 世界 state id → 重映射结果（默认用 state_remap 的表）。 */
+    remapOf?: ((stateId: number) => { stateId: number | null; kind: 'exact' | 'approx' | 'none' } | null) | null;
 }
 
 function defaultViewerVersionOf(worldVersion: string): string | null {
@@ -317,6 +396,16 @@ export function measureFrameTrust(bot: any, deps: FrameTrustDeps = {}): FrameTru
         return null;
     }, null);
 
+    const remapOf =
+        deps.remapOf !== undefined
+            ? deps.remapOf
+            : (() => {
+                  try {
+                      return remapFromStateId;
+                  } catch {
+                      return null;
+                  }
+              })();
     return assessFrameTrust({
         worldVersion,
         rendererVersion,
@@ -324,5 +413,7 @@ export function measureFrameTrust(bot: any, deps: FrameTrustDeps = {}): FrameTru
         worldMaxState,
         sampledBlocks,
         rendererNameOf,
+        remapApplied: deps.remapApplied === true,
+        remapOf,
     });
 }

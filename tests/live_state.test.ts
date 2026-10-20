@@ -9,6 +9,7 @@ import { describe, expect, it } from 'vitest';
 import {
   budgetedList,
   compassOf,
+  describeViewDirection,
   durabilityFraction,
   KEY_BLOCKS,
   PERCEPTION_LIMIT,
@@ -180,8 +181,8 @@ describe('sampleLiveState', () => {
 
   it('**坏帧的怀疑必须跟着图走**：图照发，但要说清「?」是渲染失败、不是虚空', () => {
     const line =
-      '⚠️ **这张图不可信**：世界是 1.21.11，渲染器只到 1.21.4 ⇒ 附近**至少 100%** 的方块状态它不认识。' +
-      '画面里的「?」贴图和蓝色空白是**渲染失败**，**不是虚空、也不代表那里没有方块**；以方块数据为准。';
+      '⚠️ **这张图的渲染不可全信**：世界是 1.21.11，渲染器只到 1.21.4 ⇒ 附近方块里**至少 100%** 它认不出（画成「?」）。' +
+      '**地形判断以 near key blocks 的方块数据为准**，不要只凭画面。';
     const s = sampleLiveState({
       bot: stubBot(),
       vision: {
@@ -196,13 +197,13 @@ describe('sampleLiveState', () => {
 
     const text = renderLiveState(s);
     expect(text).toContain('Screenshot: screenshot_bad.jpg');
-    expect(text).toContain('这张图不可信');
-    expect(text).toContain('不是虚空');
+    expect(text).toContain('这张图的渲染不可全信');
+    expect(text).toContain('以 near key blocks 的方块数据为准');
     // 那一行必须紧跟在 Screenshot 行之后（模型最容易把图旁边的字当结论）
     const lines = text.split('\n');
     const idx = lines.findIndex((l) => l.startsWith('Screenshot:'));
     expect(idx).toBeGreaterThanOrEqual(0);
-    expect(lines[idx + 1]).toContain('这张图不可信');
+    expect(lines[idx + 1]).toContain('不可全信');
   });
 
   it('图可信时**一个字都不多**（零噪音）', () => {
@@ -216,8 +217,8 @@ describe('sampleLiveState', () => {
     expect(s.screenshot.trust?.trusted).toBe(true);
     const text = renderLiveState(s);
     expect(text).toContain('Screenshot: screenshot_ok.jpg');
-    expect(text).not.toContain('这张图不可信');
-    expect(text).not.toContain('渲染失败');
+    expect(text).not.toContain('不可全信');
+    expect(text).not.toContain('不可全信');
   });
 
   it('key blocks are found by registry name within radius', () => {
@@ -535,5 +536,61 @@ describe('perception fields', () => {
     entities['900'] = { id: 900, name: 'skeleton', position: { x: 0, y: 64, z: -20 } };
     const text = renderLiveState(sampleLiveState({ bot: stubBot({ entities }) }));
     expect(text).toContain('farther (merged): skeleton×1 N');
+  });
+});
+
+describe('视线方向：先给上下文，再谈可不可信（真机 overnight_a 的"整片天空"其实是朝上）', () => {
+  it('pitch ≈ −87°（几乎垂直朝上）⇒ 点名"朝天空"、仰视、朝向罗盘，并说明这时的图不能判断地形', () => {
+    const line = describeViewDirection((-87 * Math.PI) / 180, 0); // yaw 0 = +z = 南
+    expect(line).not.toBeNull();
+    expect(line).toContain('朝天空');
+    expect(line).toContain('pitch -87°');
+    expect(line).toContain('仰视');
+    expect(line).toContain('朝 S');
+    expect(line).toContain('不能用来判断地形');
+    expect(line).toContain('纯天空色是正常的');
+  });
+
+  it('平视 ⇒ **一个字都不加**（零噪音）', () => {
+    expect(describeViewDirection(0.05, 0)).toBeNull();
+    expect(describeViewDirection((-20 * Math.PI) / 180, 1.2)).toBeNull(); // 20° 还在半视场内
+  });
+
+  it('几乎垂直向下 ⇒ 说明"只能看到脚下几格"', () => {
+    const line = describeViewDirection((85 * Math.PI) / 180, Math.PI);
+    expect(line).toContain('几乎垂直向下');
+    expect(line).toContain('俯视');
+    expect(line).toContain('朝 N');
+    expect(line).toContain('不可靠');
+  });
+
+  it('朝向罗盘按 MC 的 yaw 约定（0=南、±90=东/西、180=北）', () => {
+    const at = (yawDeg: number): string | null => describeViewDirection((-80 * Math.PI) / 180, (yawDeg * Math.PI) / 180);
+    expect(at(0)).toContain('朝 S');
+    expect(at(180)).toContain('朝 N');
+    expect(at(-90)).toContain('朝 E');
+    expect(at(90)).toContain('朝 W');
+  });
+
+  it('读不到 pitch/yaw ⇒ null（不猜）', () => {
+    expect(describeViewDirection(null, 0.3)).toBeNull();
+    expect(describeViewDirection(0.3, undefined)).toBeNull();
+    expect(describeViewDirection(Number.NaN, 0.3)).toBeNull();
+  });
+
+  it('渲染进截图块：紧跟 Screenshot 行（上下文在怀疑之前）', () => {
+    const bot: any = stubBot();
+    // 真机那一幕：pitch ≈ −88°（几乎垂直朝上）
+    bot.entity.pitch = (-88 * Math.PI) / 180;
+    bot.entity.yaw = 0;
+    const s = sampleLiveState({
+      bot,
+      vision: { lastScreenshot: { file: 'screenshot_sky.jpg', takenAt: Date.now() } },
+    });
+    const text = renderLiveState(s);
+    const lines = text.split('\n');
+    const idx = lines.findIndex((l) => l.startsWith('Screenshot:'));
+    expect(idx).toBeGreaterThanOrEqual(0);
+    expect(lines[idx + 1]).toContain('朝天空');
   });
 });

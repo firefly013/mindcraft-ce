@@ -326,6 +326,47 @@ export function aggregateTotals(items: readonly string[]): string[] {
 }
 
 /**
+ * **仰角/俯角超过它就"画面里基本没有地面"**。
+ *
+ * 量化依据：MC 默认垂直视场角 ≈ 70°（半角 35°）⇒ 视线抬高超过半角，地平线就出画面、
+ * 整张图只剩天空。真机那次 pitch ≈ −87°~−90° 正是这一类（画面本来就该是纯天空）。
+ */
+export const SKY_PITCH_DEG = -35;
+/** 低于这个角度就是"几乎垂直向下"：只能看到脚下几格，判断远处地形不可靠。 */
+export const DOWN_PITCH_DEG = 70;
+
+/**
+ * **这张截图到底在拍什么**（纯函数）。
+ *
+ * 只回答"视线方向"这一个问题：pitch 度数 + 俯仰措辞 + 朝向罗盘。**平视时返回 null**
+ * （零噪音）—— 这一行是**上下文**，不是怀疑：有了它，"整片天空"的图就不再需要被误读成
+ * "渲染坏了/掉进虚空"。
+ *
+ * 单位：mineflayer 的 `entity.pitch` / `entity.yaw` 是**弧度**；pitch 负 = 抬头（西部为 -90°）。
+ */
+export function describeViewDirection(pitch: unknown, yaw: unknown): string | null {
+  const p = Number(pitch);
+  const y = Number(yaw);
+  if (!Number.isFinite(p) || !Number.isFinite(y)) return null; // 读不到就不说（不猜）
+  const pitchDeg = (p * 180) / Math.PI;
+  // MC yaw：0 = +z = 南；朝向向量 = (-sin yaw, cos yaw)。
+  const compass = compassOf(-Math.sin(y), Math.cos(y));
+  if (pitchDeg <= SKY_PITCH_DEG) {
+    return (
+      `视线：**朝天空**（pitch ${pitchDeg.toFixed(0)}°，仰视，朝 ${compass}）——` +
+      '画面里基本没有地面，**这时的截图不能用来判断地形/挖向**（纯天空色是正常的），看 near key blocks。'
+    );
+  }
+  if (pitchDeg >= DOWN_PITCH_DEG) {
+    return (
+      `视线：**几乎垂直向下**（pitch +${pitchDeg.toFixed(0)}°，俯视，朝 ${compass}）——` +
+      '只能看到脚下几格，判断远处地形/走位不可靠。'
+    );
+  }
+  return null; // 平视：一个字都不加
+}
+
+/**
  * 快照的段落名。`stats(type=…)` 就是按它挑"要看哪一方面"——
  * 段落是**同一份采样**的不同切面，不存在第二套数据。
  */
@@ -415,6 +456,14 @@ const SECTION_RENDERERS: Record<LiveSectionKey, (s: LiveState) => string[]> = {
         `speed ${p.speed ?? UNKNOWN} dimension ${p.dimension ?? UNKNOWN} biome ${p.biome ?? UNKNOWN}`,
     ];
   },
+  /**
+   * **视线方向**：判断"这张图现在到底在拍什么"。
+   *
+   * 真机（overnight_a）：pitch ≈ −87°~−90°（几乎垂直朝上）时两张截图整片是天空色，
+   * bot 以为"渲染坏了/掉进虚空"，其实**画面是对的** —— 它缺的是"我现在朝上"这条元数据。
+   * 所以：只有视线**不寻常**时才加这一行（俯仰超出临界角），平视时一个字都不加。
+   * 这一行放在截图块里（下面 `screenshot` 段），因为它描述的是"这张图在拍什么"。
+   */
   environment: (s) => {
     const e = s.environment;
     return [
@@ -445,7 +494,10 @@ const SECTION_RENDERERS: Record<LiveSectionKey, (s: LiveState) => string[]> = {
     if (s.screenshot.ref != null) {
       const age = Date.now() - s.screenshot.ref.takenAt;
       const lines = [`Screenshot: ${s.screenshot.ref.file} (taken ${Math.max(0, Math.round(age / 1000))}s ago)`];
-      // **图照发，但坏帧必须当场说清楚**（否则模型会把「?」读成"掉进虚空/世界坏了"）。
+      // **先说"这张图在拍什么"（上下文），再说"这张图可不可信"（怀疑）** —— 顺序是有意的：
+      // 上下文明明可以把一张"全天空"的图解释清楚，先给怀疑会让模型把正常画面也当成坏的。
+      const view = describeViewDirection(s.position.pitch, s.position.yaw);
+      if (view != null) lines.push(view);
       const line = s.screenshot.trust?.line ?? '';
       if (line !== '') lines.push(line);
       return lines;

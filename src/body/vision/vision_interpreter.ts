@@ -44,7 +44,9 @@ export class VisionInterpreter {
             // **拍完立刻判定这张图可不可信**（版本/状态表可能对不上）。测不出来也不影响发图：
             // 宁可让模型知道"图不可信"，也不能让它把「?」当成世界的样子。
             try {
-                this.lastFrameTrust = measureFrameTrust(this.agent?.bot);
+                const remapApplied = (camera as { stateRemapInstalled?: boolean }).stateRemapInstalled === true;
+                // 重映射生效时报的是**重映射之后的残余误差**（不能拿旧数字夸大不可靠程度）。
+                this.lastFrameTrust = measureFrameTrust(this.agent?.bot, { remapApplied });
             } catch {
                 this.lastFrameTrust = null;
             }

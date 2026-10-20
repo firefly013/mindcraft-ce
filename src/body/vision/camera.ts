@@ -11,6 +11,9 @@ import { EventEmitter } from 'events';
 
 import worker_threads from 'worker_threads';
 
+import { remapChunkJson, remapBlockUpdateStateId } from './chunk_remap.js';
+import { remapStateId, RENDERER_VERSION } from './state_remap.js';
+
 // prismarine-viewer 的 viewer 内部用的是**全局** THREE / Worker
 // （见 node_modules/prismarine-viewer/viewer/lib/entity/Entity.js 的 `/* global THREE */`）。
 // 它自己的 headless 入口（lib/headless.js）会设置这两个全局，而我们只用了
@@ -34,6 +37,9 @@ export class Camera extends EventEmitter {
     viewer: any;
     worldView: any;
 
+    /** 是否装了"世界→渲染器"的 state 重映射（版本一致时不装）。 */
+    stateRemapInstalled = false;
+
     constructor (bot: any, fp: string) {
         super();
         this.bot = bot;
@@ -55,10 +61,43 @@ export class Camera extends EventEmitter {
         this.viewer.setVersion(this.bot.version);
         // Load world
         const worldView = new WorldView(this.bot.world, this.viewDistance, center);
+        this._installStateRemap(worldView);
         this.viewer.listen(worldView);
         worldView.listenToBot(this.bot);
         await worldView.init(center);
         this.worldView = worldView;
+    }
+
+    /**
+     * **把世界版本的方块状态翻译成渲染器认识的 state id。**
+     *
+     * 为什么必须做：`prismarine-viewer` 的 `supportedVersions` 只到 1.21.4，世界的 1.21.11
+     * 状态表它解不了（全表只有 9.6% 对、84.3% 被画成别的方块、6.1% 画「?」）。
+     * 拦截点只有两处：`loadChunk`（整列）与 `blockUpdate`（增量）——**只翻 state id，不动结构**。
+     *
+     * 三条纪律：
+     *   ① 世界/渲染器版本一致时**完全不插手**（零风险零开销）；
+     *   ② 不能映射的 id 保持原值（渲染器画「?」，回执会如实计入），**绝不换成 0**（那会被画成空气）；
+     *   ③ 永不抛 —— 重映射坏掉也只是"图更破"，不能让截图链断掉。
+     */
+    _installStateRemap (worldView: any): void {
+        const worldVersion = String(this.bot?.version ?? '');
+        if (worldVersion === '' || worldVersion === RENDERER_VERSION) return;
+        const originalEmit = worldView.emit.bind(worldView);
+        worldView.emit = (event: string, ...args: any[]): boolean => {
+            try {
+                if (event === 'loadChunk' && args[0] != null && args[0].chunk != null) {
+                    args[0] = { ...args[0], chunk: remapChunkJson(args[0].chunk, remapStateId) };
+                } else if (event === 'blockUpdate' && args[0] != null) {
+                    const mapped = remapBlockUpdateStateId(args[0].stateId, remapStateId);
+                    if (mapped !== args[0].stateId) args[0] = { ...args[0], stateId: mapped };
+                }
+            } catch {
+                /* 翻译坏了就照原样发：图会更破，但绝不中断 */
+            }
+            return originalEmit(event, ...args);
+        };
+        this.stateRemapInstalled = true;
     }
 
     async capture(): Promise<string> {
