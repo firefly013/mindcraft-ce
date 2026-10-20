@@ -921,7 +921,10 @@ export class MineflayerBody {
             for (const packetName of ['window_items', 'set_content', 'container_set_content']) {
                 try {
                     (this.bot as any)._client?.on?.(packetName, (packet: any) => {
-                        if (Number(packet?.windowId) === 0) this.markInventorySynced();
+                        if (Number(packet?.windowId) === 0) {
+                            this.inventoryPacketSeen = true;
+                            this.markInventorySynced();
+                        }
                     });
                 } catch {
                     // 拿不到底层 client 就只靠 heldItemChanged/恢复轮询兜底。
@@ -2207,6 +2210,8 @@ export class MineflayerBody {
 
     /** 复活后的背包同步恢复：定时器句柄。 */
     private inventorySyncRecoveryTimer: ReturnType<typeof setTimeout> | null = null;
+    /** 是否收到过 windowId 0 的背包内容包（哪怕 0 格——那是**测量**,不是假设）。 */
+    private inventoryPacketSeen = false;
 
     private clearInventorySyncRecovery(): void {
         if (this.inventorySyncRecoveryTimer == null) return;
@@ -2219,22 +2224,23 @@ export class MineflayerBody {
     }
 
     /**
-     * **复活后主动恢复背包同步（有界 3 秒）** —— 真机 2026-10-21（overnight_a）：
-     * 溺水重生后连续 3 次 `stats` 都返回「还没同步上来（刚重连，不是空的）…等一两秒再看」，
-     * 等了几十秒还是这句。文案是对的（未知不许渲染成空），但**恢复**是坏的：
-     * 复活里把 `inventorySynced=false` 之后，只有 `window_items(windowId 0)` 或
-     * `heldItemChanged` 会把它置回 true；1.21.11 服务端用的是 `set_content`，而空背包
-     * 时 `heldItemChanged` 根本不触发 ⇒ 永远"未知"。
+     * **背包同步恢复（有界，且"空"必须是被测量过的）** —— 真机 2026-10-21：
+     * 恢复轮询里"3 秒后仍空 ⇒ 当作空"这条兜底，只在**死亡/复活**时成立；
+     * 进程刚重连时物品还在世界里，把它报成"空"会让模型重采一切（`assumed-empty` 已误报 38 次）。
      *
-     * 规则：**一句"等一两秒"必须真的会等到**。策略：
-     * 每 250ms 读一次背包；读到非空 ⇒ 立刻标记同步（via: read-nonempty）；
-     * 3 秒后仍是空的 ⇒ 也标记同步（via: assumed-empty，keepInventory=false 时
-     * 复活后背包空是**合理**的，而永远未知比"空"更危险），并留一条 lifecycle 记录。
+     * 现在的出口只有四个：
+     * - `read-nonempty`：读到非空 ⇒ 真同步；
+     * - `packet-empty`：**收到过 windowId 0 的内容包**（哪怕 0 格）⇒ 这是测量出的空；
+     * - `assumed-empty-after-death`：**最近确实死过/复活过**且 3 秒仍空 ⇒ 按空处理（keepInventory=false 下合理）；
+     * - `still-unsynced-after-reconnect`：以上都不是 ⇒ **保持"未知"**，继续有界重试（最多 30 秒），
+     *   然后记 `inventory-sync-stuck` 并停止重试（状态仍是未知；渲染层会说"刚重连、不是空的"）。
      */
     armInventorySyncRecovery(why: string): void {
         this.clearInventorySyncRecovery();
         if (this.inventorySynced) return;
+        this.inventoryPacketSeen = false;
         const startedAt = Date.now();
+        let loggedStillUnsynced = false;
         const poll = (): void => {
             this.inventorySyncRecoveryTimer = null;
             if (this.inventorySynced) return;
@@ -2246,14 +2252,16 @@ export class MineflayerBody {
             } catch {
                 itemCount = null;
             }
-            const settle = (via: 'read-nonempty' | 'assumed-empty'): void => {
+            const settle = (
+                via: 'read-nonempty' | 'packet-empty' | 'assumed-empty-after-death',
+            ): void => {
                 this.markInventorySynced();
                 try {
                     this.log.with('lifecycle').info({
                         event: 'inventory-sync-recovery',
                         why,
                         via,
-                        afterMs: didTime(elapsed),
+                        afterMs: Math.round(elapsed),
                         itemCount,
                     });
                 } catch {
@@ -2261,10 +2269,41 @@ export class MineflayerBody {
                 }
             };
             if (itemCount != null && itemCount > 0) return settle('read-nonempty');
-            if (elapsed >= 3000) return settle('assumed-empty');
+            if (this.inventoryPacketSeen) return settle('packet-empty');
+            // **"空"必须能追溯到一次死亡**；重连不算。
+            const recentlyDied = this.lastDeathAt > 0 && Date.now() - this.lastDeathAt <= 60_000;
+            if (elapsed >= 3_000) {
+                if (recentlyDied) return settle('assumed-empty-after-death');
+                if (!loggedStillUnsynced) {
+                    loggedStillUnsynced = true;
+                    try {
+                        this.log.with('lifecycle').info({
+                            event: 'inventory-sync-recovery',
+                            why,
+                            via: 'still-unsynced-after-reconnect',
+                            afterMs: Math.round(elapsed),
+                            itemCount,
+                        });
+                    } catch {
+                        // 日志失败不影响重试。
+                    }
+                }
+                if (elapsed >= 30_000) {
+                    try {
+                        this.log.with('lifecycle').info({
+                            event: 'inventory-sync-stuck',
+                            why,
+                            afterMs: Math.round(elapsed),
+                            itemCount,
+                        });
+                    } catch {
+                        // 日志失败不影响状态。
+                    }
+                    return; // 保持 unsynced（未知），不再无休止轮询
+                }
+            }
             this.inventorySyncRecoveryTimer = setTimeout(poll, 250);
         };
-        const didTime = (ms: number): number => Math.round(ms);
         this.inventorySyncRecoveryTimer = setTimeout(poll, 250);
     }
 
