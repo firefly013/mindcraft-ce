@@ -49,3 +49,65 @@ node scripts/overnight/alerts-since.mjs   # 自上次以来新增的 critical �
 - `profile.name` 就是 Minecraft 用户名，必须匹配 `^[a-zA-Z0-9_]{3,16}$`；带 `-` 会在身体握手阶段被 LoginGuard 拒绝，agent 退出且不会自动重启。
 - `providers.json` 的 `x-opencode-session` header 需要 `OPENCODE_SESSION_ID`，否则每次模型请求一行 stderr 警告（已注入）。
 - watcher 启动后 120s 为宽限期，宽限期内不报 `mindserver-down` / `bot-offline`，避免「watcher 先起、8080 后起」的误报。
+
+---
+
+## ⚠️ 部署协议（2026-10-21 实测修正 —— 违反它会导致"部署看起来成功但代码没在跑"）
+
+**`.restart-request` 只重启 MindServer，不会重启两个 bot 进程。**
+
+实测证据（2026-10-21 凌晨）：
+- bot 是 MindServer spawn 的 `src/brain/index.ts` 子进程，命令行带 `-m "<init_message>"`；
+- 父进程被 `Stop-ProcessTree` 杀掉后，**bot 子进程变成孤儿继续运行**（旧 PID 从 03:25 活到 05:00）；
+- `supervisor-status.json` 的 `restarts` 计数照常增长（MindServer 自己每 5 分钟崩一次 `livedSec=15, backoffSec=300`），**但 bot 的代码与 init_message 从未更新**；
+- 后果：03:25→04:54 之间提交的 5+ 个批次（pillarUp apex、dig 进度、入口探针、物品族命名…）**全部没有生效**，而所有"已部署/已真机验证"的判断都是错的。
+
+### 正确流程（每次改完代码）
+
+```powershell
+$wt = 'C:\Users\bobo\mindcraft-ce-overnight'
+
+# 1) 提交 + 推送
+git -C $wt add <具名路径>; git -C $wt commit -m '...'; git -C $wt push origin HEAD
+
+# 2) 杀 bot 子进程（关键！restart-request 不会做这件事）
+Get-CimInstance Win32_Process -Filter "Name='node.exe'" |
+  Where-Object { $_.CommandLine -match 'brain\\index\.ts' } |
+  ForEach-Object { Stop-Process -Id $_.ProcessId -Force }
+
+# 3) 杀 supervisor + MindServer + watcher
+Get-CimInstance Win32_Process -Filter "Name='pwsh.exe'" |
+  Where-Object { $_.CommandLine -match 'supervisor\.ps1' -and $_.ProcessId -ne $PID } |
+  ForEach-Object { Stop-Process -Id $_.ProcessId -Force }
+Get-CimInstance Win32_Process -Filter "Name='node.exe'" |
+  Where-Object { $_.CommandLine -match 'overnight|main\.ts|watch\.mjs' } |
+  ForEach-Object { Stop-Process -Id $_.ProcessId -Force }
+
+# 4) 重启 supervisor（不设时长上限）
+Remove-Item "$wt\tmp\overnight\.stop","$wt\tmp\overnight\.restart-request" -ErrorAction SilentlyContinue
+Start-Process -FilePath "C:\Program Files\PowerShell\7\pwsh.exe" `
+  -ArgumentList '-NoProfile','-ExecutionPolicy','Bypass','-File','scripts\overnight\supervisor.ps1','-MaxHours','0','-Vision' `
+  -WorkingDirectory $wt -WindowStyle Hidden `
+  -RedirectStandardOutput "$wt\tmp\overnight\supervisor.out.log" `
+  -RedirectStandardError  "$wt\tmp\overnight\supervisor.err.log"
+```
+
+### 部署是否真的生效 —— 唯一可信判据
+
+**看进程启动时间与命令行，不看 `restarts` 计数：**
+
+```powershell
+Get-CimInstance Win32_Process -Filter "Name='node.exe'" |
+  Where-Object { $_.CommandLine -match 'brain\\index\.ts' } |
+  ForEach-Object {
+    "PID $($_.ProcessId) 启动 $($_.CreationDate) 新文案=$($_.CommandLine -match '世界设定')"
+  }
+```
+
+必须同时满足：**CreationDate 是刚才** 且 **`新文案=True`**。否则代码没在跑。
+
+**通用规矩：「重启成功」≠「代码生效」。**
+
+### 配置类改动的特别说明
+
+`overnight-settings.json` **只在 supervisor 启动时读一次**，且 `init_message` 会被写进 bot 进程的 `-m` 参数。所以改配置后**必须按上面流程重启 supervisor + bot**，否则配置改动等于没改。
