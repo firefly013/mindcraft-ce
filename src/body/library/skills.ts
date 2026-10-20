@@ -3005,7 +3005,11 @@ export async function consume(bot: any, itemName: string = "", options: ConsumeO
     // 所以：包里能直接吃的只剩 ≤2 份、而自己并不饿（food ≥ 14）时，**拒绝动存粮**。
     const edibleTotal = edibles.reduce((sum, edible) => sum + edible.count, 0);
     const rawInPack = edibles.filter((edible) => cookedCounterpartOf(edible.name) != null);
-    if (edibleTotal > 0 && edibleTotal <= FOOD_RESERVE_MIN && before.food != null && before.food >= FOOD_RESERVE_COMFORT) {
+    // **低血时存粮保护让位**（Lead 2026-10-21 真机 B：血 7、food 13、背包只剩 1 份腐肉，
+    // `consume` 说"先留着——你现在不饿"，把最后一份也留着 ⇒ 6 分钟无法回血）。
+    // 存粮规则的前提是"你不在危险里"；health ≤ 10 时回血比留粮重要。
+    const lowHealthEmergency = typeof bot?.health === 'number' && bot.health <= 10;
+    if (!lowHealthEmergency && edibleTotal > 0 && edibleTotal <= FOOD_RESERVE_MIN && before.food != null && before.food >= FOOD_RESERVE_COMFORT) {
         const keep = edibles.map((edible) => `${edible.name}x${edible.count}`).join('、');
         const rawHint =
             rawInPack.length > 0

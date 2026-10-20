@@ -39,6 +39,7 @@ import * as skills from '../library/skills.js';
 import * as world from '../library/world.js';
 import * as mc from '../data/mcdata.js';
 import { describeDyedShortfall, formatUnknownItemReceipt } from '../library/item_names.js';
+import { planRouteThreatResponse, threatsNearRoute } from '../safety/path_threat.js';
 import Vec3 from 'vec3';
 import { td, tp } from '../../shared/prompts.js';
 import { inventoryLossAdvice } from '../../shared/inventory_advice.js';
@@ -2321,6 +2322,32 @@ const interactCommands: AgentCommand[] = [
         return `找不到实体 #${entity_id}（可能已经消失或走远了）。看一眼 Live State 的实体表。`;
       }
       const kind = String(entity.name ?? entity.username ?? 'unknown');
+      // **走之前评估路线**（Lead 2026-10-21：低血穿过三只苦力怕去开箱子矿车，被炸死丢 496 件）。
+      try {
+        const bot: any = agent.bot;
+        const p = bot?.entity?.position;
+        const targetPos = entity?.position;
+        if (p != null && targetPos != null) {
+          const hostiles = (Object.values(bot?.entities ?? {}) as Array<any>)
+            .filter((e) => e?.position != null && String(e?.name ?? '') !== '' && mc.isHostile(e))
+            .map((e) => ({ name: String(e.name), x: Number(e.position.x), z: Number(e.position.z) }));
+          const from = { x: Number(p.x), z: Number(p.z) };
+          const to = { x: Number(targetPos.x), z: Number(targetPos.z) };
+          const near = threatsNearRoute({ from, to, hostiles });
+          const verdict = planRouteThreatResponse({
+            health: typeof bot?.health === 'number' ? bot.health : null,
+            threats: near,
+            from,
+            to,
+          });
+          if (!verdict.proceed) {
+            lines.push(step(verdict.message));
+            return renderReport(lines);
+          }
+        }
+      } catch {
+        // 评估失败不阻挡交互（守卫坏了不许变成墙）。
+      }
       lines.push(step(`目标 #${entity_id} 是 ${kind}，走过去`));
       const ok = await skills.goToPosition(
         agent.bot,
