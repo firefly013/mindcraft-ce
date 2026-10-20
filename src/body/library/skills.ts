@@ -715,9 +715,18 @@ export async function craftRecipe(bot: any, itemName: string, num: number = 1): 
     await craftWithStaleWindowGuard(bot, recipe, crafts, craftingTable);
     const got = world.getInventoryCounts(bot)[itemName];
     if (crafts < craftsWanted) {
-        log(bot, `材料不够：想做 ${num} 个 ${itemName}（需跑 ${craftsWanted} 遍配方，每遍出 ${perCraft} 个），只够跑 ${crafts} 遍；限料是 ${craftLimit.limitingResource}。现在背包里有 ${got} 个 ${itemName}。`);
-    } else {
-        log(bot, `合成了 ${itemName}：跑 ${crafts} 遍配方（每遍出 ${perCraft} 个），现在背包里有 ${got} 个。`);
+        log(bot, `材料不够：想做 ${num} 个 ${itemName}（需跑 ${craftsWanted} 遍配方，每遍出 ${perCraft} 个），只够跑 ${crafts} 遍；限料是 ${craftLimit.limitingResource}。`);
+
+        // **"现在背包里有 N 个"是未测量的断言**（真机 2026-10-20：回执说 4 个火把、实际 0 个，coal/stick 被吃掉）。
+        // 只报**实测**；测不出就如实说测不出，不替模型编造"有几个"。
+        const craftMeasured = ((): number | null => {
+            try {
+                return Number((world.getInventoryCounts(bot) as Record<string, number>)[itemName] ?? 0);
+            } catch {
+                return null;
+            }
+        })();
+        log(bot, `合成了 ${itemName}：跑 ${crafts} 遍配方（每遍出 ${perCraft} 个）；**背包实测** ${craftMeasured == null ? "读不到（以 stats 为准）" : `${itemName}×${craftMeasured}`}。`);
     }
     if (placedTable) {
         await collectBlock(bot, 'crafting_table', 1);

@@ -1205,16 +1205,26 @@ export interface SmeltAccounting {
     /** 背包里产物数的变化（读不到 = null）。 */
     productGained: number | null;
     /** 目标数：这次想烧多少个。 */
+    /** 配方比例：每个原料出几个成品（原版烧炼都是 1:1，默认 1）。 */
+    recipeRatio?: number;
     target: number;
 }
 
-/** 真丢 = 背包减少的原料 − 炉内输入槽里的原料 − 已产出的成品（读不全 = null，绝不猜）。 */
+/** **真丢的定义**（Lead 2026-10-20 修正）：
+ * 减少的原料 = 变成产物（炉内产物槽 + 背包增量）/ 配方比例 + 还在输入槽里的。
+ * 三者都读到才结算；任一读不到 ⇒ null（算不出来 ≠ 丢了）。
+ * 真机反例：input 0、产物槽 1 个 iron_ingot、背包 +0 ⇒ 原料**已经烧成成品、只是还在炉里**，
+ * 旧算法说"真丢 1"，会害得模型不敢再用熔炉。 */
 export function unaccountedInput(accounting: SmeltAccounting): number | null {
-    const { bagBefore, bagAfter, furnaceInput, productGained } = accounting;
-    if (bagBefore == null || bagAfter == null || furnaceInput == null || productGained == null) return null;
-    const consumed = bagBefore - bagAfter;
-    const accounted = furnaceInput + Math.max(0, productGained);
-    return Math.max(0, consumed - accounted);
+    const { bagBefore, bagAfter, furnaceInput, furnaceOutput, productGained } = accounting;
+    if (bagBefore == null || bagAfter == null || furnaceInput == null) return null;
+    if (furnaceOutput == null || productGained == null) return null;
+    const ratio = Number(accounting.recipeRatio ?? 1) > 0 ? Number(accounting.recipeRatio ?? 1) : 1;
+    // 从背包里拿走的原料 − 还留在输入槽的 = 真正被消耗的原料。
+    const consumed = Math.max(0, bagBefore - bagAfter - furnaceInput);
+    // 已经变成成品的有两部分：**炉内产物槽**（还没取）和背包增量。
+    const producedInputEquivalent = (Math.max(0, furnaceOutput) + Math.max(0, productGained)) / ratio;
+    return Math.max(0, Math.round((consumed - producedInputEquivalent) * 100) / 100);
 }
 
 /** 下一步该怎么办（纯判据；调用方负责真的去做）。 */
@@ -1262,8 +1272,12 @@ export function formatSmeltAccounting(accounting: SmeltAccounting, rounds: numbe
             '- 真丢：**算不出来**（背包或炉子有一项读不到）——这不能当成"丢了"，先重开一次熔炉或用 stats 核对再判断。',
         );
     } else if (lost === 0) {
-        lines.push('- 真丢：**0**。减少的原料要么变成成品、要么还躺在熔炉输入槽里（下面照这个决定下一步）。');
-    } else {
+        const outputSlotNote =
+            accounting.furnaceOutput != null && accounting.furnaceOutput > 0
+                ? `；**产物槽里还有 ${accounting.furnaceOutput} 个 ${accounting.productName} 没取**——再发一次 useBlock(type=furnace) 取走就行。`
+                : '。';
+        lines.push('- 真丢：**0**。原料要么变成了成品、要么还在炉内输入槽里' + outputSlotNote);
+    } else if (lost > 0) {
         lines.push(
             `- 真丢：**${lost} 个**原料既不在背包、也不在炉内输入槽、也没变成成品——这是真的对不上账，` +
                 '请把这条回执原样告诉开发者（不要自己重挖补上，先把事实留下来）。',
@@ -2001,6 +2015,24 @@ const interactCommands: AgentCommand[] = [
             return { input: null, fuel: null, output: null };
           }
         };
+        // **smelt 报失败也要把产物取出来**（真机 2026-10-20：产物槽有 1 个铁锭、背包 +0，
+        // 模型以为烧失败而不敢再用熔炉）。每次读炉前若产物槽有东西就先取走。
+        const takeFurnaceOutput = async (): Promise<number> => {
+          try {
+            const block = located != null ? agent.bot.blockAt?.(new Vec3(located.x, located.y, located.z)) : null;
+            if (block == null) return 0;
+            const ui: any = await agent.bot.openFurnace(block);
+            let got = 0;
+            for (let guard = 0; guard < 64 && ui?.outputItem?.() != null; guard++) {
+              const taken = await ui.takeOutput();
+              got += Number(taken?.count ?? 0);
+            }
+            try { await agent.bot.closeWindow(ui); } catch { /* 关不上不影响已取到的 */ }
+            return got;
+          } catch {
+            return 0;
+          }
+        };
         const smeltStartedAt = Date.now();
         let smeltRounds = 1;
         let slots = await readFurnaceSlots();
@@ -2020,6 +2052,17 @@ const interactCommands: AgentCommand[] = [
             productGained: outBefore != null && outNow != null ? outNow - outBefore : null,
             target: raw.count,
           };
+          // **能取就先取**：产物在产物槽里等于"还没到模型手上"，取走后再统计。
+          if ((accounting.furnaceOutput ?? 0) > 0) {
+            const takenNow = await takeFurnaceOutput();
+            if (takenNow > 0) {
+              slots = await readFurnaceSlots();
+              const outNowAgain = await countInInventoryWithSync(agent.bot, wanted.name, 1, 800);
+              accounting.productGained = outBefore != null && outNowAgain != null ? outNowAgain - outBefore : accounting.productGained;
+              accounting.furnaceOutput = slots.output;
+              lines.push(`- 产物槽里已有成品，已取回 ${takenNow} 个 ${wanted.name}（这就是"还在炉里"的那些）。`);
+            }
+          }
           const produced = Math.max(0, accounting.productGained ?? 0) + (accounting.furnaceOutput ?? 0);
           const next = nextSmeltStep({
             produced,
