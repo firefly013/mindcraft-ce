@@ -1892,7 +1892,17 @@ export async function breakBlockAt(bot: any, x: number, y: number, z: number): P
                 // 理由见 isHandMineable：无镐时被封在方块里，两边都不肯挖
                 // 就是永久卡死（Feedback #38/#43）。
                 if (!isHandMineable(block)) {
-                    log(bot, `没有能挖 ${block.name} 的工具（手持 ${bot?.heldItem?.name ?? '空手'}）；先换正确的工具再来。`);
+                    // **裸装的真话**（Lead 2026-10-21：血 7、空手、脚下是 stone，`digDown` 说
+                    // "先换正确的工具" —— 裸装永远没有镐，这是**下一步不可能**的墙）。
+                    // 给三条现在就能做的动作，而不是一个做不到的建议。
+                    log(
+                        bot,
+                        `没有能挖 ${block.name} 的工具（手持 ${bot?.heldItem?.name ?? '空手'}），空手挖不动 ${block.name}。` +
+                            '现在能做的（按顺序）：① 找附近的 **dirt/gravel/sand** 往下挖（空手能挖）；' +
+                            '② 找现成的**洞穴/矿道/坑**躲进去，别硬凿石头；' +
+                            '③ 实在没有软土也没有洞：天亮了再动，或者换个方向走走看有没有别的入口——' +
+                            '**不要**继续对 stone 发 digDown（结果只会是这一行）。',
+                    );
                     return false;
                 }
                 log(bot, `没有能挖 ${block.name} 的工具（手持 ${bot?.heldItem?.name ?? '空手'}）；它硬度低，改用空手挖（更慢，而且可能不掉落）。`);
@@ -6465,6 +6475,23 @@ export async function craftWithStaleWindowGuard(
     const timeoutMs = Math.max(100, Number(options.timeoutMs ?? CONTAINER_OPEN_TIMEOUT_MS) || CONTAINER_OPEN_TIMEOUT_MS);
     const retries = Math.max(0, Math.floor(Number(options.retries ?? CONTAINER_OPEN_RETRIES) || 0));
     let lastError: unknown = null;
+    // **产物核对基线**（Lead 2026-10-21：真机 `wooden_pickaxe` 实际做出 `oak_pressure_plate`，
+    // 回执却报成功——3 块木板一排正好是压力板配方）。合成前记一次全背包账目。
+    const countInventory = (): Record<string, number> => {
+        try {
+            const counts: Record<string, number> = {};
+            const items = ((bot?.inventory?.items?.() ?? []) as Array<{ name?: unknown; count?: unknown }>);
+            for (const item of items) {
+                const name = String(item?.name ?? '');
+                if (name === '') continue;
+                counts[name] = (counts[name] ?? 0) + Number(item?.count ?? 0);
+            }
+            return counts;
+        } catch {
+            return {};
+        }
+    };
+    const inventoryBefore: Record<string, number> = countInventory();
     for (let attempt = 0; attempt <= retries; attempt++) {
         if (closeStaleWindow(bot)) {
             log(bot, '合成之前先关掉了残留的界面（上一次会话/动作留下的）。');
@@ -6489,6 +6516,41 @@ export async function craftWithStaleWindowGuard(
                 disarm?.('crafted');
             } catch {
                 // 解除失败最多多记几行。
+            }
+            // **产物必须等于请求的产物**：不信任 `bot.craft` 的"完成"，只信任背包实测。
+            // 真机 2026-10-21：请求 wooden_pickaxe，实际背包里多出来的是 oak_pressure_plate
+            // （3 条木板一排就是压力板配方）——框架"成功"了，但合成的不是我们要的东西。
+            try {
+                const rawResultId = recipe?.result?.id;
+                const targetName =
+                    typeof rawResultId === 'string'
+                        ? rawResultId
+                        : String(mc.getItemName(Number(rawResultId)) ?? '');
+                const after = countInventory();
+                const wanted = Number(after[targetName] ?? 0) - Number(inventoryBefore[targetName] ?? 0);
+                // **读不到背包就不许判定"跑偏"**：after 为空说明这次根本没读到背包，
+                // 那不是"产物不对"，是"没测量"。假 bot 只实现注入式 accessor 时就会这样
+                // （tests/craft_workbench.test.ts 用 __counts() 驱动，没有 inventory.items）。
+                const inventoryReadable = Object.keys(after).length > 0
+                    || Object.keys(inventoryBefore).length > 0;
+                if (targetName !== '' && wanted <= 0 && inventoryReadable) {
+                    const unexpected = Object.entries(after)
+                        .map(([name, count]) => ({
+                            name,
+                            delta: Number(count ?? 0) - Number(inventoryBefore[name] ?? 0),
+                        }))
+                        .filter((entry) => entry.delta > 0 && entry.name !== targetName)
+                        .sort((a, b) => b.delta - a.delta)[0] ?? null;
+                    const wrong = unexpected != null ? `${unexpected.name}×${unexpected.delta}` : '别的东西';
+                    throw new Error(
+                        `合成跑偏：**背包里增加的是 ${wrong}，不是 ${targetName}**（这次的配方实际产出了别的东西）。` +
+                            '先 stats 核对；要的东西没出来，别按"成功"继续下一步。',
+                    );
+                }
+            } catch (verifyError: unknown) {
+                // 产物核对本身失败（读不到背包）不判失败——但不许把异常吞成成功：
+                // 只有"明确核对出跑偏"（我们自己抛的 Error）才向上抛。
+                if (verifyError instanceof Error && verifyError.message.startsWith('合成跑偏')) throw verifyError;
             }
             return;
         } catch (err: unknown) {
