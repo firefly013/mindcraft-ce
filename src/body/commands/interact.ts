@@ -1060,6 +1060,43 @@ function step(text: string): string {
 }
 
 /**
+ * 背包数量变化的**诚实**写法。
+ *
+ * 原来两处合成回执都写成 `+${now - have}`，于是"材料被吃掉、产物没出来"
+ * （`now-have = -1`）会渲染成 **`+-1`**——一个既不是成功也不是失败的字符串。
+ * 真机（1.21.11 新档 overnight_b）：
+ * 「craft(input="1 oak_log", output="4 oak_planks") → 合成 oak_planks：**+-1**（现在 0 个）」，
+ * 背包 oak_log 少 1、oak_planks 仍是 0，模型看不懂这个数，于是反复重试、继续丢材料。
+ *
+ * 按 LLM-First：回执的职责是**把实测事实说清楚**，让模型自己判断，
+ * 不是替它下结论、更不是抛一个自相矛盾的符号。
+ */
+export function formatItemDelta(have: number, now: number): string {
+  const d = now - have;
+  const sign = d > 0 ? `+${d}` : d < 0 ? `-${Math.abs(d)}` : '±0';
+  return `${sign}（现在 ${now} 个）`;
+}
+
+/**
+ * 合成"技能报成功、但实测没有产出"时的说明。
+ *
+ * 旧文案是「可能背包同步延迟……**不要判定材料/产物蒸发**」——这条在真机被证伪：
+ * 材料确实少了、产物确实没出来，而这句话明确让模型**不要**怀疑丢东西，
+ * 于是它只能反复重试同一个合成。**这是"拿一句安抚把模型的观察力关掉"，正是 LLM-First 的反面。**
+ *
+ * 现在只说事实 + 给模型可执行的下一步，**不替它下结论**：产物没增加、材料变化是几、
+ * 要不要继续由它按 stats 决定。
+ */
+export function craftNoOutputNote(name: string, have: number, now: number): string {
+  const d = now - have;
+  return (
+    `**实测没有产出**：${name} ${have} → ${now}（变化 ${d > 0 ? '+' : ''}${d}）。` +
+    '「技能报成功」不等于背包里有东西，以 stats 的实测数为准。' +
+    '你可以先 stats 核对材料：材料也少了，就是真的消耗了，别再重复同一个合成——把这行原样 Feedback 给我们。'
+  );
+}
+
+/**
  * 跑一个技能，并把它自己写进 `bot.output` 的那几行**如实带回**。
  *
  * 为什么必须这样：技能内部 `log(bot, ...)` 写的是**具体原因**——"You have no
@@ -1876,14 +1913,9 @@ const interactCommands: AgentCommand[] = [
       const now = await countInInventoryWithSync(agent.bot, wanted.name, 1, 800);
       if (crafted) {
         if (have != null && now != null) {
-          lines.push(step(`实际进包 ${wanted.name}：+${now - have}（现在 ${now} 个）${aliasNote}`));
+          lines.push(step(`实际进包 ${wanted.name}→ 实测 ${formatItemDelta(have, now)}${aliasNote}`));
           if (now - have <= 0) {
-            lines.push(
-              step(
-                '注意：合成技能报成功，但客户端背包暂时没看到产出增加——可能背包同步延迟，' +
-                  '以 stats 为准，稍后再核对，不要判定材料/产物蒸发。',
-              ),
-            );
+            lines.push(step(craftNoOutputNote(wanted.name, have, now)));
           }
         } else {
           lines.push(step(`合成技能报成功，但背包计数读不到；以 stats 为准。`));
@@ -2010,14 +2042,9 @@ const interactCommands: AgentCommand[] = [
       const now = await countInInventoryWithSync(agent.bot, want.name, 1, 800);
       if (ok) {
         if (have != null && now != null) {
-          const lines = [step(`${aliasNote}合成 ${want.name}：+${now - have}（现在 ${now} 个）`)];
+          const lines = [step(`${aliasNote}合成 ${want.name}→ 实测 ${formatItemDelta(have, now)}`)];
           if (now - have <= 0) {
-            lines.push(
-              step(
-                '注意：合成技能报成功，但客户端背包暂时没看到产出增加——可能背包同步延迟，' +
-                  '以 stats 为准，稍后再核对，不要判定材料/产物蒸发。',
-              ),
-            );
+            lines.push(step(craftNoOutputNote(want.name, have, now)));
           }
           return renderReport(lines);
         }
