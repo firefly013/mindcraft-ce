@@ -4946,6 +4946,10 @@ export async function mineBlockAt(bot: any, x: number, y: number, z: number): Pr
      * @param {number} x, y, z, 目标方块坐标。
      * @returns {Promise<boolean>} 挖掉了返回 true。
      **/
+    // **入口探针**（Lead 2026-10-21：`eb29ade` 后 `mine-progress` 全仓为 0——必须先确定工具
+    // 到底有没有进到这里、以及每次调用是"工具在跑 27 秒"还是"模型两轮之间隔了 27 秒"）。
+    // 无条件写：即使下面 early-return（空气/够不着/承重方块）也能在回执里看见这一行。
+    log(bot, 'mine-block-entry{' + JSON.stringify({ x, y, z }) + '}');
     const target: any = bot.blockAt(new Vec3(x, y, z));
     if (!target) {
         log(bot, `(${x},${y},${z}) 读不到方块。`);
@@ -5606,6 +5610,8 @@ export async function stairUp(bot: any, blocks: number = 1): Promise<boolean> {
 }
 
 export async function digDown(bot: any, distance: number = 10): Promise<boolean> {
+    // **入口探针**（同上：区分"工具真在跑"与"两次调用之间的间隔"）。
+    log(bot, 'dig-down-entry{' + JSON.stringify({ distance }) + '}');
     /**
      * Digs down a specified distance. Will stop if it reaches lava, water, or a fall of >=4 blocks below the bot.
      * @param {MinecraftBot} bot, reference to the minecraft bot.
