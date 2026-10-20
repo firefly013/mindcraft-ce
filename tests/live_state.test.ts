@@ -572,10 +572,13 @@ describe('视线方向：先给上下文，再谈可不可信（真机 overnight
     expect(at(90)).toContain('朝 W');
   });
 
-  it('读不到 pitch/yaw ⇒ null（不猜）', () => {
-    expect(describeViewDirection(null, 0.3)).toBeNull();
-    expect(describeViewDirection(0.3, undefined)).toBeNull();
-    expect(describeViewDirection(Number.NaN, 0.3)).toBeNull();
+  it('读不到 pitch/yaw ⇒ **说"读不到"**（不许让"测不出来"冒充"平视"）', () => {
+    for (const [pitch, yaw] of [[null, 0.3], [0.3, undefined], [Number.NaN, 0.3]] as const) {
+      const line = describeViewDirection(pitch, yaw);
+      expect(line).not.toBeNull();
+      expect(line).toContain('读不到');
+      expect(line).toContain('不要假设现在是平视');
+    }
   });
 
   it('渲染进截图块：紧跟 Screenshot 行（上下文在怀疑之前）', () => {

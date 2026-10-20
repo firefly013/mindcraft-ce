@@ -338,16 +338,30 @@ export const DOWN_PITCH_DEG = 70;
 /**
  * **这张截图到底在拍什么**（纯函数）。
  *
- * 只回答"视线方向"这一个问题：pitch 度数 + 俯仰措辞 + 朝向罗盘。**平视时返回 null**
- * （零噪音）—— 这一行是**上下文**，不是怀疑：有了它，"整片天空"的图就不再需要被误读成
- * "渲染坏了/掉进虚空"。
+ * 只回答"视线方向"这一个问题：pitch 度数 + 俯仰措辞 + 朝向罗盘。
  *
- * 单位：mineflayer 的 `entity.pitch` / `entity.yaw` 是**弧度**；pitch 负 = 抬头（西部为 -90°）。
+ * **三种"没有这一行"必须能区分开**（Lead 2026-10-20 裁定）：
+ *   - 平视 ⇒ 返回 `null`（**真的平静**，零噪音）；
+ *   - 仰视/俯视到看不清地面 ⇒ 给一行（上面两种分支）；
+ *   - **读不到 pitch/yaw ⇒ 必须给一行"读不到"** —— 不许让"测不出来"冒充"平视"。
+ *     同一份请求里另一条沉默（渲染行）也有同样的规矩：可信只能是"可验证的全 exact"，
+ *     绝不能因为"没测出来"。两条沉默**理由不同、必须可分辨**，否则将来"都没说话但画面是错的"
+ *     就查不出是哪一边。
+ *
+ * 单位：mineflayer 的 `entity.pitch` / `entity.yaw` 是**弧度**；pitch 负 = 抬头（向上为 -90°）。
  */
 export function describeViewDirection(pitch: unknown, yaw: unknown): string | null {
+  // **`null` 不是 0**：`Number(null) === 0` ⇒ 直转会把"没读到"读成"平视"（就是今晚那条
+  // fail-open 的同款坑）。先判类型，再谈数值。
+  if (pitch == null || yaw == null) {
+    return `视线：**读不到**（pitch/yaw 读数不可用）⇒ **不要假设现在是平视**；判断地形前先看 Position 行，或先 \`stats(type="body")\`。`;
+  }
   const p = Number(pitch);
   const y = Number(yaw);
-  if (!Number.isFinite(p) || !Number.isFinite(y)) return null; // 读不到就不说（不猜）
+  if (!Number.isFinite(p) || !Number.isFinite(y)) {
+    // **读不到 ≠ 平视**：说清"读不到"，否则这一行永远说不出自己是不是被跳过了。
+    return `视线：**读不到**（pitch/yaw 读数不可用）⇒ **不要假设现在是平视**；判断地形前先看 Position 行，或先 \`stats(type="body")\`。`;
+  }
   const pitchDeg = (p * 180) / Math.PI;
   // MC yaw：0 = +z = 南；朝向向量 = (-sin yaw, cos yaw)。
   const compass = compassOf(-Math.sin(y), Math.cos(y));
@@ -363,7 +377,7 @@ export function describeViewDirection(pitch: unknown, yaw: unknown): string | nu
       '只能看到脚下几格，判断远处地形/走位不可靠。'
     );
   }
-  return null; // 平视：一个字都不加
+  return null; // 平视：**这一种**沉默才是一个字都不加
 }
 
 /**

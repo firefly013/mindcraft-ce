@@ -249,3 +249,40 @@ describe('重映射生效后：报的是**残余误差**，不是旧数字', () 
         expect(trust.line).toContain('以 near key blocks 的方块数据为准');
     });
 });
+
+describe('"可信"只能是**可验证的全 exact**，绝不能因为"没测出来"', () => {
+    const base = {
+        worldVersion: '1.21.11',
+        rendererVersion: '1.21.4',
+        rendererMaxState: RENDERER_MAX_1214,
+        worldMaxState: WORLD_MAX_1211,
+        remapApplied: true,
+    };
+
+    it('重映射生效但一个样本都没采到 ⇒ **不可信**，并说"测不出来"', () => {
+        const trust = assessFrameTrust({ ...base, sampledBlocks: [], remapOf: () => ({ stateId: 1, kind: 'exact' }) });
+        expect(trust.trusted).toBe(false);
+        expect(trust.unknownRatio).toBeNull();
+        expect(trust.line).toContain('测不出来');
+    });
+
+    it('重映射查不到（remapOf 返回 null）⇒ 记为"仍无法渲染"，**不可信**', () => {
+        const trust = assessFrameTrust({
+            ...base,
+            sampledBlocks: [{ stateId: 1, name: 'stone' }],
+            remapOf: () => null,
+        });
+        expect(trust.trusted).toBe(false);
+        expect(trust.unknownRatio).toBe(1);
+        expect(trust.line).toContain('仍无法渲染');
+    });
+
+    it('没有 remapOf（读数不可用）⇒ 回落到旧口径、**仍然不可信**（不许默认可信）', () => {
+        const trust = assessFrameTrust({
+            ...base,
+            sampledBlocks: [{ stateId: 1, name: 'stone' }],
+            remapOf: null,
+        });
+        expect(trust.trusted).toBe(false);
+    });
+});

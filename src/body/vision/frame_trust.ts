@@ -29,6 +29,12 @@
  * - 地下剖面（y≈-10，最初报的那处）：**尚未验证** ⇒ 残余数字保持原样，不收紧。
  * - 回执行是否真进请求：`tests/vision_request_wiring.test.ts` 走 `liveTailHook.beforeRequest`
  *   的最后一条 user 消息（不是只测渲染函数）——"能力存在 ≠ 能力已接通"。
+ * - 那次"两行都沉默"的**解释已闭环**（Lead 2026-10-20 从帧里量的：地平线在竖直中央
+ *   ⇒ pitch ≈ 0°）：**两行沉默理由不同、且各自被独立验证** ——
+ *   ① 视线行沉默 = 平视（阈值 −35°），不是漏接；
+ *   ② 怀疑行沉默 = 重映射后全部一对一 ⇒ trusted（可验证的全 exact），不是测不出来。
+ *   规则：**"trusted" 只能是可验证的全 exact；测不出来一律 untrusted**（有测试钉死）。
+ *   同理，"视线行"读不到 pitch/yaw 时**必须说"读不到"**，不许冒充"平视"。
  */
 
 import { createRequire } from 'node:module';

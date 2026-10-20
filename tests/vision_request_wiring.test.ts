@@ -104,3 +104,25 @@ describe('视线行：在**真实请求**里能出现，也能正确地不出现
     expect(text).not.toContain('不可全信');
   });
 });
+
+describe('读不到 pitch：请求里必须能看到，不许静默', () => {
+  it('pitch 为 null ⇒ 请求里出现"读不到"（和平视的沉默区分开）', async () => {
+    const bot = stubBot(0, 0);
+    bot.entity.pitch = null; // 模拟读数不可用
+    const state = sampleLiveState({
+      bot,
+      vision: { lastScreenshot: { file: 'screenshot_live.jpg', takenAt: Date.now() } },
+    });
+    const tail = liveTailFromText(renderLiveState(state));
+    const hook = liveTailHook(
+      () => tail,
+      async () => 'BASE64JPEG',
+    ).handlers as unknown as { beforeRequest: Handler };
+    const out = await (hook.beforeRequest({ messages: [] }) as unknown as Promise<
+      { messages: readonly { content: unknown }[] } | undefined
+    >);
+    const parts = out!.messages.at(-1)!.content as Array<{ type: string; text?: string }>;
+    const text = parts.filter((x) => x.type === 'text').map((x) => x.text ?? '').join('\n');
+    expect(text).toContain('视线：**读不到**');
+  });
+});
