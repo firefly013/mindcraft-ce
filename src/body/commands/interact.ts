@@ -1215,6 +1215,27 @@ export interface SmeltAccounting {
  * 三者都读到才结算；任一读不到 ⇒ null（算不出来 ≠ 丢了）。
  * 真机反例：input 0、产物槽 1 个 iron_ingot、背包 +0 ⇒ 原料**已经烧成成品、只是还在炉里**，
  * 旧算法说"真丢 1"，会害得模型不敢再用熔炉。 */
+/**
+ * 炉内三项读数是否可信（真机 2026-10-20：`Failed to smelt` + 输入/燃料/产物全 0 ⇒ 算成
+ * "真丢 1"，可同一坐标方块还在、窗口也报过 39 个槽内容——两件事互相矛盾）。
+ * 规则：全 0 只有在"容器还在 + 名字还是熔炉 + 窗口内容到过"时才算可信；否则 uncertain。
+ */
+export function furnaceSlotsVerdict(input: {
+  blockPresent: boolean;
+  blockName: string | null;
+  windowContentsArrived: boolean;
+  slots: { input: number | null; fuel: number | null; output: number | null };
+}): 'ok' | 'uncertain' | 'trusted-loss' {
+  const { input: rawIn, fuel, output } = input.slots;
+  if (rawIn == null || fuel == null || output == null) return 'uncertain';
+  const allZero = rawIn === 0 && fuel === 0 && output === 0;
+  if (!allZero) return 'ok';
+  if (!input.blockPresent) return 'uncertain';
+  if (!/furnace|blast_furnace|smoker/.test(String(input.blockName ?? ''))) return 'uncertain';
+  if (!input.windowContentsArrived) return 'uncertain';
+  return 'trusted-loss';
+}
+
 export function unaccountedInput(accounting: SmeltAccounting): number | null {
     const { bagBefore, bagAfter, furnaceInput, furnaceOutput, productGained } = accounting;
     if (bagBefore == null || bagAfter == null || furnaceInput == null) return null;
@@ -1969,6 +1990,14 @@ const interactCommands: AgentCommand[] = [
         // 先让客户端背包包落地，再按全背包求和投燃料；避免「有 14 煤却说 need 2」。
         await settleInventory(agent.bot, 3, 50);
         const fuelPrep = await ensureAggregateFuel(agent.bot, raw.count, located);
+        // **打开熔炉期间武装窗口诊断**：全 0 的读数到底可不可信，要有包级证据。
+        try {
+          const arm = (agent.bot as { __armContainerPacketDump?: (reason: string, label?: 'container' | 'craft' | 'furnace') => void })
+            .__armContainerPacketDump;
+          arm?.(`useBlock furnace`, 'furnace');
+        } catch {
+          // 诊断不是功能，武装失败不影响烧炼。
+        }
         lines.push('- ' + fuelPrep.detail);
         if (!fuelPrep.ok) {
           return renderReport(lines, '燃料这一步没过，链路还没启动，熔炉里不会留下半成品；按上面说的补齐再试。');
@@ -1994,16 +2023,24 @@ const interactCommands: AgentCommand[] = [
         );
         // **烧炼三本账 + 续烧**（Lead 2026-10-20）：只印背包会造成"5 进 1 出、4 没影"的假象，
         // 那 4 块很可能还在炉内输入槽。这里每轮重开熔炉读三个槽，再决定继续还是收工。
-        const readFurnaceSlots = async (): Promise<{ input: number | null; fuel: number | null; output: number | null }> => {
+        const readFurnaceSlots = async (): Promise<{
+          input: number | null;
+          fuel: number | null;
+          output: number | null;
+          blockPresent: boolean;
+          blockName: string | null;
+        }> => {
           try {
             const block = located != null ? agent.bot.blockAt?.(new Vec3(located.x, located.y, located.z)) : null;
-            if (block == null) return { input: null, fuel: null, output: null };
+            if (block == null) return { input: null, fuel: null, output: null, blockPresent: false, blockName: null };
             const furnaceUi: any = await agent.bot.openFurnace(block);
             const countOf = (item: any): number => Number(item?.count ?? 0);
             const result = {
               input: countOf(furnaceUi?.inputItem?.()),
               fuel: countOf(furnaceUi?.fuelItem?.()),
               output: countOf(furnaceUi?.outputItem?.()),
+              blockPresent: true,
+              blockName: String(block?.name ?? ''),
             };
             try {
               await agent.bot.closeWindow(furnaceUi);
@@ -2012,7 +2049,7 @@ const interactCommands: AgentCommand[] = [
             }
             return result;
           } catch {
-            return { input: null, fuel: null, output: null };
+            return { input: null, fuel: null, output: null, blockPresent: false, blockName: null };
           }
         };
         // **smelt 报失败也要把产物取出来**（真机 2026-10-20：产物槽有 1 个铁锭、背包 +0，
@@ -2041,14 +2078,30 @@ const interactCommands: AgentCommand[] = [
           await settleInventory(agent.bot, 4, 60);
           const rawNow = await countInInventoryWithSync(agent.bot, raw.name, raw.count, 800);
           const outNow = await countInInventoryWithSync(agent.bot, wanted.name, 1, 800);
+          // **全 0 的读数不能直接当"丢"**：方块还在、窗口也报过内容时，全 0 与
+          // "容器正常"矛盾（真机 2026-10-20 A/B 各一例）⇒ 判 uncertain，宁可说"算不出来"。
+          const slotsTrust = furnaceSlotsVerdict({
+            blockPresent: slots.blockPresent,
+            blockName: slots.blockName,
+            windowContentsArrived: true,
+            slots: { input: slots.input, fuel: slots.fuel, output: slots.output },
+          });
+          const uncertainAllZero =
+            slotsTrust === 'uncertain' && (slots.input === 0 && slots.fuel === 0 && slots.output === 0);
+          if (uncertainAllZero) {
+            lines.push(
+              '- **炉内三项读数是 0，但这个容器还在、窗口也收到过内容**——两件事互相矛盾：' +
+                '这次**不结算**"丢了多少"（把读数当 null 处理）。先原样再发一次同样的 useBlock；若仍是全 0，把这条回执原样告诉开发者。',
+            );
+          }
           accounting = {
             rawName: raw.name,
             productName: wanted.name,
             bagBefore: rawBefore,
             bagAfter: rawNow,
-            furnaceInput: slots.input,
-            furnaceFuel: slots.fuel,
-            furnaceOutput: slots.output,
+            furnaceInput: uncertainAllZero ? null : slots.input,
+            furnaceFuel: uncertainAllZero ? null : slots.fuel,
+            furnaceOutput: uncertainAllZero ? null : slots.output,
             productGained: outBefore != null && outNow != null ? outNow - outBefore : null,
             target: raw.count,
           };
@@ -2067,8 +2120,8 @@ const interactCommands: AgentCommand[] = [
           const next = nextSmeltStep({
             produced,
             target: raw.count,
-            furnaceInput: slots.input,
-            furnaceFuel: slots.fuel,
+            furnaceInput: uncertainAllZero ? null : slots.input,
+            furnaceFuel: uncertainAllZero ? null : slots.fuel,
             elapsedMs: Date.now() - smeltStartedAt,
             rounds: smeltRounds,
             maxRounds: 3,

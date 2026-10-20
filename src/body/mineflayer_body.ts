@@ -1206,7 +1206,7 @@ export class MineflayerBody {
                 if (name === '') return;
                 this.containerDumpInbound.push(name);
                 // **合成窗口：内容包到达后 40ms 抓一次槽位快照**（材料进网格/产物取回都看这个）。
-                if (this.containerDumpLabel === 'craft' && /window_items|set_content|container_set_content/i.test(name)) {
+                if ((this.containerDumpLabel === 'craft' || this.containerDumpLabel === 'furnace') && /window_items|set_content|container_set_content/i.test(name)) {
                     const snapshot = (): void => {
                         try {
                             const window = (this.bot as any)?.currentWindow;
@@ -1351,6 +1351,16 @@ export class MineflayerBody {
             // **合成窗口的单行结论**（Lead 2026-10-19 ①）：crafting 走 `bot.craft`，
             // 不经过 `openBlockUi`，所以必须单独出一行——否则工作台 0/4 没有任何证据，
             // 就分不清"(a) 两条 crafting 实现一条死"和"(b) 窗口偶发无内容"。
+            if (this.containerDumpLabel === 'furnace') {
+                this.log.with('lifecycle').info({
+                    event: 'furnace-window-diagnosis',
+                    outcome,
+                    verdict,
+                    openWindow: this.containerDumpSawOpen,
+                    contents: inbound.some((n) => /window_items|set_content|container_set_content/i.test(n)),
+                    slots: this.containerDumpSlots,
+                });
+            }
             if (this.containerDumpLabel === 'craft') {
                 this.log.with('lifecycle').info({
                     event: 'craft-window-diagnosis',
@@ -1420,7 +1430,7 @@ export class MineflayerBody {
     } | null = null;
     /** "带槽位容器在本服务端不可用"结论的过期时刻；0 = 当前没被判定为坏。 */
     /** 这次转储是开容器还是合成窗口（合成走 bot.craft，不经过 openBlockUi）。 */
-    private containerDumpLabel: 'container' | 'craft' = 'container';
+    private containerDumpLabel: 'container' | 'craft' | 'furnace' = 'container';
     private containerDumpReason = '';
     /** 合成窗口的**槽位实测快照**（craft 报 ok 但背包不变时，这是唯一能看穿"材料进网格、产物没取回"的仪器）。 */
     private containerDumpSlots: Array<{ slot: number; name: string; count: number }> | null = null;
