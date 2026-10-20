@@ -6038,6 +6038,21 @@ export const CONTAINER_OPEN_RETRIES = 1;
  * @returns 是否真的清掉了一个残留界面（调用方据此上报）。
  */
 export function closeStaleWindow(bot: any): boolean {
+    // **单一判据：包级证据**（Lead 2026-10-21）：`currentWindow != null` 不是"界面对模型开着"
+    // 的证据——mineflayer 在服务端没发 `close_window` 时会留下一个**过期引用**。身体在开窗/关窗
+    // 包上计数，并通过 `__residualScreenOpen()` 暴露；只有"见过 open、没见到 close"才算残留。
+    // 没有 provider（老调用方/纯单元测试）才回退到旧判据，行为不变。
+    const provider = (bot as { __residualScreenOpen?: unknown } | null)?.__residualScreenOpen;
+    if (typeof provider === 'function') {
+        let verdict: unknown = null;
+        try {
+            verdict = (provider as () => unknown)();
+        } catch {
+            verdict = null;
+        }
+        // 读不到判据 ⇒ 不宣称"关掉了"（宁可少一句，也不说没有证据的话）。
+        if (verdict !== true) return false;
+    }
     const win = (bot as { currentWindow?: unknown } | null | undefined)?.currentWindow ?? null;
     if (win == null) return false;
     try {

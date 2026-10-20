@@ -1042,6 +1042,7 @@ export class MineflayerBody {
                     this.log.with('lifecycle').info({ event: 'inventory-sync-rearmed', why: 'death-then-spawn' });
                 } catch { /* 日志失败不影响 */ }
             }
+            this.installResidualScreenVerdict();
             this.armInventorySyncRecovery('spawn');
         });
 
@@ -2232,6 +2233,9 @@ export class MineflayerBody {
     private inventorySyncRecoveryTimer: ReturnType<typeof setTimeout> | null = null;
     /** 是否收到过 windowId 0 的背包内容包（哪怕 0 格——那是**测量**,不是假设）。 */
     private inventoryPacketSeen = false;
+    /** 开窗/关窗**包计数**（判断"真的还有残留界面"的唯一证据；currentWindow 只是代理）。 */
+    private screenOpenPackets = 0;
+    private screenClosePackets = 0;
     /** 本次登录已经 settle 过（**每个 login 只允许一次**；否则 35 秒内重复 4 次）。 */
     private inventorySyncSettledForLogin = false;
     /** 是否观察到死亡、且死亡后还没 spawn（reconnect 不许把自己升级成死亡）。 */
@@ -2259,7 +2263,36 @@ export class MineflayerBody {
      * - `assumed-empty-after-death`：**最近确实死过/复活过**且 3 秒仍空 ⇒ 按空处理（keepInventory=false 下合理）；
      * - `still-unsynced-after-reconnect`：以上都不是 ⇒ **保持"未知"**，继续有界重试（最多 30 秒），
      *   然后记 `inventory-sync-stuck` 并停止重试（状态仍是未知；渲染层会说"刚重连、不是空的"）。
+    /**
+     * **残留界面的单一判据**（Lead 2026-10-21）：不是 `currentWindow != null`，而是**包级证据**——
+     * 见过 `open_window`/`open_screen`、且没有对应的 `close_window` 才算"真的还开着"。
+     * 只读：不改变关闭动作，只决定 skills 有没有资格说「关掉了残留界面」。
      */
+    private installResidualScreenVerdict(): void {
+        try {
+            const client = (this.bot as any)?._client;
+            if (client == null) return;
+            client.on?.('open_window', () => {
+                this.screenOpenPackets += 1;
+            });
+            client.on?.('open_screen', () => {
+                this.screenOpenPackets += 1;
+            });
+            client.on?.('close_window', () => {
+                this.screenClosePackets += 1;
+            });
+            (this.bot as any).__residualScreenOpen = (): boolean => {
+                try {
+                    return this.screenOpenPackets > this.screenClosePackets;
+                } catch {
+                    return false;
+                }
+            };
+        } catch {
+            // 拿不到底层 client 就不装 provider：skills 回退旧判据，行为不变。
+        }
+    }
+
     armInventorySyncRecovery(why: string): void {
         this.clearInventorySyncRecovery();
         if (this.inventorySynced) return;
