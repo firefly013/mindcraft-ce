@@ -5513,9 +5513,9 @@ export async function stairUp(bot: any, blocks: number = 1): Promise<boolean> {
             }
         }
         // **统一走到移动原语**：不再让寻路器钻进 1×1 的洞（四个工具同一个病）。
-        const step = await stepIntoCell(bot, { x: Math.floor(feet.x) + dir.dx, y: Math.floor(feet.y) + 1, z: Math.floor(feet.z) + dir.dz });
+        const step = await stepIntoCellClearing(bot, { x: Math.floor(feet.x) + dir.dx, y: Math.floor(feet.y) + 1, z: Math.floor(feet.z) + dir.dz  });
         if (!step.moved) {
-            log(bot, 'stairUp 第 ' + (done + 1) + ' 格失败：' + String(step.reason) + ' 建议：先 mineBlock 掉头上那一格，再用 pillarUp 原地垫高 1 格。');
+            log(bot, 'stairUp 第 ' + (done + 1) + ' 格失败：' + String(step.reason) + (step.cleared.length > 0 ? '（已顺手挖开：' + step.cleared.join('、') + '）' : '') + ' 建议：先 mineBlock 掉头上那一格，再用 pillarUp 原地垫高 1 格。');
             return false;
         }
         done++;
@@ -5581,7 +5581,7 @@ export async function digDown(bot: any, distance: number = 10): Promise<boolean>
         log(bot, 'Dug down ' + i + '/' + distance + ' blocks (broke (' + verdict.target.x + ',' + verdict.target.y + ',' + verdict.target.z + ')).');
         // **挖完必须真的下去**（真机 2026-10-20：「Skipping air block… 挖了 4/80 格」后 GoalChanged）。
         // 这一动作以前完全没有——只挖不走，于是人停在洞口、下一铲继续挖空气。
-        const sunkInto = await stepIntoCell(bot, { x: verdict.target.x, y: verdict.target.y, z: verdict.target.z });
+        const sunkInto = await stepIntoCellClearing(bot, { x: verdict.target.x, y: verdict.target.y, z: verdict.target.z });
         if (!sunkInto.moved) {
             log(bot, 'Dug down ' + (i - 1) + ' blocks 后**下不去**：' + String(sunkInto.reason) + '。');
             log(bot, '建议：先 mineBlock 掉那一格再走；若那是空气/水，改用 goToCoordinates 移到旁边再 digDown，或用 placeHere 垫一块站上去再挖。');
@@ -6844,6 +6844,46 @@ export function describeStepObstacles(
  * - 每轮 ~600ms 后松开按键并**实测位移**（≥0.35 格才算走进去了）；
  * - 最多 3 次；失败时返回障碍物名，不做任何"寻路失败"的空话。
  */
+/**
+ * **走进一格；挡路的格子就挖掉它**（Lead 2026-10-21：`digDown` 连续 5 次「走不进去」、
+ * `stairUp`/`travelTo`/`goToSurface` 三个上行工具全死在「挖通了但走不进去」——
+ * 名字了障碍物却没人消费它。B 自己给出了正确做法：「挖穿一格后站不进去就顺手把挡路格挖掉」）。
+ *
+ * 只在**目标脚格/头格是实心**时动手（不扩大破坏面），最多挖 `maxClears` 格，然后重试原语。
+ */
+export async function stepIntoCellClearing(
+    bot: any,
+    target: { x: number; y: number; z: number },
+    maxClears = 3,
+): Promise<StepIntoResult & { cleared: string[] }> {
+    const cleared: string[] = [];
+    let result = await stepIntoCell(bot, target);
+    const solid = (name: unknown): boolean => {
+        const value = String(name ?? '');
+        return value !== '' && !['air', 'cave_air', 'void_air', 'water', 'flowing_water', 'lava', 'flowing_lava'].includes(value);
+    };
+    for (let i = 0; i < maxClears && !result.moved; i++) {
+        let victim: any = null;
+        try {
+            const feetBlock = bot.blockAt(new Vec3(target.x, target.y, target.z));
+            const headBlock = bot.blockAt(new Vec3(target.x, target.y + 1, target.z));
+            victim = solid(feetBlock?.name) ? feetBlock : solid(headBlock?.name) ? headBlock : null;
+        } catch {
+            victim = null;
+        }
+        if (victim == null) break;
+        const dug = await digWithTimeout(
+            bot,
+            victim,
+            `clear-for-step@(${victim.position.x},${victim.position.y},${victim.position.z})`,
+        );
+        if (!dug) break;
+        cleared.push(String(victim.name ?? 'block'));
+        result = await stepIntoCell(bot, target);
+    }
+    return { ...result, cleared };
+}
+
 export async function stepIntoCell(
     bot: any,
     target: { x: number; y: number; z: number },

@@ -4054,6 +4054,38 @@ export class MineflayerBody {
         if (!c || c.id !== this.bot?.entity?.id) return;
         const before = this.readInventoryCounts();
         const expectedItem = expectedItemNameFromEntity(collected);
+        // **原版拾取（playerCollect）是另一条路径**：它绕过 schedulePickup 的目标过滤器，
+        // 所以 `isJustPlacedDrop` 在那里拦不住——真机 2026-10-21「放熔炉→回读确认→又被 autoPickup
+        // 当掉落物捡回背包」。这里识别"刚放下的方块被自己捡起"，**不报"捡到"**，并立刻放回去。
+        try {
+            const dropPos = (collected as { position?: { x?: unknown; y?: unknown; z?: unknown } } | null)?.position;
+            if (expectedItem != null && dropPos != null && isJustPlacedDrop(expectedItem, dropPos)) {
+                this.log.with('lifecycle').info({ event: 'placed-drop-collected', item: expectedItem });
+                void (async (): Promise<void> => {
+                    try {
+                        const replaced = await placeBlock(
+                            this.bot,
+                            expectedItem,
+                            Number(dropPos.x),
+                            Number(dropPos.y),
+                            Number(dropPos.z),
+                        );
+                        this.notify('reflex.done', KIND.WORLD, LEVEL.STATE, {
+                            reflex: 'placement',
+                            outcome: replaced ? 'ok' : 'failed',
+                            detail: replaced
+                                ? `刚放下的 ${expectedItem} 被自己捡回了背包，**已自动放回原位**。`
+                                : `刚放下的 ${expectedItem} 被自己捡回了背包，**放回失败**：那一格现在可能还是空的，施工前先用 stats blocks 核对。`,
+                        });
+                    } catch {
+                        // 放回失败不阻断拾取账目。
+                    }
+                })();
+                return;
+            }
+        } catch {
+            // 识别失败就按普通拾取处理。
+        }
         setTimeout(() => {
             try {
                 const after = this.readInventoryCounts();

@@ -3021,7 +3021,8 @@ export async function digLine(
         // **先试移动原语，再决定是不是"走不进去"**（Lead 2026-10-20：四个工具同一个病，
         // 根因是让寻路器钻进 1×1 的洞；stepIntoCell 面向目标、按 forward/jump、测位移）。
         if (!reallyArrived) {
-            const stepped = await skills.stepIntoCell(bot, step.feet);
+            // **消费 obstacles**：目标格挡路就挖掉再走（Lead 2026-10-21：四个工具都死在'挖通了但走不进去'）。
+            const stepped = await skills.stepIntoCellClearing(bot, step.feet);
             if (stepped.moved) {
                 outcome.progress.push(`- 第 ${index} 步：用 stepIntoCell 走进去了（寻路器报的"没到"是它的极限，不是人的极限）。`);
                 continue;

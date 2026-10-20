@@ -75,8 +75,8 @@ describe('stepIntoCell：走进一格', () => {
     it('四个调用点都改用原语（源码守卫：不许再有"让寻路器钻进洞"）', () => {
         const skills = readFileSync(join(process.cwd(), 'src', 'body', 'library', 'skills.ts'), 'utf8');
         // stairUp / digDown
-        expect(skills).toContain('const step = await stepIntoCell(bot');
-        expect(skills).toContain('const sunkInto = await stepIntoCell(bot');
+        expect(skills).toContain('const step = await stepIntoCellClearing(bot');
+        expect(skills).toContain('const sunkInto = await stepIntoCellClearing(bot');
         // 回执必须给"下一步"，不许只说寻路失败
         expect(skills).toContain('先 mineBlock 掉头上那一格，再用 pillarUp');
         expect(skills).toContain('改用 goToCoordinates 移到旁边再 digDown');
