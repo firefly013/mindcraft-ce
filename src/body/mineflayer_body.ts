@@ -3650,7 +3650,16 @@ export class MineflayerBody {
         this.bot.autoEat.setOpts({
             priority: 'foodPoints',
             minHunger: 14,
-            bannedFood: ['rotten_flesh', 'spider_eye', 'poisonous_potato', 'pufferfish', 'chicken'],
+            // **生鸡肉不在禁用名单里。** 它原先被 ban 掉（大概是怕生鸡肉 30% 的食物中毒），
+            // 但这是**品质**偏好，不是安全限制——困难模式里饥饿值归零会持续掉血直到死。
+            // 真机（2026-10-21 overnight_b）：食物 7、背包里只有 chicken×3，自动进食因为
+            // 「chicken 被 ban」而拒绝吃；它自己说「吃的没了，得赶紧上去找动物」——
+            // 它手里有 3 块鸡肉，只是引擎不让自己吃。
+            //
+            // 判据：**"饿死"永远比"30 秒饥饿效果"更严重**。该 ban 的只有会造成不可逆或
+            // 远超收益的：腐肉（饥饿）、蛛眼（中毒+扣血）、毒土豆、河豚（中毒+反胃+饥饿）。
+            // 生鸡肉属于"能吃，只是不划算"，应该靠食品优先级排序，而不是被禁止。
+            bannedFood: ['rotten_flesh', 'spider_eye', 'poisonous_potato', 'pufferfish'],
         });
         this.bot.autoEat.enableAuto();
 
