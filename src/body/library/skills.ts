@@ -4,6 +4,7 @@ import pf from 'mineflayer-pathfinder';
 import Vec3 from 'vec3';
 import { cellIntersectsBody, standingRoomOk } from '../safety/suffocation.js';
 import { isJustPlacedDrop, markPlaced, placementVerdict } from './placement_guard.js';
+import { formatProgressLine, formatTimeoutSummary, LONG_ACTION_MAX_MS, shouldEmitProgress } from './progress.js';
 /**
  * ⚠️ **必须读共享单例，不许读根目录那份 `settings.ts`。**
  *
@@ -1406,6 +1407,9 @@ export async function collectBlock(bot: any, blockType: string, num: number = 1,
     const isLiquid = blockType === 'lava' || blockType === 'water';
 
     let collected = 0;
+    // **长动作：计时 + 进度 + 硬上限**（真机 2026-10-21：4 块铁矿在 1-1.7m 处，静默 73 秒）。
+    const collectStartedAt = Date.now();
+    let collectLastProgressAt = 0;
     // 工具在这轮采集里坏掉（耐久耗尽消失）要立刻说一声：模型只会看到
     // "挖不动了"，而原因可能是手上那把镐刚刚没了。
     const heldBefore = heldToolState(bot);
@@ -1442,6 +1446,18 @@ export async function collectBlock(bot: any, blockType: string, num: number = 1,
             return movements.safeToBreak(block) || unsafeBlocks.includes(block.name);
         }, 64, 1);
 
+        // 每轮先报进度（8 秒一次，有界内容：第几块/已用/还剩/离目标多远）。
+        const collectElapsed = Date.now() - collectStartedAt;
+        if (shouldEmitProgress(collectLastProgressAt, Date.now())) {
+            collectLastProgressAt = Date.now();
+            const nextBlock = blocks[0] as any;
+            const nextDistance = nextBlock?.position != null ? bot.entity.position.distanceTo(nextBlock.position) : null;
+            log(bot, 'collect-progress{' + JSON.stringify({ done: collected, total: num, elapsedMs: collectElapsed, remaining: Math.max(0, num - collected), distance: nextDistance }) + '} ' + formatProgressLine({ label: '挖矿', done: collected, total: num, elapsedMs: collectElapsed, remaining: Math.max(0, num - collected), distance: nextDistance }));
+        }
+        if (collectElapsed >= LONG_ACTION_MAX_MS) {
+            log(bot, formatTimeoutSummary({ label: '采集', done: collected, total: num, elapsedMs: collectElapsed, remaining: Math.max(0, num - collected) }));
+            return collected > 0;
+        }
         if (blocks.length === 0) {
             if (collected === 0)
                 log(bot, `No ${blockType} nearby to collect.`);

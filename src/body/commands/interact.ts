@@ -2070,11 +2070,41 @@ const interactCommands: AgentCommand[] = [
             return 0;
           }
         };
+        // **超时/失败的熔炉不许吞材料**（真机 2026-10-21：smelt 45 秒超时后 chicken 3→2，
+        // 回执只能报"真丢 1"——那是恢复路径的 bug，不是命）。可行时先把输入槽/燃料槽取回背包。
+        const recoverFurnaceInput = async (): Promise<{ input: number; fuel: number }> => {
+          try {
+            const block = located != null ? agent.bot.blockAt?.(new Vec3(located.x, located.y, located.z)) : null;
+            if (block == null) return { input: 0, fuel: 0 };
+            const ui: any = await agent.bot.openFurnace(block);
+            let input = 0;
+            let fuel = 0;
+            try {
+              if (ui?.inputItem?.() != null) input = Number((await ui.takeInput())?.count ?? 0);
+              if (ui?.fuelItem?.() != null) fuel = Number((await ui.takeFuel())?.count ?? 0);
+            } finally {
+              try { await agent.bot.closeWindow(ui); } catch { /* 关不上不影响已取回 */ }
+            }
+            return { input, fuel };
+          } catch {
+            return { input: 0, fuel: 0 };
+          }
+        };
         const smeltStartedAt = Date.now();
         let smeltRounds = 1;
         let slots = await readFurnaceSlots();
         let accounting: SmeltAccounting | null = null;
         for (;;) {
+          // **失败/超时先把炉里的原料和燃料取回来**：取回后下面的背包账会体现，而不是记成"丢"。
+          if (!ok && ((slots.input ?? 0) > 0 || (slots.fuel ?? 0) > 0)) {
+            const recovered = await recoverFurnaceInput();
+            if (recovered.input > 0 || recovered.fuel > 0) {
+              lines.push(
+                `- 熔炉这次没烧成：**已把炉内 ${recovered.input} 个原料、${recovered.fuel} 个燃料取回背包**（材料没丢，别重挖）。`,
+              );
+              slots = await readFurnaceSlots();
+            }
+          }
           await settleInventory(agent.bot, 4, 60);
           const rawNow = await countInInventoryWithSync(agent.bot, raw.name, raw.count, 800);
           const outNow = await countInInventoryWithSync(agent.bot, wanted.name, 1, 800);
