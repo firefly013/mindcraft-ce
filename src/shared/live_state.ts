@@ -121,8 +121,12 @@ export interface LiveScreenshot {
    *
    * `line` 非空时**必须**跟着图一起给模型看 —— 这是"不许把坏帧当可信视图"的落点；
    * 可信时 `line` 为空（零噪音）。
+   *
+   * `usable` / `verdict` 是**裁决**：`usable === false` 时把 `verdict` 直接拼进
+   * `Screenshot:` 那一行 —— 模型不必每帧自己推断"这图能不能认方块"
+   * （overnight_b：把恶地岩壁当树冠、把锻造台当传送门框架，花了多轮在猜）。
    */
-  trust?: { trusted: boolean; line: string; reason: string } | null;
+  trust?: { trusted: boolean; line: string; reason: string; usable?: boolean; verdict?: string } | null;
   /**
    * **这一帧自己的朝向**（拍摄那一刻记录的，弧度）。
    *
@@ -515,7 +519,13 @@ const SECTION_RENDERERS: Record<LiveSectionKey, (s: LiveState) => string[]> = {
   screenshot: (s) => {
     if (s.screenshot.ref != null) {
       const age = Date.now() - s.screenshot.ref.takenAt;
-      const lines = [`Screenshot: ${s.screenshot.ref.file} (taken ${Math.max(0, Math.round(age / 1000))}s ago)`];
+      const head = `Screenshot: ${s.screenshot.ref.file} (taken ${Math.max(0, Math.round(age / 1000))}s ago)`;
+      // **裁决写进第一行**（overnight_b：多轮靠猜"这图能不能信"，把恶地岩壁当树冠、
+      // 把锻造台当传送门框架）。可靠性必须**被告知**，不能让模型每帧自己推断；
+      // 数字也在这一行里，所以这个说法是可核对的。
+      const trust = s.screenshot.trust;
+      const verdict = trust != null && trust.usable === false ? (trust.verdict ?? '') : '';
+      const lines = [`${head}${verdict === '' ? '' : ` ${verdict}`}`];
       // **先说"这张图在拍什么"（上下文），再说"这张图可不可信"（怀疑）** —— 顺序是有意的：
       // 上下文明明可以把一张"全天空"的图解释清楚，先给怀疑会让模型把正常画面也当成坏的。
       //
@@ -527,8 +537,10 @@ const SECTION_RENDERERS: Record<LiveSectionKey, (s: LiveState) => string[]> = {
           ? describeViewDirection(s.screenshot.view.pitch, s.screenshot.view.yaw)
           : null;
       if (view != null) lines.push(view);
-      const line = s.screenshot.trust?.line ?? '';
-      if (line !== '') lines.push(line);
+      // 裁决为空串时（老数据/异常）回落到详细说明，**绝不静默**；
+      // 但**可用**的帧一个字都不加（不误报 —— 否则视觉通道会被"每帧都警告"淹掉）。
+      const line = trust?.line ?? '';
+      if (trust != null && trust.usable === false && verdict === '' && line !== '') lines.push(line);
       return lines;
     }
     return [`Screenshot: none (${s.screenshot.unavailableReason ?? UNKNOWN})`];

@@ -86,6 +86,74 @@ export interface FrameTrust {
     line: string;
     /** 给日志用的原因标签：`version_skew` / `renderer_unsupported` / `ok`。 */
     reason: 'ok' | 'version_skew' | 'renderer_unsupported';
+    /**
+     * **裁决**：这张图能不能拿来**认方块**（`trusted` 更宽，只说"能不能当世界的样子"）。
+     *
+     * 由 `measureFrameTrust` 填（`assessFrameTrust` 是纯测量，不做裁决）。
+     * 规矩：只有**测出来全部一对一**才算 usable（fail-CLOSED：测不出来 ⇒ 不可用）。
+     */
+    usable?: boolean;
+    /**
+     * 夹进 `Screenshot:` 那一行的**一句裁决**（可用时为空串）：
+     * 「—— **这张图不可信**（渲染器 1.21.4 vs 世界 1.21.11，只有 12% 的方块一对一）：
+     * **不要用它认方块**，用下面的 near key blocks（那份数据每次都对）。」
+     *
+     * 为什么写进第一行：overnight_b 花了多轮**靠猜**判断哪张能信（把恶地岩壁当树冠、
+     * 把锻造台当传送门框架）——可靠性必须**被告知**，不能让模型每帧自己推断。
+     */
+    verdict?: string;
+}
+
+/**
+ * **"这张图能认方块"的门槛**：可核对的方块里**全部一对一**才算。
+ *
+ * 为什么是 1.0 而不是某个百分比：`approx` 是"换成同族近邻"，画面里形状可能完全不同
+ * （正是 B 把锻造台看成传送门的成因）；只要样本里出现一个近似/未知，这张图的
+ * **识别**就不可靠了。而"不误报"靠的是另一侧：重映射生效后，地表/地下的常见方块
+ * 全部是 `exact`（真机地表已验证 100%），所以正常帧不会被打上"不可信"。
+ */
+export const FRAME_USABLE_MIN_EXACT_COVERAGE = 1;
+
+const pctOf = (ratio: number | null | undefined): string | null =>
+    ratio == null ? null : `${Math.round(ratio * 100)}%`;
+
+/**
+ * 纯函数：**裁决 + 一句话**。只依据测出来的比例，不猜。
+ *
+ * 三种结果：
+ *   ① 版本一致 ⇒ 可用、不说任何话（零噪音）；
+ *   ② 版本不一致但样本**全部一对一** ⇒ 可用、不说话（重映射成功的情形）；
+ *   ③ 否则（有近似/未知，或测不出来） ⇒ **不可用**，并给出一句含数字的裁决。
+ */
+export function frameVerdict(
+    trust: Pick<FrameTrust, 'reason' | 'correctRatio' | 'unknownRatio' | 'wrongRatio'>,
+    info: { worldVersion?: string | null; rendererVersion?: string | null } = {},
+): { usable: boolean; verdict: string } {
+    if (trust.reason === 'ok') return { usable: true, verdict: '' };
+    const exact = trust.correctRatio;
+    const unknown = trust.unknownRatio;
+    const wrong = trust.wrongRatio;
+    const measuredAllExact =
+        exact != null && exact >= FRAME_USABLE_MIN_EXACT_COVERAGE && (unknown ?? 1) === 0 && (wrong ?? 1) === 0;
+    if (measuredAllExact) return { usable: true, verdict: '' };
+    const world = (info.worldVersion ?? '').trim();
+    const renderer = (info.rendererVersion ?? '').trim();
+    const exactPct = pctOf(exact);
+    if (exact == null || world === '' || renderer === '') {
+        return {
+            usable: false,
+            verdict:
+                '—— **这张图不可信**（读不到渲染器/世界版本，没法确认画的是什么）：' +
+                '**不要用它认方块**，用下面的 `near key blocks` 方块数据。',
+        };
+    }
+    return {
+        usable: false,
+        verdict:
+            `—— **这张图不可信**（渲染器 ${renderer} vs 世界 ${world}，` +
+            `${exactPct == null ? '测不出比例' : `只有 ${exactPct} 的方块一对一`}）：` +
+            '**不要用它认方块**，用下面的 `near key blocks` 方块数据（那份每次都对）。',
+    };
 }
 
 /** 越界（> 渲染器最大 state id）的比例；只数"能判定越界"的样本。 */
@@ -419,7 +487,7 @@ export function measureFrameTrust(bot: any, deps: FrameTrustDeps = {}): FrameTru
                       return null;
                   }
               })();
-    return assessFrameTrust({
+    const trust = assessFrameTrust({
         worldVersion,
         rendererVersion,
         rendererMaxState,
@@ -429,4 +497,7 @@ export function measureFrameTrust(bot: any, deps: FrameTrustDeps = {}): FrameTru
         remapApplied: deps.remapApplied === true,
         remapOf,
     });
+    // **裁决**：把"可不可用"和"一句话"一起返回，渲染端不再自己推断。
+    const { usable, verdict } = frameVerdict(trust, { worldVersion, rendererVersion });
+    return { ...trust, usable, verdict };
 }

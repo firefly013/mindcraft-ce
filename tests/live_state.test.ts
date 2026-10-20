@@ -646,3 +646,67 @@ describe('视线行必须描述**这一帧**，不是"现在身体朝哪"（真�
     expect(text).not.toContain('视线：');
   });
 });
+
+describe('裁决进 Screenshot 第一行（不让模型每帧自己猜哪张能信）', () => {
+  const shot = (trust: any, view: any = null) =>
+    sampleLiveState({
+      bot: stubBot(),
+      vision: {
+        lastScreenshot: { file: 'frame_test.jpg', takenAt: Date.now() },
+        lastFrameTrust: trust,
+        ...(view == null ? {} : { lastFrameView: view }),
+      },
+    });
+
+  it('不可用 ⇒ 第一行就有 这张图不可信 / 不要用它认方块 / 用方块数据，且带数字', () => {
+    const text = renderLiveState(
+      shot({
+        trusted: false,
+        reason: 'version_skew',
+        usable: false,
+        verdict: '—— **这张图不可信**（渲染器 1.21.4 vs 世界 1.21.11，只有 12% 的方块一对一）：**不要用它认方块**，用下面的 near key blocks 方块数据（那份每次都对）。',
+        line: '⚠️ 旧的详细说明（既然裁决已在第一行，就不该重复）',
+      }),
+    );
+    const lines = text.split('\n');
+    const head = lines.find((l) => l.startsWith('Screenshot:')) ?? '';
+    expect(head).toContain('frame_test.jpg');
+    expect(head).toContain('这张图不可信');
+    expect(head).toContain('不要用它认方块');
+    expect(head).toContain('12%');
+    expect(head).toContain('near key blocks');
+    expect(text).not.toContain('旧的详细说明');
+  });
+
+  it('可用（覆盖率过阈值）⇒ 一个字都不加（不误报）', () => {
+    const text = renderLiveState(
+      shot({ trusted: true, reason: 'version_skew', usable: true, verdict: '', line: '' }, { pitch: 0.05, yaw: 0 }),
+    );
+    expect(text).not.toContain('不可信');
+    expect(text).not.toContain('不要用它认方块');
+  });
+
+  it('版本一致 ⇒ 那两个词永远不出现', () => {
+    const text = renderLiveState(shot({ trusted: true, reason: 'ok', usable: true, verdict: '', line: '' }));
+    expect(text).not.toContain('不可信');
+    expect(text).not.toContain('不要用它认方块');
+  });
+
+  it('裁决为空串但不可用（老数据）⇒ 回落到详细说明，绝不静默', () => {
+    const text = renderLiveState(shot({ trusted: false, reason: 'version_skew', usable: false, verdict: '', line: '⚠️ **回落的详细说明**' }));
+    expect(text).toContain('回落的详细说明');
+  });
+
+  it('视线行仍然保留（在裁决之后、同一条 Screenshot 段里）', () => {
+    const text = renderLiveState(
+      shot(
+        { trusted: false, reason: 'version_skew', usable: false, verdict: '—— **这张图不可信**（测试）', line: '' },
+        { pitch: (-88 * Math.PI) / 180, yaw: 0 },
+      ),
+    );
+    const lines = text.split('\n');
+    const idx = lines.findIndex((l) => l.startsWith('Screenshot:'));
+    expect(lines[idx]).toContain('这张图不可信');
+    expect(lines[idx + 1]).toContain('朝天空');
+  });
+});

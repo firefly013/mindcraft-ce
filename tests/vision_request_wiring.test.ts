@@ -172,3 +172,36 @@ describe('同一帧同源：朝向、文件名、时间戳必须来自**同一�
     expect(text).toContain('视线：**朝天空**');
   });
 });
+
+describe('裁决进真实请求（不只进渲染函数）', () => {
+  it('不可用的帧 ⇒ 最后一条 user 消息的 Screenshot 行里就有裁决', async () => {
+    const state = sampleLiveState({
+      bot: stubBot(0, 0),
+      vision: {
+        lastScreenshot: { file: 'frame_bad.jpg', takenAt: Date.now() },
+        lastFrameTrust: {
+          trusted: false,
+          reason: 'version_skew',
+          usable: false,
+          verdict: '—— **这张图不可信**（渲染器 1.21.4 vs 世界 1.21.11，只有 12% 的方块一对一）：**不要用它认方块**，用下面的 near key blocks 方块数据。',
+          line: '',
+        },
+        lastFrameView: { pitch: 0.05, yaw: 0 },
+      },
+    });
+    const tail = liveTailFromText(renderLiveState(state));
+    const hook = liveTailHook(
+      () => tail,
+      async () => 'BASE64JPEG',
+    ).handlers as unknown as { beforeRequest: Handler };
+    const out = await (hook.beforeRequest({ messages: [] }) as unknown as Promise<
+      { messages: readonly { content: unknown }[] } | undefined
+    >);
+    const parts = out!.messages.at(-1)!.content as Array<{ type: string; text?: string }>;
+    const text = parts.filter((x) => x.type === 'text').map((x) => x.text ?? '').join('\n');
+    const head = text.split('\n').find((l) => l.startsWith('Screenshot:')) ?? '';
+    expect(head).toContain('这张图不可信');
+    expect(head).toContain('12%');
+    expect(head).toContain('不要用它认方块');
+  });
+});

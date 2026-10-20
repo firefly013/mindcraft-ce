@@ -591,7 +591,7 @@ function screenshotOf(vision: unknown): LiveScreenshot {
       // **图照发，但坏帧要带上怀疑**：渲染器认不出这个版本的方块时，
       // 画面里的「?」和蓝色空白会被模型读成"掉进虚空"（真机 overnight_a）。
       const trust = v?.lastFrameTrust as
-        | { trusted?: unknown; line?: unknown; reason?: unknown }
+        | { trusted?: unknown; line?: unknown; reason?: unknown; usable?: unknown; verdict?: unknown }
         | null
         | undefined;
       const trustInfo =
@@ -600,6 +600,10 @@ function screenshotOf(vision: unknown): LiveScreenshot {
               trusted: trust.trusted === true,
               line: typeof trust.line === 'string' ? trust.line : '',
               reason: typeof trust.reason === 'string' ? trust.reason : '',
+              // **裁决**。`usable` 缺失按"不可用"处理：fail-CLOSED —— 判断不了就别说它能用
+              // （判断"这图能不能认方块"是动作问题，unknown 必须拒绝）。
+              usable: trust.usable === true,
+              verdict: typeof trust.verdict === 'string' ? trust.verdict : '',
             }
           : null;
       // **这一帧自己的朝向**（拍摄时记录的）—— 不给"当前朝向"。

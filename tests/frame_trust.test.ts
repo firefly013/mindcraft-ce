@@ -14,7 +14,8 @@
  *   ③ 图照发（这条在 vision_interpreter 的接线里，不删图）。
  */
 import { describe, expect, it } from 'vitest';
-import { assessFrameTrust, measureFrameTrust } from '../src/body/vision/frame_trust.js';
+import { assessFrameTrust,
+    frameVerdict, measureFrameTrust } from '../src/body/vision/frame_trust.js';
 
 /** 1.21.4 与 1.21.11 的真实规模（实测：1.21.11 有 29671 个状态 id，1.21.4 上限 27865）。 */
 const RENDERER_MAX_1214 = 27865;
@@ -284,5 +285,88 @@ describe('"可信"只能是**可验证的全 exact**，绝不能因为"没测出
             remapOf: null,
         });
         expect(trust.trusted).toBe(false);
+    });
+});
+
+describe('裁决（frameVerdict）：可用/不可用 + 一句含数字的结论', () => {
+    it('版本一致 ⇒ 可用、不说话（零噪音）', () => {
+        const v = frameVerdict({ reason: 'ok', correctRatio: null, unknownRatio: null, wrongRatio: null }, {
+            worldVersion: '1.21.11',
+            rendererVersion: '1.21.11',
+        });
+        expect(v.usable).toBe(true);
+        expect(v.verdict).toBe('');
+    });
+
+    it('版本不一致但样本全部一对一 ⇒ 可用、不说话（重映射成功的情形）', () => {
+        const v = frameVerdict({ reason: 'version_skew', correctRatio: 1, unknownRatio: 0, wrongRatio: 0 }, {
+            worldVersion: '1.21.11',
+            rendererVersion: '1.21.4',
+        });
+        expect(v.usable).toBe(true);
+        expect(v.verdict).toBe('');
+    });
+
+    it('只有 12% 一对一 ⇒ 不可用，句子里带数字 + 不要用它认方块 + 用方块数据', () => {
+        const v = frameVerdict({ reason: 'version_skew', correctRatio: 0.12, unknownRatio: 0.1, wrongRatio: 0.78 }, {
+            worldVersion: '1.21.11',
+            rendererVersion: '1.21.4',
+        });
+        expect(v.usable).toBe(false);
+        expect(v.verdict).toContain('这张图不可信');
+        expect(v.verdict).toContain('渲染器 1.21.4 vs 世界 1.21.11');
+        expect(v.verdict).toContain('12%');
+        expect(v.verdict).toContain('不要用它认方块');
+        expect(v.verdict).toContain('near key blocks');
+    });
+
+    it('静默画错（比例对得上但画成别的方块）也算不可用', () => {
+        const v = frameVerdict({ reason: 'version_skew', correctRatio: 0.5, unknownRatio: 0, wrongRatio: 0.5 }, {
+            worldVersion: '1.21.11',
+            rendererVersion: '1.21.4',
+        });
+        expect(v.usable).toBe(false);
+        expect(v.verdict).toContain('50%');
+    });
+
+    it('测不出来 ⇒ 不可用（fail-CLOSED），并说清读不到', () => {
+        const v = frameVerdict({ reason: 'renderer_unsupported', correctRatio: null, unknownRatio: null, wrongRatio: null }, {
+            worldVersion: '1.21.11',
+            rendererVersion: null,
+        });
+        expect(v.usable).toBe(false);
+        expect(v.verdict).toContain('读不到');
+        expect(v.verdict).toContain('不要用它认方块');
+    });
+});
+
+describe('measureFrameTrust 也填好裁决（接线，不只是纯函数）', () => {
+    const botOf = { version: '1.21.11' } as any;
+    const deps = {
+        viewerVersionOf: () => '1.21.4',
+        maxStateOf: (v: string) => (v === '1.21.4' ? RENDERER_MAX_1214 : WORLD_MAX_1211),
+        rendererNameOf: () => (id: number) => (id === 1 ? 'stone' : 'grass_block'),
+        sampleBlocks: () => [
+            { stateId: 1, name: 'stone' },
+            { stateId: 2, name: 'dirt' },
+        ],
+    };
+
+    it('画错的帧 ⇒ usable=false，verdict 带版本与数字', () => {
+        const trust = measureFrameTrust(botOf, deps);
+        expect(trust.usable).toBe(false);
+        expect(trust.verdict).toContain('这张图不可信');
+        expect(trust.verdict).toContain('1.21.4');
+        expect(trust.verdict).toContain('50%');
+    });
+
+    it('全部对得上 ⇒ usable=true，verdict 为空（不误报）', () => {
+        const trust = measureFrameTrust(botOf, {
+            ...deps,
+            rendererNameOf: () => () => 'stone',
+            sampleBlocks: () => [{ stateId: 1, name: 'stone' }],
+        });
+        expect(trust.usable).toBe(true);
+        expect(trust.verdict).toBe(''); // 可用 ⇒ 裁决是空串（渲染端不输出任何怀疑）
     });
 });
