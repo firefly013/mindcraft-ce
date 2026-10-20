@@ -19,6 +19,8 @@
  */
 
 import * as skills from './skills.js';
+import { chooseToolForJob } from './tool_choice.js';
+import type { ToolCandidate } from './tool_choice.js';
 import * as world from './world.js';
 import { Vec3 } from 'vec3';
 import { nearestDropWithin } from '../auto_pickup.js';
@@ -2308,7 +2310,7 @@ const TUNNEL_STOP_TEXT: Record<TunnelStop, string> = {
     liquid_ahead: '前方是液体（岩浆/水），不能往里面挖',
     unsupported_floor: '下一步脚下不是实心方块，会掉下去',
     no_tool: '没有能挖的镐，而且前面的方块徒手挖不动',
-    tool_low: '镐快用完了',
+    tool_low: '（已删除的安全门：低耐久不再拦路，工具断了由动作内部换）',
     dig_failed: '挖完还是原方块（挖不动/被挡）',
     travel_failed: '挖通了但没走进去（寻路失败）',
     unreadable: '读不到方块（区块没加载？），不敢瞎挖',
@@ -2380,7 +2382,7 @@ export function tunnelNextAction(o: TunnelOutcome): string {
         case 'bridge_failed':
             return 'moveAway(distance=3)';
         case 'no_tool':
-        case 'tool_low':
+        case 'tool_low': // 历史停止码：不再产生，仅为兼容旧回执保留
             return o.hintEquip != null ? `equip(item_name="${o.hintEquip}")` : 'stats(type="inventory")';
         case 'low_health':
         case 'damaged':
@@ -2881,10 +2883,12 @@ export async function digLine(
         // ⚠️ **"手上没有镐" ≠ "没有镐"**（真机 overnight_b：镐就在背包里、只是没握在手上，
         // 回执却报"没有镐"，害得它掉头回去做一个已经有的工具）。所以先自己换上再判。
         let guard = refreshTool();
+        // **拒绝过的工具本次动作不再选回**（Lead 2026-10-21：拒绝→换手→选回同一把 = 结构性震荡）。
+        const refusedTools = new Set<string>();
         noteToolChange(guard.name);
         let hasPickaxe = guard.name != null && guard.name.includes('pickaxe');
         if (!hasPickaxe) {
-            const spare = bestPickaxeInInventory(bot);
+            const spare = bestPickaxeInInventory(bot, null, [...(refusedTools ?? [])]);
             if (spare != null) {
                 try {
                     await equip(bot, spare);
@@ -2919,15 +2923,6 @@ export async function digLine(
                 break;
             }
             outcome.handMining = true;
-        } else if (guard.low) {
-            outcome.stop = 'tool_low';
-            const replacement = bestPickaxeInInventory(bot, guard.name);
-            outcome.hintEquip = replacement;
-            outcome.detail =
-                replacement != null
-                    ? `还剩约 ${guard.remaining ?? '?'} 次，先换 ${replacement}`
-                    : `还剩约 ${guard.remaining ?? '?'} 次，背包里没有别的镐`;
-            break;
         }
 
         // ── 挖：然后**验证明明变空气**（事实，不是假设）。挖不动的先换一次镐再试。──
@@ -3115,25 +3110,21 @@ export async function mineTunnelSkill(
 }
 
 /** 背包里最好的一把镐（有镐才能继续挖；换镐提示要能直接照抄）。 */
-export function bestPickaxeInInventory(bot: any, exclude?: string | null): string | null {
-    let items: Array<{ name?: unknown; count?: unknown }>;
+// **耐久感知**（Lead 2026-10-21）：层级最高 ≠ 还能用；把选择交给共享决策函数，
+// 并且排除本次动作里已被安全门拒绝的工具（否则"拒绝→换手→选回同一把"是结构性震荡）。
+export function bestPickaxeInInventory(bot: any, exclude?: string | null, excluded?: string[]): string | null {
+    let items: unknown[];
     try {
-        items = (bot?.inventory?.items?.() ?? []) as Array<{ name?: unknown; count?: unknown }>;
+        items = (bot?.inventory?.items?.() ?? []) as unknown[];
     } catch {
         return null;
     }
     if (!Array.isArray(items)) return null;
-    const rank = ['netherite', 'diamond', 'iron', 'stone', 'golden', 'wooden'];
-    const candidates = items
-        .filter((item) => typeof item?.name === 'string' && item.name.includes('pickaxe') && item.name !== exclude)
-        .filter((item) => (typeof item.count === 'number' ? item.count : 0) > 0)
-        .map((item) => String(item.name));
-    if (candidates.length === 0) return null;
-    return candidates.sort((a, b) => {
-        const ra = rank.findIndex((prefix) => a.startsWith(prefix));
-        const rb = rank.findIndex((prefix) => b.startsWith(prefix));
-        return (ra < 0 ? rank.length : ra) - (rb < 0 ? rank.length : rb);
-    })[0] as string;
+    const excludedNames = [...(excluded ?? [])];
+    if (typeof exclude === 'string' && exclude !== '') excludedNames.push(exclude);
+    // 便宜优先：走一步路只需挖 1 格（usesNeeded=1）⇒ 快断的镐正好用掉，满耐久留给硬活。
+    const choice = chooseToolForJob({ tools: items as ToolCandidate[], kind: 'pickaxe', minimumTier: 'wooden', usesNeeded: 1, excluded: excludedNames });
+    return choice.name;
 }
 
 // ─────────────────────────── 长途赶路（travelTo） ───────────────────────────

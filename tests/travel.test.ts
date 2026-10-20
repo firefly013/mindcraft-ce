@@ -299,7 +299,9 @@ describe('travelTo：一次调用往前走（执行）', () => {
         expect(receipt.trimEnd().split('\n').at(-1)).toBe('下一步（照做即可）：moveAway(distance=8)');
     });
 
-    it('镐快用完 ⇒ 停并给换镐提示（带具体工具名）', async () => {
+    // 用户判决（2026-10-21）：'加安全门就是过度设计……当我们的设计不能省事的时候，这就是坑了'。
+    // 镐快用完**不再中止 travelTo**，也不给"先换"这种提示。
+    it('镐快用完 ⇒ 不再停手（旧的换镐门已按用户要求删除）', async () => {
         const h = travelHarness({
             pos: { x: 0, y: 70, z: 0 },
             tool: { name: 'iron_pickaxe', remaining: 5, max: 250, low: true },
@@ -310,8 +312,8 @@ describe('travelTo：一次调用往前走（执行）', () => {
         });
         const receipt = await travelToSkill(h.bot, 400, 70, 0, 300_000, undefined, undefined, h.deps);
 
-        expect(receipt).toContain('镐快用完了');
-        expect(receipt.trimEnd().split('\n').at(-1)).toBe('下一步（照做即可）：equip(item_name="diamond_pickaxe")');
+        expect(receipt).not.toContain('镐快用完了');
+        expect(receipt).not.toContain('先换');
     });
 
     it('读不到方块 ⇒ 停，明说读不到（不猜、不硬挖）', async () => {

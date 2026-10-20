@@ -1823,16 +1823,19 @@ describe('mineTunnel：直线隧道', () => {
         expect(isUnsupportedFloorBlock(null)).toBe(true);
     });
 
-    it('镐快用完了 → 停手并给"换哪一把"的可执行调用', async () => {
+    // 用户判决（2026-10-21）：'加安全门就是过度设计……我们给他做自动选择最优工具是为了帮他省事，
+    // 但当我们的设计不能省事的时候，这就是坑了'。所以镐快用完**不再中止动作**——
+    // 这条测试从"必须停手并提示换镐"改为"必须照常挖完，不再出现'先换'那种门"。
+    it('镐快用完了 → 不再停手（旧的换镐门已按用户要求删除）', async () => {
         const h = tunnelHarness({
             tool: { name: 'stone_pickaxe', remaining: 12, max: 251, low: true },
             inventory: [{ name: 'diamond_pickaxe', count: 1 }],
         });
         const receipt = await mineTunnelSkill(h.bot, 4, 2, '+x', h.deps);
-        expect(h.dugOrder).toEqual([]);
-        expect(receipt).toContain('镐快用完了');
-        expect(receipt).toContain('stone_pickaxe');
-        expect(receipt.trimEnd().split('\n').at(-1)).toBe('下一步（照做即可）：equip(item_name="diamond_pickaxe")');
+        // 有耐久就继续用；不再因为"快用完"而一格不挖。
+        expect(h.dugOrder.length).toBeGreaterThan(0);
+        expect(receipt).not.toContain('镐快用完了');
+        expect(receipt).not.toContain('先换');
     });
 
     it('没镐 + 徒手挖不动 → 停手并给装备提示；徒手挖得动 → 放行但明说"很慢"', async () => {
