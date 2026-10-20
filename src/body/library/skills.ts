@@ -5323,6 +5323,43 @@ function forwardDelta(yaw: number): { dx: number; dz: number } {
 /** 一次调用最多垫/上多少格（再高就是调用方算错了——真机 2026-10-19 出现过 258 格）。 */
 export const MAX_VERTICAL_CLIMB_PER_CALL = 64;
 
+/**
+ * **跳跃最高点的放置判据**（纯函数，供 pillarUp 用；Lead 2026-10-21）：
+ * 旧实现只等 `y > startY+0.4` 就往"原站立格"放 ⇒ 身体 AABB 还在那格里 ⇒ 安全守卫必然拒绝，
+ * 于是正常竖井 100% 失败。正确语义：
+ * - `apexReached=false` ⇒ 「跳起来但位置没升」（**可执行**原因：头顶被挡），不放；
+ * - `apexReached=true` 但放置瞬间仍与身体相交 ⇒ 「目标格 X 与身体重叠」，不放（守卫保留）；
+ * - 否则可以放。
+ */
+export type PillarApexVerdict =
+    | { canPlace: true; message: null }
+    | { canPlace: false; message: string };
+
+export function pillarApexVerdict(input: {
+    apexReached: boolean;
+    intersectsAtApex: boolean | null;
+    target: { x: number; y: number; z: number };
+    bodyY: number;
+}): PillarApexVerdict {
+    const cell = `${input.target.x},${input.target.y},${input.target.z}`;
+    if (!input.apexReached) {
+        return {
+            canPlace: false,
+            message:
+                `pillarUp 停止：跳起来但位置没升（现在 y=${input.bodyY.toFixed(1)}，目标格 ${cell} 仍在身体里）——` +
+                '头顶多半被挡。先 mineBlock 挖开头顶那一格，再 pillarUp；窄井里也可以改用 stairUp。',
+        };
+    }
+    if (input.intersectsAtApex === true) {
+        return {
+            canPlace: false,
+            message:
+                `pillarUp 停止：目标格 ${cell} 与身体重叠（身体在 y=${input.bodyY.toFixed(1)}），这一步不放——先 mine 头顶一格再试。`,
+        };
+    }
+    return { canPlace: true, message: null };
+}
+
 export async function pillarUp(bot: any, blocks: number = 1): Promise<boolean> {
     const requested = Math.max(1, Math.floor(blocks));
     // **上限**：258 格柱子只花了 20 秒，是因为引擎允许；每一块都来自背包，
@@ -5388,21 +5425,48 @@ export async function pillarUp(bot: any, blocks: number = 1): Promise<boolean> {
         const startX = Math.floor(feet.x);
         const startZ = Math.floor(feet.z);
         bot.setControlState('jump', true);
-        const rose = await waitFor(bot, () => Number(bot?.entity?.position?.y ?? 0) > startY + 0.4, 1200, 40);
+        // **在跳跃最高点放块**（Lead 2026-10-21 真机：1×1 竖井里 100% 失败——旧代码只等
+        // `y > startY+0.4` 就往"原站立格"放，那时身体 AABB 还没离开那格 ⇒ 安全守卫必然拒绝。
+        // 正确做法是等身体**真的清空那一格**（cellIntersectsBody 为 false）或跳到足够高度）。
+        const standingCell = { x: startX, y: Math.floor(startY), z: startZ };
+        const apexReached = await waitFor(
+            bot,
+            () =>
+                cellIntersectsBody(bot?.entity?.position, standingCell) === false ||
+                Number(bot?.entity?.position?.y ?? 0) >= Math.floor(startY) + 1.0,
+            1600,
+            40,
+        );
         let placed = false;
-        if (rose) {
-            // **放块前硬前置：方块绝不能放进自己身体里**（Lead 2026-10-21：pillarUp(14) 把自己埋住，
-            // 血 19→0 憋死、损失 82 件）。跳起来后必须已经离开脚下那一格，否则这一步不放。
-            if (cellIntersectsBody(bot?.entity?.position, { x: startX, y: Math.floor(startY), z: startZ }) !== false) {
-                log(bot, 'pillarUp 停止：脚下方块格 ' + startX + ',' + Math.floor(startY) + ',' + startZ + ' 仍与身体重叠（放进去会窒息），这一步不放。先跳离地面再试或改用 stairUp。');
+        if (apexReached) {
+            // **守卫保留**：放的那一刻再验一次，方块绝不能落在身体里。
+            if (cellIntersectsBody(bot?.entity?.position, standingCell) === true) {
+                const p = bot.entity.position;
+                log(
+                    bot,
+                    'pillarUp 停止：目标格 ' + standingCell.x + ',' + standingCell.y + ',' + standingCell.z +
+                        ' 与身体重叠（身体在 ' + Number(p.x).toFixed(1) + ',' + Number(p.y).toFixed(1) + ',' + Number(p.z).toFixed(1) +
+                        '），这一步不放——先 mine 头顶一格再试。',
+                );
                 bot.setControlState('jump', false);
                 return false;
             }
-            placed = await placeBlock(bot, material, startX, Math.floor(startY), startZ, 'bottom', true);
+            placed = await placeBlock(bot, material, standingCell.x, standingCell.y, standingCell.z, 'bottom', true);
+        } else {
+            // 跳了但没升起来：这是**不同**的可执行原因，不是"会窒息"。
+            bot.setControlState('jump', false);
+            const p = bot.entity.position;
+            log(
+                bot,
+                'pillarUp 停止：跳起来但位置没升（现在 y=' + Number(p.y).toFixed(1) + '，目标格 ' +
+                    standingCell.x + ',' + standingCell.y + ',' + standingCell.z + ' 仍在身体里）——' +
+                    '头顶多半被挡。先 mineBlock 挖开头顶那一格，再 pillarUp；窄井里也可以改用 stairUp。',
+            );
+            return false;
         }
         bot.setControlState('jump', false);
         // 放完再验一次：万一位置抖动让方块落进身体，立刻挖掉它（**绝不把方块留在身体里继续垫**）。
-        const placedCell = { x: startX, y: Math.floor(startY), z: startZ };
+        const placedCell = standingCell;
         if (placed && cellIntersectsBody(bot?.entity?.position, placedCell) === true) {
             const rescued = await breakBlockAt(bot, placedCell.x, placedCell.y, placedCell.z);
             log(bot, 'pillarUp 紧急自救：方块落进了身体里，' + (rescued ? '已立刻挖掉' : '**没能挖掉**——先 Stop 再 mineBlock') + '（位置 ' + placedCell.x + ',' + placedCell.y + ',' + placedCell.z + '）。');

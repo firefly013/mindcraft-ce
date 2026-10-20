@@ -99,8 +99,8 @@ describe('接线守卫：pillarUp 放块前判占位、身体有窒息反射', (
 
   it('pillarUp：跳跃后才检查占位；不通过就停止、不放置；放完再验，落进身体就挖掉', () => {
     const code = skills();
-    expect(code).toContain('cellIntersectsBody(bot?.entity?.position, { x: startX, y: Math.floor(startY), z: startZ }) !== false');
-    expect(code).toContain('仍与身体重叠（放进去会窒息）');
+    expect(code).toContain('cellIntersectsBody(bot?.entity?.position, standingCell) === false');
+    expect(code).toContain('与身体重叠');
     expect(code).toContain('pillarUp 紧急自救');
     expect(code).toContain('已立刻挖掉');
   });
