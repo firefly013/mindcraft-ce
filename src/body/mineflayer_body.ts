@@ -58,6 +58,7 @@ import {
 } from './library/skills.js';
 import { formatShelterReceipt, planShelter } from './safety/shelter.js';
 import { formatSuffocationReceipt, planSuffocationEscape } from './safety/suffocation.js';
+import { isJustPlacedDrop } from './library/placement_guard.js';
 import {
     appendDeath,
     formatRespawnEscapeReceipt,
@@ -2644,6 +2645,9 @@ export class MineflayerBody {
     private shelterLastAt = 0;
     private shelterCountTonight = 0;
     private shelterNightKey = -1;
+    /** shelter-skip internal log throttle (not model-visible). */
+    private shelterSkipLoggedAt = 0;
+    private shelterSkipReasonSeen = '';
     /** 窒息自救：是否在跑 / 上次尝试时间 / 健康变化追踪。 */
     private suffocationRunning = false;
     private suffocationLastAt = 0;
@@ -3160,7 +3164,27 @@ export class MineflayerBody {
                 hasTorch: this.shelterHasTorch(),
                 placeableBlocks: this.shelterPlaceableCount(),
             });
-            if (plan.action === 'none') return;
+            if (plan.action === 'none') {
+                // **内部观测**（Lead 2026-10-21：shelter 触发 0 次，光看回执无法区分
+                // "辅助判定安全、故意不说话"与"辅助根本没接线"）。模型可见回执仍静默，
+                // 但日志必须留下 skip 原因；同一原因 60 秒内只记一次，避免刷屏。
+                const skipReason = plan.reason;
+                if (skipReason !== this.shelterSkipReasonSeen || now - this.shelterSkipLoggedAt > 60_000) {
+                    this.shelterSkipReasonSeen = skipReason;
+                    this.shelterSkipLoggedAt = now;
+                    try {
+                        this.log.with('lifecycle').info({
+                            event: 'shelter-skip',
+                            reason: skipReason,
+                            timeOfDay,
+                            health: typeof bot.health === 'number' ? bot.health : null,
+                        });
+                    } catch {
+                        // 日志失败不影响别的。
+                    }
+                }
+                return;
+            }
             this.shelterRunning = true;
             this.shelterLastAt = now;
             this.shelterCountTonight += 1;
@@ -4500,6 +4524,9 @@ export class MineflayerBody {
         // 刚 discard 的东西即使实体已经出现，也不许再被自己捡回：
         // 名字 / 落点 / 实体 id 三条路一起判（见 auto_pickup.ts 的 matchedRecord）。
         if (isDiscardedDrop(target.name, target, target.id)) return;
+        // **刚放下的方块不是掉落物**（真机 2026-10-21：熔炉放下就被自己捡回，回执却写 Placed）。
+        // 静默跳过：不抢身体、不写回执（skipped 与 preemption 不能同时出现）。
+        if (isJustPlacedDrop(target.name, { x: target.x, y: target.y, z: target.z })) return;
         // 威胁范围内有敌对生物：**别去捡**（真机 15:56 就是一边挨打一边被拖着走）。
         const threat = this.threatNearRelative(PICKUP_THREAT_RADIUS);
         const go = shouldAttemptPickup({

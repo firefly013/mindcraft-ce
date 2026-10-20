@@ -3,6 +3,7 @@ import * as world from "./world.js";
 import pf from 'mineflayer-pathfinder';
 import Vec3 from 'vec3';
 import { cellIntersectsBody, standingRoomOk } from '../safety/suffocation.js';
+import { isJustPlacedDrop, markPlaced, placementVerdict } from './placement_guard.js';
 /**
  * ⚠️ **必须读共享单例，不许读根目录那份 `settings.ts`。**
  *
@@ -2228,17 +2229,63 @@ export async function placeBlock(bot: any, blockType: string, x: number, y: numb
         else {
             await bot.equip(block_item, 'hand');
             await faceTarget(bot, buildOffBlock.position.offset(0.5, 0.5, 0.5), String(buildOffBlock.name));
+            // **放置前登记**：刚放下的方块不是"掉落物"，autoPickup 不许把它当战利品捡回去
+            // （真机 2026-10-21：熔炉刚放下就被自己捡回背包，回执却写 "Placed furnace"）。
+            markPlaced(blockType, { x: target_dest.x, y: target_dest.y, z: target_dest.z });
+            const countOf = (): number =>
+                Number(
+                    ((bot.inventory?.items?.() ?? []) as Array<{ name?: string; count?: number }>)
+                        .filter((item) => String(item?.name ?? '').includes(blockType))
+                        .reduce((sum, item) => sum + Number(item?.count ?? 0), 0),
+                );
+            const countBefore = countOf();
             await bot.placeBlock(buildOffBlock, faceVec);
-            log(bot, `Placed ${blockType} at ${target_dest}.`);
-            // **确认方块真的落地了再 return true**：这个 true 是对调用方的
-            // 承诺（蓝图施工会立刻在下一格继续、验证器会立刻读 blockAt）。
-            // 原先死等 200ms，现在轮询到就立刻走人。超时仍按成功返回——
-            // 契约与旧实现一致，只是把"确定失败"和"服务端慢"区分开。
+            const countAfter = countOf();
             // 方块名要去掉 `[facing=…]` 之类后缀：blockType 在上面被改写过
-            // （torch → wall_torch、stairs → stairs[facing=north]），而
-            // blockAt 报的是裸名。
+            // （torch → wall_torch、stairs → stairs[facing=north]），而 blockAt 报的是裸名。
             const bareName = blockType.split('[')[0] ?? blockType;
-            await waitForBlockAt(bot, target_dest, (name) => name === bareName);
+            let confirmed = await waitForBlockAt(bot, target_dest, (name) => name === bareName);
+            let readBack: string | null = null;
+            try {
+                readBack = String(bot?.blockAt?.(target_dest)?.name ?? '');
+            } catch {
+                readBack = null;
+            }
+            let verdict = placementVerdict({ blockRead: readBack, expected: bareName, countBefore, countAfter });
+            // **世界里没有它就不叫 Placed**：重试一次，仍没有就如实报失败（不假装成功）。
+            if (verdict === 'block-missing' || verdict === 'uncertain') {
+                try {
+                    await bot.equip(block_item, 'hand');
+                    await bot.placeBlock(buildOffBlock, faceVec);
+                    confirmed = await waitForBlockAt(bot, target_dest, (name) => name === bareName);
+                    readBack = String(bot?.blockAt?.(target_dest)?.name ?? '');
+                } catch {
+                    confirmed = false;
+                }
+                verdict = placementVerdict({ blockRead: readBack, expected: bareName, countBefore: null, countAfter: null });
+                if (verdict !== 'ok' || !confirmed) {
+                    log(
+                        bot,
+                        `**放置没有生效**：${blockType} @${target_dest} 现在读到的仍然是 ${readBack === '' ? '读不到' : readBack}（不是 ${bareName}）——` +
+                            `这一格**不是** ${blockType}，别据此继续施工；先确认脚下/旁边能站人，再试一次或换一格。`,
+                    );
+                    await failPlacementAfterClear(bot, clearedForPlacement, `放 ${blockType} 到 ${target_dest} 没有生效`);
+                    return false;
+                }
+            }
+            if (verdict === 'placed-but-item-not-consumed') {
+                log(
+                    bot,
+                    `放置已落地，但背包里的 ${blockType} 数量没有减少（${countBefore} → ${countAfter}）：` +
+                        '服务端可能还在同步；这一格的掉落物 3 秒内不会被 autoPickup 捡（不会"放下去又被自己捡回来"）。',
+                );
+            }
+            log(
+                bot,
+                confirmed
+                    ? `Placed ${blockType} at ${target_dest}（回读确认 ${readBack || bareName}）。`
+                    : `Placed ${blockType} at ${target_dest}（回读 ${readBack === '' ? '读不到' : readBack}，已重试一次）。`,
+            );
             return true;
         }
     } catch (err: unknown) {
