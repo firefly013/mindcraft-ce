@@ -5434,14 +5434,10 @@ export async function stairUp(bot: any, blocks: number = 1): Promise<boolean> {
                 continue;
             }
         }
-        const beforeY = Number(feet.y);
-        bot.setControlState('forward', true);
-        bot.setControlState('jump', true);
-        await new Promise<void>((resolve) => setTimeout(resolve, 700));
-        bot.setControlState('jump', false);
-        bot.setControlState('forward', false);
-        if (Number(bot.entity.position.y) <= beforeY + 0.4) {
-            log(bot, 'stairUp 第 ' + (done + 1) + ' 格失败：' + describeStairJumpFailure(blockAt, feet, dir.dx, dir.dz));
+        // **统一走到移动原语**：不再让寻路器钻进 1×1 的洞（四个工具同一个病）。
+        const step = await stepIntoCell(bot, { x: Math.floor(feet.x) + dir.dx, y: Math.floor(feet.y) + 1, z: Math.floor(feet.z) + dir.dz });
+        if (!step.moved) {
+            log(bot, 'stairUp 第 ' + (done + 1) + ' 格失败：' + String(step.reason) + ' 建议：先 mineBlock 掉头上那一格，再用 pillarUp 原地垫高 1 格。');
             return false;
         }
         done++;
@@ -5505,6 +5501,14 @@ export async function digDown(bot: any, distance: number = 10): Promise<boolean>
             return false;
         }
         log(bot, 'Dug down ' + i + '/' + distance + ' blocks (broke (' + verdict.target.x + ',' + verdict.target.y + ',' + verdict.target.z + ')).');
+        // **挖完必须真的下去**（真机 2026-10-20：「Skipping air block… 挖了 4/80 格」后 GoalChanged）。
+        // 这一动作以前完全没有——只挖不走，于是人停在洞口、下一铲继续挖空气。
+        const sunkInto = await stepIntoCell(bot, { x: verdict.target.x, y: verdict.target.y, z: verdict.target.z });
+        if (!sunkInto.moved) {
+            log(bot, 'Dug down ' + (i - 1) + ' blocks 后**下不去**：' + String(sunkInto.reason) + '。');
+            log(bot, '建议：先 mineBlock 掉那一格再走；若那是空气/水，改用 goToCoordinates 移到旁边再 digDown，或用 placeHere 垫一块站上去再挖。');
+            return false;
+        }
     }
     log(bot, 'Dug down ' + distance + ' blocks.');
     return true;
@@ -6711,4 +6715,122 @@ export function inspectAimed(bot: any, maxDistance: number = 5): string {
         return `${maxDistance} 格内的准星方向什么都没有（对着空气或太远）。`;
     }
     return lines.join('；') + '。';
+}
+
+/**
+ * **走进一格** —— 移动的唯一原语（Lead 2026-10-20 指令：collapse, not patch）。
+ *
+ * 为什么需要它：`mineTunnel` / `travelTo` / `stairUp` / `digDown` 四个工具**同一个病**——
+ * 它们挖通了，然后**让寻路器钻进 1×1 的洞**（寻路器表达不了这种动作），于是：
+ * 「挖通了但没走进去（寻路失败）」「跳不上去」「Skipping air block… 挖了 4/80 格」。
+ * 四个调用点坏成一句话 ⇒ 坏的是原语，不是四个调用者。
+ *
+ * 这条原语只做一件事：面向目标格、按住 forward（目标高一格就同时 jump）、
+ * **测量位移是否真的发生**，有界重试（3 次），失败时**说出障碍物**并交给调用方报实话。
+ * 不碰任何安全判定（落点/岩浆/虚空由调用方或反射负责）。
+ */
+export interface StepIntoResult {
+    moved: boolean;
+    /** 失败时的原因（含障碍物名字）；成功为 null。 */
+    reason: string | null;
+    /** 尝试次数（有界，最多 3）。 */
+    attempts: number;
+    from: { x: number; y: number; z: number };
+    to: { x: number; y: number; z: number };
+    /** 目标格里的障碍物（脚/头/落点），失败时非空，供调用方给具体下一步。 */
+    obstacles: string[];
+}
+
+/** 目标格周围挡路的是什么（给"下一步该 mineBlock 哪里"用）。 */
+export function describeStepObstacles(
+    blockAt: (x: number, y: number, z: number) => { name?: unknown } | null,
+    target: { x: number; y: number; z: number },
+): string[] {
+    const out: string[] = [];
+    const solid = (name: unknown): boolean => {
+        const value = String(name ?? '');
+        return value !== '' && value !== 'air' && value !== 'cave_air' && value !== 'void_air';
+    };
+    const feet = blockAt(target.x, target.y, target.z)?.name;
+    const head = blockAt(target.x, target.y + 1, target.z)?.name;
+    const landing = blockAt(target.x, target.y - 1, target.z)?.name;
+    if (solid(feet)) out.push(`脚那一格是 ${String(feet)}`);
+    if (solid(head)) out.push(`头那一格是 ${String(head)}`);
+    if (!solid(landing)) out.push(`目标脚下没有实心方块（${String(landing ?? '空')}）`);
+    return out;
+}
+
+/**
+ * 走进 `target` 这一格（格坐标）。**小、准、可测**：
+ * - 面向格中心；目标比现在高 1 格 ⇒ 同时按 jump；低 1 格 ⇒ 只按 forward；
+ * - 每轮 ~600ms 后松开按键并**实测位移**（≥0.35 格才算走进去了）；
+ * - 最多 3 次；失败时返回障碍物名，不做任何"寻路失败"的空话。
+ */
+export async function stepIntoCell(
+    bot: any,
+    target: { x: number; y: number; z: number },
+): Promise<StepIntoResult> {
+    const readPos = (): { x: number; y: number; z: number } => {
+        try {
+            const p = bot?.entity?.position;
+            return { x: Number(p?.x ?? 0), y: Number(p?.y ?? 0), z: Number(p?.z ?? 0) };
+        } catch {
+            return { x: 0, y: 0, z: 0 };
+        }
+    };
+    const from = readPos();
+    const goal = { x: Math.floor(target.x), y: Math.floor(target.y), z: Math.floor(target.z) };
+    const inCell = (): boolean => {
+        const p = readPos();
+        return Math.floor(p.x) === goal.x && Math.floor(p.y) === goal.y && Math.floor(p.z) === goal.z;
+    };
+    const blockAt = (x: number, y: number, z: number): { name?: unknown } | null => {
+        try {
+            return bot.blockAt(new Vec3(x, y, z));
+        } catch {
+            return null;
+        }
+    };
+    const release = (): void => {
+        for (const key of ['forward', 'jump', 'sprint']) {
+            try {
+                bot.setControlState(key, false);
+            } catch {
+                // 拿不到控制就尽力而为。
+            }
+        }
+    };
+    if (inCell()) return { moved: true, reason: null, attempts: 0, from, to: readPos(), obstacles: [] };
+    const climb = goal.y > Math.floor(from.y);
+    const attemptsMax = 3;
+    for (let attempt = 1; attempt <= attemptsMax; attempt++) {
+        try {
+            const look = new Vec3(goal.x + 0.5, Math.floor(from.y) + 1.5, goal.z + 0.5);
+            if (typeof bot.lookAt === 'function') await bot.lookAt(look, true);
+            bot.setControlState('forward', true);
+            if (climb) bot.setControlState('jump', true);
+            await new Promise<void>((resolve) => setTimeout(resolve, climb ? 900 : 650));
+        } catch {
+            // 控制失败也要走"测量位移"这一步。
+        }
+        release();
+        await new Promise<void>((resolve) => setTimeout(resolve, 120));
+        const nowPos = readPos();
+        const moved = Math.hypot(nowPos.x - from.x, nowPos.z - from.z) >= 0.35 || inCell();
+        if (inCell() || moved) {
+            return { moved: true, reason: null, attempts: attempt, from, to: nowPos, obstacles: [] };
+        }
+    }
+    const obstacles = describeStepObstacles(blockAt, goal);
+    return {
+        moved: false,
+        reason:
+            '走不进去：' +
+            (obstacles.length > 0 ? obstacles.join('；') : '按了前进键但位置没变（可能被顶回或脚下打滑）') +
+            '。',
+        attempts: attemptsMax,
+        from,
+        to: readPos(),
+        obstacles,
+    };
 }

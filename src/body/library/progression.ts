@@ -3018,10 +3018,19 @@ export async function digLine(
         outcome.dug = reachedNow;
         outcome.moved += 1;
         outcome.stalls = 0;
+        // **先试移动原语，再决定是不是"走不进去"**（Lead 2026-10-20：四个工具同一个病，
+        // 根因是让寻路器钻进 1×1 的洞；stepIntoCell 面向目标、按 forward/jump、测位移）。
         if (!reallyArrived) {
-            // 前进了但没站进那一格：如实记，**停在这里**（进度按量出来的算）。
+            const stepped = await skills.stepIntoCell(bot, step.feet);
+            if (stepped.moved) {
+                outcome.progress.push(`- 第 ${index} 步：用 stepIntoCell 走进去了（寻路器报的"没到"是它的极限，不是人的极限）。`);
+                continue;
+            }
+            // 原语也走不进去 ⇒ **说实话 + 给具体的下一步**，不再只写"寻路失败"。
             outcome.stop = 'travel_failed';
-            outcome.detail = `第 ${index} 步挖通了 ${formatPoint(step.feet)}，但人只挪到 ${formatPoint(here)}（没站进去）`;
+            outcome.detail =
+                `第 ${index} 步挖通了 ${formatPoint(step.feet)}，但**走不进去**：${String(stepped.reason)}` +
+                `。建议：mineBlock 掉 ${formatPoint(step.feet)} 那一格（或它头顶那格）后再走；若是水/岩浆，换 goToCoordinates 绕开。`;
             break;
         }
         if (outcome.dug % progressEvery === 0) {
