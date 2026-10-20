@@ -4997,6 +4997,17 @@ export async function mineBlockAt(bot: any, x: number, y: number, z: number): Pr
         }
         // **同一个入口**：mineBlock 以前是裸的 await bot.dig()，8 秒超时没覆盖到它
         // （模型真机报"mineBlock 挖黑曜石空回执×2 + 卡死 280 秒"，而其他 17 格全正常）。
+        // **长动作进度 + 硬上限**（Lead 2026-10-21：mineBlock 117 秒无进度）。
+        const mineStartedAt = Date.now();
+        let mineLastProgressAt = 0;
+        if (shouldEmitProgress(mineLastProgressAt, Date.now())) {
+            mineLastProgressAt = Date.now();
+            log(bot, 'mine-progress{' + JSON.stringify({ block: target.name, x, y, z, elapsedMs: 0 }) + '} ' + formatProgressLine({ label: '挖方块 ', done: 0, total: 1, elapsedMs: 0 }));
+        }
+        if (Date.now() - mineStartedAt >= LONG_ACTION_MAX_MS) {
+            log(bot, formatTimeoutSummary({ label: '挖方块', done: 0, total: 1, elapsedMs: Date.now() - mineStartedAt, remaining: 1 }));
+            return false;
+        }
         if (!(await digWithTimeout(bot, target, `@(${x},${y},${z})`))) return false;
         log(bot, `挖掉了 ${target.name} @(${x},${y},${z})。`);
         return true;
@@ -5542,6 +5553,10 @@ export async function digDown(bot: any, distance: number = 10): Promise<boolean>
     const blockAt = (x: number, y: number, z: number): { name?: string } | null =>
         bot.blockAt(new Vec3(x, y, z));
 
+    // **长动作进度 + 硬上限**（Lead 2026-10-21：digDown 88 秒零位移、零信息）。
+    const digStartedAt = Date.now();
+    let digLastProgressAt = 0;
+    const digStartY = Number(bot?.entity?.position?.y ?? 0);
     for (let i = 1; i <= distance; i++) {
         // Stop / 保命打断要先于下一铲：不然 ActionManager.stop 只能等 10 秒
         // 再杀进程，整晚反复回出生点。
@@ -5567,6 +5582,17 @@ export async function digDown(bot: any, distance: number = 10): Promise<boolean>
                   '③ 水面上方要下去，先 placeHere 垫一块方块站上去再挖，别直接挖穿含水层。'
                 : '';
             log(bot, 'Dug down ' + (i - 1) + ' blocks, but stopped: ' + reason + '.' + (advice ? ' ' + advice : ''));
+            return false;
+        }
+        // 每轮先报进度：`dig-progress{done,total,elapsedMs,fromY,toY}` + 人话（复用统一格式）。
+        if (shouldEmitProgress(digLastProgressAt, Date.now())) {
+            digLastProgressAt = Date.now();
+            const nowY = Number(bot?.entity?.position?.y ?? 0);
+            const elapsed = Date.now() - digStartedAt;
+            log(bot, 'dig-progress{' + JSON.stringify({ done: i - 1, total: distance, elapsedMs: elapsed, fromY: Math.round(digStartY * 10) / 10, toY: Math.round(nowY * 10) / 10 }) + '} ' + formatProgressLine({ label: '向下挖', done: i - 1, total: distance, elapsedMs: elapsed }));
+        }
+        if (Date.now() - digStartedAt >= LONG_ACTION_MAX_MS) {
+            log(bot, formatTimeoutSummary({ label: '向下挖', done: i - 1, total: distance, elapsedMs: Date.now() - digStartedAt, remaining: distance - (i - 1) }));
             return false;
         }
         if (verdict.kind === 'skip_air') {
