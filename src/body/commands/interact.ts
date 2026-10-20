@@ -1175,6 +1175,128 @@ function itemText(items: readonly ItemSpec[]): string {
 const PROCESSING_BLOCKS = new Set(['crafting_table', 'furnace', 'blast_furnace', 'smoker', 'anvil']);
 /** 熔炉族：既能加工，也能只给 output 把成品取出来。 */
 const FURNACE_BLOCKS = new Set(['furnace', 'blast_furnace', 'smoker']);
+/**
+ * 烧炼的三本账：**背包 / 炉内 / 真丢**（Lead 2026-10-20 裁定）。
+ *
+ * 真机 overnight_b：`useBlock(type="furnace", coords="27,43,-8", input="5 raw_iron",
+ * output="5 iron_ingot")` ⇒ 「燃料就绪…- 烧不了 raw_iron / **Only smelted 1 iron_ingot**
+ * - 背包账目：**raw_iron 5 → 0；iron_ingot 0 → 1**」。
+ * 那 4 块粗铁**很可能还在熔炉输入槽里**（`smeltItem` 的 11 秒空等退出），
+ * 但我们的回执只印了背包，模型于是报"材料没影了"——**是引擎的账先撒了谎**。
+ *
+ * 规则：**只报测量到的事实**，三个数分开；`真丢` 必须由三个读数算出来，
+ * 且**永远不许**在没读炉子的情况下说"消失/没影"。
+ */
+export interface SmeltAccounting {
+    /** 原料名（raw_iron 等）。 */
+    rawName: string;
+    /** 产物名（iron_ingot 等）。 */
+    productName: string;
+    /** 开始前背包里的原料数（读不到 = null）。 */
+    bagBefore: number | null;
+    /** 现在背包里的原料数。 */
+    bagAfter: number | null;
+    /** 熔炉输入槽里的原料数（读不到 = null）。 */
+    furnaceInput: number | null;
+    /** 熔炉燃料槽里的燃料数。 */
+    furnaceFuel: number | null;
+    /** 熔炉产物槽里的成品数。 */
+    furnaceOutput: number | null;
+    /** 背包里产物数的变化（读不到 = null）。 */
+    productGained: number | null;
+    /** 目标数：这次想烧多少个。 */
+    target: number;
+}
+
+/** 真丢 = 背包减少的原料 − 炉内输入槽里的原料 − 已产出的成品（读不全 = null，绝不猜）。 */
+export function unaccountedInput(accounting: SmeltAccounting): number | null {
+    const { bagBefore, bagAfter, furnaceInput, productGained } = accounting;
+    if (bagBefore == null || bagAfter == null || furnaceInput == null || productGained == null) return null;
+    const consumed = bagBefore - bagAfter;
+    const accounted = furnaceInput + Math.max(0, productGained);
+    return Math.max(0, consumed - accounted);
+}
+
+/** 下一步该怎么办（纯判据；调用方负责真的去做）。 */
+export type SmeltNext = 'done' | 'continue' | 'stop-fuel' | 'stop-input' | 'stop-time';
+
+export function nextSmeltStep(input: {
+    /** 已完成（背包增量 + 炉内产物）够不够目标。 */
+    produced: number;
+    target: number;
+    furnaceInput: number | null;
+    furnaceFuel: number | null;
+    /** 已经花了多久（毫秒）与轮数。 */
+    elapsedMs: number;
+    rounds: number;
+    maxMs?: number;
+    maxRounds?: number;
+}): SmeltNext {
+    if (input.produced >= input.target) return 'done';
+    if (input.rounds >= (input.maxRounds ?? 6)) return 'stop-time';
+    if (input.elapsedMs >= (input.maxMs ?? 90_000)) return 'stop-time';
+    if (input.furnaceInput != null && input.furnaceInput <= 0) return 'stop-input';
+    if (input.furnaceFuel != null && input.furnaceFuel <= 0) return 'stop-fuel';
+    if (input.furnaceInput == null && input.furnaceFuel == null) return 'stop-time';
+    return 'continue';
+}
+
+/**
+ * 渲染成模型能读的回执。**三件事分开写**：背包账、炉内账、真丢。
+ * 「凭空消失」「没影了」这类词**只能**在 `真丢 > 0` 且已读到炉子时出现。
+ */
+export function formatSmeltAccounting(accounting: SmeltAccounting, rounds: number): string[] {
+    const lines: string[] = [];
+    const fmt = (value: number | null): string => (value == null ? '读不到' : String(value));
+    lines.push(
+        `- 背包账：${accounting.rawName} ${fmt(accounting.bagBefore)} → ${fmt(accounting.bagAfter)}；` +
+            `${accounting.productName} 实测 +${fmt(accounting.productGained)}。`,
+    );
+    lines.push(
+        `- 炉内账（**这才是关键**）：输入槽 ${fmt(accounting.furnaceInput)} 个 ${accounting.rawName}、` +
+            `燃料槽 ${fmt(accounting.furnaceFuel)}、产物槽 ${fmt(accounting.furnaceOutput)} 个 ${accounting.productName}。`,
+    );
+    const lost = unaccountedInput(accounting);
+    if (lost == null) {
+        lines.push(
+            '- 真丢：**算不出来**（背包或炉子有一项读不到）——这不能当成"丢了"，先重开一次熔炉或用 stats 核对再判断。',
+        );
+    } else if (lost === 0) {
+        lines.push('- 真丢：**0**。减少的原料要么变成成品、要么还躺在熔炉输入槽里（下面照这个决定下一步）。');
+    } else {
+        lines.push(
+            `- 真丢：**${lost} 个**原料既不在背包、也不在炉内输入槽、也没变成成品——这是真的对不上账，` +
+                '请把这条回执原样告诉开发者（不要自己重挖补上，先把事实留下来）。',
+        );
+    }
+    if (rounds > 1) lines.push(`- 这次分 ${rounds} 轮烧（每轮都重新开炉读数，不是一口气硬等）。`);
+    return lines;
+}
+
+/** 批次没烧完时，告诉模型**剩下的在哪、缺什么**（不写"消失"）。 */
+export function formatSmeltUnfinished(accounting: SmeltAccounting, next: SmeltNext): string {
+    const remainInFurnace = accounting.furnaceInput ?? 0;
+    const done = Math.max(0, accounting.productGained ?? 0);
+    const head = `这次烧到 ${done}/${accounting.target}。`;
+    if (next === 'stop-fuel') {
+        return (
+            head +
+            `剩余 ${remainInFurnace} 个 ${accounting.rawName} **还在熔炉输入槽里**（安全，不会丢）。` +
+            '缺燃料：再带 1–2 个煤/木炭放进背包，再发一次同样的 useBlock 就能接着烧。'
+        );
+    }
+    if (next === 'stop-input') {
+        return head + '熔炉输入槽已经空了：这一批的原料都处理过了，缺的数量在背包里没有更多原料。';
+    }
+    return (
+        head +
+        (remainInFurnace > 0
+            ? `剩余 ${remainInFurnace} 个 ${accounting.rawName} **还在熔炉里**（安全）。`
+            : '炉内没有剩余原料。') +
+        '这次到时间上限了：**直接再发一次同样的 useBlock** 就会接着烧（进度不会丢）。'
+    );
+}
+
 /** 容器类方块（只存或只取）。 */
 const CONTAINER_BLOCKS = new Set(['chest', 'trapped_chest', 'barrel', 'ender_chest', 'shulker_box']);
 
@@ -1856,36 +1978,84 @@ const interactCommands: AgentCommand[] = [
           `已烧完 ${raw.name}×${raw.count}`,
           `烧不了 ${raw.name}`,
         );
-        // 烧完后再等包落地，别让产物还没同步就被误判成失败或丢失。
-        await settleInventory(agent.bot, 4, 60);
-        const rawAfter = await countInInventoryWithSync(agent.bot, raw.name, 0, 500);
-        const outAfter = await countInInventoryWithSync(agent.bot, wanted.name, 1, 800);
-        lines.push(
-          step(
-            `背包账目：${raw.name} ${rawBefore ?? '?'} → ${rawAfter ?? '?'}；` +
-              `${wanted.name} ${outBefore ?? '?'} → ${outAfter ?? '?'}。`,
-          ),
-        );
-        if (ok && outBefore != null && outAfter != null && outAfter - outBefore <= 0) {
-          lines.push(
-            step(
-              '注意：烧炼技能报成功，但客户端背包暂时没看到产物增加——可能背包同步延迟' +
-                '（真机里铁锭十几轮后才出现）。不要判定物品蒸发，以 stats 为准，稍后再核对。',
-            ),
+        // **烧炼三本账 + 续烧**（Lead 2026-10-20）：只印背包会造成"5 进 1 出、4 没影"的假象，
+        // 那 4 块很可能还在炉内输入槽。这里每轮重开熔炉读三个槽，再决定继续还是收工。
+        const readFurnaceSlots = async (): Promise<{ input: number | null; fuel: number | null; output: number | null }> => {
+          try {
+            const block = located != null ? agent.bot.blockAt?.(new Vec3(located.x, located.y, located.z)) : null;
+            if (block == null) return { input: null, fuel: null, output: null };
+            const furnaceUi: any = await agent.bot.openFurnace(block);
+            const countOf = (item: any): number => Number(item?.count ?? 0);
+            const result = {
+              input: countOf(furnaceUi?.inputItem?.()),
+              fuel: countOf(furnaceUi?.fuelItem?.()),
+              output: countOf(furnaceUi?.outputItem?.()),
+            };
+            try {
+              await agent.bot.closeWindow(furnaceUi);
+            } catch {
+              // 关不上不影响读数。
+            }
+            return result;
+          } catch {
+            return { input: null, fuel: null, output: null };
+          }
+        };
+        const smeltStartedAt = Date.now();
+        let smeltRounds = 1;
+        let slots = await readFurnaceSlots();
+        let accounting: SmeltAccounting | null = null;
+        for (;;) {
+          await settleInventory(agent.bot, 4, 60);
+          const rawNow = await countInInventoryWithSync(agent.bot, raw.name, raw.count, 800);
+          const outNow = await countInInventoryWithSync(agent.bot, wanted.name, 1, 800);
+          accounting = {
+            rawName: raw.name,
+            productName: wanted.name,
+            bagBefore: rawBefore,
+            bagAfter: rawNow,
+            furnaceInput: slots.input,
+            furnaceFuel: slots.fuel,
+            furnaceOutput: slots.output,
+            productGained: outBefore != null && outNow != null ? outNow - outBefore : null,
+            target: raw.count,
+          };
+          const produced = Math.max(0, accounting.productGained ?? 0) + (accounting.furnaceOutput ?? 0);
+          const next = nextSmeltStep({
+            produced,
+            target: raw.count,
+            furnaceInput: slots.input,
+            furnaceFuel: slots.fuel,
+            elapsedMs: Date.now() - smeltStartedAt,
+            rounds: smeltRounds,
+            maxRounds: 3,
+            maxMs: 120_000,
+          });
+          lines.push(...formatSmeltAccounting(accounting, smeltRounds));
+          if (next !== 'continue') {
+            if (next !== 'done') lines.push('- ' + formatSmeltUnfinished(accounting, next));
+            break;
+          }
+          // **不是失败，是还没烧完**：再开一次同样的调用接着烧（有轮数/时间上限）。
+          smeltRounds += 1;
+          lines.push('- 还没到目标，继续烧（这是进度，不是失败）。');
+          await runSkill(
+            agent.bot,
+            lines,
+            () => skills.smeltItem(agent.bot, raw.name, Math.max(1, raw.count - produced)),
+            `续烧 ${raw.name}`,
+            `续烧 ${raw.name} 没成功`,
+          );
+          slots = await readFurnaceSlots();
+        }
+        if (!ok && (accounting?.productGained ?? 0) <= 0) {
+          return renderReport(
+            lines,
+            '上面几行是熔炉读到的真实账：原料在哪（背包/炉内）、缺什么燃料都写清了；照着下一步做，不要自己重挖补材料。',
           );
         }
-        // **失败时不写「稍后来取」**——模型反馈过它很误导（"failed 还附 10 秒后来取"）。
-        if (!ok) {
-          return renderReport(lines, '上面那几行是熔炉自己报的原因；照着改（缺燃料就带煤/木炭，炉子里有别的东西就先取出来）。');
-        }
-        const expected = parsedOut.items[0];
-        return renderReport(
-          lines,
-          `这次等到了产物；如果产物没全进包，可能还在熔炉里，用 useBlock(type=furnace, output="${expected?.name ?? raw.name}") 核对/取出。`,
-        );
+        return renderReport(lines);
       }
-      // 工作台 / 铁砧
-      // 合成前先结算客户端背包，再读数量：有材料却报缺，多半是 window_items 包还在飞。
       await settleInventory(agent.bot, 3, 50);
       await settleInventory(agent.bot, 2, 40);
       const have = countInInventory(agent.bot, wanted.name);
