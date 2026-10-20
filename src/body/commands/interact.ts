@@ -38,6 +38,7 @@
 import * as skills from '../library/skills.js';
 import * as world from '../library/world.js';
 import * as mc from '../data/mcdata.js';
+import { describeDyedShortfall, formatUnknownItemReceipt } from '../library/item_names.js';
 import Vec3 from 'vec3';
 import { td, tp } from '../../shared/prompts.js';
 import { inventoryLossAdvice } from '../../shared/inventory_advice.js';
@@ -1776,12 +1777,27 @@ export async function craftSmartDetailed(
     return {
       ok: false,
       detail:
-        `没有 ${itemName} 这个物品（配方表里也没有）。金装备的注册名是 golden_*（如 golden_boots）；` +
-        '先用 getCraftingPlan / searchWiki 确认名字，再试。',
+        formatUnknownItemReceipt(itemName) +
+        (describeDyedShortfall(itemName, () => null, []) == null ? '' : ''),
     };
   }
   const targetName = resolved.name;
   const aliasNote = resolved.aliasOf != null ? `（${resolved.aliasOf} 不是注册名，已按 ${targetName} 处理）` : '';
+  // **染色配方要同色**（真机 A：`white_wool×2 + black_wool×1` 做床——混色不行）：
+  // 材料不够时直接说清"需要 3 块同色 white_wool，你还差 1 块白"，别让 `craft` 去撞一个注定失败的配方。
+  try {
+    const inventoryNames = ((bot?.inventory?.items?.() ?? []) as Array<{ name?: string }>)
+      .map((item) => String(item?.name ?? ''))
+      .filter((name) => name !== '');
+    const shortfall = describeDyedShortfall(
+      targetName,
+      (name) => countInInventory(bot, name),
+      inventoryNames,
+    );
+    if (shortfall != null) return { ok: false, detail: shortfall };
+  } catch {
+    // 读不到背包就照常尝试合成（不让守卫变成墙）。
+  }
   try {
     if (await skills.craftRecipe(bot, targetName, num)) {
       return { ok: true, detail: `${aliasNote}合成 ${targetName} 成功（原配方）。` };
@@ -2018,7 +2034,7 @@ const interactCommands: AgentCommand[] = [
       if (wanted == null) return renderReport(lines, 'useBlock 用不了：加工要给出 output。');
       const resolvedWanted = resolveCraftItemName(wanted.name);
       if (!resolvedWanted.valid) {
-        return renderReport(lines, `useBlock 用不了：没有 ${wanted.name} 这个物品（配方表里也没有）。金装备的注册名是 golden_*（如 golden_boots）。`);
+        return renderReport(lines, 'useBlock 用不了：' + formatUnknownItemReceipt(wanted.name));
       }
       const aliasNote = resolvedWanted.aliasOf != null ? `（${resolvedWanted.aliasOf} → ${resolvedWanted.name}）` : '';
       wanted.name = resolvedWanted.name;
