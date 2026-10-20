@@ -212,9 +212,48 @@ export function isHuntable(mob: any): boolean {
     return animals.includes(mob.name.toLowerCase()) && !mob.metadata[16]; // metadata 16 is not baby
 }
 
+/**
+ * 这个生物是不是"敌对"。
+ *
+ * **不能用 mineflayer 运行时实体的 `type`。** 运行时的 `entity.type` 是**协议层**的
+ * 实体种类（`'player' | 'mob' | 'object' | ...`），`'mob'` 的意思是"这是个生物、
+ * 不是玩家也不是物体"——牛、猪、鳕鱼、三文鱼、鱿鱼**全都是 `'mob'`**。原来这里写的是
+ * `(mob.type === 'mob' || mob.type === 'hostile')`，等于"**凡是生物都算敌对**"。
+ *
+ * 真机两例：
+ * - 旧档（1.20.6）：「快照里只有两只 glow_squid，却收到一堆 hostile_nearby」；
+ * - 新档（**1.21.11**）：「**salmon 被当成敌对生物，导致一直不捡掉落物**」，
+ *   原话 `附近有敌对生物 salmon（13 格），这次不去捡掉落物——先保命`。
+ *   水边十几条鱼，于是永远捡不到东西。
+ *
+ * 1.21.11 里 salmon 的 mcdata `type` 恰好是 `'mob'`（1.20.6 是 `'water_creature'`），
+ * 所以这个 bug 在新版本上**暴露面更大**——版本一升级，鱼就变成了"敌人"。
+ *
+ * 权威判据是 mcdata 的 **`category`**（`'Hostile mobs'` / `'Passive mobs'`），
+ * 两个版本都正确。没有 `category` 时退回 mcdata 自己的 `type === 'hostile'`
+ * （这个字段的语义就是敌意，和协议层的 `type` 不是一回事）。
+ * 两者都读不到 ⇒ **不当敌对**：宁可漏报（真正的保命是挨打触发的反射），
+ * 也不能把整片鱼塘当敌人，让 bot 永远不敢捡东西。
+ */
 export function isHostile(mob: any): boolean {
-    if (!mob || !mob.name) return false;
-    return (mob.type === 'mob' || mob.type === 'hostile') && mob.name !== 'iron_golem' && mob.name !== 'snow_golem';
+    if (mob == null || typeof mob.name !== 'string' || mob.name.length === 0) return false;
+    const name = mob.name.toLowerCase();
+    if (name === 'iron_golem' || name === 'snow_golem' || name === 'player') return false;
+    const data: any = (mcdata as any)?.entitiesByName?.[name];
+    return hostileFromEntityData(data);
+}
+
+/**
+ * 纯判定：只吃 mcdata 的实体数据条目，不读运行时实体。
+ *
+ * 和 `isHostile` 分开是为了可测——`mcdata` 只在 bot `login` 之后才有，
+ * 而这条规则必须能在没有 bot 的情况下被钉住（它已经出过两次真机事故）。
+ */
+export function hostileFromEntityData(data: any): boolean {
+    if (data == null) return false;
+    if (typeof data.category === 'string') return data.category === 'Hostile mobs';
+    if (typeof data.type === 'string') return data.type === 'hostile';
+    return false;
 }
 
 // blocks that don't work with collectBlock, need to be manually collected
