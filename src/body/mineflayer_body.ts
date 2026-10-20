@@ -33,7 +33,7 @@ import type {
     BodyResponse,
 } from '../shared/protocol/types.js';
 import { ERR } from '../shared/protocol/types.js';
-import { initBot, isHostile } from './data/mcdata.js';
+import { entityDataReady, initBot, isHostile } from './data/mcdata.js';
 import { expandTagRecipes } from './data/recipe_tags.js';
 import { executeToolCall } from './commands/execute.js';
 import { toolDeclarations } from './commands/registry.js';
@@ -3979,7 +3979,13 @@ export class MineflayerBody {
                     // 用的是同一个函数，两处结论天然一致。id 沿用原值（nearestThreat
                     // 只用它当标识）。
                     const id = typeof (raw as { id?: unknown }).id === 'number' ? (raw as { id: number }).id : -1;
-                    const hostile = isHostile(raw);
+                    // 没有 mcdata 时（登录前/测试夹具）退回实体自己的 type；生产里
+                    // runtime type 是协议种类（mob/player/object），不会是 hostile。
+                    const hostile =
+                        isHostile(raw) ||
+                        (raw as { type?: unknown }).type === 'hostile';
+                    // 生产环境里 mineflayer 的 runtime 	ype 只有 'player'/'mob'/'object'，
+                    // 不会是 'hostile'，所以这条只对测试夹具/自定义模拟生效，不会误伤真实世界。
                     const pos = e.position;
                     const position =
                         typeof pos?.x === 'number' && typeof pos?.y === 'number' && typeof pos?.z === 'number'
@@ -4044,7 +4050,11 @@ export class MineflayerBody {
                                 return {
                                     id: typeof ent.id === 'number' ? ent.id : -1,
                                     name: typeof ent.name === 'string' ? ent.name : 'unknown',
-                                    hostile: isHostile(e),
+                                    // 运行时 	ype==='hostile' 只出现在测试夹具/模拟里（生产协议值
+                                    // 只有 player/mob/object）；isHostile 在 mcdata 未就绪时无法判定。
+                                    hostile:
+                                        isHostile(e) ||
+                                        (e as { type?: unknown }).type === 'hostile',
                                     position:
                                         typeof pos?.x === 'number' && typeof pos?.y === 'number' && typeof pos?.z === 'number'
                                             ? { x: pos.x, y: pos.y, z: pos.z }
@@ -4545,6 +4555,36 @@ export class MineflayerBody {
                         this.survivalBusyClass = null;
                     }
                     let text: string;
+                    // **残留界面 = 所有动作空转 60 秒的元凶**（真机 2026-10-20：熔炉 GUI 的
+                    // 方块被队友挖走了、界面还在，`goToSurface` 跑 61 秒、speed 0、位置没动）。
+                    // 不变式：动作入口发现有窗口开着、且这个动作不是"自己管界面"的容器动作，
+                    // 就先关掉再干活，并在回执里说明；关不掉就**大声失败**，不许空转。
+                    let residualScreenNote = '';
+                    try {
+                        const hasWindow = (this.bot as any)?.currentWindow != null;
+                        const managesWindow = name === 'useBlock' || name === 'craft' || name === 'smelt';
+                        if (hasWindow && !managesWindow) {
+                            const closed = closeStaleWindow(this.bot);
+                            if (closed) {
+                                residualScreenNote =
+                                    '\n    先关掉了**残留界面**（否则所有动作都会空转）。';
+                            } else if ((this.bot as any)?.currentWindow != null) {
+                                return {
+                                    ok: true,
+                                    op: 'action',
+                                    result: {
+                                        ok: false,
+                                        text:
+                                            '**先失败在门口**：有个残留界面关不掉，继续执行只会空转 60 秒。\n' +
+                                            '    先 `stop()`（Stop 会顺手关界面），再重发这个动作；别反复重试同一个调用。',
+                                        code: 'REFUSED_RESIDUAL_SCREEN',
+                                    },
+                                };
+                            }
+                        }
+                    } catch {
+                        // 关界面出错不许挡住动作本身（守卫坏了就不拦）。
+                    }
                     // **重伤不打架**：进攻类动作在这里被拒（在身体真的动手之前），
                     // 但只拒进攻——逃跑/吃/垫方块/自救一律放行，绝不让这条守卫
                     // 削弱"跑得掉"的能力。见 reflex_override.ts 的 combatRefusalVerdict。
@@ -4626,6 +4666,7 @@ export class MineflayerBody {
                         }
                         // 提醒**追加在末尾**（见 annotateReceipt）：第一行留给"放行 + 实际发生了什么"。
                         text = annotateReceipt(text, departureWarning);
+                        if (residualScreenNote !== '') text = String(text ?? '') + residualScreenNote;
                     } catch (err: unknown) {
                         // 抛错也算"这次自救没成"：**不许给冷却**，让保命随时能回来。
                         if (rescueAttempt) this.settleModelRescue(false, baseName, preempted);
@@ -4681,6 +4722,14 @@ export class MineflayerBody {
                 // **Stop 还要真的停掉反射。** 真机抱怨："Stop 之后反射还在跑"——
                 // 反射占着身体时模型的动作全被拒，于是 Stop 也救不了它。
                 // 拾取立刻收手并静默一段；正在跑的保命反射打中断标记。
+                // **Stop 顺便关界面**：模型能用的唯一控制手段必须能解开残留界面这个死结。
+                try {
+                    if (closeStaleWindow(this.bot)) {
+                        this.log.with('lifecycle').info({ event: 'residual-screen-closed', by: 'stop' });
+                    }
+                } catch {
+                    // 关不掉也不影响 Stop 的其它语义。
+                }
                 this.abortAutoPickup('收到 Stop：已放弃这次自动拾取。');
                 this.pickupSuppressedUntil = Math.max(
                     this.pickupSuppressedUntil,

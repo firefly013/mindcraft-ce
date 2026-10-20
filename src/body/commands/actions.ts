@@ -275,7 +275,7 @@ export const actionsList: AgentCommand[] = [
                         '但如果你自己走过去踩到，原版拾取仍会捡起。' +
                         '**交接别靠丢东西**：真机实测队友站 0.4 米、站了 5 分钟也没捡起来' +
                         '（队友的自动拾取不一定以它为目标，原版拾取还要身体接触）——' +
-                        '要交接就用箱子：你 useBlock(type="chest", input="…") 存进去，队友 takeFromChest 取。',
+                        '要交接就用箱子：你 useBlock(type="chest", input="…") 存进去；对方用 useBlock(type="chest") 打开就能拿走（没有 takeFromChest 这个工具）。',
                 );
             }
         })
@@ -445,7 +445,7 @@ export const actionsList: AgentCommand[] = [
         })
     },
     // 交互类：useBlock / useEntity / craft。它们取代了一批把固定流程写死的中层
-    // 工具（craftRecipe / smeltItem / putInChest / takeFromChest / viewChest /
+    // 工具（craftRecipe / smeltItem / useBlock 的容器读写 /
     // tradeWithVillager / showVillagerTrades / goToBed / clearFurnace / givePlayer）。
     ...interactList,
     // 危险操作许可。**开关合一**：`revoke=true` 即收回授权。

@@ -1141,6 +1141,9 @@ const FURNACE_BLOCKS = new Set(['furnace', 'blast_furnace', 'smoker']);
 /** 容器类方块（只存或只取）。 */
 const CONTAINER_BLOCKS = new Set(['chest', 'trapped_chest', 'barrel', 'ender_chest', 'shulker_box']);
 
+/** 开箱拿东西用（含 shulker 变体，下面用 endsWith 兜住）。 */
+const CONTAINER_TYPES = CONTAINER_BLOCKS;
+
 /**
  * `useBlock` 的落点分派。
  *
@@ -1636,16 +1639,30 @@ const interactCommands: AgentCommand[] = [
 
       // 分派到已有技能。每一步都写进 lines，失败也写清楚。
       if (plan.kind === 'interact') {
-        if (type === 'chest' || type === 'trapped_chest' || type === 'barrel') {
-          await runSkill(agent.bot, lines, () => skills.viewChest(agent.bot), '打开看了里面的东西', '打开失败');
-          // **读不到 ≠ 空**：客户端窗口包延迟时 skills.viewChest 会报 The chest is empty，
-          // 真机上这会让模型以为东西丢了。补一句延迟说明，并指向 stats。
-          lines.push(
-            step(
-              '如果这里显示空、但你明明刚放进去过，可能是客户端容器同步延迟——' +
-                '重开一次容器或以 stats 为准，不要判定物品蒸发。',
-            ),
-          );
+        // **开箱 = 拿东西**（用户要求「世界里有奖励箱，他们得拿」）。
+        // 不新增工具：模型能调用的只有 `useBlock`，所以能力就放在它的 interact 分支里
+        // （`takeFromChest`/`viewChest` 从来不是工具，模型根本调不到——那些文案今晚一并删掉）。
+        if (CONTAINER_TYPES.has(type) || type.endsWith('shulker_box')) {
+          if (located == null) return renderReport(lines, '定位不到容器。');
+          const containerBlock = agent.bot.blockAt?.(new Vec3(located.x, located.y, located.z));
+          if (containerBlock == null) {
+            lines.push(step(`读不到 (${located.x},${located.y},${located.z}) 那一格——区块可能没加载，先 goToCoordinates 靠近再试。`));
+            return renderReport(lines);
+          }
+          try {
+            const outcome = await skills.lootContainer(agent.bot, containerBlock);
+            lines.push(...skills.formatLootReport(outcome));
+          } catch (error: unknown) {
+            const message = error instanceof Error ? error.message : String(error);
+            lines.push(step(`开箱失败：${message}`));
+            // **一行说清 + 指非容器兜底**：容器是本仓最不稳的一条路（旧世界 100% 超时）。
+            lines.push(
+              step(
+                '容器这条路不稳时**别原地反复开**：换个位置/换个箱子重试一次，' +
+                  '或先用 stats 核对背包；实在打不开就先做别的（东西不会跑，但别在开箱上耗死）。',
+              ),
+            );
+          }
           return renderReport(lines);
         }
         if (type === 'bed') {

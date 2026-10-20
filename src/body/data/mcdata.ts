@@ -235,6 +235,11 @@ export function isHuntable(mob: any): boolean {
  * 两者都读不到 ⇒ **不当敌对**：宁可漏报（真正的保命是挨打触发的反射），
  * 也不能把整片鱼塘当敌人，让 bot 永远不敢捡东西。
  */
+/** mcdata 是否已经就绪（只在 bot login 之后才有）。 */
+export function entityDataReady(): boolean {
+    return mcdata != null;
+}
+
 export function isHostile(mob: any): boolean {
     if (mob == null || typeof mob.name !== 'string' || mob.name.length === 0) return false;
     const name = mob.name.toLowerCase();

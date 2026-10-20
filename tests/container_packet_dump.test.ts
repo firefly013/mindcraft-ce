@@ -334,7 +334,9 @@ describe('确证失效 ⇒ 工具层快速失败（不烧 6 秒 × 重试）', (
     expect(text).toContain('从不发窗口内容');
     expect(text).toContain('零协议解析错误');
     expect(text).toContain('换另一种容器类型再试');
-    expect(text).toContain('takeFromChest');
+    // 旧回执点名了一个不存在的工具（takeFromChest）——现在必须说真话。
+    expect(text).toContain('useBlock');
+    expect(text).not.toContain('takeFromChest');
   });
 
   it('结论过期（blocked=false）⇒ 恢复正常尝试路径（不永久焊死）', async () => {

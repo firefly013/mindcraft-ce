@@ -2527,6 +2527,170 @@ export function containerContents(container: any): {
     return { readable: true, invStart, end, lines };
 }
 
+/** 一次"开箱拿东西"的实测结果（给回执用；**只装测量到的事实**）。 */
+export interface LootOutcome {
+    readable: boolean;
+    /** 箱子里原本有什么。 */
+    contents: Array<{ name: string; count: number }>;
+    /** 实际进了背包的（用背包增量测出来，不是"我点了几个槽"）。 */
+    taken: Array<{ name: string; count: number }>;
+    /** 还留在箱子里的。 */
+    left: Array<{ name: string; count: number }>;
+    freeSlots: number | null;
+    /** 拿不完/读不到的原因。 */
+    reason: string | null;
+}
+
+/**
+ * **把 `LootOutcome` 渲染成模型能照着做的话**（纯函数，便于测试）。
+ *
+ * 真机教训（旧世界）：「捡到 0 个」被读成"这种怪不掉东西"；「箱子是空的」被读成
+ * "东西丢了"。所以这里三件事分开写：**箱子里有什么 / 实际拿走多少 / 剩下的为什么留下**。
+ */
+export function formatLootReport(outcome: LootOutcome): string[] {
+    const lines: string[] = [];
+    if (!outcome.readable) {
+        lines.push(
+            '箱子**槽位表读不到**（窗口没给内容）——**不能据此判断箱子是空的**。' +
+                '先重试一次 `useBlock`（同一个箱子），或用 `stats` 核对；容器这条路不稳时别在这上面耗。',
+        );
+        return lines;
+    }
+    const contents = outcome.contents;
+    const describe = (list: Array<{ name: string; count: number }>): string =>
+        list.map((entry) => `${entry.name}×${entry.count}`).join('、');
+    if (contents.length === 0) {
+        lines.push('箱子是**空的**：没有拿任何东西（这不是失败，也不是"拿走 0 个"）。');
+        return lines;
+    }
+    lines.push(`箱子里有：${describe(contents)}（共 ${contents.reduce((sum, e) => sum + e.count, 0)} 件）。`);
+    if (outcome.taken.length === 0) {
+        lines.push(
+            `**一件都没拿走**${outcome.reason != null ? `：${outcome.reason}` : ''}。` +
+                (outcome.freeSlots === 0 ? '背包没有空位——先 `discard` 或存掉点东西再回来。' : ''),
+        );
+    } else {
+        lines.push(
+            `拿走：${describe(outcome.taken)}` +
+                (outcome.reason != null ? `（${outcome.reason}）` : '（背包实测增量，不是"点了几个槽"）。'),
+        );
+    }
+    if (outcome.left.length > 0) {
+        lines.push(
+            `留在箱子里：${describe(outcome.left)}` +
+                (outcome.freeSlots != null ? `（背包空位 ${outcome.freeSlots} 个，装不下就留在这儿，下次再来）。` : '。'),
+        );
+    }
+    return lines;
+}
+
+/**
+ * **开容器并把能装的都装走**（`useBlock(type="chest")` 的实际动作）。
+ *
+ * 为什么不是 `takeFromChest`：那个函数**不是工具**（模型调不到），只存在于 skills 里。
+ * 用户的要求"把奖励箱拿走"必须走模型真的能调用的 `useBlock`，所以能力放在这里。
+ */
+export async function lootContainer(bot: any, block: any): Promise<LootOutcome> {
+    const snapshot = (): Map<string, number> => {
+        const map = new Map<string, number>();
+        try {
+            for (const item of (bot?.inventory?.items?.() ?? []) as Array<{ name?: string; count?: number }>) {
+                const name = String(item?.name ?? '');
+                if (name === '') continue;
+                map.set(name, (map.get(name) ?? 0) + Number(item?.count ?? 0));
+            }
+        } catch {
+            // 读不到就返回空表：调用方会把"测不出"说成测不出。
+        }
+        return map;
+    };
+    const before = snapshot();
+    const container: any = await openBlockUi(bot, block);
+    try {
+        const slots: Array<{ name?: string; type?: number; count?: number } | null> = container?.slots ?? [];
+        const invStart = Number(container?.inventoryStart ?? 9);
+        if (!Array.isArray(slots) || slots.length === 0) {
+            return { readable: false, contents: [], taken: [], left: [], freeSlots: null, reason: '槽位表为空' };
+        }
+        // **只读容器区间 [0, inventoryStart)**，绝不能把查看者背包算成箱子内容。
+        const contents: Array<{ name: string; count: number; type: number }> = [];
+        for (let i = 0; i < Math.min(invStart, slots.length); i++) {
+            const slot = slots[i];
+            const name = String(slot?.name ?? '');
+            if (name === '') continue;
+            contents.push({ name, count: Number(slot?.count ?? 1), type: Number(slot?.type ?? -1) });
+        }
+        const freeSlots = (() => {
+            try {
+                const value = Number(bot?.inventory?.emptySlotCount?.());
+                return Number.isFinite(value) ? value : null;
+            } catch {
+                return null;
+            }
+        })();
+        // 按名字合并（同一种物品可能在多个槽）。
+        const merged = new Map<string, { name: string; count: number; type: number }>();
+        for (const entry of contents) {
+            const prev = merged.get(entry.name);
+            if (prev == null) merged.set(entry.name, { ...entry });
+            else prev.count += entry.count;
+        }
+        if (merged.size === 0) {
+            return { readable: true, contents: [], taken: [], left: [], freeSlots, reason: null };
+        }
+        if (freeSlots === 0) {
+            return {
+                readable: true,
+                contents: [...merged.values()].map(({ name, count }) => ({ name, count })),
+                taken: [],
+                left: [...merged.values()].map(({ name, count }) => ({ name, count })),
+                freeSlots,
+                reason: '背包没有空位',
+            };
+        }
+        // 拿走：逐种整叠取（有指定物品时只取那种，由调用方过滤）。
+        const wantedTotal = [...merged.values()].reduce((sum, entry) => sum + entry.count, 0);
+        try {
+            for (const entry of merged.values()) {
+                await container.withdraw(entry.type, null, entry.count);
+            }
+        } catch {
+            // 取物失败也要照实报告（下面的背包增量会说明实际拿到了多少）。
+        }
+        const after = snapshot();
+        const taken: Array<{ name: string; count: number }> = [];
+        for (const entry of merged.values()) {
+            const gained = (after.get(entry.name) ?? 0) - (before.get(entry.name) ?? 0);
+            if (gained > 0) taken.push({ name: entry.name, count: gained });
+        }
+        const takenByName = new Map(taken.map((entry) => [entry.name, entry.count]));
+        const left = [...merged.values()]
+            .map((entry) => ({ name: entry.name, count: entry.count - (takenByName.get(entry.name) ?? 0) }))
+            .filter((entry) => entry.count > 0);
+        const takenCount = taken.reduce((sum, entry) => sum + entry.count, 0);
+        const reason =
+            takenCount < wantedTotal
+                ? taken.length === 0
+                    ? '点了取物但背包增量是 0——可能是客户端同步延迟，用 stats 核对'
+                    : '有一部分没装下/没取到：剩下的留在箱子里'
+                : null;
+        return {
+            readable: true,
+            contents: [...merged.values()].map(({ name, count }) => ({ name, count })),
+            taken,
+            left,
+            freeSlots,
+            reason,
+        };
+    } finally {
+        try {
+            await container?.close?.();
+        } catch {
+            // 关不上不影响已经拿到的结果。
+        }
+    }
+}
+
 export async function viewChest(bot: any): Promise<boolean> {
     /**
      * View the contents of the nearest chest.
@@ -5881,7 +6045,7 @@ export async function openBlockUi(
                 `而且本进程**零协议解析错误**；mineflayer 要等槽位数据才会发 windowOpen，所以必然超时。` +
                 `这是**那一种容器**在那一次尝试里的证据，重试同一种意义不大（但别的类型是别的路径）（这条结论约 ${minutesLeft} 分钟后自动失效，之后才值得再试一次）。` +
                 `下一步（照做即可）：**换另一种容器类型再试**（箱子/熔炉/合成台是不同路径；真机 2026-10-20 熔炉产出过 21 块玻璃，别把一次箱子失败当成全局）——让队友把要用的东西丢在约定点自己捡，` +
-                `或让对方用 takeFromChest 取/存；需要合成就直接 craft（工作台不需要窗口）。` +
+                `取/存都用 useBlock(type="chest", …)；需要合成就直接 craft（工作台不需要窗口）。` +
                 (slotted.reason ? `（判定依据：${slotted.reason}）` : ''),
         );
     }
@@ -6000,10 +6164,10 @@ export async function openBlockUi(
     const nextStep =
         protocolFault != null
             ? `下一步（照做即可）：**别再 useBlock 任何带槽位的容器了**（柜子/熔炉/箱子都一样，重试只是白耗回合）——` +
-              `改走非容器路径（队友把东西丢在约定点后自己捡，或让对方 takeFromChest），并把「容器协议解析失败」告诉人类。`
+              `改走非容器路径（队友把东西丢在约定点后自己捡，取/存都用 useBlock），并把「容器协议解析失败」告诉人类。`
             : consecutive >= 2
             ? `下一步（照做即可）：这已经是连续第 ${consecutive} 次打不开容器了——**别再重发同一个 useBlock**（同样的调用只会得到同样的结果）。` +
-              `改走非容器路径：让队友把东西丢在约定点后自己捡（或互相用 takeFromChest 由**能开箱的那一方**去取），` +
+              `改走非容器路径：让队友把东西丢在约定点后自己捡（或用 useBlock 由能开箱的那一方去取），` +
               `并把这条现象告诉人类（这是代码级故障）。`
             : `下一步（照做即可）：换**另一个**容器方块试一次（不同坐标或不同种类），仍然失败就别再试了；` +
               `同一个箱子重复 useBlock 不会变好。`;
