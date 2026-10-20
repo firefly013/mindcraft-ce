@@ -1028,6 +1028,19 @@ export class MineflayerBody {
             // **复活后主动把背包同步重新武装起来**：不能只把 flag 设成 false 就等服务端，
             // 真机里服务端用 `set_content`（windowId 0）而旧代码只监听 `window_items`，
             // flag 永远不恢复 ⇒ 模型被一句"等一两秒再看"骗了一整局。有界：最多 3 秒。
+            // **一命一判**：这次 spawn 前面有没有观察到真正的死亡？
+            this.spawnFollowedDeath = this.pendingRespawnDeath === true;
+            this.pendingRespawnDeath = false;
+            if (this.inventorySyncSettledForLogin && !this.spawnFollowedDeath) {
+                // 本次登录已经结算过、又不是"死完复活" ⇒ 不重新武装（防止 4 次/35 秒的重复结论）。
+                return;
+            }
+            if (this.inventorySyncSettledForLogin && this.spawnFollowedDeath) {
+                this.inventorySyncSettledForLogin = false;
+                try {
+                    this.log.with('lifecycle').info({ event: 'inventory-sync-rearmed', why: 'death-then-spawn' });
+                } catch { /* 日志失败不影响 */ }
+            }
             this.armInventorySyncRecovery('spawn');
         });
 
@@ -2212,6 +2225,11 @@ export class MineflayerBody {
     private inventorySyncRecoveryTimer: ReturnType<typeof setTimeout> | null = null;
     /** 是否收到过 windowId 0 的背包内容包（哪怕 0 格——那是**测量**,不是假设）。 */
     private inventoryPacketSeen = false;
+    /** 本次登录已经 settle 过（**每个 login 只允许一次**；否则 35 秒内重复 4 次）。 */
+    private inventorySyncSettledForLogin = false;
+    /** 是否观察到死亡、且死亡后还没 spawn（reconnect 不许把自己升级成死亡）。 */
+    private pendingRespawnDeath = false;
+    private spawnFollowedDeath = false;
 
     private clearInventorySyncRecovery(): void {
         if (this.inventorySyncRecoveryTimer == null) return;
@@ -2239,6 +2257,8 @@ export class MineflayerBody {
         this.clearInventorySyncRecovery();
         if (this.inventorySynced) return;
         this.inventoryPacketSeen = false;
+        // **每个 login 只结算一次**（真机：35 秒内 4 次重复结论）。
+        if (this.inventorySyncSettledForLogin && this.spawnFollowedDeath !== true) return;
         const startedAt = Date.now();
         let loggedStillUnsynced = false;
         const poll = (): void => {
@@ -2255,6 +2275,7 @@ export class MineflayerBody {
             const settle = (
                 via: 'read-nonempty' | 'packet-empty' | 'assumed-empty-after-death',
             ): void => {
+                this.inventorySyncSettledForLogin = true;
                 this.markInventorySynced();
                 try {
                     this.log.with('lifecycle').info({
@@ -2271,7 +2292,8 @@ export class MineflayerBody {
             if (itemCount != null && itemCount > 0) return settle('read-nonempty');
             if (this.inventoryPacketSeen) return settle('packet-empty');
             // **"空"必须能追溯到一次死亡**；重连不算。
-            const recentlyDied = this.lastDeathAt > 0 && Date.now() - this.lastDeathAt <= 60_000;
+            // "空"必须能追溯到一次**死亡事件**；重连不算（spawnFollowedDeath 只在死亡后置真）。
+            const recentlyDied = this.spawnFollowedDeath === true;
             if (elapsed >= 3_000) {
                 if (recentlyDied) return settle('assumed-empty-after-death');
                 if (!loggedStillUnsynced) {
@@ -3861,6 +3883,8 @@ export class MineflayerBody {
                 const text = MESSAGES.death(death_pos_text || 'unknown', dimention, message, carried);
                 this.lastDeathAt = Date.now();
                 this.recordRespawnDeath(death_pos ?? null);
+                // **死亡信号**：只有真正的死亡事件会置它；spawn/reconnect 不会。
+                this.pendingRespawnDeath = true;
                 // **先写一条 L2 被动记录**。L4 会走 `abort()`，而 `abort()` 撤回
                 // 排队中的输入——真机上这条死亡消息 19 秒后才落地，最后连同被
                 // abort 的那一轮一起丢了，模型全程不知道自己死了。
