@@ -896,12 +896,20 @@ export class MineflayerBody {
             }
             // 包里没有任何物品时服务端也会发一次 window_items（空包同样算同步）；
             // 但那之前 `heldItemChanged` 也可能先到，一并当作"到过一次"。
-            try {
-                (this.bot as any)._client?.on?.('window_items', (packet: any) => {
-                    if (Number(packet?.windowId) === 0) this.markInventorySynced();
-                });
-            } catch {
-                // 拿不到底层 client 就只靠 heldItemChanged/超时兜底。
+            //
+            // **1.21.11 的坑（真机 2026-10-21）**：服务端在复活/重连时用的是
+            // `set_content` / `container_set_content`（windowId 0），**不是** `window_items`。
+            // 以前只监听 `window_items` ⇒ 复活后 `inventorySynced=false` **永远不恢复**，
+            // 模型连续三次 `stats` 都只看到"还没同步上来，等一两秒再看"，等了几十秒还是这句。
+            // 承诺永远不兑现，比数字错更糟。
+            for (const packetName of ['window_items', 'set_content', 'container_set_content']) {
+                try {
+                    (this.bot as any)._client?.on?.(packetName, (packet: any) => {
+                        if (Number(packet?.windowId) === 0) this.markInventorySynced();
+                    });
+                } catch {
+                    // 拿不到底层 client 就只靠 heldItemChanged/恢复轮询兜底。
+                }
             }
             try {
                 this.bot.on('heldItemChanged', () => this.markInventorySynced());
@@ -998,6 +1006,10 @@ export class MineflayerBody {
             } catch {
                 // 同上。
             }
+            // **复活后主动把背包同步重新武装起来**：不能只把 flag 设成 false 就等服务端，
+            // 真机里服务端用 `set_content`（windowId 0）而旧代码只监听 `window_items`，
+            // flag 永远不恢复 ⇒ 模型被一句"等一两秒再看"骗了一整局。有界：最多 3 秒。
+            this.armInventorySyncRecovery('spawn');
         });
 
         const spawnTimeoutDuration = settings.spawn_timeout;
@@ -2160,8 +2172,9 @@ export class MineflayerBody {
         }
     }
 
-    /** 背包数据到过一次了（服务端 window_items / heldItemChanged 触发）。 */
+    /** 背包数据到过一次了（服务端 window_items/set_content / heldItemChanged 触发）。 */
     private markInventorySynced(): void {
+        this.clearInventorySyncRecovery();
         if (this.inventorySynced) return;
         this.inventorySynced = true;
         try {
@@ -2174,6 +2187,69 @@ export class MineflayerBody {
         } catch {
             // 日志失败不影响同步状态。
         }
+    }
+
+    /** 复活后的背包同步恢复：定时器句柄。 */
+    private inventorySyncRecoveryTimer: ReturnType<typeof setTimeout> | null = null;
+
+    private clearInventorySyncRecovery(): void {
+        if (this.inventorySyncRecoveryTimer == null) return;
+        try {
+            clearTimeout(this.inventorySyncRecoveryTimer);
+        } catch {
+            // 清不掉也不影响新定时器。
+        }
+        this.inventorySyncRecoveryTimer = null;
+    }
+
+    /**
+     * **复活后主动恢复背包同步（有界 3 秒）** —— 真机 2026-10-21（overnight_a）：
+     * 溺水重生后连续 3 次 `stats` 都返回「还没同步上来（刚重连，不是空的）…等一两秒再看」，
+     * 等了几十秒还是这句。文案是对的（未知不许渲染成空），但**恢复**是坏的：
+     * 复活里把 `inventorySynced=false` 之后，只有 `window_items(windowId 0)` 或
+     * `heldItemChanged` 会把它置回 true；1.21.11 服务端用的是 `set_content`，而空背包
+     * 时 `heldItemChanged` 根本不触发 ⇒ 永远"未知"。
+     *
+     * 规则：**一句"等一两秒"必须真的会等到**。策略：
+     * 每 250ms 读一次背包；读到非空 ⇒ 立刻标记同步（via: read-nonempty）；
+     * 3 秒后仍是空的 ⇒ 也标记同步（via: assumed-empty，keepInventory=false 时
+     * 复活后背包空是**合理**的，而永远未知比"空"更危险），并留一条 lifecycle 记录。
+     */
+    armInventorySyncRecovery(why: string): void {
+        this.clearInventorySyncRecovery();
+        if (this.inventorySynced) return;
+        const startedAt = Date.now();
+        const poll = (): void => {
+            this.inventorySyncRecoveryTimer = null;
+            if (this.inventorySynced) return;
+            const elapsed = Date.now() - startedAt;
+            let itemCount: number | null = null;
+            try {
+                const items = (this.bot as any)?.inventory?.items?.();
+                if (Array.isArray(items)) itemCount = items.length;
+            } catch {
+                itemCount = null;
+            }
+            const settle = (via: 'read-nonempty' | 'assumed-empty'): void => {
+                this.markInventorySynced();
+                try {
+                    this.log.with('lifecycle').info({
+                        event: 'inventory-sync-recovery',
+                        why,
+                        via,
+                        afterMs: didTime(elapsed),
+                        itemCount,
+                    });
+                } catch {
+                    // 日志失败不影响状态。
+                }
+            };
+            if (itemCount != null && itemCount > 0) return settle('read-nonempty');
+            if (elapsed >= 3000) return settle('assumed-empty');
+            this.inventorySyncRecoveryTimer = setTimeout(poll, 250);
+        };
+        const didTime = (ms: number): number => Math.round(ms);
+        this.inventorySyncRecoveryTimer = setTimeout(poll, 250);
     }
 
     /**
@@ -3136,16 +3212,28 @@ export class MineflayerBody {
                     death_pos_text = `x: ${death_pos.x.toFixed(2)}, y: ${death_pos.y.toFixed(2)}, z: ${death_pos.z.toFixed(2)}`;
                 }
                 const dimention = this.bot.game.dimension;
-                // **掉落清单：死亡瞬间的背包就是"你带走的全部"**（没开
-                // keepInventory 的话，它们正躺在死亡点）。模型要靠它决定
-                // "回去捡还是重新准备"——以前这里什么都不给。
-                const carried = ((this.bot.inventory?.items?.() ?? []) as Array<{
+                // **掉落清单 = 死亡瞬间的完整背包**（真机 2026-10-21：模型最关心的
+                // diamond×3 以及 cobblestone/granite/copper 都没出现在清单里——旧代码
+                // `.slice(0, 12)` 静默截断，而模型把**部分**清单当权威，据此规划出一个
+                // 错误的背包。部分清单比没有清单更危险。）
+                const deathItems = ((this.bot.inventory?.items?.() ?? []) as Array<{
                     name?: string;
                     count?: number;
-                }>)
-                    .map((item) => `${item.name}×${item.count ?? 1}`)
-                    .slice(0, 12)
-                    .join('、');
+                }>);
+                const deathList = deathItems.map((item) => `${item.name}×${item.count ?? 1}`);
+                const deathKinds = deathList.length;
+                const deathTotal = deathItems.reduce((sum, item) => sum + Number(item.count ?? 1), 0);
+                const inventoryWasSynced = this.inventorySynced !== false;
+                const carried =
+                    deathKinds === 0
+                        ? inventoryWasSynced
+                            ? ''
+                            : '（背包读数**未同步**，无法给出清单——这次**不要**据此判断"身上没东西"）'
+                        : deathList.join('、') +
+                          `（共 ${deathKinds} 种 ${deathTotal} 件` +
+                          (inventoryWasSynced
+                              ? '；来自死亡瞬间的完整背包快照）'
+                              : '；**注意：这份清单读自未同步的背包，可能不完整**）');
                 const text = MESSAGES.death(death_pos_text || 'unknown', dimention, message, carried);
                 this.lastDeathAt = Date.now();
                 // **先写一条 L2 被动记录**。L4 会走 `abort()`，而 `abort()` 撤回
