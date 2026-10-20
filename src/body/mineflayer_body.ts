@@ -58,6 +58,15 @@ import {
 } from './library/skills.js';
 import { formatShelterReceipt, planShelter } from './safety/shelter.js';
 import { formatSuffocationReceipt, planSuffocationEscape } from './safety/suffocation.js';
+import {
+    appendDeath,
+    formatRespawnEscapeReceipt,
+    RESPAWN_DANGER_RADIUS,
+    RESPAWN_LOOP_WINDOW_MS,
+    RESPAWN_SAFE_DISTANCE,
+    respawnLoopVerdict,
+} from './safety/respawn_loop.js';
+import type { RespawnEscapeAction } from './safety/respawn_loop.js';
 import type { ShelterPlan } from './safety/shelter.js';
 import { headInWater } from './safety/water_safety.js';
 import { movementsFor } from './safety/movements.js';
@@ -2641,6 +2650,232 @@ export class MineflayerBody {
     private lastHealthSeen: number | null = null;
     private lastHealthDropAt = 0;
 
+    // ===== 重生循环破解器（Lead 2026-10-21：出生点在骷髅射程内，出生即被射杀几十次） =====
+
+    /** 最近几次死亡（时间+位置）；由死亡事件写入。 */
+    private respawnDeaths: Array<{ at: number; x: number; y: number; z: number }> = [];
+    private respawnEscapeRunning = false;
+    private respawnEscapeLastAt = 0;
+
+    /** 最近一次死亡记一笔（供重生循环判定）。 */
+    recordRespawnDeath(position: { x: number; y: number; z: number } | null): void {
+        try {
+            const x = Number(position?.x);
+            const y = Number(position?.y);
+            const z = Number(position?.z);
+            this.respawnDeaths = appendDeath(this.respawnDeaths, {
+                at: Date.now(),
+                x: Number.isFinite(x) ? x : 0,
+                y: Number.isFinite(y) ? y : 0,
+                z: Number.isFinite(z) ? z : 0,
+            });
+        } catch {
+            // 记录失败不影响别的。
+        }
+    }
+
+    /** 最近的敌对生物（带位置/距离）；读不到返回 null。 */
+    private nearestHostileForEscape(radius: number): { x: number; z: number; distance: number } | null {
+        try {
+            const bot = this.bot as any;
+            const from = bot?.entity?.position;
+            if (from == null) return null;
+            let best: { x: number; z: number; distance: number } | null = null;
+            const entities = (Object.values(bot.entities ?? {}) as Array<Record<string, unknown>>);
+            for (const entity of entities) {
+                if (entity == null) continue;
+                const pos = entity.position as { x?: unknown; y?: unknown; z?: unknown } | undefined;
+                if (pos == null) continue;
+                const x = Number(pos.x);
+                const z = Number(pos.z);
+                if (!Number.isFinite(x) || !Number.isFinite(z)) continue;
+                const horizontal = Math.hypot(x - from.x, z - from.z);
+                if (horizontal > radius) continue;
+                const raw = {
+                    id: Number(entity.id),
+                    name: String(entity.name ?? ''),
+                    type: String(entity.type ?? ''),
+                };
+                if (!isHostile(raw)) continue;
+                if (best == null || horizontal < best.distance) best = { x, z, distance: horizontal };
+            }
+            return best;
+        } catch {
+            return null;
+        }
+    }
+
+    /** 循环中：跑远 → 跑不掉就直下挖洞封顶 → 都不行才交还。有界、无需模型回合。 */
+    private async performRespawnEscape(deaths: number): Promise<void> {
+        const bot = this.bot as any;
+        const startedAt = Date.now();
+        const maxMs = 15_000;
+        let lastAction: RespawnEscapeAction = 'give-up';
+        let gaveUpReason: string | null = null;
+        let sprinted = false;
+        let dugSealed = false;
+        try {
+            for (;;) {
+                if (bot.interrupt_code != null) {
+                    gaveUpReason = '被 Stop/保命打断';
+                    break;
+                }
+                if (Date.now() - startedAt > maxMs) {
+                    gaveUpReason = `已用满 ${maxMs / 1000} 秒还没脱离`;
+                    break;
+                }
+                const threat = this.nearestHostileForEscape(RESPAWN_DANGER_RADIUS);
+                const health = typeof bot.health === 'number' ? bot.health : null;
+                if (threat == null) break; // 脱离
+                if (health != null && health <= 4) {
+                    // 血太低：先试着挖洞，别跑死在半路
+                    const sealed = await this.respawnDigAndSeal();
+                    if (sealed) {
+                        dugSealed = true;
+                        lastAction = 'dig-seal';
+                        break;
+                    }
+                    gaveUpReason = '血太低且挖洞封顶失败';
+                    break;
+                }
+                // (a) 沿"远离攻击者"方向猛跑（方向是量出来的）
+                lastAction = 'sprint-away';
+                const from = bot.entity.position;
+                const away = { x: from.x - threat.x, y: from.y, z: from.z - threat.z };
+                try {
+                    bot.lookAt(new Vec3(away.x, from.y + 1.6, away.z), true);
+                } catch {
+                    // 看不过去也照样按前进。
+                }
+                bot.setControlState('sprint', true);
+                bot.setControlState('forward', true);
+                sprinted = true;
+                await new Promise<void>((resolve) => setTimeout(resolve, 900));
+                bot.setControlState('forward', false);
+                bot.setControlState('sprint', false);
+                const after = this.nearestHostileForEscape(RESPAWN_DANGER_RADIUS);
+                if (after == null) {
+                    dugSealed = false;
+                    break;
+                }
+                // 跑了一段还在掉血/还贴着怪 ⇒ (b) 直下挖洞封顶
+                if (after.distance < 6 && health != null && health <= 10) {
+                    const sealed = await this.respawnDigAndSeal();
+                    if (sealed) {
+                        dugSealed = true;
+                        lastAction = 'dig-seal';
+                        break;
+                    }
+                }
+                if (Date.now() - startedAt > maxMs / 2 && after.distance <= RESPAWN_SAFE_DISTANCE) {
+                    // 半程还没跑出危险圈，试试挖洞
+                    const sealed = await this.respawnDigAndSeal();
+                    if (sealed) {
+                        dugSealed = true;
+                        lastAction = 'dig-seal';
+                        break;
+                    }
+                }
+            }
+        } catch {
+            gaveUpReason = '自救动作抛错';
+        }
+        try {
+            bot.setControlState('forward', false);
+            bot.setControlState('sprint', false);
+        } catch {
+            // 松键失败不阻断回执。
+        }
+        const position = (this.bot as any)?.entity?.position ?? { x: 0, y: 0, z: 0 };
+        const remainingThreat = this.nearestHostileForEscape(RESPAWN_SAFE_DISTANCE);
+        const escaped = !dugSealed && remainingThreat == null;
+        const action: RespawnEscapeAction = escaped || dugSealed ? (dugSealed ? 'dig-seal' : 'sprint-away') : 'give-up';
+        try {
+            this.log.with('lifecycle').info({
+                event: 'respawn-loop',
+                deaths,
+                windowMs: RESPAWN_LOOP_WINDOW_MS,
+                action,
+                sprinted,
+                dugSealed,
+                escaped,
+                ms: Date.now() - startedAt,
+            });
+        } catch {
+            // 日志失败不影响回执。
+        }
+        try {
+            this.notify('reflex.done', KIND.WORLD, LEVEL.STATE, {
+                reflex: 'respawn_escape',
+                outcome: action === 'give-up' ? 'failed' : 'ok',
+                detail: formatRespawnEscapeReceipt({
+                    deaths,
+                    action,
+                    position: { x: Number(position.x), y: Number(position.y), z: Number(position.z) },
+                    nearestThreatDistance: remainingThreat?.distance ?? null,
+                    gaveUpReason,
+                }),
+            });
+        } catch {
+            // 回执失败不影响实际位置。
+        }
+    }
+
+    /** 直下挖 2 格、再尝试封顶。返回是否**验证过**封住了。 */
+    private async respawnDigAndSeal(): Promise<boolean> {
+        const bot = this.bot as any;
+        try {
+            const p = bot.entity.position;
+            const base = new Vec3(Math.floor(p.x), Math.floor(p.y), Math.floor(p.z));
+            for (let i = 0; i < 2; i++) {
+                if (bot.interrupt_code != null) return false;
+                const below = bot.blockAt(base.offset(0, -1 - i, 0));
+                if (below == null) return false;
+                if (below.name === 'air') {
+                    await new Promise<void>((resolve) => setTimeout(resolve, 250));
+                    continue;
+                }
+                const dug = await digWithTimeout(bot, below, `respawn-dig@(${below.position.x},${below.position.y},${below.position.z})`);
+                if (!dug) return false;
+                await new Promise<void>((resolve) => setTimeout(resolve, 400));
+            }
+            // 封顶：在身后的竖井口放一块（有材料才放；放完**验证**）
+            const items = (bot.inventory?.items?.() ?? []) as Array<{ name?: string }>;
+            const material = items
+                .map((item) => String(item?.name ?? ''))
+                .find((name) => name !== '' && !name.includes('torch') && bot?.registry?.blocksByName?.[name] != null);
+            if (material == null) return false;
+            const sealedCell = base.offset(0, 3, 0);
+            const placed = await placeBlock(bot, material, sealedCell.x, sealedCell.y, sealedCell.z, 'bottom');
+            if (!placed) return false;
+            const readBack = bot.blockAt?.(sealedCell);
+            return readBack != null && String(readBack.name) === material;
+        } catch {
+            return false;
+        }
+    }
+
+    /** 每 tick 调一次：**死亡 ≥2 次（窗口/同点）⇒ 不等模型回合，直接自救**。 */
+    maybeBreakRespawnLoop(): void {
+        try {
+            const bot = this.bot as any;
+            const position = bot?.entity?.position ?? null;
+            const verdict = respawnLoopVerdict({ deaths: this.respawnDeaths, now: Date.now(), position });
+            if (!verdict.inLoop) return;
+            if (this.respawnEscapeRunning) return;
+            const now = Date.now();
+            if (now - this.respawnEscapeLastAt < 5_000) return;
+            if (bot?.interrupt_code != null) return;
+            this.respawnEscapeRunning = true;
+            this.respawnEscapeLastAt = now;
+            void this.performRespawnEscape(verdict.deathsInWindow).finally(() => {
+                this.respawnEscapeRunning = false;
+            });
+        } catch {
+            // 循环破解器出错必须静默。
+        }
+    }
+
     // ===== 窒息自救反射（与怪物无关：被方块埋住时逃跑没用，正确动作是挖开那一格） =====
 
     /**
@@ -3553,6 +3788,7 @@ export class MineflayerBody {
                               : '；**注意：这份清单读自未同步的背包，可能不完整**）');
                 const text = MESSAGES.death(death_pos_text || 'unknown', dimention, message, carried);
                 this.lastDeathAt = Date.now();
+                this.recordRespawnDeath(death_pos ?? null);
                 // **先写一条 L2 被动记录**。L4 会走 `abort()`，而 `abort()` 撤回
                 // 排队中的输入——真机上这条死亡消息 19 秒后才落地，最后连同被
                 // abort 的那一轮一起丢了，模型全程不知道自己死了。
@@ -3649,6 +3885,8 @@ export class MineflayerBody {
         this.perhapsNightShelter();
         // 窒息自救：血在掉 + 脚/头那格实心 ⇒ 就地挖开（与怪物无关，优先级高于一切）。
         this.maybeSuffocationEscape();
+        // 重生循环：窗口内死过 ≥2 次 ⇒ **不等模型回合**，直接跑/挖洞封顶。
+        this.maybeBreakRespawnLoop();
         this.pollEdges();
     }
 
