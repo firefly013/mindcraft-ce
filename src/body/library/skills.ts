@@ -4,7 +4,7 @@ import pf from 'mineflayer-pathfinder';
 import Vec3 from 'vec3';
 import { cellIntersectsBody, standingRoomOk } from '../safety/suffocation.js';
 import { isJustPlacedDrop, markPlaced, placementVerdict } from './placement_guard.js';
-import { formatProgressLine, formatTimeoutSummary, LONG_ACTION_MAX_MS, shouldEmitProgress } from './progress.js';
+import { formatProgressLine, formatTimeoutSummary, LONG_ACTION_MAX_MS, recordActionProgress, shouldEmitProgress } from './progress.js';
 import { estimateDigSeconds, formatNoObstacleDiagnosis, planClearStep } from '../safety/step_diagnosis.js';
 /**
  * ⚠️ **必须读共享单例，不许读根目录那份 `settings.ts`。**
@@ -1454,6 +1454,7 @@ export async function collectBlock(bot: any, blockType: string, num: number = 1,
             const nextBlock = blocks[0] as any;
             const nextDistance = nextBlock?.position != null ? bot.entity.position.distanceTo(nextBlock.position) : null;
             log(bot, 'collect-progress{' + JSON.stringify({ done: collected, total: num, elapsedMs: collectElapsed, remaining: Math.max(0, num - collected), distance: nextDistance }) + '} ' + formatProgressLine({ label: '挖矿', done: collected, total: num, elapsedMs: collectElapsed, remaining: Math.max(0, num - collected), distance: nextDistance }));
+            recordActionProgress(bot, { label: '挖矿', done: collected, total: num });
         }
         if (collectElapsed >= LONG_ACTION_MAX_MS) {
             log(bot, formatTimeoutSummary({ label: '采集', done: collected, total: num, elapsedMs: collectElapsed, remaining: Math.max(0, num - collected) }));
@@ -5021,6 +5022,7 @@ export async function mineBlockAt(bot: any, x: number, y: number, z: number): Pr
         if (shouldEmitProgress(mineLastProgressAt, Date.now())) {
             mineLastProgressAt = Date.now();
             log(bot, 'mine-progress{' + JSON.stringify({ block: target.name, x, y, z, elapsedMs: 0 }) + '} ' + formatProgressLine({ label: '挖方块 ', done: 0, total: 1, elapsedMs: 0 }));
+            recordActionProgress(bot, { label: '挖方块', done: 0, total: 1 });
         }
         if (Date.now() - mineStartedAt >= LONG_ACTION_MAX_MS) {
             log(bot, formatTimeoutSummary({ label: '挖方块', done: 0, total: 1, elapsedMs: Date.now() - mineStartedAt, remaining: 1 }));
@@ -5674,6 +5676,7 @@ export async function digDown(bot: any, distance: number = 10): Promise<boolean>
             const nowY = Number(bot?.entity?.position?.y ?? 0);
             const elapsed = Date.now() - digStartedAt;
             log(bot, 'dig-progress{' + JSON.stringify({ done: i - 1, total: distance, elapsedMs: elapsed, fromY: Math.round(digStartY * 10) / 10, toY: Math.round(nowY * 10) / 10 }) + '} ' + formatProgressLine({ label: '向下挖', done: i - 1, total: distance, elapsedMs: elapsed }));
+            recordActionProgress(bot, { label: '向下挖', done: i - 1, total: distance, fromY: digStartY, toY: nowY });
         }
         if (Date.now() - digStartedAt >= LONG_ACTION_MAX_MS) {
             log(bot, formatTimeoutSummary({ label: '向下挖', done: i - 1, total: distance, elapsedMs: Date.now() - digStartedAt, remaining: distance - (i - 1) }));

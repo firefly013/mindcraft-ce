@@ -26,6 +26,8 @@
  * 踩出来的坑，是主线资产，不是装饰。
  */
 import { closeSync, openSync, readFileSync, readSync, statSync, writeFileSync } from 'node:fs';
+import { evaluateStuck } from './library/progress.js';
+import type { ActionProgressRecord } from './library/progress.js';
 import type {
     BodyCapabilities,
     BodyPush,
@@ -818,6 +820,7 @@ export class MineflayerBody {
     private lastSeenHealth: number | null = null;
     private stuckPos: string | null = null;
     private stuckSince = 0;
+    private stuckLastY = 0;
     private lastHeartbeatAt = Date.now();
     private lowHpArmed = false;
     /** 自动拾取：上一次尝试的时刻 / 是否正在捡（见 `schedulePickup`）。 */
@@ -4542,28 +4545,56 @@ export class MineflayerBody {
         } catch {
             return;
         }
-        // 卡住：有动作在跑但位置 60 秒没动（动了就重算；报一次后再等 60 秒）。
+        // 卡住：**看进度，不只看坐标**（Lead 2026-10-21 真机 A：垂直下挖每格只降亚方块高度，
+        // `stuckForSeconds` 把"几乎不变"当卡死，67/81/118 秒三次误报中止了合法下挖）。
         const now = Date.now();
         const pos = snapshot.position ?? null;
-        if (pos !== this.stuckPos) {
+        const progress = (this.bot as { __actionProgress?: ActionProgressRecord })?.__actionProgress ?? null;
+        const progressAdvanced = progress != null && progress.at > this.stuckSince;
+        const bodyY = Number((this.bot as any)?.entity?.position?.y ?? 0);
+        if (pos !== this.stuckPos || progressAdvanced) {
             this.stuckPos = pos;
             this.stuckSince = now;
+            this.stuckLastY = bodyY;
         } else {
             const currentAction = this.currentActionName();
             // **站着干活不算卡住**：开箱子/合成/查背包时位置当然不变。模型真机报过
             // "误报 task.stuck"，每次误报都白花一次 PREEMPT 唤醒。
-            const stuck =
-                !isStationaryAction(currentAction) &&
-                isStuck(this.stuckPos, pos, this.stuckSince, now, currentAction != null);
-            if (stuck) {
-                const seconds = Math.round((now - this.stuckSince) / 1000);
+            if (isStationaryAction(currentAction)) {
                 this.stuckSince = now;
-                this.notify('task.stuck', KIND.WORLD, LEVEL.PREEMPT, {
-                    position: pos,
-                    action: currentAction,
-                    // 把"卡了多久"写进去，模型能据此判断是真卡还是刚起步。
-                    stuckForSeconds: seconds,
+                this.stuckLastY = bodyY;
+            } else {
+                const seconds = Math.round((now - this.stuckSince) / 1000);
+                const verdict = evaluateStuck({
+                    actionRunning: currentAction != null,
+                    positionChanged: pos !== this.stuckPos,
+                    yChanged: bodyY - this.stuckLastY,
+                    progressAdvanced: false,
+                    seconds,
+                    thresholdSeconds: 60,
+                    progress,
                 });
+                if (verdict.kind === 'moving-slow') {
+                    this.stuckSince = now;
+                    this.stuckLastY = bodyY;
+                    this.notify('task.progress', KIND.WORLD, LEVEL.STATE, {
+                        position: pos,
+                        action: currentAction,
+                        detail: verdict.message,
+                        signals: verdict.signals,
+                    });
+                } else if (verdict.kind === 'stuck') {
+                    this.stuckSince = now;
+                    this.notify('task.stuck', KIND.WORLD, LEVEL.PREEMPT, {
+                        position: pos,
+                        action: currentAction,
+                        // 把"卡了多久"和"哪几个信号都没动"写进去，模型能据此判断真假。
+                        stuckForSeconds: seconds,
+                        detail: verdict.message,
+                        signals: verdict.signals,
+                        progress: progress == null ? null : { label: progress.label, done: progress.done, total: progress.total },
+                    });
+                }
             }
         }
         // 心跳：5 分钟无动作无请求，醒一次做反思，防睡死。

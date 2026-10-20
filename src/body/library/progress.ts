@@ -46,3 +46,89 @@ export function formatTimeoutSummary(input: {
         `还剩 ${left} 个没做——这是到时间上限，不是失败；可以直接再发一次同样的调用继续，进度不会丢。`
     );
 }
+
+/**
+ * **卡死判定必须看"进度"，不能只看坐标**（Lead 2026-10-21 真机 A）：
+ * 垂直下挖每挖一格只降"亚方块"高度，`stuckForSeconds` 却把"位置几乎不变"当卡死，
+ * 67/81/118 秒三次误报并中止了合法下挖。证据源必须与 `dig-progress` 相同：
+ * **done/total 变了就不是卡死**；y 变动 ≥0.1 是"在下降但慢"；两个信号都没有才是真停。
+ */
+export interface ActionProgressRecord {
+    label: string;
+    done: number;
+    total: number;
+    fromY?: number | null;
+    toY?: number | null;
+    at: number;
+}
+
+/** skills 在 emit `*-progress` 时同步写一份，身体用它做卡死判据（同一事实，不是第二意见）。 */
+export function recordActionProgress(
+    bot: unknown,
+    record: Omit<ActionProgressRecord, 'at'> & { at?: number },
+): void {
+    try {
+        (bot as { __actionProgress?: ActionProgressRecord }).__actionProgress = {
+            label: record.label,
+            done: record.done,
+            total: record.total,
+            fromY: record.fromY ?? null,
+            toY: record.toY ?? null,
+            at: record.at ?? Date.now(),
+        };
+    } catch {
+        // 记录失败不阻挡动作本身。
+    }
+}
+
+export type StuckKind = 'none' | 'moving-slow' | 'stuck';
+
+export interface StuckEvaluation {
+    kind: StuckKind;
+    /** 一句话事实（只有 stuck / moving-slow 有）。 */
+    message: string;
+    /** 触发判据里的信号名，便于回执与测试。 */
+    signals: string[];
+}
+
+/**
+ * @param input.positionChanged 水平位置是否变化（≥0.35 格）
+ * @param input.yChanged        竖直变化量绝对值（格）
+ * @param input.progressAdvanced 窗口内动作是否报告过新进度（done 变化）
+ * @param input.seconds         当前位置已经持续多久（秒）
+ * @param input.thresholdSeconds 触发卡死的门槛（默认 60）
+ */
+export function evaluateStuck(input: {
+    actionRunning: boolean;
+    positionChanged: boolean;
+    yChanged: number;
+    progressAdvanced: boolean;
+    seconds: number;
+    thresholdSeconds?: number;
+    progress?: ActionProgressRecord | null;
+}): StuckEvaluation {
+    if (!input.actionRunning) return { kind: 'none', message: '', signals: [] };
+    // **有任何进展迹象就不报卡死**：进度增加 > 亚方块下降 > 坐标变化。
+    if (input.progressAdvanced) return { kind: 'none', message: '', signals: ['progress'] };
+    if (Math.abs(input.yChanged) >= 0.1) {
+        const side = input.yChanged > 0 ? '上升' : '下降';
+        return {
+            kind: 'moving-slow',
+            message: `${Math.round(input.seconds)} 秒里${side}了 ${Math.abs(input.yChanged).toFixed(1)} 格（不是卡住，是慢）——继续。`,
+            signals: ['y-delta'],
+        };
+    }
+    if (input.positionChanged) return { kind: 'none', message: '', signals: ['position'] };
+    const threshold = input.thresholdSeconds ?? 60;
+    if (input.seconds < threshold) return { kind: 'none', message: '', signals: [] };
+    const progressText =
+        input.progress != null
+            ? `进度 ${input.progress.done}/${input.progress.total}（${input.progress.label}）`
+            : '没有进度输出';
+    return {
+        kind: 'stuck',
+        message: `${Math.round(input.seconds)} 秒里一格没挖掉/一步没走（${progressText} 未变，坐标也没动）——**不是挖慢，是真停了**。`,
+        signals: ['position', 'progress', 'y-delta'],
+    };
+}
+
