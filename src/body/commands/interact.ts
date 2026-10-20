@@ -262,6 +262,41 @@ export function fuelTier(name: string): number {
  * 优先挑总量够烧的燃料；都够就按优先级；都不够就挑覆盖率最高的报清楚。
  * 完全没有燃料返回 null。
  */
+export interface FuelTotals {
+  ok: boolean;
+  capacity: number;
+  entries: Array<{ name: string; count: number; unit: number; capacity: number }>;
+}
+
+/**
+ * **按全背包求和所有燃料**（Lead 2026-10-21：燃料判定只认 oak_planks，B 背包有
+ * `oak_planks×1 + stick×4`（合计 3.5 个物品）却被判"燃料不够：需要 2 个 oak_planks"，
+ * 卡在"有原料、有燃料、系统说没燃料"）。用 mcdata 的燃料表，任何名字都不硬编码。
+ */
+export function planFuelTotals(bot: unknown, smeltCount: number): FuelTotals | null {
+  const b = bot as { inventory?: { items?: () => Array<{ name?: unknown; count?: unknown }> } };
+  let items: Array<{ name?: unknown; count?: unknown }>;
+  try {
+    items = b.inventory?.items?.() ?? [];
+  } catch {
+    return null;
+  }
+  const totals = new Map<string, number>();
+  for (const item of items) {
+    if (typeof item?.name !== 'string') continue;
+    const unit = mc.getFuelSmeltOutput(item.name);
+    if (!(unit > 0)) continue;
+    const count = typeof item.count === 'number' ? item.count : 1;
+    totals.set(item.name, (totals.get(item.name) ?? 0) + count);
+  }
+  if (totals.size === 0) return null;
+  const entries = [...totals.entries()]
+    .map(([name, count]) => ({ name, count, unit: mc.getFuelSmeltOutput(name), capacity: mc.getFuelSmeltOutput(name) * count }))
+    .sort((x, y) => y.unit - x.unit);
+  const capacity = entries.reduce((sum, entry) => sum + entry.capacity, 0);
+  return { ok: capacity >= smeltCount, capacity, entries };
+}
+
 export function planAggregateFuel(bot: unknown, smeltCount: number): FuelPlan | null {
   const b = bot as { inventory?: { items?: () => Array<{ name?: unknown; count?: unknown }> } };
   let items: Array<{ name?: unknown; count?: unknown }>;
@@ -363,26 +398,39 @@ export async function ensureAggregateFuel(
           (plan2 != null ? `背包跨堆合计：${plan2.name} 有 ${plan2.available} 个（需要 ${plan2.needed}）。` : '背包里没有任何燃料。'),
       };
     }
-    const plan = planAggregateFuel(bot, smeltCount);
-    if (plan == null) {
-      return { ok: false, detail: '没有燃料：需要煤 / 木炭 / 木头（原木或木板）——放进背包再来。' };
+    // **所有燃料求和**（Lead 2026-10-21：只认 oak_planks 会判「有 stick×4 却燃料不够」）；
+    // 够了就按单位从大到小投，不够就打印燃料账本，让模型自己判断。
+    const totals = planFuelTotals(bot, smeltCount);
+    if (totals == null) {
+      return { ok: false, detail: '没有燃料：需要煤 / 木炭 / 木头 / 木棍（任何可烧的东西）——放进背包再来。' };
     }
-    if (!plan.ok) {
+    const ledger = totals.entries
+      .map((entry) => `${entry.name}×${entry.count} = ${Math.round(entry.capacity * 10) / 10} 个`)
+      .join(' · ');
+    if (!totals.ok) {
       return {
         ok: false,
         detail:
-          `燃料不够：烧 ${smeltCount} 个需要 ${plan.needed} 个 ${plan.name}，` +
-          `背包里只有 ${plan.available} 个（分散在 ${plan.stacks} 堆，**已按全背包合计**）。` +
-          '先补燃料，或减少要烧的数量。',
+          `燃料不够：烧 ${smeltCount} 个需要 ${smeltCount} 个物品的燃料，可用燃料：${ledger}，` +
+          `**合计只能烧 ${Math.round(totals.capacity * 10) / 10} 个**（所有可烧的东西都算进去了）。` +
+          '补燃料，或减少要烧的数量。',
       };
     }
-    await furnace.putFuel(mc.getItemId(plan.name), null, plan.needed);
+    let remaining = smeltCount;
+    const put: string[] = [];
+    for (const entry of totals.entries) {
+      if (remaining <= 0) break;
+      const itemsNeeded = Math.max(1, Math.ceil(remaining / entry.unit));
+      const itemsToPut = Math.min(entry.count, itemsNeeded);
+      await furnace.putFuel(mc.getItemId(entry.name), null, itemsToPut);
+      put.push(`${entry.name}×${itemsToPut}`);
+      remaining -= itemsToPut * entry.unit;
+    }
     return {
       ok: true,
       detail:
-        `燃料就绪：${plan.name} 跨 ${plan.stacks} 堆共 ${plan.available} 个，` +
-        `已投 ${plan.needed} 个（够烧 ${smeltCount} 个）。` +
-        '（这一步按全背包求和算，不会再出现"有 14 个却说 need 2"。）',
+        `燃料就绪（全背包求和）：${ledger} → 合计可烧 ${Math.round(totals.capacity * 10) / 10} 个，` +
+        `够烧 ${smeltCount} 个；已投 ${put.join('、')}。`,
     };
   } catch (error: unknown) {
     return { ok: false, detail: `预处理燃料失败：${error instanceof Error ? error.message : String(error)}` };

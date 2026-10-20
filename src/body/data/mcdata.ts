@@ -481,16 +481,22 @@ export function getSmeltingFuel(bot: any): any {
 }
 
 export function getFuelSmeltOutput(fuelName: string): number {
-    if (fuelName === 'coal' || fuelName === 'charcoal')
-        return 8;
-    if (fuelName === 'blaze_rod')
-        return 12;
-    if (fuelName.includes('log') || fuelName.includes('planks'))
-        return 1.5;
-    if (fuelName === 'coal_block')
-        return 80;
-    if (fuelName === 'lava_bucket')
-        return 100;
+    // **完整燃料表**（Lead 2026-10-21：只认 oak_planks 导致「有 stick×4 却说燃料不够」，
+    // B 卡在「有原料、有燃料、系统说没燃料」）。单位 = 每 1 个该物品能烧多少个物品。
+    const FUEL_VALUES: Record<string, number> = {
+        coal: 8, charcoal: 8, coal_block: 80, blaze_rod: 12, lava_bucket: 100,
+        stick: 0.5, bamboo: 0.25, dried_kelp_block: 20, dead_bush: 0.5,
+        oak_sapling: 0.5, spruce_sapling: 0.5, birch_sapling: 0.5, jungle_sapling: 0.5,
+        acacia_sapling: 0.5, dark_oak_sapling: 0.5, cherry_sapling: 0.5, mangrove_propagule: 0.5,
+        crafting_table: 1.5, chest: 1.5, bookshelf: 1.5, ladder: 0.5,
+        white_wool: 0.5, cactus: 1, note_block: 1.5, jukebox: 1.5, scaffolding: 0.25,
+    };
+    const direct = FUEL_VALUES[fuelName];
+    if (direct != null) return direct;
+    // 名字类的兜底（不硬编码单个物品）：
+    if (fuelName.endsWith('_planks') || fuelName.includes('_log') || fuelName.includes('_wood') || fuelName.endsWith('_stem') || fuelName.endsWith('_hyphae')) return 1.5;
+    if (fuelName.endsWith('_sapling') || fuelName === 'torch' || fuelName.endsWith('_banner') || fuelName.includes('_door')) return 0.5;
+    if (fuelName.endsWith('_axe') || fuelName.endsWith('_pickaxe') || fuelName.endsWith('_shovel') || fuelName.endsWith('_hoe') || fuelName.endsWith('_sword') || fuelName === 'bow' || fuelName === 'fishing_rod' || fuelName === 'wooden_pressure_plate' || fuelName === 'wooden_button') return 1;
     return 0;
 }
 
