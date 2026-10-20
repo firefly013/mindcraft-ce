@@ -72,6 +72,11 @@ export function respawnLoopVerdict(input: {
     return { inLoop: false, deathsInWindow: recent.length, reason: 'deaths-too-far-apart' };
 }
 
+/** 循环 verdict 为真时，普通 yield（如 empty-after-death）**不许赢**。 */
+export function shouldYieldBePreempted(input: { inLoop: boolean; yieldReason: string }): boolean {
+    return input.inLoop === true && input.yieldReason.length > 0;
+}
+
 export type RespawnEscapeAction = 'sprint-away' | 'dig-seal' | 'give-up';
 
 export interface RespawnEscapePlan {
@@ -88,6 +93,8 @@ export interface RespawnEscapePlan {
  * - 都不行 ⇒ give-up（带原因）。
  */
 export function planRespawnEscape(input: {
+    /** 空手（重生后没装备）：贴脸怪面前跑不掉，标准解法是**立刻挖脚下自封**。 */
+    handEmpty?: boolean;
     threats: Array<{ x: number; z: number; distance: number }>;
     health: number | null;
     canDig: boolean;
@@ -104,6 +111,10 @@ export function planRespawnEscape(input: {
                   return { x: dx / len, z: dz / len };
               })();
     if (threat != null && away != null) {
+        // **空手 + 贴脸（≤3 格）**：speed 相同跑不掉，挖脚下自封是唯一可行动作。
+        if (input.handEmpty === true && threat.distance <= 3 && input.canDig) {
+            return { action: 'dig-seal', away, reason: '空手且怪贴身（' + Math.round(threat.distance) + ' 格）：立刻挖脚下自封' };
+        }
         const desperate = input.health != null && input.health <= 6;
         if (!desperate) return { action: 'sprint-away', away, reason: `远离 ${Math.round(threat.distance)} 格外的敌对生物` };
         if (input.canDig) return { action: 'dig-seal', away, reason: '血太低跑不掉：直下 2 格再封顶' };

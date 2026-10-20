@@ -59,6 +59,7 @@ import {
 import { formatShelterReceipt, planShelter } from './safety/shelter.js';
 import { formatSuffocationReceipt, planSuffocationEscape } from './safety/suffocation.js';
 import { isJustPlacedDrop } from './library/placement_guard.js';
+import { shouldYieldBePreempted } from './safety/respawn_loop.js';
 import {
     appendDeath,
     formatRespawnEscapeReceipt,
@@ -2138,6 +2139,12 @@ export class MineflayerBody {
             if (this.lastDeathAt > 0 && Date.now() - this.lastDeathAt <= 120_000) {
                 const items = this.bot?.inventory?.items?.() ?? [];
                 if (items.length === 0) {
+                    const loopV = respawnLoopVerdict({ deaths: this.respawnDeaths ?? [], now: Date.now(), position: null });
+                    if (shouldYieldBePreempted({ inLoop: loopV.inLoop, yieldReason: 'empty-after-death' })) {
+                        this.lastYieldBeatenReason = 'empty-after-death';
+                        return null;
+                    }
+                    this.lastYieldReason = 'empty-after-death';
                     return { yield: true, reason: 'empty-after-death' };
                 }
             }
@@ -2720,6 +2727,9 @@ export class MineflayerBody {
     /** 最近几次死亡（时间+位置）；由死亡事件写入。 */
     private respawnDeaths: Array<{ at: number; x: number; y: number; z: number }> = [];
     private respawnEscapeRunning = false;
+    /** yield 被循环 verdict 顶掉 / 真的赢了（写进 respawn-loop 日志，供 Lead 定位）。 */
+    private lastYieldBeatenReason = '';
+    private lastYieldReason = '';
     private respawnEscapeLastAt = 0;
 
     /** 最近一次死亡记一笔（供重生循环判定）。 */
@@ -2792,6 +2802,16 @@ export class MineflayerBody {
                 const threat = this.nearestHostileForEscape(RESPAWN_DANGER_RADIUS);
                 const health = typeof bot.health === 'number' ? bot.health : null;
                 if (threat == null) break; // 脱离
+                // **空手 + 贴脸**：跑不掉，挖脚下自封（B 自己建议的第三个选项）。
+                const handEmpty = (((this.bot as any)?.inventory?.items?.() ?? []) as unknown[]).length === 0;
+                if (handEmpty && threat.distance <= 3) {
+                    const sealed = await this.respawnDigAndSeal();
+                    if (sealed) {
+                        dugSealed = true;
+                        lastAction = 'dig-seal';
+                        break;
+                    }
+                }
                 if (health != null && health <= 4) {
                     // 血太低：先试着挖洞，别跑死在半路
                     const sealed = await this.respawnDigAndSeal();
@@ -2861,6 +2881,8 @@ export class MineflayerBody {
                 deaths,
                 windowMs: RESPAWN_LOOP_WINDOW_MS,
                 action,
+                yieldReason: this.lastYieldReason || null,
+                yieldBeaten: this.lastYieldBeatenReason || null,
                 sprinted,
                 dugSealed,
                 escaped,
