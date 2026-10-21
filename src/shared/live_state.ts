@@ -497,6 +497,23 @@ const SECTION_RENDERERS: Record<LiveSectionKey, (s: LiveState) => string[]> = {
     ];
     const totals = aggregateTotals(s.backpack.items);
     if (totals.length > 0) lines.push(`- totals: ${totals.join(', ')}`);
+    // **价值感知的风险提示**（2026-10-22 真机惨痛数据点，Lead 亲眼看着丢的）：
+    // overnight_b 在 y=-29 挖到 diamond×8、捡到 flint_and_steel、**合成出 diamond_pickaxe**，
+    // 当时 hp 8/20、food 1；它继续在地下活动，然后死了一次——
+    // **钻石镐、5 颗钻石、打火石、4 个铁锭全部掉落**，下界门的两件关键道具一次清零。
+    // 根因不是某个 bug，而是**引擎不知道"它身上的东西值多少"**：
+    // 空手时 hp 10 不算危险；拿着钻石镐和打火石时 hp 18 就该收工。
+    // 这只是一条**事实提示**（不是门控）：把"不可替代"和"死亡代价"摆到模型眼前，让它自己决定。
+    const highValue = s.backpack.items.filter((item) =>
+      /^(diamond|diamond_pickaxe|diamond_sword|diamond_axe|netherite.*|emerald|ender_pearl|blaze_rod|.*_ingot|flint_and_steel|obsidian|ancient_debris|eye_of_ender|totem_of_undying)$/
+        .test(String(item).replace(/x\d+$/, '')),
+    );
+    if (highValue.length > 0) {
+      lines.push(
+        `- **价值提示**：身上有不可替代/难重来的东西（${highValue.join(', ')}）。` +
+          '这个档 keepInventory=false，死一次全掉。**血低或食物见底时先把它们带回家或放进箱子，别在危险的地方硬扛。**',
+      );
+    }
     return lines;
   },
   position: (s) => {
