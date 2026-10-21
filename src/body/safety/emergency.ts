@@ -362,6 +362,13 @@ export type EmergencyIntent = 'surface' | 'flee' | 'lava';
 /** 水面反射最多占身体多久：够它浮上来并在水面往岸边试，又不至于把模型锁死。 */
 const SURFACE_MAX_MS = 12_000;
 
+/**
+ * 第几次"溺水自救"被触发。**只用来轮换游动方位**：扫不到岸时，
+ * 第一次朝 +x、第二次 +z、第三次 −x、第四次 −z——重试几次就会覆盖不同方向，
+ * 而不是永远朝同一片海游（固定方向的优点是可预期、可测试，缺点是一开始可能选错方向）。
+ */
+let surfaceAttemptCount = 0;
+
 async function runSurface(
   bot: EmergencyBot,
   io: { tickMs: number; sleep: (ms: number) => Promise<void> },
@@ -372,7 +379,25 @@ async function runSurface(
     return { escaped: false, reason: 'safe', position: bot.feet(), health: bot.health };
   }
   const surfaceStartedAt = Date.now();
+  // **游向岸要"记住一个方向"**（2026-10-21 第二轮实测：第一版每 tick 都扫一次
+  // `nearestDryLand(12)`——开阔水域里 12 格全是水，返回 null，于是退化成原地 swimUp，
+  // 12 秒超时、交还身体、再沉下去，人照样淹死）。
+  // 现在两条一起改：① 每 SURFACE_SCAN_EVERY_TICKS 才扫一次，半径放大到 24（节流防拖 TPS）；
+  // ② 扫不到岸就按一个**固定方位**持续游（不再每 tick 重算导致原地摆动）——
+  //    方位按"第几次触发"轮换，这样重试几次就会覆盖不同方向，而不是永远朝同一片水游。
+  const SURFACE_SCAN_EVERY_TICKS = 5;
+  const SURFACE_SCAN_RADIUS = 24;
+  const headings = [
+    { x: 1, z: 0 },
+    { x: 0, z: 1 },
+    { x: -1, z: 0 },
+    { x: 0, z: -1 },
+  ];
+  const heading = headings[surfaceAttemptCount++ % headings.length];
+  let shore: { x: number; z: number } | null = null;
+  let tick = 0;
   for (;;) {
+    tick += 1;
     if (bot.health <= 0) return { escaped: false, reason: 'died' };
     // **"头露出水面"不等于脱险**（2026-10-21 数据修正）。
     // 全量日志统计：overnight_a 78% 的死亡、overnight_b 78% 的死亡是 drowned，
@@ -400,10 +425,20 @@ async function runSurface(
         health: bot.health,
       };
     }
-    // **先找岸再浮**：只按 jump 会原地浮着等超时，人还在水里。
-    const shore = bot.nearestDryLand?.(12) ?? null;
-    if (shore && bot.moveToward) {
-      bot.moveToward(shore.x, shore.z);
+    // **先找岸再浮**（节流：每 5 tick 才扫一次，扫到就记住不再重扫）。
+    if (!shore && tick % SURFACE_SCAN_EVERY_TICKS === 0) {
+      shore = bot.nearestDryLand?.(SURFACE_SCAN_RADIUS) ?? null;
+    }
+    if (bot.moveToward) {
+      const target = shore ?? (() => {
+        // 没有岸：按固定方位持续游，靠移动本身走出水域。
+        const feet = bot.feet();
+        if (!feet) return null;
+        const reach = SURFACE_SCAN_RADIUS;
+        return { x: feet.x + heading.x * reach, z: feet.z + heading.z * reach };
+      })();
+      if (target) bot.moveToward(target.x, target.z);
+      else bot.swimUp?.();
     } else {
       bot.swimUp?.();
     }
