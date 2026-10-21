@@ -1893,16 +1893,63 @@ export async function breakBlockAt(bot: any, x: number, y: number, z: number): P
                 // 理由见 isHandMineable：无镐时被封在方块里，两边都不肯挖
                 // 就是永久卡死（Feedback #38/#43）。
                 if (!isHandMineable(block)) {
-                    // **裸装的真话**（Lead 2026-10-21：血 7、空手、脚下是 stone，`digDown` 说
-                    // "先换正确的工具" —— 裸装永远没有镐，这是**下一步不可能**的墙）。
-                    // 给三条现在就能做的动作，而不是一个做不到的建议。
+                    // **裸装的真话 + 实测哪条路真的能走**（Lead 2026-10-21 两次踩到）：
+                    // 一开始只给三条通用建议（找软土/找洞穴/换个方向）。用 CLI 当玩家时发现
+                    // **这三条可能一条都不可行**（周围全是石头、只有 2 个土、洞口已不记得），
+                    // 于是模型读到一段"看起来有出路、实际没有"的文案，继续对 stone 发同一命令。
+                    // 现在把建议换成**就地测出来的事实**：附近有没有软方块、有没有洞口、都没有就直说"没路"。
+                    let softNearby = 0;
+                    let softAt: string | null = null;
+                    let caveNearby = 0;
+                    try {
+                        const origin = bot.entity?.position;
+                        if (origin) {
+                            for (let dx = -6; dx <= 6 && softNearby < 1; dx++) {
+                                for (let dy = -4; dy <= 4 && softNearby < 1; dy++) {
+                                    for (let dz = -6; dz <= 6; dz++) {
+                                        const b = bot.blockAt?.(origin.offset(dx, dy, dz));
+                                        if (!b) continue;
+                                        if (b.name === 'dirt' || b.name === 'gravel' || b.name === 'sand'
+                                            || b.name === 'red_sand' || b.name === 'clay') {
+                                            softNearby += 1;
+                                            softAt = `${b.name} @(${Math.round(origin.x + dx)},${Math.round(origin.y + dy)},${Math.round(origin.z + dz)})`;
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+                            // 洞口：附近有一格空气且它上方也是空气（能钻进去的那种）
+                            for (let dx = -4; dx <= 4 && caveNearby < 1; dx++) {
+                                for (let dy = -2; dy <= 3 && caveNearby < 1; dy++) {
+                                    for (let dz = -4; dz <= 4; dz++) {
+                                        const p = origin.offset(dx, dy, dz);
+                                        const b = bot.blockAt?.(p);
+                                        const up = bot.blockAt?.(p.offset(0, 1, 0));
+                                        const up2 = bot.blockAt?.(p.offset(0, 2, 0));
+                                        if (b?.name === 'air' && up?.name === 'air' && up2?.name === 'air') {
+                                            caveNearby += 1;
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    } catch {
+                        // 读不到世界就退回"未测量"，不编数字。
+                    }
+                    const measured = softNearby > 0 || caveNearby > 0;
                     log(
                         bot,
                         `没有能挖 ${block.name} 的工具（手持 ${bot?.heldItem?.name ?? '空手'}），空手挖不动 ${block.name}。` +
-                            '现在能做的（按顺序）：① 找附近的 **dirt/gravel/sand** 往下挖（空手能挖）；' +
-                            '② 找现成的**洞穴/矿道/坑**躲进去，别硬凿石头；' +
-                            '③ 实在没有软土也没有洞：天亮了再动，或者换个方向走走看有没有别的入口——' +
-                            '**不要**继续对 stone 发 digDown（结果只会是这一行）。',
+                            (measured
+                                ? `**附近实测**：软方块 ${softNearby > 0 ? `有（最近的 ${softAt}）` : '0 个'}；` +
+                                  `可钻的洞口 ${caveNearby > 0 ? '有（4 格内有 3 格高的空腔）' : '0 个'}。` +
+                                  (softNearby > 0
+                                      ? '走那里挖软土是对的。'
+                                      : '那就往洞口方向走，别在这一列凿石头。')
+                                : '**附近实测：6 格内没有 dirt/gravel/sand，4 格内也没有能钻的洞口——这一列确实没路。**' +
+                                  '别再对 stone 发 digDown（只会再得到这一行）：换个方向走远一点找软土/洞口，' +
+                                  '或者用 pillarUp 垫着往上（有方块的话）。'),
                     );
                     return false;
                 }
