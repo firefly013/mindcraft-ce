@@ -20,6 +20,7 @@
 
 import * as skills from './skills.js';
 import { chooseToolForJob } from './tool_choice.js';
+import { isLandAnimal, planWaterHuntStop } from './hunt_reach.js';
 import type { ToolCandidate } from './tool_choice.js';
 import * as world from './world.js';
 import { Vec3 } from 'vec3';
@@ -733,7 +734,19 @@ export interface HuntOutcome {
     baseline: number;
     kills: number;
     attacks: number;
-    stopReason: 'reached' | 'budget' | 'no_target' | 'interrupted' | 'low_health' | 'danger' | 'gone' | 'attack_failed' | 'attempts' | 'cannot_kill' | 'same_target';
+    stopReason:
+        | 'reached'
+        | 'budget'
+        | 'no_target'
+        | 'interrupted'
+        | 'low_health'
+        | 'danger'
+        | 'gone'
+        | 'attack_failed'
+        | 'attempts'
+        | 'cannot_kill'
+        | 'same_target'
+        | 'water_unreachable';
     elapsedMs: number;
     /** 在下界刷烈焰人（"没怪了"的下一步建议要用它）。 */
     netherBlaze: boolean;
@@ -774,6 +787,7 @@ const STOP_REASON_TEXT: Record<HuntOutcome['stopReason'], string> = {
     attempts: '尝试次数到上限了',
     cannot_kill: '打不死（每次都耗完击杀预算），已收手',
     same_target: '同一个目标连续打不死，已熔断停手',
+    water_unreachable: '目标在水里、我在岸上，追不到——早停（不烧完整段预算）',
 };
 
 export function huntReceipt(o: HuntOutcome): string {
@@ -1423,6 +1437,8 @@ export async function huntForSkill(
     let lastFailedTargetId: number | null = null;
     const maxAttempts = huntMaxAttempts(want);
     let stopReason: HuntOutcome['stopReason'] = 'budget';
+    /** 岸上追水里目标的开始时刻（0 = 当前没有这种空转）。 */
+    let waterStallSince = 0;
     /** 最后一次捡拾的四个事实（回执要分开说：看到/踩到/到手/读不到）。 */
     let lastSweep: DropSweep | null = null;
 
@@ -1518,6 +1534,70 @@ export async function huntForSkill(
             });
             if (progress.length > HUNT_MAX_PROGRESS_LINES) progress.splice(0, progress.length - HUNT_MAX_PROGRESS_LINES);
         }
+        // **岸上追水里：早停**（Lead 2026-10-21：60 秒零移动零命中）。
+        // 判据是纯函数（hunt_reach）；这里只负责测量：位置、水块、陆生动物数量、空转时长。
+        if (waterStallSince == null) waterStallSince = 0;
+        try {
+            const botPosition = bot?.entity?.position ?? null;
+            const targetPosition = (target as { position?: { x: number; y: number; z: number } })?.position ?? null;
+            const pointInWater = (point: { x: number; y: number; z: number } | null): boolean => {
+                if (point == null) return false;
+                try {
+                    const block = bot?.blockAt?.(new Vec3(Math.floor(point.x), Math.floor(point.y), Math.floor(point.z)));
+                    return String(block?.name ?? '').includes('water');
+                } catch {
+                    return false;
+                }
+            };
+            const botInWater = pointInWater(botPosition);
+            const targetInWater = pointInWater(targetPosition);
+            const distanceNow =
+                botPosition != null && targetPosition != null
+                    ? Math.hypot(
+                          Number(botPosition.x) - Number(targetPosition.x),
+                          Number(botPosition.y) - Number(targetPosition.y),
+                          Number(botPosition.z) - Number(targetPosition.z),
+                      )
+                    : null;
+            let landAnimals: number | null = null;
+            try {
+                let count = 0;
+                for (const other of Object.values(bot?.entities ?? {}) as Array<{ name?: unknown; position?: { x: number; z: number } }>) {
+                    if (!isLandAnimal(String(other?.name ?? ''))) continue;
+                    const p = other?.position;
+                    if (p == null || botPosition == null) continue;
+                    if (Math.hypot(Number(p.x) - Number(botPosition.x), Number(p.z) - Number(botPosition.z)) <= radius) count += 1;
+                }
+                landAnimals = count;
+            } catch {
+                landAnimals = null;
+            }
+            if (targetInWater && !botInWater) {
+                if (waterStallSince <= 0) waterStallSince = now();
+                const waterVerdict = planWaterHuntStop({
+                    elapsedMs: now() - waterStallSince,
+                    distance: distanceNow ?? radius,
+                    attempts,
+                    landAnimals,
+                    botInWater,
+                    targetInWater,
+                    targetName: entity,
+                });
+                if (waterVerdict.stop) {
+                    stopReason = 'water_unreachable';
+                    progress.push({ attempt: attempts, text: waterVerdict.text });
+                    if (progress.length > HUNT_MAX_PROGRESS_LINES) {
+                        progress.splice(0, progress.length - HUNT_MAX_PROGRESS_LINES);
+                    }
+                    break;
+                }
+            } else {
+                waterStallSince = 0;
+            }
+        } catch {
+            // 判据坏了不许让 huntFor 停下来。
+        }
+
         const attackStartedAt = now();
         const claimedKill = await attack(bot, entity);
         const attackMs = Math.max(0, now() - attackStartedAt);
