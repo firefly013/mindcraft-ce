@@ -173,6 +173,65 @@ async function main(): Promise<void> {
     });
   });
 
+  /**
+   * **spawn：CLI 自己开一个角色**（2026-10-21 用 CLI 当玩家时撞到的第一个结构性缺陷）。
+   *
+   * 当时 `cli --agent player stats` 只能回一句"不在线"——因为 cli 只会**遥控已经连上的**
+   * 机器人，想从零开局必须改 settings 再重启服务，终端里做不到。这就是"CLI 是个残疾遥控器"。
+   * 而 MindServer 本来就有 `create-agent` 事件（完整 Settings → 真的拉起 agent），只是没暴露。
+   *
+   * 用法：cli spawn --agent <名字> [--profile <路径>] [--host 127.0.0.1] [--port 61359]
+   * profile 缺省走 `profiles/<名字>.json`；文件里没有的字段交给 MindServer 的默认值。
+   */
+  if (opts.command === 'spawn') {
+    const name = String(opts.agent ?? '').trim();
+    if (name === '') {
+      process.stdout.write('用法：cli spawn --agent <名字> [--profile profiles/x.json] [--host 127.0.0.1] [--port 61359]\n');
+      socket.close();
+      process.exitCode = 2;
+      return;
+    }
+    const profilePath = String(opts.args['profile'] ?? `profiles/${name}.json`);
+    let profile: Record<string, unknown> = {};
+    try {
+      profile = JSON.parse(readFileSync(profilePath, 'utf8')) as Record<string, unknown>;
+    } catch (error: unknown) {
+      process.stdout.write(
+        `读不到 profile 文件 ${profilePath}：${String(error)}\n` +
+          '先写一个再 spawn，最小内容：{"name":"' + name + '","model":"<provider>/<model>"}\n',
+      );
+      socket.close();
+      process.exitCode = 2;
+      return;
+    }
+    profile.name = name;
+    const host = String(opts.args['host'] ?? '127.0.0.1');
+    const mcPort = Number(opts.args['port'] ?? 61359);
+    const settings = { profile, host, port: mcPort };
+    const result = await new Promise<{ success?: boolean; error?: string }>((resolve) => {
+      const timer = setTimeout(() => resolve({ success: false, error: 'spawn 超时（MindServer 没回）' }), 60_000);
+      socket.emit('create-agent', settings, (res: { success?: boolean; error?: string }) => {
+        clearTimeout(timer);
+        resolve(res ?? { success: false, error: 'MindServer 回了空结果' });
+      });
+    });
+    socket.close();
+    if (result.success) {
+      process.stdout.write(
+        `已开角色 ${name}（profile ${profilePath} → ${host}:${mcPort}）。\n` +
+          '它在游戏里生成需要几秒；连上后用 `cli --agent ' + name + ' stats` 确认。\n',
+      );
+    } else {
+      process.stdout.write(
+        `开角色失败：${result.error ?? '未知原因'}\n` +
+          '常见原因：① 名字已经被占用（换一个）；② profile 里的 model 字段认不出来；' +
+          '③ 服务器 ${host}:${mcPort} 没开。\n',
+      );
+      process.exitCode = 1;
+    }
+    return;
+  }
+
   const send = (payload: Record<string, unknown>, timeoutMs: number): Promise<CliResult> =>
     new Promise<CliResult>((resolve) => {
       // 应答到了就把兜底计时器清掉：**计时器不清 = 进程不退出**。它是
