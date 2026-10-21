@@ -77,6 +77,57 @@ describe('不刷屏：血恢复 / 有动作在飞 ⇒ 静默', () => {
   });
 });
 
+describe('autoEat 可观测字段（只读）：为什么 4.5 HP 没自动吃', () => {
+  function eatBody(opts: {
+    health?: number;
+    food?: number;
+    saturation?: number;
+    minHunger?: number;
+    minHealth?: number;
+    items?: any[];
+  } = {}): any {
+    const body: any = Object.create(MineflayerBody.prototype);
+    const records: any[] = [];
+    body.bot = {
+      health: opts.health ?? 4.5,
+      food: opts.food ?? 20,
+      foodSaturation: opts.saturation ?? 0,
+      inventory: { items: () => opts.items ?? [{ name: 'bread', count: 3 }] },
+      autoEat: { _enabled: true, opts: { minHunger: opts.minHunger ?? 14, minHealth: opts.minHealth ?? 14 } },
+    };
+    body.modelActionsInFlight = 0;
+    body.reflexRunning = false;
+    body.currentReflexName = null;
+    body.lastActionName = '';
+    body.lastActionAtMs = 0;
+    body.lastLowHealthIdleLogAt = 0;
+    body.log = { with: () => ({ info: (payload: any) => records.push(payload) }) };
+    return { body, records };
+  }
+  it('health<minHealth ⇒ autoEatTrigger=true，并带上 enabled/minHunger/minHealth/saturation/edibleCount', () => {
+    const { body, records } = eatBody();
+    body.maybeLogLowHealthIdle(1_000);
+    const payload = records[0];
+    expect(payload.autoEatEnabled).toBe(true);
+    expect(payload.autoEatTrigger).toBe(true);
+    expect(payload.autoEatMinHealth).toBe(14);
+    expect(payload.autoEatMinHunger).toBe(14);
+    expect(payload.saturation).toBe(0);
+    expect(payload.edibleCount).toBe(1);
+  });
+  it('阈值极低（不满足触发）⇒ autoEatTrigger=false（区分"配置不能触发"与"触发但失败"）', () => {
+    const { body, records } = eatBody({ minHunger: 1, minHealth: 1 });
+    body.maybeLogLowHealthIdle(1_000);
+    expect(records[0].autoEatTrigger).toBe(false);
+  });
+  it('没有可食物品 ⇒ edibleCount=0 / edibleItems=[]（"触发但没东西吃"的证据）', () => {
+    const { body, records } = eatBody({ items: [{ name: 'cobblestone', count: 10 }] });
+    body.maybeLogLowHealthIdle(1_000);
+    expect(records[0].edibleCount).toBe(0);
+    expect(records[0].edibleItems).toEqual([]);
+  });
+});
+
 describe('接线守卫：update() 调用、且不走模型事件通道', () => {
   const code = (): string => readFileSync(join(process.cwd(), 'src', 'body', 'mineflayer_body.ts'), 'utf8');
   it('update() 里调用 maybeLogLowHealthIdle', () => {

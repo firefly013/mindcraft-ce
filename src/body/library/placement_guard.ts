@@ -81,3 +81,38 @@ export function isJustPlacedDrop(
 export function clearPlacedRecords(): void {
     placedRecords = [];
 }
+
+/**
+ * `placeHere` 的回执（Lead 2026-10-21 ①）：**不许报计划，只报回读**。
+ * `placeHere` 把"当前位置格"当目标——而当前位置格通常就是**身体所在格**，放进去必然被
+ * 占位守卫拒绝（或根本放不上）。所以先把两种现实说清：
+ * - 目标格与身体相交 ⇒ 直接说"这就是我现在站的位置"，给两条可执行替代；
+ * - 否则按回读说成功/失败，不写"Placed"除非回读确认。
+ */
+export function formatPlaceHereReceipt(input: {
+    /** placeBlock 的返回值。 */
+    ok: boolean;
+    target: { x: number; y: number; z: number };
+    expected: string;
+    /** 放置后目标格读回的方块名；读不到 = null。 */
+    readBack: string | null;
+    /** 目标格是否就是身体所在格（feet/head 占的那一格）。 */
+    bodyCell: boolean;
+}): string {
+    const cell = `${input.target.x},${input.target.y},${input.target.z}`;
+    const read = input.readBack == null ? '' : String(input.readBack);
+    const matches = read !== '' && (read === input.expected || read.endsWith(input.expected) || input.expected.endsWith(read));
+    if (input.bodyCell) {
+        return (
+            `**placeHere 放不下**：(${cell}) 就是我现在站的位置（feet/head 都在里面），方块放进去会被占位守卫拒绝。` +
+            '改用：① 先跳起来在最高点放（pillarUp 会做），或 ② 用 placeBlock 指定旁边一格坐标（先 goToCoordinates 挪开也可以）。'
+        );
+    }
+    if (input.ok && matches) {
+        return `placeHere 确认：(${cell}) 现在是 ${read}（回读确认）。`;
+    }
+    return (
+        `placeHere **没有生效**：(${cell}) 读到的是 ${read === '' ? '读不到' : read}，不是 ${input.expected}` +
+        '——可能被 autoPickup 抢回/够不着/那一格不是空气；先用 stats 核对，再 placeBlock 重试。'
+    );
+}

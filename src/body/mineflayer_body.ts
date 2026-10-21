@@ -1901,10 +1901,35 @@ export class MineflayerBody {
             }
             this.lastLowHealthIdleLogAt = now;
             const food = Number(bot?.food);
+            const eatUtil = (bot as { autoEat?: { _enabled?: unknown; opts?: Record<string, unknown> } })?.autoEat ?? null;
+            const edibleItems = (() => {
+                try {
+                    return ((bot as { inventory?: { items?: () => Array<{ name?: unknown }> } })?.inventory?.items?.() ?? [])
+                        .map((item) => String(item?.name ?? ''))
+                        .filter((name) => name !== '' && FOOD_VALUE[name] != null);
+                } catch {
+                    return null;
+                }
+            })();
+            const eatOpts = eatUtil?.opts ?? null;
+            const minHunger = Number(eatOpts?.minHunger);
+            const minHealth = Number(eatOpts?.minHealth);
+            const saturation = Number((bot as { foodSaturation?: unknown })?.foodSaturation);
             this.log.with('lifecycle').info({
                 event: 'low-health-idle',
                 health,
                 food: Number.isFinite(food) ? food : null,
+                saturation: Number.isFinite(saturation) ? saturation : null,
+                autoEatEnabled: eatUtil?._enabled === true,
+                autoEatTrigger: eatUtil == null
+                    ? null
+                    : Number.isFinite(food) && Number.isFinite(minHunger)
+                      ? food < minHunger || (Number.isFinite(health) && Number.isFinite(minHealth) && health < minHealth)
+                      : null,
+                autoEatMinHunger: Number.isFinite(minHunger) ? minHunger : null,
+                autoEatMinHealth: Number.isFinite(minHealth) ? minHealth : null,
+                edibleItems: edibleItems == null ? null : edibleItems.slice(0, 6),
+                edibleCount: edibleItems == null ? null : edibleItems.length,
                 reflexRunning: this.reflexRunning === true,
                 inFlight: this.modelActionsInFlight,
                 reflexKind: this.currentReflexName ?? null,
@@ -4075,6 +4100,25 @@ export class MineflayerBody {
             bannedFood: ['rotten_flesh', 'spider_eye', 'poisonous_potato', 'pufferfish'],
         });
         this.bot.autoEat.enableAuto();
+        // autoEat 的失败是**静默**的（statusCheck 里 catch{} 吞掉异常）。
+        // distinct：低血却没吃成，到底是没食物、被 ban、还是别的原因——先留证据，不改行为。
+        try {
+            this.bot.autoEat.on('eatFail', (error: unknown) => {
+                try {
+                    const bot = this.bot as { food?: unknown; health?: unknown } | null;
+                    this.log.with('lifecycle').info({
+                        event: 'auto-eat-fail',
+                        reason: error instanceof Error ? error.message : String(error),
+                        food: Number(bot?.food),
+                        health: Number(bot?.health),
+                    });
+                } catch {
+                    // 记日志失败不影响进食。
+                }
+            });
+        } catch {
+            // 没有该事件也不阻塞启动。
+        }
 
         // 保命应急交由 common-sense 插件（着火/摔落等基础响应），自研 modes 已退役
         try {

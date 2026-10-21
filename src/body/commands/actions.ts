@@ -8,6 +8,8 @@ import { safeguards } from '../safety/safeguards.js';
 import { collectOverrideFacts, deathCostLine, disableSafeguardsVerdict } from '../safety/reflex_override.js';
 import { DANGEROUS_OPS, isAuthorizable } from '../safety/dangerous_ops.js';
 import { td, tp, MESSAGES } from '../../shared/prompts.js';
+import { formatPlaceHereReceipt } from '../library/placement_guard.js';
+import Vec3 from 'vec3';
 import type { ToolParamDef } from '../../shared/tools.js';
 import { interactList } from './interact.js';
 
@@ -334,7 +336,21 @@ export const actionsList: AgentCommand[] = [
         params: {'type': { type: 'BlockOrItemName', description: tp('placeHere', 'type') }},
         perform: runAsAction(async (agent: any, type: string) => {
             const pos = agent.bot.entity.position;
-            await skills.placeBlock(agent.bot, type, pos.x, pos.y, pos.z);
+            const cell = { x: Math.floor(pos.x), y: Math.floor(pos.y), z: Math.floor(pos.z) };
+            const ok = await skills.placeBlock(agent.bot, type, pos.x, pos.y, pos.z);
+            // 只报回读（Lead 2026-10-21 ①）：placeHere 的目标格通常就是身体所在格，
+            // 放不进去是常态——回执必须说明是「身体格」，而不是含糊的「放置失败」。
+            let readBack: string | null = null;
+            try {
+                const block = agent.bot.blockAt(new Vec3(cell.x, cell.y, cell.z));
+                readBack = block == null ? null : String(block.name ?? "");
+            } catch {
+                readBack = null;
+            }
+            const bodyY = Math.floor(pos.y);
+            const bodyCell =
+                Math.floor(pos.x) === cell.x && Math.floor(pos.z) === cell.z && (bodyY === cell.y || bodyY + 1 === cell.y);
+            skills.log(agent.bot, formatPlaceHereReceipt({ ok, target: cell, expected: type, readBack, bodyCell }));
         })
     },
     {
