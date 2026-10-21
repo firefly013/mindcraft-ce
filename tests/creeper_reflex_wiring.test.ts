@@ -124,3 +124,61 @@ describe('(iv) 让位：更高优先级反射占用身体 ⇒ 不动', () => {
     expect(body.creeperReflexActive).toBe(false);
   });
 });
+
+describe('(v) 威胁分类接线：骷髅低血会行动，满血不噪音', () => {
+  function threatBody(opts: { name: string; health: number; distance: number }): any {
+    const body: any = Object.create(MineflayerBody.prototype);
+    const events: any[] = [];
+    const bot: any = {
+      health: opts.health,
+      entity: { position: { x: 0, y: 64, z: 0 } },
+      entities: { 11: { id: 11, name: opts.name, position: { x: opts.distance, y: 64, z: 0 } } },
+      inventory: { items: () => [] },
+      equip: vi.fn(async () => {}),
+      activateItem: vi.fn(),
+      deactivateItem: vi.fn(),
+      setControlState: vi.fn(),
+      lookAt: vi.fn(async () => {
+        delete bot.entities[11];
+      }),
+    };
+    body.bot = bot;
+    body.creeperReflexActive = false;
+    body.creeperCooldownUntil = 0;
+    body.creeperLastDistance = new Map();
+    body.reflexRunning = false;
+    body.suffocationRunning = false;
+    body.respawnEscapeRunning = false;
+    body.shelterHasRoof = () => false;
+    body.notify = (_type: string, _kind: unknown, _level: unknown, payload: any) => events.push(payload);
+    return { body, bot, events };
+  }
+
+  it('(a) 骷髅 11 格 + 血 12 ⇒ 行动（移动/掩体），回执点名骷髅+距离+血，不 sprint 冲空地', async () => {
+    const { body, bot, events } = threatBody({ name: 'skeleton', health: 12, distance: 11 });
+    body.maybeCreeperReflex();
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    const acted = bot.setControlState.mock.calls.some(([key, value]: any[]) => key === 'forward' && value === true);
+    expect(acted || events.length > 0).toBe(true);
+    expect(bot.setControlState).not.toHaveBeenCalledWith('sprint', true);
+    if (events.length > 0) {
+      const text = String(events[0]?.detail ?? '');
+      expect(text).toContain('骷髅');
+      expect(text).toContain('掩体');
+    }
+  });
+  it('(b) 骷髅 11 格 + 血 20 ⇒ 不动（满血不制造噪音）', async () => {
+    const { body, bot } = threatBody({ name: 'skeleton', health: 20, distance: 11 });
+    body.maybeCreeperReflex();
+    await new Promise((resolve) => setTimeout(resolve, 120));
+    expect(bot.setControlState).not.toHaveBeenCalled();
+    expect(bot.activateItem).not.toHaveBeenCalled();
+  });
+  it('(c) 僵尸 4 格 + 血 8 ⇒ 跑（远离方向）', async () => {
+    const { body, bot } = threatBody({ name: 'zombie', health: 8, distance: 4 });
+    body.maybeCreeperReflex();
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    expect(bot.setControlState.mock.calls.some(([key, value]: any[]) => key === 'forward' && value === true)).toBe(true);
+    expect(bot.lookAt).toHaveBeenCalled();
+  });
+});

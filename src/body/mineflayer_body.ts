@@ -70,8 +70,9 @@ import {
     CREEPER_SAFE_DISTANCE,
     formatCreeperReflexReceipt,
     planCreeperResponse,
+    planThreatResponse,
 } from './safety/creeper_reflex.js';
-import type { CreeperPlan, CreeperResult } from './safety/creeper_reflex.js';
+import type { CreeperResult, ThreatPlan } from './safety/creeper_reflex.js';
 import {
     appendDeath,
     formatRespawnEscapeReceipt,
@@ -2733,16 +2734,36 @@ export class MineflayerBody {
             if (now < this.creeperCooldownUntil) return;
             const position = bot?.entity?.position;
             if (position == null) return;
-            const creepers: Array<{ name: string; distance: number; prevDistance: number | null }> = [];
+            const hostiles: Array<{
+                name: string;
+                distance: number;
+                prevDistance: number | null;
+                threatClass: 'creeper' | 'skeleton' | 'zombie';
+                position: { x: number; z: number };
+            }> = [];
             try {
                 for (const entity of Object.values(bot?.entities ?? {}) as any[]) {
                     const name = String(entity?.name ?? '');
-                    if (!name.toLowerCase().includes('creeper')) continue;
+                    const lower = name.toLowerCase();
+                    const threatClass = lower.includes('creeper')
+                        ? ('creeper' as const)
+                        : lower.includes('skeleton')
+                          ? ('skeleton' as const)
+                          : lower.includes('zombie')
+                            ? ('zombie' as const)
+                            : null;
+                    if (threatClass == null) continue;
                     const p = entity?.position;
                     if (p == null) continue;
                     const distance = Math.hypot(Number(p.x) - Number(position.x), Number(p.z) - Number(position.z));
                     const key = String(entity?.id ?? `${Math.round(Number(p.x))},${Math.round(Number(p.z))}`);
-                    creepers.push({ name, distance, prevDistance: this.creeperLastDistance.get(key) ?? null });
+                    hostiles.push({
+                        name,
+                        distance,
+                        prevDistance: this.creeperLastDistance.get(key) ?? null,
+                        threatClass,
+                        position: { x: Number(p.x), z: Number(p.z) },
+                    });
                     this.creeperLastDistance.set(key, distance);
                 }
             } catch {
@@ -2754,18 +2775,21 @@ export class MineflayerBody {
             } catch {
                 hasShield = false;
             }
-            const plan = planCreeperResponse({
-                health: typeof bot?.health === 'number' ? bot.health : null,
-                creepers,
-                hasShield,
-                sheltered: this.shelterHasRoof() === true,
-                cooldownActive: false,
-                otherReflexActive:
-                    this.reflexRunning === true ||
-                    this.suffocationRunning === true ||
-                    this.respawnEscapeRunning === true,
-            });
-            if (plan.action !== 'block' && plan.action !== 'run') return;
+            const plan = planThreatResponse(
+                {
+                    health: typeof bot?.health === 'number' ? bot.health : null,
+                    hostiles,
+                    hasShield,
+                    sheltered: this.shelterHasRoof() === true,
+                    cooldownActive: false,
+                    otherReflexActive:
+                        this.reflexRunning === true ||
+                        this.suffocationRunning === true ||
+                        this.respawnEscapeRunning === true,
+                },
+                { x: Number(position.x), z: Number(position.z) },
+            );
+            if (plan.action !== 'block' && plan.action !== 'run' && plan.action !== 'cover') return;
             this.creeperReflexActive = true;
             void this.performCreeperReflex(plan, hasShield)
                 .catch(() => {})
@@ -2779,7 +2803,7 @@ export class MineflayerBody {
     }
 
     /** 执行一次苦力怕 episode：举盾（≤2.5 s）或远离（≤20 步/20 s），然后报一条事实回执。 */
-    private async performCreeperReflex(plan: CreeperPlan, hasShield: boolean): Promise<void> {
+    private async performCreeperReflex(plan: ThreatPlan, hasShield: boolean): Promise<void> {
         const bot = this.bot as any;
         const healthBefore = typeof bot?.health === 'number' ? bot.health : null;
         const startedAt = Date.now();
@@ -2823,15 +2847,25 @@ export class MineflayerBody {
                 const damage =
                     healthBefore != null && healthAfter != null ? Math.max(0, Math.round((healthBefore - healthAfter) * 10) / 10) : null;
                 const outcome = !raised ? 'tooLate' : damage != null && damage > 0 ? 'tookDamage' : 'blocked';
-                this.notifyCreeperReflex({ action: 'block', outcome, distance: plan.distance, healthBefore, healthAfter, elapsedMs: Date.now() - startedAt });
+                this.notifyCreeperReflex({
+                    action: 'block',
+                    outcome,
+                    threatClass: plan.threatClass,
+                    distance: plan.distance,
+                    healthBefore,
+                    healthAfter,
+                    elapsedMs: Date.now() - startedAt,
+                });
                 return;
             }
-            // 没盾：朝远离向量跑，直到 >10 格 / 威胁消失 / 20 步 / 20 秒。
+            // 没盾/找掩体：朝远离向量跑，直到 >10 格 / 威胁消失 / 20 步 / 20 秒。
             const away = plan.away ?? { x: 0, z: 1 };
             const startPos = bot?.entity?.position;
             const startDistance = plan.distance;
+            // 骷髅是远程：sprint 冲空地只会更好被射中 ⇒ 走过去找掩体；苦力怕/僵尸可 sprint。
+            const allowSprint = plan.threatClass !== 'skeleton';
             try {
-                bot.setControlState('sprint', true);
+                if (allowSprint) bot.setControlState('sprint', true);
             } catch {
                 /* 允许关不掉 */
             }
@@ -2841,7 +2875,8 @@ export class MineflayerBody {
                 let nearest: number | null = null;
                 try {
                     for (const entity of Object.values(bot?.entities ?? {}) as any[]) {
-                        if (!String(entity?.name ?? '').toLowerCase().includes('creeper')) continue;
+                        // 按本次 plan 的类别找对应威胁（骷髅/僵尸也走同一条逃逸循环）。
+                        if (!String(entity?.name ?? '').toLowerCase().includes(plan.threatClass ?? 'creeper')) continue;
                         const p = entity?.position;
                         if (p == null) continue;
                         const distance = Math.hypot(Number(p.x) - Number(position.x), Number(p.z) - Number(position.z));
@@ -2854,7 +2889,7 @@ export class MineflayerBody {
                 try {
                     await bot.lookAt(new Vec3(position.x + away.x, position.y, position.z + away.z));
                     bot.setControlState('forward', true);
-                    bot.setControlState('sprint', true);
+                    if (allowSprint) bot.setControlState('sprint', true);
                 } catch {
                     break;
                 }
@@ -2877,8 +2912,9 @@ export class MineflayerBody {
             healthAfter = typeof bot?.health === 'number' ? bot.health : healthAfter;
             const took = healthBefore != null && healthAfter != null && healthAfter < healthBefore;
             this.notifyCreeperReflex({
-                action: 'run',
+                action: plan.action === 'cover' ? 'cover' : 'run',
                 outcome: took ? 'tookDamage' : 'ran',
+                threatClass: plan.threatClass,
                 distance: plan.distance,
                 healthBefore,
                 healthAfter,

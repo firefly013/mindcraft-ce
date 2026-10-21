@@ -5,6 +5,11 @@
 import { describe, expect, it } from 'vitest';
 import {
   CREEPER_ALERT_RANGE,
+  planThreatResponse,
+  SKELETON_ALERT_RANGE,
+  SKELETON_LOW_HEALTH,
+  ZOMBIE_ALERT_RANGE,
+  ZOMBIE_LOW_HEALTH,
   CREEPER_REFLEX_COOLDOWN_MS,
   CREEPER_SAFE_DISTANCE,
   formatCreeperReflexReceipt,
@@ -69,5 +74,59 @@ describe('事实回执：不许无证据说"躲过了"', () => {
   it('读不到血量 ⇒ 如实说读不到', () => {
     const text = formatCreeperReflexReceipt({ action: 'block', outcome: 'blocked', distance: 3, healthBefore: null, healthAfter: null });
     expect(text).toContain('读不到');
+  });
+});
+
+// ─────────────────── 威胁分类：骷髅/僵尸也走同一个反射（Lead 2026-10-21 真机死因） ───────────────────
+
+describe('威胁分类：健康门槛 + 类别触发', () => {
+  const base2 = { hasShield: false, sheltered: false, cooldownActive: false, otherReflexActive: false };
+  const threat = (threatClass: any, distance: number) => ({
+    name: threatClass,
+    distance,
+    prevDistance: null,
+    threatClass,
+    position: { x: distance, z: 0 },
+  });
+
+  it('(a) 骷髅 11 格 + 血 12 ⇒ cover（找掩体），回执点名类别+距离+血', () => {
+    const plan = planThreatResponse({ ...base2, health: 12, hostiles: [threat('skeleton', 11)] });
+    expect(plan.action).toBe('cover');
+    expect(plan.threatClass).toBe('skeleton');
+    expect(plan.reason).toContain('骷髅 11.0 格');
+    expect(plan.reason).toContain('血 12');
+    expect(plan.reason).toContain('掩体');
+  });
+  it('(b) 骷髅 11 格 + 血 20 ⇒ 不动（满血不制造噪音）', () => {
+    expect(planThreatResponse({ ...base2, health: 20, hostiles: [threat('skeleton', 11)] }).action).toBe('none');
+  });
+  it('(c) 僵尸 4 格 + 血 8 ⇒ 跑（不近战）', () => {
+    const plan = planThreatResponse({ ...base2, health: 8, hostiles: [threat('zombie', 4)] }, { x: 0, z: 0 });
+    expect(plan.action).toBe('run');
+    expect(plan.threatClass).toBe('zombie');
+    expect(plan.away?.x).toBeLessThan(-0.9);
+  });
+  it('(d) 僵尸 4 格 + 血 20 ⇒ 不动', () => {
+    expect(planThreatResponse({ ...base2, health: 20, hostiles: [threat('zombie', 4)] }).action).toBe('none');
+  });
+  it('(e) 苦力怕行为不变：8 格内有盾举盾、没盾跑（与血量无关）', () => {
+    expect(planThreatResponse({ ...base2, health: 20, hasShield: true, hostiles: [threat('creeper', 7)] }).action).toBe('block');
+    expect(planThreatResponse({ ...base2, health: 3, hostiles: [threat('creeper', 7)] }).action).toBe('run');
+  });
+  it('(f) 让位优先：更高优先级反射占用身体 ⇒ yield（不抢）', () => {
+    expect(planThreatResponse({ ...base2, health: 5, otherReflexActive: true, hostiles: [threat('skeleton', 6)] }).action).toBe('yield');
+  });
+  it('骷髅 cover 回执：没掉血才说"这一轮没再中箭"，掉血就说被射中', () => {
+    const safe = formatCreeperReflexReceipt({
+      action: 'cover', threatClass: 'skeleton', outcome: 'ran', distance: 11, healthBefore: 12, healthAfter: 12,
+    });
+    expect(safe).toContain('骷髅 11.0 格');
+    expect(safe).toContain('这一轮没再中箭');
+    expect(safe).not.toContain('躲过了');
+    const hit = formatCreeperReflexReceipt({
+      action: 'cover', threatClass: 'skeleton', outcome: 'tookDamage', distance: 11, healthBefore: 12, healthAfter: 7,
+    });
+    expect(hit).toContain('中箭掉血 5');
+    expect(hit).not.toContain('这一轮没再中箭');
   });
 });
