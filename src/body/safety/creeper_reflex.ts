@@ -137,9 +137,18 @@ export type ThreatClass = 'creeper' | 'skeleton' | 'zombie';
 export const SKELETON_ALERT_RANGE = 12;
 /** 骷髅是远程：能把你射死，所以血 ≤14 才打断动作（满血不制造噪音）。 */
 export const SKELETON_LOW_HEALTH = 14;
-export const ZOMBIE_ALERT_RANGE = 5;
-/** 僵尸慢，但低血挨一下也致命：血 ≤10 才跑。 */
-export const ZOMBIE_LOW_HEALTH = 10;
+/**
+ * 僵尸的触发范围/血量。**2026-10-21 用正确统计改高过一次**：
+ *
+ * 旧值（5 格 / 血 ≤10）的依据是"僵尸慢"，但那是普通难度的手感。这个档是**困难**：
+ * 僵尸 3 格内两三下就能打死满血的人，等到血 ≤10 再跑经常已经来不及。
+ * 实测死因分布（只数 `agent.death` 里的临终消息，A 117 死 + B 182 死）：
+ * **僵尸 113 次（38%）** 是头号杀手，而同一时段日志里战斗反射只触发了 1 次——
+ * 阈值定得太保守，等于没有护栏。
+ * 现在：7 格 / 血 ≤16 就退。宁可多跑几次，也不要在 3 格内和它换血。
+ */
+export const ZOMBIE_ALERT_RANGE = 7;
+export const ZOMBIE_LOW_HEALTH = 16;
 
 export interface ThreatCandidate extends CreeperCandidate {
     threatClass: ThreatClass;
