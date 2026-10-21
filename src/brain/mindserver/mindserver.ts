@@ -162,6 +162,12 @@ export function createMindServer(
             settings: Settings,
             callback: (result: CreateAgentCallbackResult) => void,
         ) => {
+            // **整个 handler 必须自己兜住异常**（2026-10-21 真机事故）：
+            // 这个 handler 是 async 的，里面 `await mindcraft.createAgent(...)` 一旦 reject
+            // （例如刚创建的 bot 进程立刻死掉/连接被拒），就会变成**未捕获的 Promise rejection**，
+            // Node 直接把 MindServer 整个进程带走——表现是 `cli` 全部 "xhr poll error"，
+            // 一个 bot 的问题升级成**所有 bot 一起失联**。服务器的底线是"自己别死"。
+            try {
             console.log('API create agent...');
             for (const key in settings_spec) {
                 if (!(key in settings)) {
@@ -194,6 +200,15 @@ export function createMindServer(
             } else {
                 console.error('Agent name is required in profile');
                 callback({ success: false, error: 'Agent name is required in profile' });
+            }
+            } catch (error: unknown) {
+                // 兜住之后**必须回一句**，否则调用方（cli spawn）会一直等到超时。
+                console.error('create-agent 失败（MindServer 继续运行）:', error);
+                try {
+                    callback({ success: false, error: `创建 agent 时出错：${String(error)}` });
+                } catch {
+                    // callback 本身再炸就只记日志：绝不允许它把进程带走。
+                }
             }
         });
 

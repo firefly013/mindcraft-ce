@@ -142,3 +142,20 @@ try {
     }
     throw error;
 }
+
+/**
+ * **MindServer 的底线：不许因为一个 bot 的异常把自己带走。**
+ *
+ * 2026-10-21 真机事故：用 `cli spawn` 开了一个 agent，几秒后把那个 bot 进程杀掉，
+ * MindServer 整个退出——所有 `cli` 命令立刻 "xhr poll error"，两个正常运行的机器人一起失联。
+ * 一个成员的故障升级成了全集群故障，代价完全没必要。
+ *
+ * 这里只兜**进程级**的漏网异常：记日志、继续服务。业务内的错误仍然要在各自 handler 里
+ * try/catch 并回话（见 create-agent），不要把这条当成"错误不用处理"的借口。
+ */
+process.on('unhandledRejection', (reason: unknown) => {
+    console.error('[MindServer] 未处理的 Promise rejection（继续运行）:', reason);
+});
+process.on('uncaughtException', (error: unknown) => {
+    console.error('[MindServer] 未捕获异常（继续运行）:', error);
+});
