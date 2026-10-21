@@ -1488,8 +1488,11 @@ export async function runInteractiveAction(
     return `${label} 执行出错：${error instanceof Error ? error.message : String(error)}`;
   }
   if (outcome?.interrupted === true && outcome.timedout !== true) {
+    // 同 `actions.ts` / `execute.ts`：中断必须指名，不许列三个候选（Lead 2026-10-21）。
+    const who = String((agent?.bot as any)?.__interruptReason ?? '').trim();
+    const whoText = who === '' ? '原因未记录（这是已知缺口，不是你的错）' : who;
     return (
-      `${label} 被中断（Stop / 保命反射 / autoPickup 抢走了身体），本次没有完整结果。` +
+      `${label} 被中断（${whoText}），本次没有完整结果。` +
       '不要盲目重发；先用 stats 看当前位置和背包，再决定继续还是换路。'
     );
   }

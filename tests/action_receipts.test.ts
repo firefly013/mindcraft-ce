@@ -350,7 +350,9 @@ describe('交互动作的统一结局', () => {
     };
     const text = await runInteractiveAction(agent, 'useBlock', () => '不该原样返回');
     expect(text).toContain('被中断');
-    expect(text).toContain('autoPickup');
+    // 契约变更（Lead 2026-10-21）：**不许列三个候选**，要么指名、要么如实说没记录。
+    expect(text).toContain('原因未记录');
+    expect(text).not.toContain('Stop / 保命反射 / autoPickup');
     expect(text).not.toContain('不该原样返回');
   });
 

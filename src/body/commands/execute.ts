@@ -202,8 +202,16 @@ export function annotateSearchForBlock(
         );
     }
     if (/被中断|中断（|interrupted/i.test(body)) {
+        // **不许列三个候选**（Lead 2026-10-21，真机当场抓到）：上一轮只改了
+        // `actions.ts` 的中断回执，`searchForBlock` 走的是这里，文案照旧是
+        // "Stop / 保命反射 / autoPickup 抢走身体都会这样"——三个候选等于零信息，
+        // 模型拿到它只能盲试。现在从 `body` 里认元凶（body 侧会写"原因未记录"或具体原因），
+        // 认不出来就如实说没记录。
+        const whoMatch = /被中断（([^）]{1,40})）/.exec(body);
+        const who = whoMatch != null ? whoMatch[1] : '';
+        const whoText = who === '' ? '原因未记录（这是已知缺口，不是你的错）' : who;
         return (
-            `searchForBlock：搜索没做完就被中断了（Stop / 保命反射 / autoPickup 抢走身体都会这样），` +
+            `searchForBlock：搜索没做完就被中断了（${whoText}），` +
             `搜索范围 ${range} 格；${moved}` +
             `结论：无法确认 ${type} 是否在范围内（原因：搜索被中断，没有写出找到/未找到）。` +
             '通道已释放，可以缩小 search_range 重试或换目标；急用就先 stats 核对当前位置。' +
