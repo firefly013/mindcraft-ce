@@ -347,6 +347,9 @@ export interface EmergencyResult {
 export type EmergencyIntent = 'surface' | 'flee' | 'lava';
 
 /** 溺水：只要头还在水里就往上浮，浮出来就算处理完了。 */
+/** 水面反射最多占身体多久：够它浮上来并在水面往岸边试，又不至于把模型锁死。 */
+const SURFACE_MAX_MS = 12_000;
+
 async function runSurface(
   bot: EmergencyBot,
   io: { tickMs: number; sleep: (ms: number) => Promise<void> },
@@ -356,10 +359,32 @@ async function runSurface(
   if (bot.safeguardsOff?.() === true) {
     return { escaped: false, reason: 'safe', position: bot.feet(), health: bot.health };
   }
+  const surfaceStartedAt = Date.now();
   for (;;) {
     if (bot.health <= 0) return { escaped: false, reason: 'died' };
-    if (bot.submerged?.() !== true) {
+    // **"头露出水面"不等于脱险**（2026-10-21 数据修正）。
+    // 全量日志统计：overnight_a 78% 的死亡、overnight_b 78% 的死亡是 drowned，
+    // 其中 238/269 有坐标的溺亡发生在 y>=55（水面高度），**192/269 死亡瞬间
+    // currentAction 为空**——不是死在赶路，是漂在水里慢慢淹死。
+    // 旧判据只要 `submerged !== true` 就 return escaped:true：在汪洋中间浮着也算"安全"，
+    // 反射立刻结束、身体交还模型、模型没有动作、于是再沉下去——这就是那 192 条的来历。
+    // 新判据：**头不淹 且 脚下不是水** 才算真的到了岸上/干地。
+    const headClear = bot.submerged?.() !== true;
+    const feetName = bot.feetBlockName?.() ?? null;
+    const standingInWater = feetName === 'water' || feetName === 'flowing_water'
+      || feetName === 'bubble_column';
+    if (headClear && !standingInWater) {
       return { escaped: true, reason: 'safe', position: bot.feet(), health: bot.health };
+    }
+    // 还在水里（浮着或泡着）就继续上浮/往岸边探；但有**时间上限**，
+    // 不许为了"一定上岸"把身体无限占住（2026-10-18 的反射↔模型抢身体就是这么死的）。
+    if (Date.now() - surfaceStartedAt > SURFACE_MAX_MS) {
+      return {
+        escaped: false,
+        reason: 'time-cap',
+        position: bot.feet(),
+        health: bot.health,
+      };
     }
     bot.swimUp?.();
     await io.sleep(io.tickMs);
