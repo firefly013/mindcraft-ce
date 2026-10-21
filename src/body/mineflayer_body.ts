@@ -702,6 +702,10 @@ export function toolResultLooksFailed(text: unknown): boolean {
     return /^(Tool\s+\S+\s+failed:|Unknown tool:|Unknown tool\b)/i.test(first);
 }
 
+/** 低血静止诊断：只在 lifecycle 里每 30 秒一行，**不产生模型事件、不是门、不改行为**。 */
+export const LOW_HEALTH_IDLE_THRESHOLD = 6;
+export const LOW_HEALTH_IDLE_INTERVAL_MS = 30_000;
+
 export class MineflayerBody {
     readonly name: string;
     readonly countId: number;
@@ -1871,8 +1875,46 @@ export class MineflayerBody {
         try {
             this.lastActionInventory = this.readInventoryCounts();
             this.lastActionName = actionName;
+            this.lastActionAtMs = Date.now();
         } catch {
             // 读不到就保持上一次快照（不许把未知当已知）。
+        }
+    }
+
+
+    /**
+     * **谁占着身体**（Lead 2026-10-21：B 在 2.67 HP 静止 ≥45 秒后死亡——是锁还是模型没发指令？）。
+     * 只读诊断：低血 + 没有动作在飞时，每 30 秒打一行 lifecycle；血恢复或动作开始就停（不刷屏）。
+     * @returns 这一 tick 是否真的写了一行（测试用）。
+     */
+    maybeLogLowHealthIdle(now: number = Date.now()): boolean {
+        try {
+            const bot = this.bot as { health?: unknown; food?: unknown } | null;
+            const health = Number(bot?.health);
+            const inFlight = this.modelActionsInFlight > 0;
+            if (!Number.isFinite(health) || health > LOW_HEALTH_IDLE_THRESHOLD || inFlight) {
+                this.lastLowHealthIdleLogAt = 0;
+                return false;
+            }
+            if (this.lastLowHealthIdleLogAt !== 0 && now - this.lastLowHealthIdleLogAt < LOW_HEALTH_IDLE_INTERVAL_MS) {
+                return false;
+            }
+            this.lastLowHealthIdleLogAt = now;
+            const food = Number(bot?.food);
+            this.log.with('lifecycle').info({
+                event: 'low-health-idle',
+                health,
+                food: Number.isFinite(food) ? food : null,
+                reflexRunning: this.reflexRunning === true,
+                inFlight: this.modelActionsInFlight,
+                reflexKind: this.currentReflexName ?? null,
+                lastAction: this.lastActionName === '' ? null : this.lastActionName,
+                lastActionAtMs: this.lastActionAtMs === 0 ? null : this.lastActionAtMs,
+                ms: now,
+            });
+            return true;
+        } catch {
+            return false;
         }
     }
 
@@ -3012,6 +3054,9 @@ export class MineflayerBody {
     /** 上一个动作结束时的背包快照：用来回答「东西是在哪一步消失的」。 */
     private lastActionInventory: InventoryCounts | null = null;
     private lastActionName = '';
+    private lastActionAtMs = 0;
+    /** 低血静止诊断：上次打 lifecycle 行的时间（0 = 当前不在诊断期）。 */
+    private lastLowHealthIdleLogAt = 0;
     /** yield 被循环 verdict 顶掉 / 真的赢了（写进 respawn-loop 日志，供 Lead 定位）。 */
     private lastYieldBeatenReason = '';
     private lastYieldReason = '';
@@ -4285,6 +4330,8 @@ export class MineflayerBody {
         // 深水强制出水（见 maybeForceExitWater）。同样是后台行为，不能 await。
         this.maybeForceExitWater();
         // 天黑/快黑且不安全 ⇒ 主动躲（assist，非阻塞；有界、可让位）。
+        // 低血静止诊断（只写 lifecycle，不产生模型事件）。
+        this.maybeLogLowHealthIdle();
         this.perhapsNightShelter();
         // 窒息自救：血在掉 + 脚/头那格实心 ⇒ 就地挖开（与怪物无关，优先级高于一切）。
         this.maybeSuffocationEscape();
