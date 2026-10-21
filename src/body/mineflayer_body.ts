@@ -2227,7 +2227,17 @@ export class MineflayerBody {
             if (this.lastDeathAt > 0 && Date.now() - this.lastDeathAt <= 120_000) {
                 const items = this.bot?.inventory?.items?.() ?? [];
                 if (items.length === 0) {
-                    const loopV = respawnLoopVerdict({ deaths: this.respawnDeaths ?? [], now: Date.now(), position: null });
+                    // **必须把当前位置传进去**（2026-10-22 真机危机）：原来传的是 `position: null`，
+                    // 而 `respawnLoopVerdict` 里"同一个点反复死"那条分支**依赖 position != null**——
+                    // 传 null 等于把重生循环最典型的签名（同一个坐标反复死）整个关掉。
+                    // 现场：06:25~06:36 两个 bot 在复活点 (4.5,65,10.5) 被僵尸守着，
+                    // A 死 11 次、B 死 6 次，每次都 `yield:empty-after-death` 交还身体原地等死。
+                    const pos = this.bot?.entity?.position ?? null;
+                    const loopV = respawnLoopVerdict({
+                        deaths: this.respawnDeaths ?? [],
+                        now: Date.now(),
+                        position: pos == null ? null : { x: Number(pos.x), y: Number(pos.y), z: Number(pos.z) },
+                    });
                     if (shouldYieldBePreempted({ inLoop: loopV.inLoop, yieldReason: 'empty-after-death' })) {
                         this.lastYieldBeatenReason = 'empty-after-death';
                         return null;

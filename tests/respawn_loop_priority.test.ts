@@ -20,7 +20,12 @@ describe('循环 verdict 压过普通 yield', () => {
   });
   it('接线：empty-after-death 分支先算循环 verdict，inLoop 就 return null', () => {
     const code = body();
-    expect(code).toContain('const loopV = respawnLoopVerdict({ deaths: this.respawnDeaths ?? [], now: Date.now(), position: null });');
+    // 契约变更（Lead 2026-10-22）：这里**必须传当前位置**。
+    // 原来传 position: null，而 respawnLoopVerdict 里"同一个点反复死"分支依赖 position != null
+    // ⇒ 等于把重生循环最典型的签名整个关掉。真机：复活点被僵尸守着，A 死 11 次 / B 死 6 次。
+    expect(code).toMatch(/respawnLoopVerdict\(\{/);
+    expect(code).toContain('position: pos == null ? null :');
+    expect(code).not.toContain('position: null });');
     expect(code).toContain("shouldYieldBePreempted({ inLoop: loopV.inLoop, yieldReason: 'empty-after-death' })");
     expect(code).toContain('this.lastYieldBeatenReason');
   });
