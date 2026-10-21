@@ -361,6 +361,9 @@ export function isControlledSafeLavaOperation(bot: any): boolean {
 export function forceStopBody(agent: any): void {
     const bot = agent?.bot;
     if (bot != null) bot.interrupt_code = true;
+    // **留下"是谁打断的"**：中断回执要能指名（见 commands/actions.ts）。
+    // 以前只有一个 boolean，回执只能列三个候选——对模型等于没有信息。
+    if (bot != null && bot.__interruptReason == null) bot.__interruptReason = '保命反射/急停抢走了身体';
     try {
         bot?.clearControlStates?.();
     } catch {
@@ -2714,6 +2717,8 @@ export class MineflayerBody {
     clearBotLogs(): void {
         this.bot.output = '';
         this.bot.interrupt_code = false;
+        // 新动作开始：清掉上一轮的中断原因，否则它会粘到这一轮的回执上（谎报元凶）。
+        this.bot.__interruptReason = null;
     }
 
     cleanKill(msg = 'Killing agent process...', code = 1): void {

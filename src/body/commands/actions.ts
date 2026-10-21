@@ -90,8 +90,15 @@ function runAsAction (actionFn: AgentActionFn, timeout = DEFAULT_ACTION_TIMEOUT_
             // "搜索没做完，因为 Stop/保命反射抢走了身体"。
             const logs = String(code_return.message ?? '').trim();
             const tail = logs === '' ? '' : `\n中断前的日志：${logs.split('\n').slice(-4).join(' / ')}`;
+            // **必须指出是谁打断的，不许列清单**（Lead 2026-10-21：用 CLI 驱动
+            // `collectBlocks` 被中断，回执写"Stop / 保命反射 / autoPickup 抢走了身体"——
+            // 三个候选等于零信息，模型只能盲试同一条命令）。
+            // body 侧在真正置 `interrupt_code` 的地方留下 `__interruptReason`，
+            // 这里直接读；没记录就**如实说没记录**，不再假装知道。
+            const who = String((agent.bot as any)?.__interruptReason ?? '').trim();
+            const whoText = who === '' ? '原因未记录（这是已知缺口，不是你的错）' : who;
             return (
-                `${actionLabel}：**被中断**（Stop / 保命反射 / autoPickup 抢走了身体），没有做完，也没有结论。` +
+                `${actionLabel}：**被中断**（${whoText}），没有做完，也没有结论。` +
                 `通道已经释放，可以开始下一个动作。${tail}`
             );
         }

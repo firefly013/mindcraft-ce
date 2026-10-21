@@ -95,7 +95,12 @@ export class ActionManager {
         } catch {
             // 同上。
         }
-        if (bot != null) bot.interrupt_code = true;
+        if (bot != null) {
+            bot.interrupt_code = true;
+            // 中断回执要能指名是谁（见 commands/actions.ts）：这里是显式 Stop 的路径。
+            if (bot.__interruptReason == null) bot.__interruptReason = 'Stop（显式停止）';
+        }
+
     }
 
     /**
