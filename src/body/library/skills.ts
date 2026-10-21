@@ -5946,9 +5946,38 @@ export async function goToSurface(bot: any): Promise<boolean> {
     }
     const arrived = await goToPosition(bot, block.position.x, targetY, block.position.z, 0);
     if (!arrived) {
+        // **物理死局要如实说出来**（2026-10-21 真机，数据来自 overnight_a）：
+        // 它在 y=20、背包只有 2 个土、离地表 45 格、没有镐；在"上不去"这句话之后
+        // **原地耗了 3 小时**——不是模型懒，是这个局面在资源上真的无解：
+        // 没有方块垫不上去，没有镐挖不动石头，来路是自己挖的竖井。
+        // 而 keepInventory=false 的世界里，**"死一次回出生点"往往是这个局面的最优解**，
+        // 引擎却从来不会这么说，于是模型只能一直试。
+        // 判据很窄（没有镐 + 可垫方块 < 高差），只在真无解时才说，不当通用建议。
+        let deadEndAdvice = '';
+        try {
+            const here = Number(bot?.entity?.position?.y ?? 0);
+            const gap = Math.max(0, Math.round(targetY - here));
+            const items: Array<{ name?: string; count?: number }> = bot.inventory?.items?.() ?? [];
+            const hasPickaxe = items.some((it) => /_pickaxe$/.test(String(it.name ?? '')));
+            const placeable = items
+                .filter((it) => /^(dirt|cobblestone|stone|andesite|granite|diorite|sand|gravel|netherrack|dead_bush|.*_planks|.*_log)$/.test(String(it.name ?? '')))
+                .reduce((sum, it) => sum + Number(it.count ?? 1), 0);
+            const carried = items.reduce((sum, it) => sum + Number(it.count ?? 1), 0);
+            if (gap > 0 && !hasPickaxe && placeable < gap) {
+                deadEndAdvice =
+                    ` **这个局面在资源上无解**：离地表 ${gap} 格、能垫脚的方块只有 ${placeable} 个、` +
+                    `而且没有能挖石头的镐——往上没有路，继续在这里试只会耗掉整晚。` +
+                    `你身上一共 ${carried} 件东西，这个档 keepInventory=false：` +
+                    `**如果这里不值得留，让一次死亡把你送回出生点，代价比你想象的更小**，` +
+                    `这比困在竖井底部一直试要强。`;
+            }
+        } catch {
+            // 读不到背包就不给结论，不编数字。
+        }
         log(
             bot,
-            'Surface is at y=' + targetY + ' (' + block.name + ') but I could not get up there from here. 竖井/洞穴里常这样——用 stairUp/pillarUp 垂直上行，或者 mineBlock 挖头顶开路。',
+            'Surface is at y=' + targetY + ' (' + block.name + ') but I could not get up there from here. 竖井/洞穴里常这样——用 stairUp/pillarUp 垂直上行，或者 mineBlock 挖头顶开路。' +
+                deadEndAdvice,
         );
         return false;
     }
