@@ -5533,6 +5533,35 @@ export async function pillarUp(bot: any, blocks: number = 1): Promise<boolean> {
                 return false;
             }
             placed = await placeBlock(bot, material, standingCell.x, standingCell.y, standingCell.z, 'bottom', true);
+            // **放块之后自检"身体格子有没有被占住"**（2026-10-22 真机事故）：
+            // overnight_b 连续 4 次 pillarUp（03:02:00/16/22/30）之后
+            // 03:02:39 `suffocated in a wall` 窒息死亡。上面两道守卫（跳前验一次、放前再验一次）
+            // 都是在**放之前**判断的，放完之后没有复检——只要有一次放偏到身体里，
+            // 结局就是被方块闷死。这里补上：放完立刻检查脚/头两格，被占就当场挖掉自救。
+            if (placed) {
+                try {
+                    const p2 = bot.entity.position;
+                    const bx = Math.floor(Number(p2.x));
+                    const by = Math.floor(Number(p2.y));
+                    const bz = Math.floor(Number(p2.z));
+                    const feetBlk = verticalName(blockAt(bx, by, bz));
+                    const headBlk = verticalName(blockAt(bx, by + 1, bz));
+                    const feetFilled = feetBlk != null && !isVerticalPassable(feetBlk);
+                    const headFilled = headBlk != null && !isVerticalPassable(headBlk);
+                    if (feetFilled || headFilled) {
+                        const rescueY = headFilled ? by + 1 : by;
+                        log(
+                            bot,
+                            'pillarUp：放块之后**自己的身体格子被占住了**（' +
+                                (headFilled ? '头部 ' + String(headBlk) : '脚下 ' + String(feetBlk)) +
+                                '），正在挖掉自救——这一格本来绝不该被填。已垫 ' + done + '/' + wanted + ' 格。',
+                        );
+                        await breakBlockAt(bot, bx, rescueY, bz);
+                    }
+                } catch {
+                    // 读不到位置就不做判断（宁可少一次检查，也不要因此中断爬升）。
+                }
+            }
         } else {
             // 跳了但没升起来：这是**不同**的可执行原因，不是"会窒息"。
             bot.setControlState('jump', false);
