@@ -5374,7 +5374,8 @@ export function pillarApexVerdict(input: {
         return {
             canPlace: false,
             message:
-                `pillarUp 停止：目标格 ${cell} 与身体重叠（身体在 y=${input.bodyY.toFixed(1)}），这一步不放——先 mine 头顶一格再试。`,
+                `pillarUp 停止：**要放的格子就是我现在站的位置**（目标格 ${cell}，身体在 y=${input.bodyY.toFixed(1)}` +
+                '——feet/head 都在里面），这一次不放；先 mineBlock 挖开头顶那一格，或换位置。',
         };
     }
     return { canPlace: true, message: null };
@@ -5438,6 +5439,18 @@ export async function pillarUp(bot: any, blocks: number = 1): Promise<boolean> {
             const dug = await breakBlockAt(bot, plan.target.x, plan.target.y, plan.target.z);
             if (!dug) {
                 log(bot, 'pillarUp 停止：挖头顶方块失败（已完成 ' + done + '/' + wanted + ' 格）。');
+                return false;
+            }
+            // **挖了却还是实心 ⇒ 不许原地循环重挖**（真机 A：回执只有 dig 行反复出现，
+            // `planPillarStep` 又算出同一个 mine 目标，直到超时——看起来像"往自己脚下放"）。
+            const stillThere = verticalName(blockAt(plan.target.x, plan.target.y, plan.target.z));
+            if (stillThere != null && !isVerticalPassable(stillThere)) {
+                log(
+                    bot,
+                    'pillarUp 停止：挖了 (' + plan.target.x + ',' + plan.target.y + ',' + plan.target.z + ') 的 ' +
+                        stillThere + '，但那里**仍然是实心**（方块没更新/是挖不动的方块）——不再原地重挖。' +
+                        '下一步：换位置重试，或先 mineBlock 那一格确认能挖掉。',
+                );
                 return false;
             }
             continue;
