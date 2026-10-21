@@ -7240,6 +7240,26 @@ export async function stepIntoCell(
         }
     };
     if (inCell()) return { moved: true, reason: null, attempts: 0, from, to: readPos(), obstacles: [] };
+    // **往下走一格不需要按前进键**（2026-10-22 用 CLI 在真机定位到的通关阻断点）：
+    // overnight_b 在 (44,9,15) 执行 digDown，挖掉脚下 granite 之后这一步报
+    // "走不进去：目标脚下是 stone（站不住）；按键期间位置完全没变"——因为目标是**正下方**
+    // 那一格（x/z 相同、y 小 1），按 forward 水平位移恒为 0，于是每次都判失败，
+    // digDown 1 秒就停。钻石在 y≈-58，机器人因此永远到不了钻石层。
+    // 正确做法：目标在下方且该格已是空气 ⇒ 松开按键**等重力**把人带下去。
+    if (goal.y < Math.floor(from.y)) {
+        try {
+            release();
+        } catch {
+            // 松键失败也无所谓，重力一样起作用。
+        }
+        const dropDeadline = Date.now() + 1200;
+        while (Date.now() < dropDeadline) {
+            await new Promise<void>((resolve) => setTimeout(resolve, 120));
+            if (inCell() || readPos().y <= goal.y + 0.5) {
+                return { moved: true, reason: null, attempts: 1, from, to: readPos(), obstacles: [] };
+            }
+        }
+    }
     const climb = goal.y > Math.floor(from.y);
     const attemptsMax = 3;
     for (let attempt = 1; attempt <= attemptsMax; attempt++) {
