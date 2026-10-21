@@ -5665,6 +5665,50 @@ export class MineflayerBody {
                         // 拿不到实体就没什么可做的。
                     }
                 },
+                // 朝岸边游（2026-10-21：78% 的死亡是溺亡，其中 71% 死时没有任何动作——
+                // 旧反射只会按 jump 浮着；浮着不动不等于上岸，反射一收工就又沉下去）。
+                moveToward: (x: number, z: number): void => {
+                    if (run.aborted) return;
+                    // **先按键，再转视角**：`lookAt` 在测试夹具/异常状态下可能不存在或抛错，
+                    // 放在前面会把后面的 setControlState 一起吞掉（第一版就是这么挂的）。
+                    try {
+                        bot.setControlState('forward', true);
+                        bot.setControlState('jump', true);
+                    } catch {
+                        return;
+                    }
+                    try {
+                        const p = bot.entity.position;
+                        void bot.lookAt(new Vec3(x, p.y + 0.5, z), true);
+                    } catch {
+                        // 转不了视角不影响朝那个方向走。
+                    }
+                },
+                // 最近能站人的干地：脚下是实体方块、脚所在格子不是水。
+                nearestDryLand: (radius: number): { x: number; z: number } | null => {
+                    try {
+                        const p = bot.entity.position;
+                        for (let r = 1; r <= radius; r++) {
+                            for (let dx = -r; dx <= r; dx++) {
+                                for (let dz = -r; dz <= r; dz++) {
+                                    if (Math.max(Math.abs(dx), Math.abs(dz)) !== r) continue;
+                                    const below = bot.blockAt?.(p.offset(dx, -1, dz));
+                                    const feet = bot.blockAt?.(p.offset(dx, 0, dz));
+                                    if (!below || !feet) continue;
+                                    const feetIsWater = feet.name === 'water'
+                                        || feet.name === 'flowing_water'
+                                        || feet.name === 'bubble_column';
+                                    if (below.boundingBox === 'block' && !feetIsWater) {
+                                        return { x: p.x + dx, z: p.z + dz };
+                                    }
+                                }
+                            }
+                        }
+                    } catch {
+                        // 读不到世界就当没找到岸。
+                    }
+                    return null;
+                },
                 feetBlockName: (): string | null => {
                     // 取消之后报"脚下不是岩浆"：让 `runLavaEscape` 当场收尾，而不是
                     // 继续每秒 setControlState / setGoal。

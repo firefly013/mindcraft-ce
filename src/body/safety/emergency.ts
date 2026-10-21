@@ -298,6 +298,18 @@ export interface EmergencyBot {
   submerged?(): boolean;
   /** 往上浮（在水里连跳 + 抬头）。可选，配合 submerged 用。 */
   swimUp?(): void;
+  /**
+   * 朝某个**水平**坐标游/走一步（水里就是朝岸上游）。可选。
+   *
+   * 为什么必须有它：2026-10-21 全量日志统计——两个 bot 各 78% 的死亡是 drowned，
+   * 其中 88% 发生在水面高度、71% 死亡瞬间**没有任何正在执行的动作**。
+   * 旧 `runSurface` 只会 `swimUp`（按 jump 浮起来）：**浮着不动 ≠ 上岸**，
+   * 反射一结束就交还身体，模型不动，于是又沉下去。
+   * 有了这条，反射才能真的把人往最近的干地上带。
+   */
+  moveToward?(x: number, z: number): void;
+  /** 附近最近的"能站人的干地"（水面同高、实体方块、上方是空气）。可选。 */
+  nearestDryLand?(radius: number): { x: number; z: number } | null;
   /** 脚下方块名（lava 反射用）。 */
   feetBlockName?(): string | null;
   /** 头所在方块名（lava 反射用）。 */
@@ -374,11 +386,13 @@ async function runSurface(
     const standingInWater = feetName === 'water' || feetName === 'flowing_water'
       || feetName === 'bubble_column';
     if (headClear && !standingInWater) {
+      bot.stopAll?.();
       return { escaped: true, reason: 'safe', position: bot.feet(), health: bot.health };
     }
     // 还在水里（浮着或泡着）就继续上浮/往岸边探；但有**时间上限**，
     // 不许为了"一定上岸"把身体无限占住（2026-10-18 的反射↔模型抢身体就是这么死的）。
     if (Date.now() - surfaceStartedAt > SURFACE_MAX_MS) {
+      bot.stopAll?.();
       return {
         escaped: false,
         reason: 'time-cap',
@@ -386,7 +400,13 @@ async function runSurface(
         health: bot.health,
       };
     }
-    bot.swimUp?.();
+    // **先找岸再浮**：只按 jump 会原地浮着等超时，人还在水里。
+    const shore = bot.nearestDryLand?.(12) ?? null;
+    if (shore && bot.moveToward) {
+      bot.moveToward(shore.x, shore.z);
+    } else {
+      bot.swimUp?.();
+    }
     await io.sleep(io.tickMs);
   }
 }
