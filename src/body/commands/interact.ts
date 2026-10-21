@@ -39,6 +39,7 @@ import * as skills from '../library/skills.js';
 import * as world from '../library/world.js';
 import * as mc from '../data/mcdata.js';
 import { describeDyedShortfall, formatUnknownItemReceipt } from '../library/item_names.js';
+import { describeCraftShortfallForBot } from '../library/craft_shortfall.js';
 import { planRouteThreatResponse, threatsNearRoute } from '../safety/path_threat.js';
 import Vec3 from 'vec3';
 import { td, tp } from '../../shared/prompts.js';
@@ -1807,7 +1808,13 @@ export async function craftSmartDetailed(
     skills.log(bot, `craftRecipe 抛错：${error instanceof Error ? error.message : String(error)}`);
   }
   const outcome = await craftRecipeWithTags(bot, targetName, num);
-  return { ok: outcome.ok, detail: `${aliasNote}${outcome.detail}` };
+  // **失败时给算术**（Lead 2026-10-21：机器人常"只差一件基础物品"，引擎从不说清）。
+  // 不是门：只在失败回执里追加一行缺口，不阻止任何行动。
+  const shortfallNote = outcome.ok ? '' : describeCraftShortfallForBot(bot, targetName, num);
+  return {
+    ok: outcome.ok,
+    detail: `${aliasNote}${outcome.detail}${shortfallNote === '' ? '' : ` ${shortfallNote}`}`,
+  };
 }
 
 
