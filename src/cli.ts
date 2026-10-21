@@ -205,8 +205,23 @@ async function main(): Promise<void> {
       return;
     }
     profile.name = name;
-    const host = String(opts.args['host'] ?? '127.0.0.1');
-    const mcPort = Number(opts.args['port'] ?? 61359);
+    // **警告：带 model 的 profile 会开出一个"自主 agent"，不是你能操纵的木偶。**
+    // 2026-10-21 实测事故：`spawn --profile profiles/overnight-a.json` 开出的 explorer
+    // 是个完整 LLM bot，它一进服就不断给 overnight_a 发 user.message / player.chat，
+    // 12 分钟里 A 一次工具都没调（回合全被对话占满），看起来像"引擎卡死"。
+    // 想自己用 CLI 操控一个角色练手/通关，profile 里**不要写 model**。
+    if (profile.model != null && typeof profile.model === 'string' && profile.model.trim() !== '') {
+      process.stdout.write(
+        `⚠ 注意：profile ${profilePath} 里配了 model=${String(profile.model)}。\n` +
+          '  这意味着新角色是一个**自主 agent**——它会自己想、自己做、也会和其他机器人说话，\n' +
+          '  你没法靠 CLI 完全指挥它（真机事故：它会把别的 bot 的回合占满）。\n' +
+          '  想自己操控一个角色，写一个**不带 model 字段**的 profile 再 spawn。\n',
+      );
+    }
+    const host = String(opts.args['mc-host'] ?? '127.0.0.1');
+    // 注意：`--port` 已经被本 CLI 用作 **MindServer** 端口（opts.port），
+    // 所以游戏服务器端口必须另起一个名字，否则两个端口撞车。
+    const mcPort = Number(opts.args['mc-port'] ?? 25565);
     const settings = { profile, host, port: mcPort };
     const result = await new Promise<{ success?: boolean; error?: string }>((resolve) => {
       const timer = setTimeout(() => resolve({ success: false, error: 'spawn 超时（MindServer 没回）' }), 60_000);
