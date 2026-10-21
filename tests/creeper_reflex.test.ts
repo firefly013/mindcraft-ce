@@ -18,6 +18,10 @@ describe('触发条件', () => {
   it('(a) 逼近 + 有盾 ⇒ 举盾', () => {
     expect(planCreeperResponse({ ...base, hasShield: true, creepers: near(5) }).action).toBe('block');
   });
+  it('(a2) 8 格就触发（举盾要早于危险距离）', () => {
+    expect(planCreeperResponse({ ...base, hasShield: true, creepers: near(7.5) }).action).toBe('block');
+    expect(planCreeperResponse({ ...base, creepers: near(7.5) }, { x: 7.5, z: 0 }).action).toBe('run');
+  });
   it('(b) 逼近 + 没盾 ⇒ 跑', () => {
     const plan = planCreeperResponse({ ...base, creepers: near(4) }, { x: 4, z: 0 });
     expect(plan.action).toBe('run');
@@ -38,7 +42,7 @@ describe('触发条件', () => {
     expect(planCreeperResponse({ ...base, otherReflexActive: true, creepers: near(3) }).action).toBe('yield');
   });
   it('范围常量符合契约', () => {
-    expect(CREEPER_ALERT_RANGE).toBe(6);
+    expect(CREEPER_ALERT_RANGE).toBe(8); // 真机调参：3.9 格举盾太晚（掉血 1.8）
     expect(CREEPER_SAFE_DISTANCE).toBeGreaterThanOrEqual(10);
   });
 });

@@ -57,6 +57,36 @@ describe('(i) tick 接线：盾分支真的执行', () => {
   });
 });
 
+describe('(i2) 盾分支在 8 格就开始举盾（不是等到 4 格）', () => {
+  it('苦力怕 7.5 格 + 盾 ⇒ 立刻 equip+activateItem，而不是先靠近', async () => {
+    const body: any = Object.create(MineflayerBody.prototype);
+    const bot: any = {
+      health: 20,
+      entity: { position: { x: 0, y: 64, z: 0 } },
+      entities: { 9: { id: 9, name: 'creeper', position: { x: 7.5, y: 64, z: 0 } } },
+      inventory: { items: () => [{ name: 'shield', count: 1 }] },
+      equip: vi.fn(async () => {}),
+      activateItem: vi.fn(),
+      deactivateItem: vi.fn(),
+      setControlState: vi.fn(),
+      lookAt: vi.fn(async () => {}),
+    };
+    body.bot = bot;
+    body.creeperReflexActive = false;
+    body.creeperCooldownUntil = 0;
+    body.creeperLastDistance = new Map();
+    body.reflexRunning = false;
+    body.suffocationRunning = false;
+    body.respawnEscapeRunning = false;
+    body.shelterHasRoof = () => false;
+    body.notify = () => {};
+    body.maybeCreeperReflex();
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    expect(bot.activateItem).toHaveBeenCalled();
+    expect(bot.setControlState).not.toHaveBeenCalledWith('forward', true);
+  });
+});
+
 describe('(ii) 所有权/冷却：结束后释放，不会每 tick 重复', () => {
   it('episode 结束后 flag 清除、冷却写入，下一次 tick 不再行动', async () => {
     const { body, bot } = fakeBody({ shield: true });

@@ -5381,6 +5381,7 @@ export function pillarApexVerdict(input: {
 }
 
 export async function pillarUp(bot: any, blocks: number = 1): Promise<boolean> {
+    const pillarStartY = Number(bot?.entity?.position?.y ?? 0);
     const requested = Math.max(1, Math.floor(blocks));
     // **上限**：258 格柱子只花了 20 秒，是因为引擎允许；每一块都来自背包，
     // 而且"要爬这么多"本身就是上游判定出错的信号。超上限就只爬上限，并说清。
@@ -5520,7 +5521,18 @@ export async function pillarUp(bot: any, blocks: number = 1): Promise<boolean> {
             log(bot, 'pillarUp：垫了 ' + done + ' 格，但**人没有站在柱子上**（脚下仍然没有方块）——不算完成，别往前走。');
             return false;
         }
-        log(bot, 'pillarUp 完成：上升 ' + done + ' 格（已确认站在柱子上）。');
+        // **完成也要由实测高度门控**（Lead 2026-10-21：与 stairUp 同款缺陷——报的是计划不是事实）。
+        const pillarEndY = Number(bot?.entity?.position?.y ?? pillarStartY);
+        const pillarClimb = Math.round((pillarEndY - pillarStartY) * 10) / 10;
+        if (pillarClimb <= 0.4) {
+            log(
+                bot,
+                'pillarUp **没有升上去**：垫了 ' + done + ' 格，y 仍是 ' + pillarEndY.toFixed(1) +
+                    '（起点 ' + pillarStartY.toFixed(1) + '）——先 mineBlock 头顶那一格，或检查脚下依附面。',
+            );
+            return false;
+        }
+        log(bot, 'pillarUp 完成：实际上升 ' + pillarClimb + ' 格（目标 ' + wanted + '，已确认站在柱子上，现在 y=' + pillarEndY.toFixed(1) + '）。');
         return true;
     }
     log(bot, 'pillarUp 结束：只垫了 ' + done + '/' + wanted + ' 格（背包里的 ' + material + ' 用完了）。');
@@ -5553,6 +5565,7 @@ export async function stairUp(bot: any, blocks: number = 1): Promise<boolean> {
     );
     const deadline = Date.now() + Math.max(30_000, wanted * 8_000);
     let done = 0;
+    const stairStartY = Number(bot?.entity?.position?.y ?? 0);
     while (done < target) {
         if (bot.interrupt_code) {
             log(bot, 'stairUp 中断：Stop/保命打断，已完成 ' + done + '/' + wanted + ' 格。');
@@ -5617,11 +5630,23 @@ export async function stairUp(bot: any, blocks: number = 1): Promise<boolean> {
         done++;
         log(bot, 'stairUp 进度 ' + done + '/' + wanted + '：现在 y=' + Number(bot.entity.position.y).toFixed(1) + '。');
     }
-    if (done >= wanted) {
-        log(bot, 'stairUp 完成：上升 ' + done + ' 格。');
+    // **"完成"必须由实测高度门控**（Lead 2026-10-21 真机 A：进度里 y 一直没变，
+    // 最后却写「stairUp 完成 / 上升 10 格」——测的是计划不是事实）。
+    const stairEndY = Number(bot?.entity?.position?.y ?? stairStartY);
+    const measuredClimb = Math.round((stairEndY - stairStartY) * 10) / 10;
+    if (done >= wanted && measuredClimb > 0.4) {
+        log(bot, 'stairUp 完成：实际上升 ' + measuredClimb + ' 格（目标 ' + wanted + '），现在 y=' + stairEndY.toFixed(1) + '。');
         return true;
     }
-    log(bot, 'stairUp 结束：只上了 ' + done + '/' + wanted + ' 格（没材料也没能挖出台阶）。');
+    if (done >= wanted && measuredClimb <= 0.4) {
+        log(
+            bot,
+            'stairUp **没有升上去**：y 仍是 ' + stairEndY.toFixed(1) + '（目标 ' + wanted + '，挖了 ' + done +
+                ' 格但没走上去）——先确认头顶/脚下空间，用 mineBlock 挖开那一格，或改用 pillarUp。',
+        );
+        return false;
+    }
+    log(bot, 'stairUp 结束：只上了 ' + done + '/' + wanted + ' 格（实测 y=' + stairEndY.toFixed(1) + '，没材料也没能挖出台阶）。');
     return false;
 }
 

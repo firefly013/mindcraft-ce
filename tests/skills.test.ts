@@ -566,9 +566,19 @@ describe('F-10 第二半：前方放不下就改用 pillarUp 直着垫', () => {
     const bot = fallbackBot();
     await expect(stairUp(bot, 1)).resolves.toBe(true);
     expect(bot.output).toContain('nothing to place on');
-    expect(bot.output).toContain('nothing to place on');
     expect(bot.output).toContain('改用 pillarUp');
-    expect(bot.output).toContain('stairUp 完成：上升 1 格');
+    expect(bot.output).toContain('stairUp 完成');
+  });
+
+  it('y 实测没升 ⇒ 不许报完成（Lead 2026-10-21：进度里 y 不变却写"上升 10 格"）', async () => {
+    const bot = fallbackBot();
+    const base = bot.entity.position;
+    const frozenClone = (): any => Object.assign(Object.create(Object.getPrototypeOf(base)), base, { x: base.x, y: base.y, z: base.z });
+    Object.defineProperty(bot.entity, 'position', { get: frozenClone, set: () => {} });
+    const result = await stairUp(bot, 1);
+    expect(result).toBe(false);
+    // 走哪条失败分支都可（blocked/plan/mine），**关键是不许声称完成**。
+    expect(bot.output).not.toContain('stairUp 完成');
   });
 
   it('pillarUp 也不成（连脚下都没有依附面）：停下并说清两条路都失败', async () => {

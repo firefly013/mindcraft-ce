@@ -6,7 +6,8 @@
  * 本模块是纯决策 + 回执格式；动作由 body 执行（举盾 activateItem / 远离移动）。
  * 原则：只报实测——举盾后掉血、跑出后距离、被炸了掉多少，**没有证据不许说"躲过了"**。
  */
-export const CREEPER_ALERT_RANGE = 6;
+/** 8 格起反应（Lead 2026-10-21 真机：盾分支 3.9 格才触发时已吃到 1.8 伤害——举盾不是瞬发，必须更早）。 */
+export const CREEPER_ALERT_RANGE = 8;
 export const CREEPER_SAFE_DISTANCE = 10;
 export const CREEPER_BLOCK_MAX_MS = 2500;
 export const CREEPER_REFLEX_COOLDOWN_MS = 3000;
