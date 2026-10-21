@@ -615,14 +615,26 @@ function screenshotOf(vision: unknown): LiveScreenshot {
               pitch: typeof view.pitch === 'number' && Number.isFinite(view.pitch) ? view.pitch : null,
             }
           : null;
-      // **这一帧的颜色测量**：测过才给，没测就不提（不许猜"应该是彩色"）。
-      const colorRaw = v?.lastFrameColor as { chromaMean?: unknown; grayscale?: unknown } | null | undefined;
+      // **这一帧的颜色统计**：测过才给，没测就不提（不许猜"应该是彩色"）。
+      // 判据是**尾部/覆盖率**（彩色像素占比），不是平均 —— 平均会被大面积的灰墙拉低
+      // （真机 overnight_b：灰墙 + 大片铁矿，平均 2.72 但明显有颜色）。
+      const colorRaw = v?.lastFrameColor as
+        | { mean?: unknown; p95?: unknown; colouredFraction?: unknown; grayscale?: unknown }
+        | null
+        | undefined;
+      const colorNum = (value: unknown): number | null =>
+        typeof value === 'number' && Number.isFinite(value) ? value : null;
+      const colorMean = colorNum(colorRaw?.mean);
+      const colorP95 = colorNum(colorRaw?.p95);
+      const colorFraction = colorNum(colorRaw?.colouredFraction);
       const colorInfo =
-        colorRaw != null &&
-        typeof colorRaw === 'object' &&
-        typeof colorRaw.chromaMean === 'number' &&
-        Number.isFinite(colorRaw.chromaMean)
-          ? { chromaMean: colorRaw.chromaMean, grayscale: colorRaw.grayscale === true }
+        colorRaw != null && colorMean != null && colorP95 != null && colorFraction != null
+          ? {
+              mean: colorMean,
+              p95: colorP95,
+              colouredFraction: colorFraction,
+              grayscale: colorRaw.grayscale === true,
+            }
           : null;
       return {
         ref: { file: last.file, takenAt: last.takenAt },

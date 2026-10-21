@@ -723,19 +723,27 @@ describe('颜色是独立事实：丢颜色 ≠ 不可信（三件事分开说�
     });
 
   it('丢颜色 ⇒ 说"丢了颜色/无彩度/认方块可以但别靠颜色认材质"，且**不说"不可信"**', () => {
-    const text = renderLiveState(shot({ color: { chromaMean: 0.4, grayscale: true } }));
+    const text = renderLiveState(shot({ color: { mean: 2.7, p95: 3, colouredFraction: 0.004, grayscale: true } }));
     expect(text).toContain('这张图丢了颜色');
-    expect(text).toContain('无彩度');
-    expect(text).toContain('0.4');
+    expect(text).toContain('彩色像素 0.4%'); // 判据（占比）写进消息
+    expect(text).toContain('判灰 <2%'); // 阈值也写进去，可核对
+    expect(text).toContain('95 分位 3');
+    expect(text).toContain('平均彩度 2.7');
     expect(text).toContain('认方块可以');
     expect(text).toContain('别靠颜色认材质');
     expect(text).not.toContain('不可信');
   });
 
   it('彩色帧 ⇒ 一个字都不提颜色（不误报）', () => {
-    const text = renderLiveState(shot({ color: { chromaMean: 41.2, grayscale: false } }));
+    const text = renderLiveState(shot({ color: { mean: 41.2, p95: 120, colouredFraction: 0.6, grayscale: false } }));
     expect(text).not.toContain('丢了颜色');
-    expect(text).not.toContain('无彩度');
+  });
+
+  it('B 那一帧的形状：灰墙为主 + 8% 矿 ⇒ **不说话**（平均 2.72 也不许报警）', () => {
+    const text = renderLiveState(
+      shot({ color: { mean: 2.72, p95: 96, colouredFraction: 0.08, grayscale: false } }),
+    );
+    expect(text).not.toContain('丢了颜色');
   });
 
   it('没量颜色 ⇒ 不提（没测就是没测，不猜）', () => {
@@ -766,7 +774,7 @@ describe('颜色是独立事实：丢颜色 ≠ 不可信（三件事分开说�
         },
       }),
     );
-    const gray = renderLiveState(shot({ color: { chromaMean: 0.2, grayscale: true } }));
+    const gray = renderLiveState(shot({ color: { mean: 0.2, p95: 1, colouredFraction: 0, grayscale: true } }));
     expect(low).toContain('这张图不可信');
     expect(low).not.toContain('无法核对');
     expect(unknown).toContain('无法核对');

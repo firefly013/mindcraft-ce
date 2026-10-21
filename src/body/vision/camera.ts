@@ -12,7 +12,7 @@ import { EventEmitter } from 'events';
 import worker_threads from 'worker_threads';
 
 import { remapChunkJson, remapBlockUpdateStateId } from './chunk_remap.js';
-import { chromaMeanOf, colorFromChroma, type FrameColor, type FrameView } from './frame_record.js';
+import { chromaStatsOf, colorFromStats, type FrameColor, type FrameView } from './frame_record.js';
 import { remapStateId, RENDERER_VERSION } from './state_remap.js';
 
 // prismarine-viewer 的 viewer 内部用的是**全局** THREE / Worker
@@ -136,7 +136,9 @@ export class Camera extends EventEmitter {
             const h = Number(this.canvas.height);
             const pixels = new Uint8Array(w * h * 4);
             gl.readPixels(0, 0, w, h, gl.RGBA, gl.UNSIGNED_BYTE, pixels);
-            color = colorFromChroma(chromaMeanOf(pixels, w, h, 7));
+            // **尾部/覆盖率统计**，不是平均：灰墙为主的画面平均彩度低，
+            // 但只要有一块矿（彩色像素占比够）就不能判"丢颜色"（真机 overnight_b）。
+            color = colorFromStats(chromaStatsOf(pixels, w, h, 7));
         } catch {
             color = null;
         }
@@ -155,7 +157,7 @@ export class Camera extends EventEmitter {
         await fs.writeFile(`${this.fp}/${filename}.jpg`, buf);
         console.log('saved', filename);
         if (color?.grayscale === true) {
-            console.warn('screenshot is grayscale', { file: filename, chromaMean: color.chromaMean });
+            console.warn('screenshot is grayscale', { file: filename, ...color });
         }
         return {
             file: filename,

@@ -61,6 +61,7 @@ import {
 import { formatShelterReceipt, planShelter } from './safety/shelter.js';
 import { formatSuffocationReceipt, planSuffocationEscape } from './safety/suffocation.js';
 import { isJustPlacedDrop } from './library/placement_guard.js';
+import { formatInventoryDeltaNote } from './library/inventory_delta.js';
 import { shouldYieldBePreempted } from './safety/respawn_loop.js';
 import {
     CREEPER_BLOCK_MAX_MS,
@@ -1866,38 +1867,40 @@ export class MineflayerBody {
      * 只报**变化**；读数不可用（未同步/读失败）时说"读不到"，**绝不**把它当成"没变化"。
      * 名字最多列 8 项，避免长跑进程里刷屏。
      */
+    private rememberInventoryAfterAction(actionName: string): void {
+        try {
+            this.lastActionInventory = this.readInventoryCounts();
+            this.lastActionName = actionName;
+        } catch {
+            // 读不到就保持上一次快照（不许把未知当已知）。
+        }
+    }
+
+    private detectVanishedInventory(currentAction: string): void {
+        try {
+            if (this.lastActionInventory == null) return;
+            const after = this.readInventoryCounts();
+            const delta = this.describeInventoryDelta(this.lastActionInventory, after, '');
+            if (delta.lost.length === 0) return;
+            const reason = `上一个动作（${this.lastActionName || '未知'}）结束到本次（${currentAction}）开始之间`;
+            this.notify('inventory-vanish', KIND.WORLD, LEVEL.STATE, {
+                previousAction: this.lastActionName || null,
+                currentAction,
+                lost: delta.lost.slice(0, 8),
+                detail: `${reason}背包少了 ${delta.lost.join('、')}——先 stats 核对，别在下一步重复采集`,
+            });
+        } catch {
+            // 取证失败不报噪音。
+        }
+    }
+
     private describeInventoryDelta(
         before: InventoryCounts | null,
         after: InventoryCounts | null,
         targetName: string,
     ): { changed: boolean; gained: string[]; lost: string[]; note: string } {
-        if (before == null || after == null) {
-            return {
-                changed: false,
-                gained: [],
-                lost: [],
-                note: `读数不可用（${before == null ? '之前' : '之后'}读不到，可能是刚重连还没同步）——不能据此判断捡没捡到`,
-            };
-        }
-        const names = new Set<string>([...Object.keys(before), ...Object.keys(after)]);
-        const gained: string[] = [];
-        const lost: string[] = [];
-        for (const name of names) {
-            const delta = (after[name] ?? 0) - (before[name] ?? 0);
-            if (delta > 0) gained.push(`+${name}×${delta}`);
-            else if (delta < 0) lost.push(`-${name}×${-delta}`);
-        }
-        const changed = gained.length > 0 || lost.length > 0;
-        const targetGain = (after[targetName] ?? 0) - (before[targetName] ?? 0);
-        const parts: string[] = [];
-        if (gained.length > 0) parts.push(`增加 ${gained.slice(0, 8).join('、')}`);
-        if (lost.length > 0) parts.push(`**减少 ${lost.slice(0, 8).join('、')}**`);
-        if (lost.length > 0) {
-            parts.push('（**有物品减少**——这不是"没捡到"，是背包真的被改动了，先用 stats 核对再行动）');
-        } else if (targetGain <= 0) {
-            parts.push('（目标物品并没有增加）');
-        }
-        return { changed, gained, lost, note: parts.join('') };
+        // 措辞统一在 inventory_delta（**词与数字符号一致**：减少 2 而不是减少 -2）。
+        return formatInventoryDeltaNote(before, after, targetName);
     }
 
     /**
@@ -3006,6 +3009,9 @@ export class MineflayerBody {
     private creeperReflexActive = false;
     private creeperCooldownUntil = 0;
     private creeperLastDistance = new Map<string, number>();
+    /** 上一个动作结束时的背包快照：用来回答「东西是在哪一步消失的」。 */
+    private lastActionInventory: InventoryCounts | null = null;
+    private lastActionName = '';
     /** yield 被循环 verdict 顶掉 / 真的赢了（写进 respawn-loop 日志，供 Lead 定位）。 */
     private lastYieldBeatenReason = '';
     private lastYieldReason = '';
@@ -5760,6 +5766,20 @@ export class MineflayerBody {
             }
             case 'action': {
                 const { name, args } = request.request;
+                // 物品消失取证（Lead 2026-10-21：oak_log 三次凭空消失）：在上一个动作结束时记快照，
+                // 下一个动作开始时比对——点名是哪一步之间少的。
+                // **进度标签不跨动作**（Lead 2026-10-21 真机：huntFor 的进度行带着上一个动作的「挖矿」标签）。
+                // 每个动作开始时清空上一次的进度记录，回执只能描述自己的事。
+                try {
+                    (this.bot as { __actionProgress?: unknown }).__actionProgress = null;
+                } catch {
+                    // 清不掉不影响动作。
+                }
+                try {
+                    this.detectVanishedInventory(name);
+                } catch {
+                    // 取证坏了不影响动作。
+                }
                 // 模型的动作优先于自动拾取：先占位阻止新的拾取，再让旧的收手。
                 // 用计数而不是布尔：查询类 action 和占用类 action 可能重叠，
                 // 一个先结束不能把另一个的在途状态清掉（否则 pickup 会钻空子）。
@@ -5902,6 +5922,7 @@ export class MineflayerBody {
                         // 提醒**追加在末尾**（见 annotateReceipt）：第一行留给"放行 + 实际发生了什么"。
                         text = annotateReceipt(text, departureWarning);
                         if (residualScreenNote !== '') text = String(text ?? '') + residualScreenNote;
+                        this.rememberInventoryAfterAction(name);
                     } catch (err: unknown) {
                         // 抛错也算"这次自救没成"：**不许给冷却**，让保命随时能回来。
                         if (rescueAttempt) this.settleModelRescue(false, baseName, preempted);
@@ -5916,6 +5937,7 @@ export class MineflayerBody {
                                 this.actionTailNote = null;
                             }
                         }
+                        this.rememberInventoryAfterAction(name);
                         throw err;
                     }
                     if (rescueAttempt) {

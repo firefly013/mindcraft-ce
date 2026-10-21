@@ -136,13 +136,17 @@ export interface LiveScreenshot {
    */
   view?: { yaw: number | null; pitch: number | null } | null;
   /**
-   * **这一帧有没有颜色**（渲染后量的平均彩度 `|R−G|+|G−B|`，0~510）。
+   * **这一帧的颜色统计**（渲染后按像素量 `|R−G|+|G−B|`，0~510）。
    *
-   * 真机 overnight_b：同一会话里颜色时有时无（画面清晰可读却全灰）。这是一个**独立事实**，
-   * 不能混进"可不可信"：丢颜色的图**认方块可以**，只是**别靠颜色认材质**。
+   * 真机 overnight_b：同一会话里颜色时有时无；而**判据曾经用平均彩度、结论错了**——
+   * 灰墙为主的画面平均只有 2.72，可正前方一大片橙褐铁矿、左下角红棕花岗岩明明有颜色。
+   * 所以判据是**彩色像素占比（尾部）**：`colouredFraction`（彩度 ≥24 的占比）< 2% 才判灰；
+   * `p95` 看尾部强度；`mean` 只作次要数字，但**写进消息**让说法可核对。
+   *
+   * 这是**独立事实**，不能混进"可不可信"：丢颜色的图**认方块可以**，只是**别靠颜色认材质**。
    * `null`/缺失 ⇒ 没测 ⇒ 回执不提名。
    */
-  color?: { chromaMean: number; grayscale: boolean } | null;
+  color?: { mean: number; p95: number; colouredFraction: number; grayscale: boolean } | null;
 }
 
 export interface LiveMeta {
@@ -369,6 +373,12 @@ export const DOWN_PITCH_DEG = 70;
  *     就查不出是哪一边。
  *
  * 单位：mineflayer 的 `entity.pitch` / `entity.yaw` 是**弧度**；pitch 负 = 抬头（向上为 -90°）。
+ *
+ * ⚠️ **-90° = 垂直向上看（仰视），这是 Minecraft 约定，不是 bug。** 2026-10-21 overnight_b
+ * 曾连报 4 次"符号标反"，后来自己撤销了：1 格宽竖井里往上/往下都是方形石壁向中心收拢，
+ * 视觉上极难分辨；而 y=38 矿井里 pitch −46° 的画面确实是往上看（石顶 + 斜上通道），标注正确。
+ * **不要再"修"这个符号。**（真正会让标注可疑的只有一件事：朝向是否来自**这一帧**，
+ * 那由 `frame_record.ts` 保证。）
  */
 export function describeViewDirection(pitch: unknown, yaw: unknown): string | null {
   // **`null` 不是 0**：`Number(null) === 0` ⇒ 直转会把"没读到"读成"平视"（就是今晚那条
@@ -549,8 +559,12 @@ const SECTION_RENDERERS: Record<LiveSectionKey, (s: LiveState) => string[]> = {
       // 只是不能靠颜色认材质（真机 overnight_b：同会话里全灰帧时有时无）。
       const color = s.screenshot.color;
       if (color != null && color.grayscale === true) {
+        // **判据写进消息**，让这个说法可核对：彩色像素占比（阈值 ≥24 算彩色）+
+        // 95 分位（尾部强度）+ 平均（次要）。平均低不等于没颜色 —— 灰墙面积会把它拉平。
+        const fractionPct = Math.round(color.colouredFraction * 1000) / 10;
         lines.push(
-          `颜色：**这张图丢了颜色**（已测：无彩度，平均 |R−G|+|G−B| = ${color.chromaMean}）——` +
+          `颜色：**这张图丢了颜色**（已测：彩色像素 ${fractionPct}%（彩度 ≥24 算彩色；判灰 <2%），` +
+            `95 分位 ${color.p95}，平均彩度 ${color.mean}）——` +
             '**认方块可以，但别靠颜色认材质/判断"这是不是同一种方块"**。',
         );
       }

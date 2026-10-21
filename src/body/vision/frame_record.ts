@@ -27,65 +27,102 @@ export interface FrameRecord {
 }
 
 /**
- * **颜色**：`chromaMean` = 采样像素上 `|R−G| + |G−B|` 的平均值（0~510）。
+ * **颜色统计**（量的是渲染出来的像素：`|R−G| + |G−B|`，0~510）。
  *
- * 真机 overnight_b：同一会话里颜色**时有时无**——画面清晰可读却全灰（熔炉、石墙都在）。
- * 这不是重映射的形状（那换的是"哪张贴图"，不是饱和度）。所以每帧量一次：
- * 只报**测到的**，测不到就 `null`（不许猜"应该是彩色"）。
+ * 真机 overnight_b（2026-10-21）**纠正过一次这个指标的用法**：他看到的画面是左右浅灰石墙、
+ * 正前方**大片橙褐色铁矿**、左下角红棕花岗岩——明显有颜色，而"全图平均彩度"只有 2.72，
+ * 于是回执错判成"丢了颜色"。**数字对，结论错**：平均把尾部信息抹平了，
+ * 而模型要认的恰恰是那块矿。所以判据改成**尾部/覆盖率**：
+ *   - `colouredFraction`：彩度 ≥ `COLOURED_CHROMA_MIN` 的采样像素占比；
+ *   - `p95`：第 95 百分位彩度（看尾部有多强）；
+ *   - `mean` 只作为次要数字保留（并**写进消息**，让说法可核对）。
+ * 判灰**只当彩色像素占比可以忽略**（< `GREYSCALE_MAX_COLOURED_FRACTION`）。
  */
 export interface FrameColor {
-    chromaMean: number | null;
-    /** 平均彩度低于阈值 ⇒ 判为"丢了颜色"。`null` = 没测。 */
+    /** 平均彩度（次要指标，保留但**不再单独决定**结论）。 */
+    mean: number | null;
+    /** 彩度 ≥ 24 的采样像素占比（0~1）。 */
+    colouredFraction: number | null;
+    /** 第 95 百分位彩度（尾部强度）。 */
+    p95: number | null;
+    /** 判据命中 ⇒ 丢了颜色。`null` = 没测。 */
     grayscale: boolean | null;
 }
 
-/** 低于这个平均彩度就算"这一帧没颜色"（纯灰 ≈ 0；正常地形画面通常 ≫ 10）。 */
-export const GRAYSCALE_CHROMA_MAX = 4;
+/** 单像素彩度到这个数就算"彩色"（灰墙/石头通常 < 10，铁矿橙褐/花岗岩红棕远高于此）。 */
+export const COLOURED_CHROMA_MIN = 24;
+/** 彩色像素占比低于这个值才算"丢了颜色"（"可以忽略"，不是"平均低"）。 */
+export const GREYSCALE_MAX_COLOURED_FRACTION = 0.02;
 
 /**
- * 采样一张 RGBA 缓冲的平均彩度。纯函数：不 import 任何渲染器/画布。
+ * 采样一张 RGBA 缓冲的彩度统计。纯函数：不 import 任何渲染器/画布。
  *
  * @param step 采样步长（每 step 个像素取 1 个；默认 7 —— 800×512 约 8k 个样本，够且便宜）
  */
-export function chromaMeanOf(
+export function chromaStatsOf(
     data: ArrayLike<number> | null | undefined,
     width: number,
     height: number,
     step = 7,
-): number | null {
+): { mean: number; p95: number; colouredFraction: number; sampled: number } | null {
     if (data == null) return null;
     const w = Number(width);
     const h = Number(height);
     const stride = Math.max(1, Math.floor(Number(step) || 1));
     if (!Number.isFinite(w) || !Number.isFinite(h) || w <= 0 || h <= 0) return null;
     if (data.length < w * h * 4) return null;
-    let sum = 0;
-    let counted = 0;
+    const samples: number[] = [];
+    let coloured = 0;
     for (let y = 0; y < h; y += stride) {
         for (let x = 0; x < w; x += stride) {
             const i = (y * w + x) * 4;
             const r = Number(data[i] ?? 0);
             const g = Number(data[i + 1] ?? 0);
             const b = Number(data[i + 2] ?? 0);
-            sum += Math.abs(r - g) + Math.abs(g - b);
-            counted += 1;
+            const chroma = Math.abs(r - g) + Math.abs(g - b);
+            samples.push(chroma);
+            if (chroma >= COLOURED_CHROMA_MIN) coloured += 1;
         }
     }
-    if (counted === 0) return null;
-    return Math.round((sum / counted) * 100) / 100;
+    if (samples.length === 0) return null;
+    samples.sort((a, b) => a - b);
+    const mean = samples.reduce((sum, value) => sum + value, 0) / samples.length;
+    const p95 = samples[Math.min(samples.length - 1, Math.floor(samples.length * 0.95))] ?? 0;
+    return {
+        mean: Math.round(mean * 100) / 100,
+        p95: Math.round(p95 * 100) / 100,
+        colouredFraction: Math.round((coloured / samples.length) * 10000) / 10000,
+        sampled: samples.length,
+    };
 }
 
-/** 由平均彩度得到"测过的颜色记录"；`null` 进 ⇒ `null` 出（不猜）。 */
-export function colorFromChroma(chromaMean: number | null | undefined): FrameColor | null {
-    if (chromaMean == null || !Number.isFinite(chromaMean)) return null;
-    return { chromaMean, grayscale: chromaMean < GRAYSCALE_CHROMA_MAX };
+/** 由统计得到"测过的颜色记录"；`null` 进 ⇒ `null` 出（不猜）。 */
+export function colorFromStats(
+    stats: { mean: number; p95: number; colouredFraction: number } | null | undefined,
+): FrameColor | null {
+    if (stats == null) return null;
+    const mean = Number(stats.mean);
+    const p95 = Number(stats.p95);
+    const fraction = Number(stats.colouredFraction);
+    if (!Number.isFinite(mean) || !Number.isFinite(p95) || !Number.isFinite(fraction)) return null;
+    return {
+        mean,
+        p95,
+        colouredFraction: fraction,
+        grayscale: fraction < GREYSCALE_MAX_COLOURED_FRACTION,
+    };
 }
 
 /** 相机返回的原始形状（不 import Camera，避免把 `window` 带进测试）。 */
 export interface CapturedShot {
     file?: unknown;
     view?: { yaw?: unknown; pitch?: unknown } | null;
-    color?: { chromaMean?: unknown; grayscale?: unknown } | null;
+    color?: {
+        mean?: unknown;
+        p95?: unknown;
+        colouredFraction?: unknown;
+        grayscale?: unknown;
+    } | null;
 }
 
 function finiteOrNull(value: unknown): number | null {
@@ -108,10 +145,20 @@ export function frameRecordOf(shot: unknown, takenAt: number): FrameRecord | nul
         view != null && typeof view === 'object'
             ? { yaw: finiteOrNull(view.yaw), pitch: finiteOrNull(view.pitch) }
             : null;
-    const chroma = finiteOrNull(raw.color?.chromaMean);
+    const mean = finiteOrNull(raw.color?.mean);
+    const p95 = finiteOrNull(raw.color?.p95);
+    const colouredFraction = finiteOrNull(raw.color?.colouredFraction);
     const recordedColor: FrameColor | null =
-        chroma == null
+        mean == null || p95 == null || colouredFraction == null
             ? null
-            : { chromaMean: chroma, grayscale: typeof raw.color?.grayscale === 'boolean' ? raw.color.grayscale : chroma < GRAYSCALE_CHROMA_MAX };
+            : {
+                  mean,
+                  p95,
+                  colouredFraction,
+                  grayscale:
+                      typeof raw.color?.grayscale === 'boolean'
+                          ? raw.color.grayscale
+                          : colouredFraction < GREYSCALE_MAX_COLOURED_FRACTION,
+              };
     return { file: raw.file, takenAt, view: recordedView, color: recordedColor };
 }
