@@ -47,8 +47,12 @@ describe('触发条件', () => {
     expect(planCreeperResponse({ ...base, otherReflexActive: true, creepers: near(3) }).action).toBe('yield');
   });
   it('范围常量符合契约', () => {
-    expect(CREEPER_ALERT_RANGE).toBe(8); // 真机调参：3.9 格举盾太晚（掉血 1.8）
-    expect(CREEPER_SAFE_DISTANCE).toBeGreaterThanOrEqual(10);
+    // 契约变更（Lead 2026-10-22）：8 → 14。
+    // 真机数据：overnight_b 今日被苦力怕炸死 2 次，**反射都在死亡前 1~2 秒才触发**
+    // （01:26:36→:37、03:47:19→:21）——"触发了但来不及"。苦力怕引信 1.5 秒，
+    // 从 8 格外跑出爆炸半径来不及，所以提前到 14 格。
+    expect(CREEPER_ALERT_RANGE).toBeGreaterThanOrEqual(14);
+    expect(CREEPER_SAFE_DISTANCE).toBeGreaterThan(CREEPER_ALERT_RANGE);
   });
 });
 

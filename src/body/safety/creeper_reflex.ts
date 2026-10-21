@@ -6,9 +6,16 @@
  * 本模块是纯决策 + 回执格式；动作由 body 执行（举盾 activateItem / 远离移动）。
  * 原则：只报实测——举盾后掉血、跑出后距离、被炸了掉多少，**没有证据不许说"躲过了"**。
  */
-/** 8 格起反应（Lead 2026-10-21 真机：盾分支 3.9 格才触发时已吃到 1.8 伤害——举盾不是瞬发，必须更早）。 */
-export const CREEPER_ALERT_RANGE = 8;
-export const CREEPER_SAFE_DISTANCE = 10;
+/**
+ * 苦力怕警戒距离。**2026-10-22 从 8 提到 14**（真机数据：overnight_b 今日被炸死 2 次，
+ * 两次的反射都在**死亡前 1~2 秒**才触发（01:26:36→01:26:37、03:47:19→03:47:21）——
+ * 也就是"反射触发了，但来不及"。苦力怕引信只有 1.5 秒，8 格的距离对"跑开"而言太近：
+ * 从 8 格跑出爆炸半径 ~3 格需要约 5 格位移，1.5 秒内做不到。
+ * 现在提前到 14 格：反应时间约翻倍，跑到安全距离才有可能。
+ * 代价是"看到远处苦力怕就绕开"，这比死一次（keepInventory=false 全掉）便宜得多。
+ */
+export const CREEPER_ALERT_RANGE = 14;
+export const CREEPER_SAFE_DISTANCE = 18;
 export const CREEPER_BLOCK_MAX_MS = 2500;
 export const CREEPER_REFLEX_COOLDOWN_MS = 3000;
 export const CREEPER_RUN_MAX_STEPS = 20;
