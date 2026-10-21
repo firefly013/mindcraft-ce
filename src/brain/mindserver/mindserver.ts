@@ -326,7 +326,24 @@ export function createMindServer(
             };
             const agent = agent_connections[agentName];
             if (agent?.socket == null) {
-                reply({ ok: false, error: `机器人 ${agentName} 不在线（或还没连上 MindServer）` });
+                // **死路改成指路**（2026-10-21 实测：`cli --agent player stats` 只回一句
+                // "不在线（或还没连上 MindServer）"，用户不知道该干什么——CLI 自己不会创建机器人，
+                // 所以这条错误是新手第一次使用必然撞到的墙）。现在列出在线者并说清怎么开一个。
+                const online = Object.keys(agent_connections).filter(
+                    (name) => agent_connections[name]?.socket != null,
+                );
+                const onlineLine =
+                    online.length > 0
+                        ? `当前在线的机器人：${online.join(', ')}（名字打错了就用这些重试）`
+                        : '现在没有任何机器人在线。';
+                reply({
+                    ok: false,
+                    error:
+                        `机器人 ${agentName} 不在线。${onlineLine}\n` +
+                        'CLI 只驱动**已经连着 MindServer** 的机器人，它自己不会创建机器人。\n' +
+                        '开一个：在 overnight settings 的 agents 里加一项（名字 + profile\n' +
+                        '  如 profiles/overnight-a.json），然后重启 supervisor / main.ts。',
+                });
                 return;
             }
             const timeoutMs =
