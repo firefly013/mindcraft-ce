@@ -2826,7 +2826,13 @@ export class MineflayerBody {
                           ? ('skeleton' as const)
                           : lower.includes('zombie')
                             ? ('zombie' as const)
-                            : null;
+                            // **掠夺者按远程威胁处理**（2026-10-22 真机：overnight_a 在 06:16/06:18
+                            // 连续两次 `was shot by Pillager`，而威胁分类里只有 creeper/skeleton/zombie——
+                            // 掠夺者**从来不会被当成威胁**，所以反射一次都没为它触发。
+                            // 它和骷髅一样是弩手，复用 skeleton 分支：血低就找掩体。）
+                            : lower.includes('pillager')
+                              ? ('skeleton' as const)
+                              : null;
                     if (threatClass == null) continue;
                     const p = entity?.position;
                     if (p == null) continue;
