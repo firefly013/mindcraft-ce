@@ -134,9 +134,16 @@ export function formatCreeperReflexReceipt(result: CreeperResult): string {
 // 设计不变：一个反射、一个 owner flag、一个冷却、一条回执通道、让位给死亡恢复。
 
 export type ThreatClass = 'creeper' | 'skeleton' | 'zombie';
-export const SKELETON_ALERT_RANGE = 12;
-/** 骷髅是远程：能把你射死，所以血 ≤14 才打断动作（满血不制造噪音）。 */
-export const SKELETON_LOW_HEALTH = 14;
+/**
+ * 骷髅是远程。**2026-10-21 用正确统计调整过**：实测骷髅占死因 23%（A 41 死 + B 28 死 = 69 次），
+ * 且僵尸阈值改高之后，"部署后第一例死亡"就是 `was shot by Skeleton`——
+ * 说明骷髅接棒成了新的头号杀手。
+ * 旧值（血 ≤14 / 12 格）的问题是：困难难度骷髅在 16 格外就开始射，箭伤 2~5 点，
+ * 血 20 也只是挨四五箭的事；等血掉到 14 再找掩体，往往已经在开阔地被点死。
+ * 现在：**16 格内、血 ≤18 就找掩体**（不硬拼、不冲锋，只是躲）。
+ */
+export const SKELETON_ALERT_RANGE = 16;
+export const SKELETON_LOW_HEALTH = 18;
 /**
  * 僵尸的触发范围/血量。**2026-10-21 用正确统计改高过一次**：
  *
