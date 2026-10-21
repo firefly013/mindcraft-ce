@@ -186,10 +186,9 @@ export const TOOL_TEXT: Record<string, { description: string; params: Record<str
       type: '必填。id（按实体编号）/ player（按玩家名）/ mob（按实体类型）。三选一，无默认值。',
     },
   },
-  stay: {
-    description: '待在原地不动，不管发生什么。',
-    params: { type: '要待的秒数，-1 表示永远。' },
-  },
+  // `stay` 已删除（2026-10-21 用户判定）：它是一个"永远成功、零成本"的空操作，
+  // 模型不确定时就按它，退化成吸引子——真机 2 小时内 141/208 次调用是 stay，位置两小时没动。
+  // **任何"保证成功且不要求推进"的工具都会吸收决策**，所以不再提供。
   jump: {
     description: '原地跳一下。离地就松开跳跃键、落地才算完成（不会连跳）。要上到旁边一格高的台子上，用 move。',
     params: {},

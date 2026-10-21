@@ -399,14 +399,13 @@ export const actionsList: AgentCommand[] = [
             await skills.attackTarget(agent.bot, target, type, true);
         })
     },
-    {
-        name: '!stay',
-        description: td('stay'),
-        params: {'type': { type: 'int', description: tp('stay', 'type'), domain: [-1, Number.MAX_SAFE_INTEGER] }},
-        perform: runAsAction(async (agent: any, seconds: number) => {
-            await skills.stay(agent.bot, seconds);
-        })
-    },
+    // **`!stay` 已删除（2026-10-21 用户判定）。**
+    // 它是一个"永远成功、零成本"的空操作：模型一旦不确定，`stay` 就是最安全的成功，
+    // 于是退化成吸引子——真机 overnight_a 最近 2 小时 208 次工具调用里 **stay × 141 (68%)**，
+    // 位置 2 小时固定在 (4.3,33,-12.7)，主线零推进。
+    // 用户原话：「你给他把 Stay 这个工具删了得了嘛，留着没用。」
+    // 教训：**任何"保证成功且不要求推进"的工具，都会吸收决策**。需要等待时，
+    // 让模型去做一件真的事（挖一格、走一格）或让长动作自己跑完，不要给它一个闭眼按的按钮。
     {
         name: '!lookAtPosition',
         description: td('lookAtPosition'),
