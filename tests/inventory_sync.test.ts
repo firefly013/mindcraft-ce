@@ -44,13 +44,18 @@ function botWithItems(items: Array<{ name: string; count: number }>, held: { nam
 const render = (bot: any, inventorySynced: boolean): string =>
   renderLiveState(sampleLiveState({ bot, inventorySynced }));
 
-describe('① 背包还没同步：说"还没同步"，不许说"空"', () => {
-  it('刚重连（还没收到背包包）：渲染层明确说"还没同步上来 / 不是空的"，且不出现 empty', () => {
+describe('① 背包读数未同步：说"不可知"，既不许说"空"也不许说"东西还在"', () => {
+  // 两次真机教训，方向相反：
+  //  2026-10-18 说 empty，而物品其实在 ⇒ 模型以为丢光、从零重采；
+  //  2026-10-21 改说"物品还在"，而 overnight_a 真是空包 ⇒ 它不去采集，原地耗了 2 小时。
+  // 所以正确措辞是"不可知（可能空也可能有）" + 一个能确认的动作。
+  it('刚重连（还没收到背包包）：说"不可知"，不出现 empty，也不许声称"东西还在"', () => {
     const text = render(botWithItems([], null), false);
-    expect(text).toContain('Held: main 还没同步上来');
-    expect(text).toContain('不是空的');
+    expect(text).toContain('Held: main 读数未同步');
+    expect(text).toContain('不可知');
     expect(text).not.toContain('Held: main empty');
     expect(text).not.toContain('Backpack (free 36): empty');
+    expect(text).not.toContain('物品还在');
   });
 
   it('同步之后：报真实内容（dirt×11 这类）', () => {

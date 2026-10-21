@@ -468,10 +468,15 @@ const SECTION_RENDERERS: Record<LiveSectionKey, (s: LiveState) => string[]> = {
     // **"不知道"不许写成"空"**（真机 2026-10-18：进程重启后第一份快照读成
     // `Held: main empty` / `Backpack: empty`，而物品其实一直在——玩家数据里
     // dirt×11 好端端躺着，模型据此以为自己丢了全部家当，从零开始重新采集）。
+    // **"不知道"不许写成"空"，但也不许写成"东西还在"**（两次真机教训，方向相反）：
+    //  2026-10-18：重启后第一份快照读成 `Backpack: empty`，物品其实在 ⇒ 模型以为丢光、从零重采。
+    //  2026-10-21：修成"物品还在，别重采"之后，overnight_a 真的**空包**却被反复告知"物品还在"，
+    //              于是它不去采集，在 y=33 原地耗了 2 小时（日志 inventory-sync-stuck itemCount:0）。
+    // 正确说法：**读数不可知**（可能空也可能有），并给一个能确认的动作。
     if (h.synced === false) {
       return [
-        'Held: main 还没同步上来（刚重连，**不是空的**，别据此判断手上没东西） ' +
-          'off 还没同步 armor 还没同步',
+        'Held: main 读数未同步（**不可知，可能空也可能有东西**，别据此断言手上没东西，也别据此以为还有） ' +
+          'off 读数未同步 armor 读数未同步',
       ];
     }
     return [
@@ -482,8 +487,9 @@ const SECTION_RENDERERS: Record<LiveSectionKey, (s: LiveState) => string[]> = {
   backpack: (s) => {
     if (s.backpack.synced === false) {
       return [
-        'Backpack: **还没同步上来（刚重连，不是空的）**——物品还在，别据此重采/重做/判定丢东西；' +
-          '等一两秒再看 stats。',
+        'Backpack: **读数未同步（不可知：可能空、也可能有东西）**。' +
+          '**两种说法都是猜，别据此判定丢东西，也别据此以为还有**。' +
+          '要确认就做一件会回执的事：collectBlocks(oak_log) 砍一个、或 equip 一件工具——回执会告诉你实际拿到了什么。',
       ];
     }
     const lines = [
