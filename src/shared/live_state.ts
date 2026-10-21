@@ -454,11 +454,27 @@ const SECTION_RENDERERS: Record<LiveSectionKey, (s: LiveState) => string[]> = {
     // oxygen 故意不显示：mineflayer 的 oxygenLevel 在 1.20.6 上取不到 air_supply，
     // 会出现 -1、"干燥洞窟里 0"这种不可能的读数（模型真机报过），摆出来只会误导判断。
     // 水下安全改用 submerged（头+脚都是水）那条独立信号。
-    return [
+    const lines = [
       `Body: health ${b.health ?? UNKNOWN} food ${b.food ?? UNKNOWN} saturation ${b.saturation ?? UNKNOWN} ` +
         `xp ${b.xpLevel ?? UNKNOWN} pose ${b.pose ?? UNKNOWN} ` +
         `onGround ${b.onGround ?? UNKNOWN} effects ${b.effects.length > 0 ? b.effects.join(', ') : 'none'}`,
     ];
+    // **"低血 + 无食物"是死锁，必须说出来**（2026-10-22 真机：overnight_a 卡在
+    // hp 0.73 整整 15 分钟不动——不是快死，是**根本死不掉也好不了**：
+    // 饱食度 0、背包里没有任何食物 ⇒ Minecraft 的回血机制不会启动；
+    // 而 hp 0.73 又不敢去打动物。引擎知道这两件事，却从没告诉过它。）
+    // 这只是事实 + 两条出路，不是门控。
+    const hp = typeof b.health === 'number' ? b.health : null;
+    const food = typeof b.food === 'number' ? b.food : null;
+    if (hp != null && hp <= 8 && food != null && food <= 10) {
+      lines.push(
+        '- **回血死锁**：血量低，而饱食度是 0 时 Minecraft **不会自然回血**——' +
+          '光等是永远不会好起来的。你必须弄到食物：`huntFor` 打动物、`getFood` 找现成的、' +
+          '或有小麦就种/有骨头就骨粉催熟。**在这个血量下跟任何敌对生物打架都会死**，' +
+          '优先去找最容易到手的食物（羊/牛/猪/鸡），别下矿、别远行。',
+      );
+    }
+    return lines;
   },
   // 危险操作许可：默认全禁，要用得先授权。**必须让模型看得见**——否则
   // 它不知道自己现在能不能倒水/点火，只能靠"试一下被拒"来发现，那是最贵的发现方式。
