@@ -2949,6 +2949,39 @@ export class MineflayerBody {
                 });
                 return;
             }
+            // **'cover' 必须真的找掩体，不能只是"往空地跑"**（2026-10-22 真机，今晚最大的一个坑）：
+            // 规划层写的是 `action:'cover'` + '退到掩体/封住视线'，但这里两条分支跑的是
+            // **同一个"朝远离方向跑"的循环**——所谓找掩体，实际是背对着骷髅在开阔地直线跑，
+            // 这等于把自己摆成最好的靶子。今天两个 bot 共死 213 次、骷髅是最大单一来源，
+            // A 甚至在 26 秒内被同一只骷髅连杀 3 次（20:12:19 / :28 / :45）。
+            // 现在：'cover' 先尝试**挖进地下 2 格并封顶**（复用重生自救那套已验证的逻辑），
+            // 成功了就直接报"封住了"，不再去空地跑；失败才退回跑步。
+            if (plan.action === 'cover') {
+                const sealed = await this.respawnDigAndSeal();
+                healthAfter = typeof bot?.health === 'number' ? bot.health : healthAfter;
+                if (sealed) {
+                    this.notifyCreeperReflex({
+                        action: 'cover',
+                        outcome: 'ran',
+                        threatClass: plan.threatClass,
+                        distance: plan.distance,
+                        healthBefore,
+                        healthAfter,
+                        ranBlocks: 0,
+                        steps: 1,
+                        elapsedMs: Date.now() - startedAt,
+                    });
+                    this.notify('lifecycle', KIND.WORLD, LEVEL.STATE, {
+                        event: 'cover-sealed',
+                        threat: plan.threatClass,
+                        distance: plan.distance,
+                        detail:
+                            '掩体反射：周围没有可用的墙，**直接挖进地下 2 格并封顶**（已回读验证封住了）。' +
+                            '远程威胁的箭打不到封闭空间里的人。',
+                    });
+                    return;
+                }
+            }
             // 没盾/找掩体：朝远离向量跑，直到 >10 格 / 威胁消失 / 20 步 / 20 秒。
             const away = plan.away ?? { x: 0, z: 1 };
             const startPos = bot?.entity?.position;
