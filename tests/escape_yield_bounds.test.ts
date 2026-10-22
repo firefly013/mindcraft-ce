@@ -80,8 +80,14 @@ describe('escape 有界 + 可让位', () => {
     expect(progress[0]).toHaveProperty('safeDestination');
   });
 
-  it('上限常量是硬上限（20 秒 / 20 步 / 掉血 3 tick）', () => {
-    expect(FLEE_MAX_MS).toBeLessThanOrEqual(20_000);
+  it('上限常量是硬上限（45 秒 / 20 步 / 掉血 3 tick）', () => {
+    // 契约变更（Lead 2026-10-22）：20 秒 → 45 秒。
+    // 真机日志：逃命反射**每次都撞在这个上限上**（"20 秒 / 7 步，原因：time-cap"），
+    // 而 20 秒时人还在出生点附近的怪堆里，一交还身体就站着被咬死。
+    // 原来的 20 秒是防"空转 30+ 秒"，现在的问题是相反的：**没跑够就放手**。
+    // 45 秒仍然有界（不会无限占身体），其余两个上限不变。
+    expect(FLEE_MAX_MS).toBeLessThanOrEqual(45_000);
+    expect(FLEE_MAX_MS).toBeGreaterThan(20_000);
     expect(FLEE_MAX_STEPS).toBeLessThanOrEqual(20);
     expect(FLEE_HEALTH_DROP_TICKS).toBeLessThanOrEqual(3);
   });
