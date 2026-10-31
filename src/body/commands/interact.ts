@@ -40,7 +40,7 @@ import * as world from '../library/world.js';
 import * as mc from '../data/mcdata.js';
 import { describeDyedShortfall, formatUnknownItemReceipt } from '../library/item_names.js';
 import { describeCraftShortfallForBot } from '../library/craft_shortfall.js';
-import { planRouteThreatResponse, threatsNearRoute } from '../safety/path_threat.js';
+import { corridorThreatVerdict, threatsNearCorridor } from '../safety/path_threat.js';
 import Vec3 from 'vec3';
 import { td, tp } from '../../shared/prompts.js';
 import { inventoryLossAdvice } from '../../shared/inventory_advice.js';
@@ -419,24 +419,113 @@ export async function ensureAggregateFuel(
           '补燃料，或减少要烧的数量。',
       };
     }
-    let remaining = smeltCount;
-    const put: string[] = [];
-    for (const entry of totals.entries) {
-      if (remaining <= 0) break;
-      const itemsNeeded = Math.max(1, Math.ceil(remaining / entry.unit));
-      const itemsToPut = Math.min(entry.count, itemsNeeded);
-      await furnace.putFuel(mc.getItemId(entry.name), null, itemsToPut);
-      put.push(`${entry.name}×${itemsToPut}`);
-      remaining -= itemsToPut * entry.unit;
+    // **只投一种燃料**（真机 2026-10-23：先投 3 根原木，再想补 1 块木板时，
+    // mineflayer 的 putFuel 撞上"燃料槽里已经是别的东西"直接抛 destination full，
+    // 整条熔炼链路当场判失败——明明只需要再多烧 1.5 个）。燃料槽只有一个，
+    // 混投本来就不成立：挑**单独就能烧够**的那种，挑不到就如实报缺口。
+    const single = totals.entries.find((entry) => entry.capacity >= smeltCount) ?? null;
+    if (single == null) {
+      return {
+        ok: false,
+        detail:
+          `燃料不够：烧 ${smeltCount} 个需要 ${smeltCount} 个物品的燃料，可用的每种都单独不够（${ledger}）。` +
+          '燃料槽只能放一种燃料，混投会失败——补同一种燃料，或减少要烧的数量。',
+      };
+    }
+    const itemsToPut = Math.min(single.count, Math.max(1, Math.ceil(smeltCount / single.unit)));
+    // **燃料槽可能被别的东西占着**（真机 2026-10-23：一把石镐躺在槽 1 里，
+    // 于是 putFuel 每次都抛 `destination full`——那个错误只表示"目标区间没有空槽、
+    // 也没有同类物品"）。先把它搬回背包空格：`withdraw` 对工具槽不一定生效，
+    // 这里用玩家级操作（`moveSlotItem`，失败再 `clickWindow`）。
+    const slotList: any[] = Array.isArray((furnace as any).slots) ? (furnace as any).slots : [];
+    const occupant = slotList[1] as { name?: unknown; type?: unknown; count?: unknown } | null | undefined;
+    let cleanupNote = '';
+    if (occupant != null && String(occupant.name ?? '') !== single.name) {
+      const invStart = Number((furnace as any).inventoryStart ?? 3);
+      let dest = -1;
+      for (let i = invStart; i < slotList.length; i++) {
+        if (slotList[i] == null) {
+          dest = i;
+          break;
+        }
+      }
+      try {
+        if (dest >= 0) {
+          await (bot as any).moveSlotItem(1, dest);
+          cleanupNote = `（先把燃料槽里的 ${String(occupant.name)} 挪回背包）`;
+        } else {
+          await (bot as any).clickWindow(1, 0, 0);
+          const firstEmpty = (() => {
+            for (let i = invStart; i < slotList.length; i++) if (slotList[i] == null) return i;
+            return -1;
+          })();
+          if (firstEmpty >= 0) await (bot as any).clickWindow(firstEmpty, 0, 0);
+          cleanupNote = `（用点击把燃料槽里的 ${String(occupant.name)} 挪回背包）`;
+        }
+      } catch (cleanupError: unknown) {
+        cleanupNote = `（燃料槽里的 ${String(occupant.name)} 挪不走：${
+          cleanupError instanceof Error ? cleanupError.message : String(cleanupError)
+        }）`;
+      }
+    }
+    try {
+      await furnace.putFuel(mc.getItemId(single.name), null, itemsToPut);
+    } catch (error: unknown) {
+      // **`putFuel` 会抛 destination full，即使燃料槽是空的**（真机 2026-10-23：
+      // 全新熔炉、燃料槽空、背包有空位，照样失败）。它内部按 `fuelSlot` 算目标槽，
+      // 某些版本拿到的索引不对。这里退一步：**自己按窗口槽位搬**——
+      // 原版熔炉 GUI 的燃料槽恒为 1，玩家背包从 `inventoryStart` 开始。
+      const manual = await (async (): Promise<string> => {
+        try {
+          const anyBot: any = bot as any;
+          const win = anyBot?.currentWindow;
+          const winText = win == null ? 'null' : `${String(win.type ?? '?')}(${Array.isArray(win.slots) ? win.slots.length : '?'}槽)`;
+          const invStart = Number((furnace as any).inventoryStart ?? 3);
+          const slots: any[] = Array.isArray((furnace as any).slots) ? (furnace as any).slots : [];
+          const names = slots
+            .map((slot, index) => (slot == null ? null : `${index}:${String(slot.name ?? '?')}×${Number(slot.count ?? 0)}`))
+            .filter((entry): entry is string => entry != null)
+            .slice(0, 6)
+            .join(',');
+          let remaining = itemsToPut;
+          let moved = 0;
+          for (let i = invStart; i < slots.length && remaining > 0; i++) {
+            const slot = slots[i];
+            if (slot == null || String(slot.name ?? '') !== single.name) continue;
+            await anyBot.moveSlotItem(i, 1);
+            const take = Math.min(remaining, Number(slot.count ?? 0));
+            remaining -= take;
+            moved += take;
+          }
+          if (moved > 0) return `putFuel 失败后手动搬进燃料槽 ${single.name}×${moved}`;
+          return `manual-empty（窗口=${winText} invStart=${invStart} 槽位=${slots.length} 有物=${names || '无'}）`;
+        } catch (manualError: unknown) {
+          return `manual-error：${manualError instanceof Error ? manualError.message : String(manualError)}`;
+        }
+      })();
+      if (!manual.startsWith('putFuel') || manual.startsWith('manual')) {
+        return { ok: false, detail: `预处理燃料失败：${manual}` };
+      }
+      return { ok: true, detail: `${manual}（putFuel 报错后的兜底路径）。` };
     }
     return {
       ok: true,
-      detail:
-        `燃料就绪（全背包求和）：${ledger} → 合计可烧 ${Math.round(totals.capacity * 10) / 10} 个，` +
-        `够烧 ${smeltCount} 个；已投 ${put.join('、')}。`,
+      detail: `燃料就绪：投 ${single.name}×${itemsToPut}（可烧 ${Math.round(itemsToPut * single.unit * 10) / 10} 个，够烧 ${smeltCount} 个）${cleanupNote}。`,
     };
   } catch (error: unknown) {
-    return { ok: false, detail: `预处理燃料失败：${error instanceof Error ? error.message : String(error)}` };
+    // **诊断要在现场**（2026-10-23）：`destination full` 只有一个含义——目标区间既没有
+    // 同类物品也没有空槽。燃料槽是空的却报这个，说明 `bot.currentWindow` 根本不是熔炉窗口。
+    const anyBot = bot as any;
+    const win = anyBot?.currentWindow;
+    const winText = win == null ? 'null' : `${String(win.type ?? '?')}/${Array.isArray(win.slots) ? win.slots.length : '?'}`;
+    const diag = [
+      `err=${error instanceof Error ? error.message : String(error)}`,
+      `当前窗口=${winText}`,
+      `熔炉窗口=${String((furnace as any)?.id ?? (furnace as any)?.windowId ?? '?')}`,
+      `槽位数=${Array.isArray((furnace as any)?.slots) ? (furnace as any).slots.length : -1}`,
+      `invStart=${String((furnace as any)?.inventoryStart ?? '?')}`,
+    ].join('；');
+    return { ok: false, detail: `预处理燃料失败：${diag}` };
   } finally {
     try {
       if (furnace != null) await bot.closeWindow(furnace);
@@ -675,6 +764,49 @@ export function isFurnaceLikeBlock(name: unknown): boolean {
 }
 
 /**
+ * 从**原料槽/燃料槽**里把误投的东西取回来。
+ *
+ * 为什么需要：`useBlock(type=furnace, output=…)` 只认产物槽，而误投进燃料槽的工具
+ * 根本取不回来（真机 2026-10-23：一把石镐卡在燃料槽，炉子直接报废）。这不是"帮你
+ * 做决定"，是**把身体能做的事补齐**——玩家右键就能把这格拿起来。
+ *
+ * 只在产物槽取不到时调用；找到了就取，取不到就如实说。
+ */
+export async function recoverFromContainerSlots(
+  bot: any,
+  furnace: any,
+  item: ItemSpec,
+  type: string,
+): Promise<string | null> {
+  const slots: any[] = Array.isArray(furnace?.slots) ? furnace.slots : [];
+  const invStart = Number(furnace?.inventoryStart ?? 3);
+  const limit = Math.min(invStart, slots.length);
+  const labels = ['原料槽', '燃料槽', '产物槽'];
+  for (let i = 0; i < limit; i++) {
+    const slot = slots[i];
+    if (slot == null || String(slot.name ?? '') !== item.name) continue;
+    const count = Number(slot.count ?? 1);
+    const before = countInInventory(bot, item.name);
+    try {
+      await furnace.withdraw(slot.type, null, count);
+    } catch (error: unknown) {
+      return `- ${type} 的${labels[i] ?? `槽 ${i}`}里有 ${item.name}×${count}，但**取不出来**：${
+        error instanceof Error ? error.message : String(error)
+      }`;
+    }
+    await settleInventory(bot, 3, 50);
+    const after = countInInventory(bot, item.name);
+    const delta = before != null && after != null ? after - before : null;
+    return (
+      `- 产物槽是空的，但在${labels[i] ?? `槽 ${i}`}里找到了 ${item.name}×${count}，**已经取回**` +
+      (delta != null ? `（背包 +${delta}）` : '（背包读数暂时不可用，以 stats 为准）') +
+      '——那是误投进去的，不是烧出来的。'
+    );
+  }
+  return null;
+}
+
+/**
  * 从熔炉**产物槽**取物。
  *
  * 契约（Lead 裁定，2026-10-19）：
@@ -717,6 +849,12 @@ export async function takeFromFurnace(
     const slotName = typeof slot?.name === 'string' ? slot.name : null;
     const slotCount = Number(slot?.count ?? 0);
     if (slotName == null || !Number.isFinite(slotCount) || slotCount <= 0) {
+      // **产物槽空 ≠ 里面没东西**（真机 2026-10-23 用 CLI 通关时踩到）：
+      // 一把石镐被误投进燃料槽，产物槽是空的、`output=` 又只认产物槽 ⇒
+      // 那件东西再也取不回来，整个炉子连带里面的工具一起废掉。
+      // 这里补一条：请求的物品如果在原料/燃料槽里，就把它取回来，并点名从哪个槽取的。
+      const recovered = await recoverFromContainerSlots(bot, furnace, item, type);
+      if (recovered != null) return [recovered];
       return [`- ${type} 的**产物槽是空的**：没有东西可取（原料槽/燃料槽没动；还在烧就再等一会儿）。`];
     }
     if (slotName !== item.name) {
@@ -2303,7 +2441,7 @@ const interactCommands: AgentCommand[] = [
         lines,
         `检查一下 input（现在给的是 ${itemText(parsedIn.items) || '空'}）够不够、配方对不对。` +
           `背包里现有 ${wanted.name}×${have}。` +
-          '如果 stats 里其实有材料，说明是客户端背包同步延迟——不要重复挖/丢材料，稍后用 stats 再核对一次；必要时重启 agent 后再试。',
+          '如果 stats 里显示材料其实存在，那就是客户端背包同步延迟（本工具读不到）。',
       );
     },
   },
@@ -2343,17 +2481,16 @@ const interactCommands: AgentCommand[] = [
             .map((e) => ({ name: String(e.name), x: Number(e.position.x), z: Number(e.position.z) }));
           const from = { x: Number(p.x), z: Number(p.z) };
           const to = { x: Number(targetPos.x), z: Number(targetPos.z) };
-          const near = threatsNearRoute({ from, to, hostiles });
-          const verdict = planRouteThreatResponse({
+          const near = threatsNearCorridor({ from, to, hostiles });
+          const verdict = corridorThreatVerdict({
             health: typeof bot?.health === 'number' ? bot.health : null,
             threats: near,
             from,
             to,
           });
-          if (!verdict.proceed) {
-            lines.push(step(verdict.message));
-            return renderReport(lines);
-          }
+          // 事实照写（放行时也写）：模型有权知道直线上有几只苦力怕。
+          if (verdict.message !== '') lines.push(step(verdict.message));
+          if (!verdict.proceed) return renderReport(lines);
         }
       } catch {
         // 评估失败不阻挡交互（守卫坏了不许变成墙）。
@@ -2453,7 +2590,7 @@ const interactCommands: AgentCommand[] = [
       return renderReport(
         [step(`做不出 ${want.name}×${want.count}`), step(craftResult.detail)],
         '同类材料（任何木板/原木/煤炭/羊毛）会按全背包合计、支持混用；上面已写明缺什么、现有多少。' +
-          '如果 stats 里其实有材料，可能是客户端背包同步延迟——不要重复挖/丢材料，稍后用 stats 再核对一次。' +
+          '如果 stats 里显示材料其实存在，那就是客户端背包同步延迟（本工具读不到）。' +
           `想知道这个物品怎么做、缺哪些材料，用 getCraftingPlan(targetItem="…")；只有 3×3 的配方才需要工作台（那时用 useBlock(type=crafting_table, …)）。` +
           `背包里现有 ${want.name}×${have}。`,
       );

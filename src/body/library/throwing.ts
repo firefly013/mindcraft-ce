@@ -188,13 +188,24 @@ export interface FlatPosition {
 }
 
 /**
- * 闭式**低伸弹道**俯仰角（返回 mineflayer 的 `pitch`：**抬头为负**）。
+ * 闭式**低伸弹道**俯仰角（返回 mineflayer 的 `pitch`：**抬头为正**）。
  *
  *   tanθ = (v² − √(v⁴ − g(g·x² + 2·y·v²))) / (g·x)
  *
  * x = 水平距离、y = 高差（目标更高为正）、v = 初速、g = 重力。
  * 判别式 < 0 → 这个距离打不到（返回 null，由调用方如实说"打不到"，不许硬扔）。
  * 取减号 = 低伸解（平射）；加号是高抛解，命中间隔太久、容易被挡，不用。
+ *
+ * **符号以 mineflayer 源码为准**（三条互相独立，都对得上）：
+ *   1. `ray_trace.js` 的 `getViewDirection(pitch, yaw)` 的 y 分量 = `sin(pitch)`
+ *      ⇒ pitch 为正 = 视线朝上；
+ *   2. `physics.js` 的 `bot.lookAt`：`pitch = atan2(delta.y, groundDistance)`
+ *      ⇒ 目标更高，pitch 为正；
+ *   3. `conversions.js`：`toNotchianPitch(pitch) = toDegrees(−pitch)`，
+ *      原版 pitch 负数为抬头 ⇒ mineflayer 的正数为抬头。
+ * **真机交叉验证**（2026-10-23，(-246,60,-183)）：`lookAtPosition` 指向头顶上方
+ * y=62 的石头，读数 pitch = **+38°**，且 `inspect` 的准星确实落在 (-247,62,-184) 的石头上。
+ * 以前这里返回 `−atan(tanθ)`（等于默认"抬头为负"），投出去一律往下扎。
  *
  * 不含阻力：原版阻力 0.99/刻会让实际射程略短，所以表里的 v 是**可校准**的，
  * 回执也会把 v/g 写出来，方便用实测数据改。
@@ -203,28 +214,40 @@ export function solveBallisticPitch(x: number, y: number, v: number, g: number):
     if (![x, y, v, g].every((n) => Number.isFinite(n))) return null;
     if (v <= 0 || g <= 0) return null;
     if (x <= 0) {
-        // 垂直上下：目标在正上方就抬头 90°，正下方就低头（这种扔法没意义，如实返回）。
+        // 垂直上下：目标在正上方就抬头 +90°，正下方就低头 −90°（这种扔法没意义，如实返回）。
         if (Math.abs(y) < 1e-9) return 0;
-        return y > 0 ? -Math.PI / 2 : Math.PI / 2;
+        return y > 0 ? Math.PI / 2 : -Math.PI / 2;
     }
     const v2 = v * v;
     const discriminant = v2 * v2 - g * (g * x * x + 2 * y * v2);
     if (discriminant < 0) return null;
     const tanTheta = (v2 - Math.sqrt(discriminant)) / (g * x);
-    return -Math.atan(tanTheta);
+    return Math.atan(tanTheta);
 }
 
 /** 水平朝向角（mineflayer 的 yaw：0 = 南(+z)，90° = 西(-x)）。 */
+/**
+ * 从 from 看向 to 时的 **mineflayer 朝向（弧度）**。
+ *
+ * 和 `skills.anglesToPoint` 同一套约定（mineflayer 自己的 `bot.lookAt`）：
+ *   `yaw = atan2(−dx, −dz)`  （yaw 0 = 北=−Z，+90° = 西=−X）
+ * **别和 Notchian 的 0=南 混用。** 以前这里写成 `atan2(−dx, +dz)`（z 分量漏了负号），
+ * 于是所有投掷物朝**反方向**飞（正北的目标会算出正南的 yaw，整整 180°）。
+ */
 export function yawTo(from: FlatPosition, to: FlatPosition): number {
     const dx = to.x - from.x;
     const dz = to.z - from.z;
-    return Math.atan2(-dx, dz);
+    return Math.atan2(-dx, -dz);
 }
 
-/** 同一俯仰角下的**平射射程**（真空解；用来和实测比对，差多少就是校准数据）。 */
+/** 同一俯仰角下的**平射射程**（真空解；用来和实测比对，差多少就是校准数据）。
+ *
+ * θ = 抬头为正的发射仰角 ⇒ 同高射程 = v²·sin(2θ)/g。以前写成 `sin(−2·pitch)`
+ * 是为了抵消当时"抬头为负"的错误约定。
+ */
 export function predictedRange(pitch: number, v: number, g: number): number | null {
     if (![pitch, v, g].every((n) => Number.isFinite(n)) || g <= 0) return null;
-    return (v * v * Math.sin(-2 * pitch)) / g;
+    return (v * v * Math.sin(2 * pitch)) / g;
 }
 
 export type AimPlan =
@@ -444,9 +467,7 @@ export async function throwItemSkill(
         const throwables = inventoryThrowables(bot, countOf, hasItem);
         return finish(
             `throwItem：不认识 "${item || '(没给物品名)'}"，不敢瞎扔。支持：${supportedThrowables().join(' / ')}。` +
-                (throwables.length > 0 ? `背包里能扔的有：${throwables.join('、')}。` : '背包里没有可扔的东西。') +
-                `\n下一步（照做即可）：stats(type="inventory")`,
-        );
+                (throwables.length > 0 ? `背包里能扔的有：${throwables.join('、')}。` : '背包里没有可扔的东西。') );
     }
 
     // ── 箭矢类：要弓，核对的是**箭**；其余：核对物品本身 ──
@@ -459,15 +480,11 @@ export async function throwItemSkill(
         const others = inventoryThrowables(bot, countOf, hasItem);
         return finish(
             `throwItem：背包里没有 ${ammoItem}（手上/背包都数不到），投不了。` +
-                (others.length > 0 ? `能扔的还有：${others.join('、')}。` : '没有任何可扔的东西：先去做（雪球=雪块×4、箭=燧石+木棍+羽毛）。') +
-                `\n下一步（照做即可）：stats(type="inventory")`,
-        );
+                (others.length > 0 ? `能扔的还有：${others.join('、')}。` : '没有任何可扔的东西：先去做（雪球=雪块×4、箭=燧石+木棍+羽毛）。') );
     }
     if (profile.klass === 'arrow' && held == null) {
         return finish(
-            `throwItem：有箭但没有弓/弩，射不出去。**先做一把弓**（3 木棍 + 3 线），或换别的投掷物。` +
-                `\n下一步（照做即可）：stats(type="inventory")`,
-        );
+            `throwItem：有箭但没有弓/弩，射不出去。**先做一把弓**（3 木棍 + 3 线），或换别的投掷物。` );
     }
 
     // ── 瞄准（抛物线解算 / 制导直扔） ──
@@ -476,14 +493,13 @@ export async function throwItemSkill(
     let target: FlatPosition | null = null;
     if (given.length !== 0 && given.length !== 3) {
         return finish(
-            `throwItem：目标坐标要么全给（target_x/target_y/target_z），要么都不给；现在给了 ${given.length} 个。` +
-                `\n下一步（照做即可）：stats(type="body")`,
+            `throwItem：目标坐标要么全给（target_x/target_y/target_z），要么都不给；现在给了 ${given.length} 个。`,
         );
     }
     if (given.length === 3) {
         const [x, y, z] = targetRaw.map((value) => Number(value));
         if (![x, y, z].every((n) => Number.isFinite(n))) {
-            return finish(`throwItem：目标坐标读不出数字，不扔。\n下一步（照做即可）：stats(type="body")`);
+            return finish(`throwItem：目标坐标读不出数字，不扔。`);
         }
         target = { x, y, z };
     }
@@ -491,15 +507,13 @@ export async function throwItemSkill(
     const currentYaw = yawOf(bot) ?? 0;
     const aim = planThrowAim(profile, launch, currentYaw, target);
     if (aim.kind === 'unreachable') {
-        const closer = closerPoint(launch, target, aim.maxRange);
         return finish(
             `throwItem ${profile.item}：**这个距离打不到**——水平 ${aim.distance.toFixed(1)} 格、高差 ${aim.heightDiff.toFixed(1)} 格，` +
                 `按 v=${aim.velocity} 格/刻、g=${aim.gravity} 格/刻² 的最大平射射程只有 ${aim.maxRange.toFixed(1)} 格。` +
-                `**没有扔**（扔出去只会掉在半路）。走近一点再扔，或者改用别的办法。` +
-                `\n下一步（照做即可）：goToCoordinates(x=${closer.x}, y=${closer.y}, z=${closer.z}, closeness=2)`,
+                `**没有扔**（扔出去只会掉在半路）。`,
         );
     }
-    const pitchDeg = (-aim.pitch * 180) / Math.PI;
+    const pitchDeg = (aim.pitch * 180) / Math.PI;
     if (aim.kind === 'ballistic') {
         lines.push(
             `throwItem ${profile.item}：瞄准 → 水平 ${aim.distance.toFixed(1)} 格、高差 ${aim.heightDiff >= 0 ? '+' : ''}${aim.heightDiff.toFixed(1)} 格；` +
@@ -519,9 +533,7 @@ export async function throwItemSkill(
     const equipped = held == null ? false : await equip(bot, held);
     if (!equipped) {
         return finish(
-            `throwItem：${held ?? profile.item} 没拿到手上，投不了（装备失败）。` +
-                `\n下一步（照做即可）：stats(type="inventory")`,
-        );
+            `throwItem：${held ?? profile.item} 没拿到手上，投不了（装备失败）。` );
     }
     const beforeEntities = snapshotProjectiles(entitiesOf(bot), profile.projectile);
     const launchedAt = now();
@@ -549,9 +561,7 @@ export async function throwItemSkill(
             `throwItem ${profile.item}：**没扔出去**——${ammoItem} 数量没变（${countBefore ?? '读不到'} → ${countAfter ?? '读不到'}）${why}。` +
                 (profile.klass === 'arrow'
                     ? '拉弓→放箭的时序可能没被服务端采纳（这条路径以前从没真机验证过）：先确认弓在手上、箭在背包。'
-                    : '服务端可能没采纳这次"使用物品"（或被挡/被打断）。别当作扔成功了。') +
-                `\n下一步（照做即可）：stats(type="inventory")`,
-        );
+                    : '服务端可能没采纳这次"使用物品"（或被挡/被打断）。别当作扔成功了。') );
     }
     lines.push(`投出：${ammoItem} ${countBefore} → ${countAfter}（数量确实少了 = 真的扔出去了）。`);
 
@@ -623,8 +633,6 @@ export async function throwItemSkill(
         lines.push(guidance);
     }
 
-    lines.push(`下一步（照做即可）：${throwNextAction(profile, teleport)}`);
-
     const outcome: ThrowOutcome = {
         item: item,
         profile: profile.klass,
@@ -647,27 +655,6 @@ export async function throwItemSkill(
 /** 把校准观测写进回执的一句（诊断用；目前并入"观测"行）。 */
 function fmt(value: number): string {
     return (Math.round(value * 10) / 10).toString();
-}
-
-function closerPoint(from: FlatPosition, target: FlatPosition | null, maxRange: number): FlatPosition {
-    if (target == null) return { x: Math.round(from.x), y: Math.round(from.y), z: Math.round(from.z) };
-    const dx = target.x - from.x;
-    const dz = target.z - from.z;
-    const distance = Math.hypot(dx, dz) || 1;
-    const want = Math.max(1, maxRange * 0.7);
-    const ratio = Math.min(1, want / distance);
-    return {
-        x: Math.round(from.x + dx * ratio),
-        y: Math.round(from.y),
-        z: Math.round(from.z + dz * ratio),
-    };
-}
-
-function throwNextAction(profile: ThrowProfile, teleport: ThrowOutcome['teleport']): string {
-    if (profile.teleports === true) return 'stats(type="body")';
-    if (profile.guided === true) return 'stats(type="body")';
-    void teleport;
-    return 'stats(type="inventory")';
 }
 
 /** 背包里能扔的东西（拒绝/推荐时点名）。 */

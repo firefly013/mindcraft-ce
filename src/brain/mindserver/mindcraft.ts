@@ -46,7 +46,8 @@ export async function createAgent(incomingSettings: Settings): Promise<CreateAge
     // 否则 agent 进程起来就死，只剩重启循环。
     try {
         validateProfile(incomingSettings.profile);
-        resolveProvider(incomingSettings.profile);
+        // 没有 model = 手动模式：不解析供应商（那是模型才需要的东西）。
+        if (incomingSettings.profile?.model != null) resolveProvider(incomingSettings.profile);
     } catch (error: unknown) {
         const message = error instanceof ConfigError || error instanceof Error ? error.message : String(error);
         // 调用方负责显示：网页端把 error 回给浏览器，CLI 端打印后退出。

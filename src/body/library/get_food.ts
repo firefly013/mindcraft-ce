@@ -18,8 +18,8 @@
  * 三条硬规矩：
  *   - **背包增量是唯一证据**（和 consume / mineTunnel 一样）：没多出能吃的，就不许说拿到了；
  *   - **有界 + 可续**：每一步都有子预算，整趟有总预算；停下来时给**一条**能照抄的"接着做"调用；
- *   - **存粮规则穿过去**：拿到吃的**不等于**立刻吃掉最后两份——阈值与 `skills.consume` 同一套，
- *     两边不许打架（否则会来回振荡：getFood 刚钓到，consume 立刻拒吃）。
+ *   - **吃不吃由模型定**：`skills.consume` 只警告不拒绝，这里也不替它判断"现在该不该吃"；
+ *     拿到吃的**不等于**立刻吃掉最后两份——但那是模型的判断，工具只把事实写进回执。
  */
 
 import * as skills from './skills.js';
@@ -63,10 +63,23 @@ export const GETFOOD_COBWEB_RADIUS = 48;
 export const GETFOOD_MAX_COBWEBS = 3;
 /** 每个子步骤至少要有这么多剩余预算才值得开始。 */
 export const GETFOOD_MIN_STEP_MS = 15_000;
-/** 背包里已经有这么多能吃的：**什么都不用做**（和 `!fish` 的同一条线，复用同一个常量）。 */
+/**
+ * 全局"舒适线"：背包里有这么多能吃的，才允许**连吃都不吃**直接收工。
+ *
+ * 它和 `want` 是两件事：`want` 是"要囤到几份"，舒适线是"已经不用管了"。
+ * **两个都满足**才提前返回——只按 `want` 判会把"饿着但背包有 1 份"也判成收工
+ * （真机测试当场抓到：want=1、3 份面包、food 8，工具直接不动，一口都不吃）。
+ */
 export const FOOD_ACCEPTABLE = FISH_FOOD_ENOUGH;
 
-/** 能"走过去打"的陆地动物（水里/天上的不算：huntFor 要陆地接近）。按食物价值排优先级。 */
+/**
+ * 能"走过去打"的陆地动物（水里/天上的不算：huntFor 要陆地接近）。按食物价值排优先级。
+ *
+ * **海龟不在名单里**（真机 2026-10-23 删掉）：它**掉的是海草，海草玩家吃不了**
+ * （已核对 minecraft.wiki/w/Turtle：掉落 0–2 seagrass，且页面里 seagrass 只作为
+ * "对海龟使用的物品"，没有任何可食用的说法），而且**有 30 HP**（15 颗心）——
+ * 徒手要打 30 下。真机上 getFood 挑了海龟当目标，**空打 90 秒、一份吃的都没拿到**。
+ */
 export const HUNTABLE_ANIMALS: readonly string[] = [
     'cow',
     'mooshroom',
@@ -76,7 +89,6 @@ export const HUNTABLE_ANIMALS: readonly string[] = [
     'goat',
     'chicken',
     'rabbit',
-    'turtle',
 ];
 
 export type GetFoodStopReason = 'enough' | 'reached' | 'gained' | 'blocked' | 'budget' | 'interrupted' | 'eat_only';
@@ -102,7 +114,6 @@ export interface GetFoodOutcome {
     eaten: Array<{ name: string; gained: number }>;
     steps: GetFoodStepRecord[];
     stopReason: GetFoodStopReason;
-    nextCall: string;
     elapsedMs: number;
     water: { position: FlatPosition; distance: number } | null;
     warnings: string[];
@@ -372,28 +383,8 @@ export function foodDistributionLines(
     return lines;
 }
 
-/** 失败时的"一条可执行下一步"（候选优先；什么都没有就用方向 + 距离换地方）。 */
-export function foodNextCallFromSurvey(survey: FoodSurvey | null, here: FlatPosition | null): string | null {
-    if (survey == null) return null;
-    const nearest = [...survey.animals, ...survey.crops].sort((a, b) => a.distance - b.distance)[0];
-    if (nearest != null) {
-        if (nearest.kind === 'animal') return `huntFor(entity="${nearest.name}", want=1, max_ms=120000)`;
-        return `collectBlocks(type="${nearest.name}", num=3)`;
-    }
-    if (survey.water != null) {
-        return `travelTo(x=${Math.round(survey.water.position.x)}, y=${Math.round(survey.water.position.y)}, z=${Math.round(survey.water.position.z)})`;
-    }
-    if (here == null) return null;
-    const probed = survey.open.filter((o) => o.probed > 0);
-    if (probed.length === 0) return null;
-    const best = [...probed].sort((a, b) => b.open - a.open)[0]!;
-    const dx = best.dir === '+x' ? GETFOOD_EXPAND_DISTANCE : best.dir === '-x' ? -GETFOOD_EXPAND_DISTANCE : 0;
-    const dz = best.dir === '+z' ? GETFOOD_EXPAND_DISTANCE : best.dir === '-z' ? -GETFOOD_EXPAND_DISTANCE : 0;
-    return `goToCoordinates(x=${Math.round(here.x + dx)}, y=${Math.round(here.y)}, z=${Math.round(here.z + dz)}, closeness=3)`;
-}
-
 const STOP_TEXT: Record<GetFoodStopReason, string> = {
-    enough: `背包里的吃的够用（≥${FOOD_ACCEPTABLE} 份），不用动`,
+    enough: '背包里的吃的已经到你说的份数（want），不用动',
     reached: '到目标份数了',
     gained: '拿到了（还没到目标份数）',
     blocked: '每一条路都卡住了',
@@ -408,20 +399,6 @@ export function firstLine(text: string): string {
     return (line ?? '').trim();
 }
 
-/** 从子回执里取最后一条 `下一步（照做即可）：…`（没有就 null）。 */
-export function lastNextCall(text: string): string | null {
-    const lines = String(text ?? '').split('\n');
-    for (let i = lines.length - 1; i >= 0; i--) {
-        const line = lines[i]?.trim() ?? '';
-        const marker = '下一步（照做即可）：';
-        if (line.startsWith(marker)) {
-            const call = line.slice(marker.length).trim();
-            if (call !== '') return call;
-        }
-    }
-    return null;
-}
-
 /** 能吃的份数 + 逐项（从背包计数表算）。 */
 export function edibleItemsFrom(inventory: Record<string, number>): Array<{ name: string; count: number }> {
     return Object.entries(inventory ?? {})
@@ -434,20 +411,11 @@ export function craftingTableCall(input: string, output: string): string {
     return `useBlock(type="crafting_table", input="${input}", output="${output}")`;
 }
 
-/** 生食 → 先烤（拿到生肉/生鱼时的下一步）。 */
-export function cookCallFor(name: string, count: number): string | null {
-    const cooked = cookedCounterpartOf(name);
-    if (cooked == null) return null;
-    return `useBlock(type="furnace", input="${count} ${name}", output="${count} ${cooked}")`;
-}
-
 export interface GetFoodStepResult {
     /** 这一步净拿到几份能吃的（由调用方复核背包增量得出）。 */
     gained: number;
     /** 一句话摘要。 */
     label: string;
-    /** 子步骤自己给的"接着做"（可为 null）。 */
-    nextCall?: string | null;
 }
 
 export interface GetFoodDeps {
@@ -514,51 +482,6 @@ export function bestKnownCobwebSite(
     return [...sites].sort((a, b) => cost(a) - cost(b))[0] ?? null;
 }
 
-/**
- * 一条能照抄的"接着做"：把这条链**从当前断点继续**。
- *
- * 关键点：杆子这条路**永远点名工作台**（3×3 配方，2×2 的 `craft` 放不下——我们自己踩过）。
- */
-export function rodNextCall(options: {
-    hasRod: boolean;
-    string: number;
-    sticks: number;
-    cobweb: FlatPosition | null;
-    spawner: string | null;
-    water: { position: FlatPosition; distance: number } | null;
-    /** 现在在哪（用来挑"最省事"的已知蛛网点）；读不到就 null。 */
-    here?: FlatPosition | null;
-    /** 当前维度：已知蛛网点在主世界，别的维度不能照抄。 */
-    dimension?: string | null;
-}): string {
-    if (options.hasRod) {
-        if (options.water == null) return 'searchForBlock(type="water", search_range=256)';
-        return `goToCoordinates(x=${Math.round(options.water.position.x)}, y=${Math.round(options.water.position.y)}, z=${Math.round(options.water.position.z)}, closeness=3)`;
-    }
-    if (options.string < 2) {
-        if (options.spawner != null) {
-            return `huntFor(entity="${options.spawner}", want=2, max_ms=60000)`;
-        }
-        if (options.cobweb != null) {
-            return `goToCoordinates(x=${Math.round(options.cobweb.x)}, y=${Math.round(options.cobweb.y)}, z=${Math.round(options.cobweb.z)}, closeness=2)`;
-        }
-        // 已知蛛网点是**主世界**的坐标：只有调用方明确说"在主世界"才照抄
-        // （维度未知时不猜——猜错等于把人指到另一个维度去）。
-        const dimension = (options.dimension ?? '').toLowerCase();
-        if (dimension.includes('overworld')) {
-            const site = bestKnownCobwebSite(options.here ?? null);
-            if (site != null) {
-                // **用 travelTo，不用 goToCoordinates**：水层挡路时 travelTo 会自己规划斜台阶/横向
-                // 隧道绕过去（goToCoordinates 只会在水边干等，真机卡了 90 秒）。
-                return `travelTo(x=${Math.round(site.x)}, y=${Math.round(site.y)}, z=${Math.round(site.z)})`;
-            }
-        }
-        return 'exploreFor(block="cobweb", max_steps=8, step=32)';
-    }
-    if (options.sticks < 3) return 'craft(input="2 oak_planks", output="4 stick")';
-    // **工作台**：3 木棍 + 2 线是 3×3 配方，背包里的 2×2 craft 做不出来。
-    return craftingTableCall('3 stick, 2 string', '1 fishing_rod');
-}
 
 /** 渲染回执（纯函数）。 */
 export function getFoodReceipt(o: GetFoodOutcome): string {
@@ -567,7 +490,7 @@ export function getFoodReceipt(o: GetFoodOutcome): string {
     const num = (value: number | null): string => (value == null ? '读不到' : String(value));
     const head =
         o.stopReason === 'enough'
-            ? `getFood：**不用动**——背包里已经有 ${o.ediblesBefore} 份能吃的（≥${FOOD_ACCEPTABLE}），先去干正事。`
+            ? `getFood：**不用动**——背包里已经有 ${o.ediblesBefore} 份能吃的（你要的是 ${o.want} 份，已经够了）。`
             : delta > 0
               ? `getFood：这一步**拿到了 ${delta} 份能吃的**（${o.ediblesBefore} → ${o.ediblesAfter}）。`
               : o.eaten.length > 0
@@ -593,7 +516,7 @@ export function getFoodReceipt(o: GetFoodOutcome): string {
     }
     if (o.longTerm !== '') lines.push(o.longTerm);
     for (const warning of capLines(o.warnings, 8, '警告')) lines.push(warning);
-    lines.push(`下一步（照做即可）：${o.nextCall}`);
+    // 2026-10-30：不再补"下一步"——钓/打/烤/换目标，是模型自己的计划
     return capReceipt(lines.join('\n'));
 }
 
@@ -643,7 +566,7 @@ export async function getFoodSkill(
             const before = countFood(inventory(b));
             const receipt = await huntForSkill(b, entity, huntWant, radius, maxMs, {});
             const gained = countFood(inventory(b)) - before;
-            return { gained, label: firstLine(receipt), nextCall: lastNextCall(receipt) };
+            return { gained, label: firstLine(receipt) };
         });
     const fish =
         deps.fish ??
@@ -651,7 +574,7 @@ export async function getFoodSkill(
             const before = countFood(inventory(b));
             const receipt = await fishSkill(b, maxMs, casts, {}, {});
             const gained = countFood(inventory(b)) - before;
-            return { gained, label: firstLine(receipt), nextCall: lastNextCall(receipt) };
+            return { gained, label: firstLine(receipt) };
         });
     const findBlock =
         deps.findBlock ??
@@ -720,7 +643,7 @@ export async function getFoodSkill(
         deps.explore ??
         (async (b: any, block: string, maxSteps: number, step: number) => {
             const receipt = await exploreForSkill(b, block, maxSteps, step, {});
-            return { gained: 0, label: firstLine(receipt), nextCall: lastNextCall(receipt) };
+            return { gained: 0, label: firstLine(receipt) };
         });
 
     const startedAt = now();
@@ -731,7 +654,6 @@ export async function getFoodSkill(
     const warnings: string[] = [];
     const eaten: Array<{ name: string; gained: number }> = [];
     const here = position(bot);
-    let nextCall: string | null = null;
     let longTerm = '';
     let stopReason: GetFoodStopReason = 'blocked';
     let waterInfo: { position: FlatPosition; distance: number } | null = null;
@@ -742,27 +664,49 @@ export async function getFoodSkill(
         steps.push({ id, text, gained });
     };
 
-    // ── 已经不缺吃的：什么都不做（"want 是下限，不是目标"） ──
-    if (ediblesBefore >= FOOD_ACCEPTABLE) {
+    // ── 已经达到**本次要的份数**、而且本来就不缺：什么都不做。 ──
+    // **两个条件都要**：
+    //   - `want` 是调用方自己说的数。以前只看全局舒适线，于是 `getFood(want=10)`
+    //     在背包有 4 份时被直接判"不用动"——**参数被吞**，模型说的数没人看；
+    //   - 舒适线管的是"连吃都不用吃"。只按 want 判（want=1、3 份面包、food 8）
+    //     会把饿着的人直接收工，一口都不吃——真机测试当场抓到。
+    if (ediblesBefore >= want && ediblesBefore >= FOOD_ACCEPTABLE) {
         stopReason = 'enough';
-        nextCall = 'stats(type="inventory")';
     } else {
-        // ── ① 吃：真饿（food < 回血线）且**不违反存粮规则**才吃 ──
+        // ── ① 吃：**只要包里有能吃的就吃**（"现在饿不饿"由模型判断，工具不猜）──
+        // 2026-10-24 修：以前这里有两道替模型把关的门——"food ≥ 回血线 ⇒ 跳过（先补库存）"
+        // 和存粮门。真机：机器人血 3、food 11、包里有猪排，工具说"先留着" ⇒ 6 分钟回不了血
+        // （Lead 2026-10-21 真机 B）。存粮门当天已改成"照吃 + 警告"，这处"回血线"是同一类：
+        // 接下来是去打架（可能掉血）还是回城（不缺），只有模型知道。现在照吃，
+        // 把"你没在掉血、这份吃了有点浪费"作为事实写进回执，判断权交还模型。
         const foodNow = before.food;
+        const notHungry = foodNow != null && foodNow >= FOOD_REGEN_THRESHOLD;
         const reserveBlocked = ediblesBefore > 0 && ediblesBefore <= FOOD_RESERVE_LOW && foodNow != null && foodNow >= FOOD_RESERVE_COMFORT;
         if (ediblesBefore === 0) {
             record('eat', '吃：跳过（背包里没有能吃的）。', 0);
         } else if (foodNow == null) {
             record('eat', '吃：跳过（食物值读不到，不瞎吃）。', 0);
-        } else if (foodNow >= FOOD_REGEN_THRESHOLD) {
-            record('eat', `吃：跳过（食物 ${foodNow} ≥ 回血线 ${FOOD_REGEN_THRESHOLD}，先补库存）。`, 0);
-        } else if (reserveBlocked) {
-            record(
-                'eat',
-                `吃：**先留着**——食物 ${foodNow}（≥${FOOD_RESERVE_COMFORT} 不算饿）而背包只剩 ${ediblesBefore} 份，` +
-                    `存粮规则要求留给低血期（和 consume 同一套阈值）。`,
-                0,
-            );
+        } else if (notHungry || reserveBlocked) {
+            const names = edibleItemsFrom(inventory(bot)).map((item) => item.name);
+            const best = pickBestFood(names);
+            if (best == null) {
+                record('eat', '吃：跳过（挑不出可吃的东西）。', 0);
+            } else {
+                const gainedBefore = ediblesNow();
+                const ok = await eat(bot, best);
+                const gained = gainedBefore - ediblesNow();
+                // 两条事实照说，但**吃这一步照做**：
+                const why = notHungry ? `食物 ${foodNow} ≥ 回血线 ${FOOD_REGEN_THRESHOLD}（现在吃不涨饱食度）` : '';
+                const reserve = reserveBlocked
+                    ? `⚠️ 背包只剩 ${ediblesBefore} 份，这份吃掉之后短期内没吃的了——先去补（打猎/钓鱼/种小麦）`
+                    : '';
+                const facts = [why, reserve].filter((x) => x !== '').join('；');
+                record(
+                    'eat',
+                    `吃：${ok ? `吃了 ${best}` : `想吃 ${best} 但没吃成（回执里有原因）`}${facts === '' ? '' : '。' + facts + '。'}`,
+                    gained,
+                );
+            }
         } else {
             const names = edibleItemsFrom(inventory(bot)).map((item) => item.name);
             const best = pickBestFood(names);
@@ -788,7 +732,6 @@ export async function getFoodSkill(
                 const result = await hunt(bot, animal, need, GETFOOD_HUNT_RADIUS, Math.min(GETFOOD_HUNT_MAX_MS, Math.max(5_000, left() - 5_000)));
                 const gained = ediblesNow() - gainedBefore;
                 record('hunt', `打猎：${animal} → ${result.label}（能吃的 ${gained >= 0 ? '+' : ''}${gained}）`, gained);
-                if (result.nextCall != null) nextCall = result.nextCall;
             }
         } else if (ediblesNow() < want) {
             record('hunt', `打猎：跳过（剩余预算不足 ${GETFOOD_MIN_STEP_MS / 1000} 秒）。`, 0);
@@ -859,16 +802,6 @@ export async function getFoodSkill(
                             return null;
                         }
                     })();
-                    nextCall = rodNextCall({
-                        hasRod: false,
-                        string: countOf(bot, 'string'),
-                        sticks: countOf(bot, 'stick'),
-                        cobweb: web,
-                        spawner,
-                        water: waterInfo,
-                        here,
-                        dimension,
-                    });
                     record(
                         'rod',
                         `竿子这条路卡住了：string ${countOf(bot, 'string')}/2、stick ${countOf(bot, 'stick')}/3` +
@@ -886,18 +819,11 @@ export async function getFoodSkill(
                             : `钓鱼：最近的水在 (${Math.round(waterInfo.position.x)}, ${Math.round(waterInfo.position.y)}, ${Math.round(waterInfo.position.z)})，${waterInfo.distance.toFixed(1)} 格——超过抛竿距离 ${FISH_WATER_REACH} 格，先走过去。`,
                         0,
                     );
-                    if (nextCall == null) {
-                        nextCall =
-                            waterInfo == null
-                                ? 'searchForBlock(type="water", search_range=256)'
-                                : `goToCoordinates(x=${Math.round(waterInfo.position.x)}, y=${Math.round(waterInfo.position.y)}, z=${Math.round(waterInfo.position.z)}, closeness=3)`;
-                    }
                 } else {
                     const gainedBefore = ediblesNow();
                     const result = await fish(bot, Math.min(GETFOOD_FISH_MAX_MS, Math.max(5_000, left() - 5_000)), GETFOOD_FISH_MAX_CASTS);
                     const gained = ediblesNow() - gainedBefore;
                     record('fish', `钓鱼：${result.label}（能吃的 ${gained >= 0 ? '+' : ''}${gained}）`, gained);
-                    if (result.nextCall != null) nextCall = result.nextCall;
                 }
             }
         } else if (ediblesNow() < want) {
@@ -959,17 +885,6 @@ export async function getFoodSkill(
             );
             record('rotten', `腐肉：有 ${rotten} 个（应急可选，带饥饿效果）。`, 0);
         }
-
-        // ── "接着做"：没拿到就跟着断点走；拿到了就提醒先烤 ──
-        if (nextCall == null || (after > ediblesBefore && stopReason === 'gained' && !nextCall.startsWith('useBlock(type="furnace"'))) {
-            const gainedItems = edibleItemsFrom(inventory(bot));
-            const rawItem = gainedItems.find((item) => cookedCounterpartOf(item.name) != null);
-            if (after > ediblesBefore && rawItem != null) {
-                nextCall = cookCallFor(rawItem.name, rawItem.count) ?? 'stats(type="inventory")';
-            } else if (nextCall == null) {
-                nextCall = ediblesNow() > 0 ? 'stats(type="inventory")' : 'stats(type="inventory")';
-            }
-        }
     }
 
     const satBefore = before.saturation;
@@ -987,7 +902,6 @@ export async function getFoodSkill(
         eaten,
         steps,
         stopReason,
-        nextCall: nextCall ?? 'stats(type="inventory")',
         elapsedMs: now() - startedAt,
         water: waterInfo,
         warnings,
@@ -1009,15 +923,6 @@ export async function getFoodSkill(
             outcome.survey = survey;
             outcome.rodAvailable = countOf(bot, 'fishing_rod') > 0;
             outcome.huntedWithoutGain = steps.some((step) => step.id === 'hunt' && step.gained <= 0);
-            const better = foodNextCallFromSurvey(survey, position(bot) ?? null);
-            // **只在下一步是死胡同时才换**（`stats`/再调一次 getFood 都是空转的形状）；
-            // 已经有具体动作（蛛网/水/烤）就不抢。
-            if (
-                better != null &&
-                (outcome.nextCall.startsWith('stats(') || outcome.nextCall.startsWith('getFood('))
-            ) {
-                outcome.nextCall = better;
-            }
         } catch {
             // 扫描本身炸了 ⇒ 明确说"没扫到"，不猜（`null` 会被渲染成"没扫到"）。
             outcome.survey = null;

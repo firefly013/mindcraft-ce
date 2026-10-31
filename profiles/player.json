@@ -1,0 +1,4 @@
+{
+  "$schema": "../schemas/profile.schema.json",
+  "name": "player"
+}

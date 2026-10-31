@@ -213,11 +213,10 @@ function runProgressionAction(
         if (result.interrupted && !result.timedout) return;
         if (result.timedout) {
             const why = typeof skills.describeStuck === 'function' ? skills.describeStuck(agent.bot) : '';
-            const next = label === 'exploreFor' ? 'stats(type="body")' : 'stats(type="inventory")';
             return (
                 `${label}：**超时**（${timeoutMinutes} 分钟没做完），已释放身体通道。` +
                 `注意：${label} 自己有更短的时间预算，正常会先收手并给出完整回执——走到这里说明某一腿/某一次攻击卡住了。` +
-                `下一步（照做即可）：${next}。${why === '' ? '' : `\n卡住时：${why}`}`
+                `${why === '' ? '' : `\n卡住时：${why}`}`
             );
         }
         return result.message;
@@ -314,6 +313,11 @@ export const progressionActionList: AgentCommand[] = [
                 description: PROGRESSION_TOOL_TEXT.mineTunnel.params.direction,
                 optional: true,
             },
+            force: {
+                type: 'boolean',
+                description: PROGRESSION_TOOL_TEXT.mineTunnel.params.force,
+                optional: true,
+            },
             handoff: {
                 type: 'string',
                 description: PROGRESSION_TOOL_TEXT.mineTunnel.params.handoff,
@@ -323,8 +327,8 @@ export const progressionActionList: AgentCommand[] = [
         perform: runProgressionAction(
             'mineTunnel',
             TUNNEL_TIMEOUT_MIN,
-            (agent, rawLength?: unknown, rawHeight?: unknown, rawDirection?: unknown, rawHandoff?: unknown) =>
-                progression.mineTunnelSkill(agent.bot, rawLength, rawHeight, rawDirection, {}, { handoff: rawHandoff }),
+            (agent, rawLength?: unknown, rawHeight?: unknown, rawDirection?: unknown, rawForce?: unknown, rawHandoff?: unknown) =>
+                progression.mineTunnelSkill(agent.bot, rawLength, rawHeight, rawDirection, {}, { handoff: rawHandoff, force: rawForce === true }),
         ),
     },
     {

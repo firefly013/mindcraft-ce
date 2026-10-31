@@ -353,11 +353,11 @@ export function aggregateTotals(items: readonly string[]): string[] {
  * **仰角/俯角超过它就"画面里基本没有地面"**。
  *
  * 量化依据：MC 默认垂直视场角 ≈ 70°（半角 35°）⇒ 视线抬高超过半角，地平线就出画面、
- * 整张图只剩天空。真机那次 pitch ≈ −87°~−90° 正是这一类（画面本来就该是纯天空）。
+ * 整张图只剩天空。**抬头是正数**，所以天空是 `pitch ≥ +35°`。
  */
-export const SKY_PITCH_DEG = -35;
-/** 低于这个角度就是"几乎垂直向下"：只能看到脚下几格，判断远处地形不可靠。 */
-export const DOWN_PITCH_DEG = 70;
+export const SKY_PITCH_DEG = 35;
+/** 超过这个俯角（**负**，因为低头是负）就是"几乎垂直向下"：只能看到脚下几格。 */
+export const DOWN_PITCH_DEG = -70;
 
 /**
  * **这张截图到底在拍什么**（纯函数）。
@@ -372,13 +372,21 @@ export const DOWN_PITCH_DEG = 70;
  *     绝不能因为"没测出来"。两条沉默**理由不同、必须可分辨**，否则将来"都没说话但画面是错的"
  *     就查不出是哪一边。
  *
- * 单位：mineflayer 的 `entity.pitch` / `entity.yaw` 是**弧度**；pitch 负 = 抬头（向上为 -90°）。
+ * 单位：mineflayer 的 `entity.pitch` / `entity.yaw` 是**弧度**；**pitch 正 = 抬头（+90° 垂直向上）**。
  *
- * ⚠️ **-90° = 垂直向上看（仰视），这是 Minecraft 约定，不是 bug。** 2026-10-21 overnight_b
- * 曾连报 4 次"符号标反"，后来自己撤销了：1 格宽竖井里往上/往下都是方形石壁向中心收拢，
- * 视觉上极难分辨；而 y=38 矿井里 pitch −46° 的画面确实是往上看（石顶 + 斜上通道），标注正确。
- * **不要再"修"这个符号。**（真正会让标注可疑的只有一件事：朝向是否来自**这一帧**，
- * 那由 `frame_record.ts` 保证。）
+ * ⚠️ **这条符号以前标反过，而且被一段"不要再修"的注释锁住了。** 这次改回来有硬证据，
+ * 不再靠"肉眼看着像朝上"：
+ *   1. 源码三条互相印证 —— `ray_trace.js` 的 `getViewDirection` y 分量 = `sin(pitch)`；
+ *      `physics.js` 的 `bot.lookAt`：`pitch = atan2(delta.y, groundDistance)`；
+ *      `conversions.js`：`toNotchianPitch(p) = toDegrees(−p)`（原版抬头是负）。
+ *   2. **真机交叉验证**（2026-10-23，人在 (-246,60,-183)）：`lookAtPosition` 指向头顶上方
+ *      y=62 的石头 → 读数 **pitch +38°**，紧接着 `inspect` 的准星落在 (-247,62,-184) 的
+ *      stone 上。目标在眼睛（y≈61.6）之上、pitch 为正，两者同时成立 ⇒ 正数=抬头。
+ *   3. 反过来把竖井里"石壁向中心收拢"当证据是不可靠的：1 格宽竖井往上/往下看到的画面
+ *      本来就很像，那正是上一次误判的来源。
+ *
+ * 罗盘同理：`getViewDirection` 的水平分量是 `(−sin yaw, −cos yaw)`（z 要带负号），
+ * 以前漏了这个负号，正对北时会报"S"。
  */
 export function describeViewDirection(pitch: unknown, yaw: unknown): string | null {
   // **`null` 不是 0**：`Number(null) === 0` ⇒ 直转会把"没读到"读成"平视"（就是今晚那条
@@ -393,17 +401,18 @@ export function describeViewDirection(pitch: unknown, yaw: unknown): string | nu
     return `视线：**读不到**（pitch/yaw 读数不可用）⇒ **不要假设现在是平视**；判断地形前先看 Position 行，或先 \`stats(type="body")\`。`;
   }
   const pitchDeg = (p * 180) / Math.PI;
-  // MC yaw：0 = +z = 南；朝向向量 = (-sin yaw, cos yaw)。
-  const compass = compassOf(-Math.sin(y), Math.cos(y));
-  if (pitchDeg <= SKY_PITCH_DEG) {
+  // 水平朝向取 `getViewDirection(pitch, yaw)` 的 x/z 分量：**两项都是负的**
+  // （(−sin yaw, −cos yaw)）。以前 z 项漏了负号 ⇒ 正对北会报"S"。
+  const compass = compassOf(-Math.sin(y), -Math.cos(y));
+  if (pitchDeg >= SKY_PITCH_DEG) {
     return (
-      `视线：**朝天空**（pitch ${pitchDeg.toFixed(0)}°，仰视，朝 ${compass}）——` +
+      `视线：**朝天空**（pitch +${pitchDeg.toFixed(0)}°，仰视，朝 ${compass}）——` +
       '画面里基本没有地面，**这时的截图不能用来判断地形/挖向**（纯天空色是正常的），看 near key blocks。'
     );
   }
-  if (pitchDeg >= DOWN_PITCH_DEG) {
+  if (pitchDeg <= DOWN_PITCH_DEG) {
     return (
-      `视线：**几乎垂直向下**（pitch +${pitchDeg.toFixed(0)}°，俯视，朝 ${compass}）——` +
+      `视线：**几乎垂直向下**（pitch ${pitchDeg.toFixed(0)}°，俯视，朝 ${compass}）——` +
       '只能看到脚下几格，判断远处地形/走位不可靠。'
     );
   }
@@ -519,7 +528,7 @@ const SECTION_RENDERERS: Record<LiveSectionKey, (s: LiveState) => string[]> = {
     // **钻石镐、5 颗钻石、打火石、4 个铁锭全部掉落**，下界门的两件关键道具一次清零。
     // 根因不是某个 bug，而是**引擎不知道"它身上的东西值多少"**：
     // 空手时 hp 10 不算危险；拿着钻石镐和打火石时 hp 18 就该收工。
-    // 这只是一条**事实提示**（不是门控）：把"不可替代"和"死亡代价"摆到模型眼前，让它自己决定。
+    // 这只是一条**事实提示**（不是门控）：把"身上这东西有多难重来"摆到模型眼前，让它自己决定。
     const highValue = s.backpack.items.filter((item) =>
       /^(diamond|diamond_pickaxe|diamond_sword|diamond_axe|netherite.*|emerald|ender_pearl|blaze_rod|.*_ingot|flint_and_steel|obsidian|ancient_debris|eye_of_ender|totem_of_undying)$/
         .test(String(item).replace(/x\d+$/, '')),
@@ -527,7 +536,7 @@ const SECTION_RENDERERS: Record<LiveSectionKey, (s: LiveState) => string[]> = {
     if (highValue.length > 0) {
       lines.push(
         `- **价值提示**：身上有不可替代/难重来的东西（${highValue.join(', ')}）。` +
-          '这个档 keepInventory=false，死一次全掉。**血低或食物见底时先把它们带回家或放进箱子，别在危险的地方硬扛。**',
+          '**血低或食物见底时先把它们带回家或放进箱子，别在危险的地方硬扛。**',
       );
     }
     return lines;

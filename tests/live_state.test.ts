@@ -539,35 +539,38 @@ describe('perception fields', () => {
   });
 });
 
-describe('视线方向：先给上下文，再谈可不可信（真机 overnight_a 的"整片天空"其实是朝上）', () => {
-  it('pitch ≈ −87°（几乎垂直朝上）⇒ 点名"朝天空"、仰视、朝向罗盘，并说明这时的图不能判断地形', () => {
-    const line = describeViewDirection((-87 * Math.PI) / 180, 0); // yaw 0 = +z = 南
+describe('视线方向：先给上下文，再谈可不可信', () => {
+  // **pitch 正 = 抬头**（三条源码 + 真机准星实验，见 live_state.ts 的注释）。
+  // 以前这里默认"负=抬头"，整组断言的符号是反的：pitch −87° 其实是**垂直朝下**。
+  it('pitch ≈ +87°（几乎垂直朝上）⇒ 点名"朝天空"、仰视、朝向罗盘，并说明这时的图不能判断地形', () => {
+    const line = describeViewDirection((87 * Math.PI) / 180, 0); // yaw 0 = −z = 北
     expect(line).not.toBeNull();
     expect(line).toContain('朝天空');
-    expect(line).toContain('pitch -87°');
+    expect(line).toContain('pitch +87°');
     expect(line).toContain('仰视');
-    expect(line).toContain('朝 S');
+    expect(line).toContain('朝 N');
     expect(line).toContain('不能用来判断地形');
     expect(line).toContain('纯天空色是正常的');
   });
 
   it('平视 ⇒ **一个字都不加**（零噪音）', () => {
     expect(describeViewDirection(0.05, 0)).toBeNull();
-    expect(describeViewDirection((-20 * Math.PI) / 180, 1.2)).toBeNull(); // 20° 还在半视场内
+    expect(describeViewDirection((20 * Math.PI) / 180, 1.2)).toBeNull(); // 20° 还在半视场内
   });
 
   it('几乎垂直向下 ⇒ 说明"只能看到脚下几格"', () => {
-    const line = describeViewDirection((85 * Math.PI) / 180, Math.PI);
+    const line = describeViewDirection((-85 * Math.PI) / 180, Math.PI);
     expect(line).toContain('几乎垂直向下');
     expect(line).toContain('俯视');
-    expect(line).toContain('朝 N');
+    expect(line).toContain('朝 S');
     expect(line).toContain('不可靠');
   });
 
-  it('朝向罗盘按 MC 的 yaw 约定（0=南、±90=东/西、180=北）', () => {
-    const at = (yawDeg: number): string | null => describeViewDirection((-80 * Math.PI) / 180, (yawDeg * Math.PI) / 180);
-    expect(at(0)).toContain('朝 S');
-    expect(at(180)).toContain('朝 N');
+  it('朝向罗盘按 mineflayer 的 yaw 约定（0=北、±90=东/西、180=南）', () => {
+    // 水平朝向 = getViewDirection 的 (−sin yaw, −cos yaw)，**z 项带负号**。
+    const at = (yawDeg: number): string | null => describeViewDirection((80 * Math.PI) / 180, (yawDeg * Math.PI) / 180);
+    expect(at(0)).toContain('朝 N');
+    expect(at(180)).toContain('朝 S');
     expect(at(-90)).toContain('朝 E');
     expect(at(90)).toContain('朝 W');
   });
@@ -587,7 +590,7 @@ describe('视线方向：先给上下文，再谈可不可信（真机 overnight
       bot,
       vision: {
         lastScreenshot: { file: 'screenshot_sky.jpg', takenAt: Date.now() },
-        lastFrameView: { pitch: (-88 * Math.PI) / 180, yaw: 0 },
+        lastFrameView: { pitch: (88 * Math.PI) / 180, yaw: 0 },
       },
     });
     const text = renderLiveState(s);
@@ -606,7 +609,7 @@ describe('视线行必须描述**这一帧**，不是"现在身体朝哪"（真�
 
   it('**矛盾回归**：身体现在朝天空，但这一帧是平视 ⇒ 不许说"朝天空"', () => {
     const bot: any = stubBot();
-    bot.entity.pitch = (-88 * Math.PI) / 180; // 现在的姿态（会骗人的那个）
+    bot.entity.pitch = (88 * Math.PI) / 180; // 现在的姿态（会骗人的那个）
     bot.entity.yaw = 0;
     const s = sampleLiveState({
       bot,
@@ -628,7 +631,7 @@ describe('视线行必须描述**这一帧**，不是"现在身体朝哪"（真�
       bot,
       vision: {
         lastScreenshot: { file: 'screenshot_sky.jpg', takenAt: Date.now() },
-        lastFrameView: frame(-88),
+        lastFrameView: frame(88),
       },
     });
     expect(renderLiveState(s)).toContain('朝天空');
@@ -636,7 +639,7 @@ describe('视线行必须描述**这一帧**，不是"现在身体朝哪"（真�
 
   it('这一帧没记朝向 ⇒ **什么都不说**（绝不拿当前姿态顶替）', () => {
     const bot: any = stubBot();
-    bot.entity.pitch = (-88 * Math.PI) / 180; // 当前姿态很"吓人"，但不许用
+    bot.entity.pitch = (88 * Math.PI) / 180; // 当前姿态很"吓人"，但不许用
     const s = sampleLiveState({
       bot,
       vision: { lastScreenshot: { file: 'screenshot_x.jpg', takenAt: Date.now() } },
@@ -701,7 +704,7 @@ describe('裁决进 Screenshot 第一行（不让模型每帧自己猜哪张能�
     const text = renderLiveState(
       shot(
         { trusted: false, reason: 'version_skew', usable: false, verdict: '—— **这张图不可信**（测试）', line: '' },
-        { pitch: (-88 * Math.PI) / 180, yaw: 0 },
+        { pitch: (88 * Math.PI) / 180, yaw: 0 },
       ),
     );
     const lines = text.split('\n');

@@ -33,7 +33,9 @@ function agentWith(bot: any): any {
 const call = (agent: any, type?: string): string => (stats.perform as any)(agent, type);
 
 describe('stats 反轮询回执', () => {
-    it('同一段第二次调用逐字相同：追加"完全相同 + 去做个动作"，状态一行不少', () => {
+    // 2026-10-24：重复快照只追加**事实**（"和上次完全相同"），处方清掉——
+    // "去做个动作/别重复发"是在替模型决定这一轮干什么。
+    it('同一段第二次调用逐字相同：追加"完全相同"事实，状态一行不少，不含处方', () => {
         const agent = agentWith(botWith());
         const first = call(agent, 'inventory');
         expect(first).not.toContain('完全相同');
@@ -41,10 +43,9 @@ describe('stats 反轮询回执', () => {
 
         const second = call(agent, 'inventory');
         expect(second).toContain('完全相同');
-        expect(second).toContain('做一个动作');
-        expect(second).toContain('原地停摆');
-        // 有动作在跑时别鼓励重复发——真实场景里模型就是在 exploreFor 跑着时反复 stats。
-        expect(second).toContain('别重复发');
+        expect(second).not.toContain('做一个动作');
+        expect(second).not.toContain('原地停摆');
+        expect(second).not.toContain('别重复发');
         expect(second).toContain('Backpack');
     });
 

@@ -20,7 +20,7 @@
 
 import * as skills from './skills.js';
 import { chooseToolForJob } from './tool_choice.js';
-import { isLandAnimal, planWaterHuntStop } from './hunt_reach.js';
+import { isHarmlessFoodMob, isLandAnimal, planWaterHuntNotice } from './hunt_reach.js';
 import type { ToolCandidate } from './tool_choice.js';
 import * as world from './world.js';
 import { Vec3 } from 'vec3';
@@ -633,39 +633,6 @@ export interface ExploreOutcome {
  */
 const WALK_FURTHER_BLOCKS = 300;
 
-/** 空手而归时：沿这一轮**实际推进最多的轴**继续走的坐标。 */
-function walkFurtherTarget(o: ExploreOutcome): FlatPosition {
-    const dx = o.here.x - o.origin.x;
-    const dz = o.here.z - o.origin.z;
-    if (Math.abs(dx) >= Math.abs(dz)) {
-        return { x: o.here.x + (dx < 0 ? -WALK_FURTHER_BLOCKS : WALK_FURTHER_BLOCKS), y: o.here.y, z: o.here.z };
-    }
-    return { x: o.here.x, y: o.here.y, z: o.here.z + (dz < 0 ? -WALK_FURTHER_BLOCKS : WALK_FURTHER_BLOCKS) };
-}
-
-export function exploreNextAction(o: ExploreOutcome): string {
-    if (o.unknownBlock) return 'stats(type="blocks")';
-    if (o.danger != null) return 'moveAway(distance=8)';
-    if (o.found != null) {
-        return (
-            `goToCoordinates(x=${Math.round(o.found.x)}, y=${Math.round(o.found.y)}, ` +
-            `z=${Math.round(o.found.z)}, closeness=2)`
-        );
-    }
-    // 时间到/被打断：螺旋还没走完，接着跑一轮（新螺旋从当前位置重新起算）。
-    if (o.timedOut || o.interrupted) {
-        return `exploreFor(block="${o.block}", max_steps=${o.requestedLegs}, step=${o.step})`;
-    }
-    // 一腿都没走成：多半是断层/落差，把 step 调小再来。
-    if (o.attemptedLegs > 0 && o.completedLegs === 0) return `exploreFor(block="${o.block}", max_steps=8, step=16)`;
-    // 这一带扫完了、确定没有 → **换地方**，别再原地绕。
-    if (o.completedLegs > 0) {
-        const target = walkFurtherTarget(o);
-        return `goToCoordinates(x=${Math.round(target.x)}, y=${Math.round(target.y)}, z=${Math.round(target.z)}, closeness=2)`;
-    }
-    return `exploreFor(block="${o.block}", max_steps=6, step=${o.step})`;
-}
-
 export function exploreReceipt(o: ExploreOutcome): string {
     const lines: string[] = [];
     if (o.found != null) {
@@ -708,7 +675,6 @@ export function exploreReceipt(o: ExploreOutcome): string {
         );
     }
     if (o.notes.length > 0) for (const note of capLines(o.notes, HUNT_MAX_WARNING_LINES, '提示')) lines.push(note);
-    lines.push(`下一步（照做即可）：${exploreNextAction(o)}`);
     // 同 huntReceipt：**拼出来的东西必须有天花板**（真机教训见 HUNT_RECEIPT_MAX_CHARS）。
     return capReceipt(lines.join('\n'));
 }
@@ -745,8 +711,7 @@ export interface HuntOutcome {
         | 'attack_failed'
         | 'attempts'
         | 'cannot_kill'
-        | 'same_target'
-        | 'water_unreachable';
+        | 'same_target';
     elapsedMs: number;
     /** 在下界刷烈焰人（"没怪了"的下一步建议要用它）。 */
     netherBlaze: boolean;
@@ -787,7 +752,6 @@ const STOP_REASON_TEXT: Record<HuntOutcome['stopReason'], string> = {
     attempts: '尝试次数到上限了',
     cannot_kill: '打不死（每次都耗完击杀预算），已收手',
     same_target: '同一个目标连续打不死，已熔断停手',
-    water_unreachable: '目标在水里、我在岸上，追不到——早停（不烧完整段预算）',
 };
 
 export function huntReceipt(o: HuntOutcome): string {
@@ -905,58 +869,8 @@ export function huntReceipt(o: HuntOutcome): string {
                 '**别把这当战果**——先 stats(type="entities") 核对，再决定换地方还是换打法。',
         );
     }
-    lines.push(`下一步（照做即可）：${huntNextAction(o)}`);
     // **硬长度上限**：循环里拼出来的字符串必须有天花板（真机教训：1.35 亿字符把上下文打爆）。
     return capReceipt(lines.join('\n'));
-}
-
-/** 和 `exploreNextAction` 同一条理由：只给**一条**能照抄的调用，别给菜单。 */
-export function huntNextAction(o: HuntOutcome): string {
-    const remaining = Math.max(1, o.want - o.gained);
-    // **地上有东西就别收工**：击杀已确认、掉落物看到过、但一个都没到手 ⇒ 下一步是**去踩它**
-    // （真机 overnight_b：回执说"没捡到"就结束了，模型于是以为"这种怪不掉东西"）。
-    if (o.loot != null && o.loot.seen > 0 && o.loot.picked === 0 && o.loot.nearest != null) {
-        const p = o.loot.nearest.position;
-        if (Number.isFinite(p?.x) && Number.isFinite(p?.y) && Number.isFinite(p?.z)) {
-            return `goToCoordinates(x=${Math.round(p.x)}, y=${Math.round(p.y)}, z=${Math.round(p.z)}, closeness=1)`;
-        }
-    }
-    switch (o.stopReason) {
-        case 'reached':
-            return 'stats(type="inventory")';
-        case 'budget':
-        case 'interrupted':
-        case 'gone':
-            return `huntFor(entity="${o.entity}", want=${remaining}, max_ms=300000)`;
-        case 'no_target':
-            // 被动动物被打光了：给**一条**可再生路线（钓鱼/种地/腐肉），别让它换圆心空跑。
-            if (o.assets != null) return foodRoutePrimary(o.assets);
-            // 下界刷烈焰人：没怪 = 这附近没有堡垒房间，回去继续找要塞。
-            return o.netherBlaze
-                ? 'exploreFor(block="nether_bricks", max_steps=4)'
-                : 'move(direction="north", distance=16)';
-        case 'low_health':
-            return 'survivalCheck';
-        case 'danger':
-            return 'moveAway(distance=8)';
-        case 'attack_failed':
-            // **绝不把同一个会爆的调用原样丢回去**：给一条直接诊断内部动作的调用。
-            return `attack(type="${HUNT_ATTACK_TYPE}", target="${o.entity}")`;
-        case 'cannot_kill':
-            // **打不死 ≠ 工具坏了**：换打法，别让模型去调 attack 那个正常的工具。
-            if (o.netherBlaze) return 'prepareBlaze';
-            if (o.betterWeapon != null && o.betterWeapon !== '') return `equip(item_name="${o.betterWeapon}")`;
-            return 'stats(type="inventory")';
-        case 'same_target':
-            // 同一只打不死（末影人瞬移）：换打法而不是再来一次 huntFor。
-            if (o.bowInPack === true) return 'equip(item_name="bow")';
-            if (o.netherBlaze) return 'prepareBlaze';
-            return 'stats(type="inventory")';
-        case 'attempts':
-            return 'stats(type="entities")';
-        default:
-            return `huntFor(entity="${o.entity}", want=${remaining})`;
-    }
 }
 
 // ───────────────── 可再生食物路线（"世界被打光了"之后的出路） ─────────────────
@@ -1247,6 +1161,28 @@ export async function exploreForSkill(
 
     bot && (bot.interrupt_code = bot.interrupt_code === true);
 
+    // **探索前先看自己是不是已经在水里**（2026-10-23 真机：exploreFor 在海边连续
+    // 三次返回空串，查事件日志才看到是 `world.water.drowning` 把身体抢走了——
+    // 螺旋是按坐标走的，不看地形，一头就扎进海里）。
+    // **2026-10-24：从「拒绝」降级成「警告 + 照走」**。当时拒绝的理由是"每一腿
+    // 都会被溺水反射打断、回执全是空的"——那是在替"反射抢占不留原因"打补丁。
+    // 现在中断回执已经指名道姓（`__interruptReason`），模型看一眼就知道是溺水和
+    // 谁在抢身体，该上岸还是继续游由它自己定；这里只把风险作为事实说在前头。
+    const inWaterNow = (): boolean => {
+        try {
+            return skills.isStandingInWater(bot);
+        } catch {
+            return false;
+        }
+    };
+    if (inWaterNow()) {
+        outcome.danger = '人正站在水里';
+        notes.push(
+            '⚠️ 起手时人就在水里：探索是纯按坐标走螺旋的，不看地形，很可能一头扎进深水；' +
+                '被溺水反射打断时回执会写明是谁抢的身体。**想先上岸就调 escapeWater 再来**；想继续就让它跑。',
+        );
+    }
+
     // 先原地扫一次：可能它就在身边（省掉 12 腿）。
     const immediate = scan(bot, block, scanRadius);
     if (immediate != null) {
@@ -1289,6 +1225,15 @@ export async function exploreForSkill(
         const dangerAfter = hazardHere(bot);
         if (dangerAfter != null) {
             outcome.danger = dangerAfter;
+            break;
+        }
+        // **走到水里就收手**（同上的真机事故）：继续走只会溺水、被反射打断。
+        if (inWaterNow()) {
+            outcome.danger = '走到水里了';
+            notes.push(
+                '⚠️ 这一腿把人带进了水里：再往下走会被溺水反射打断（打断=空回执）。' +
+                    '**先 escapeWater 上岸**，上岸后重新调 exploreFor——已走过的腿数见回执。',
+            );
             break;
         }
         if (!arrived) {
@@ -1439,10 +1384,14 @@ export async function huntForSkill(
     let stopReason: HuntOutcome['stopReason'] = 'budget';
     /** 岸上追水里目标的开始时刻（0 = 当前没有这种空转）。 */
     let waterStallSince = 0;
+    // 空转提示是否已经进过 progress（只进一次，防刷屏）。
+    let waterStallNoticed = false;
     /** 最后一次捡拾的四个事实（回执要分开说：看到/踩到/到手/读不到）。 */
     let lastSweep: DropSweep | null = null;
 
     if (dropSpec.note != null) warnings.push(`ℹ️ ${dropSpec.note}`);
+    /** 打不还手的食物动物：低血门控不拦它（理由见 `isHarmlessFoodMob`）。 */
+    const harmlessFood = isHarmlessFoodMob(entity);
     const netherBlaze = isInNether(bot) && entity === 'blaze';
     if (netherBlaze && !hasFireResistance(bot)) {
         warnings.push(
@@ -1488,7 +1437,10 @@ export async function huntForSkill(
             stopReason = 'attack_failed';
             break;
         }
-        if (health(bot) <= MIN_HEALTH_TO_HUNT) {
+        // **低血门控只对"会还手的目标"生效**（见 `isHarmlessFoodMob` 的注释）：
+        // 血越低越需要食物（<18 不回血），而牛/猪/羊/鸡打不还手，把它们也挡掉
+        // 就是把唯一安全的回血路封死。
+        if (!harmlessFood && health(bot) <= MIN_HEALTH_TO_HUNT) {
             warnings.push(`⚠️ 血量 ${health(bot)} ≤ ${MIN_HEALTH_TO_HUNT}：停手保命，先吃喝/撤退。`);
             stopReason = 'low_health';
             break;
@@ -1574,7 +1526,7 @@ export async function huntForSkill(
             }
             if (targetInWater && !botInWater) {
                 if (waterStallSince <= 0) waterStallSince = now();
-                const waterVerdict = planWaterHuntStop({
+                const waterVerdict = planWaterHuntNotice({
                     elapsedMs: now() - waterStallSince,
                     distance: distanceNow ?? radius,
                     attempts,
@@ -1583,13 +1535,17 @@ export async function huntForSkill(
                     targetInWater,
                     targetName: entity,
                 });
-                if (waterVerdict.stop) {
-                    stopReason = 'water_unreachable';
+                // **2026-10-24：从「替模型停手」改成「报事实、照跑」**（用户定原则：
+                // 模型想干什么只有它自己知道）。以前空转 20 秒就 water_unreachable 收工——
+                // 那是用「耗了很久」猜「你肯定拿不到」。目标在水里泡一会儿可能自己上岸，
+                // 或者模型就是想等它；停不停由模型 Stop 或它自己设的预算/次数上限决定。
+                // 提示只在**空转刚开始**时进一次 progress（不刷屏），预算照常兜底。
+                if (waterVerdict.notice && waterStallNoticed === false) {
+                    waterStallNoticed = true;
                     progress.push({ attempt: attempts, text: waterVerdict.text });
                     if (progress.length > HUNT_MAX_PROGRESS_LINES) {
                         progress.splice(0, progress.length - HUNT_MAX_PROGRESS_LINES);
                     }
-                    break;
                 }
             } else {
                 waterStallSince = 0;
@@ -2359,7 +2315,13 @@ export function tunnelStep(pos: FlatPosition, dir: TunnelDirection, height: numb
     const baseZ = Math.round(pos.z) + dz;
     const baseY = Math.round(pos.y) + rise;
     const dig: FlatPosition[] = [];
-    for (let i = 0; i < height; i++) dig.push({ x: baseX, y: baseY + i, z: baseZ });
+    // **往下走一格必须多挖一格天花板**（真机 2026-10-23 用 CLI 通关时定位）：
+    // 2 格高的隧道里，脚在 Y 时身体占 Y、Y+1。台阶目标脚在 Y-1，只挖 Y-1/Y，
+    // 那么往前迈的瞬间身体仍在 Y、Y+1 —— Y+1 是实心的 ⇒ **水平位移恒为 0**，
+    // 于是每一步都"挖通了但走不进去"，travelTo/digDown 全部卡死在下降段。
+    // 多挖 Y+1（也就是 baseY+height）给身体让路，人才真的会掉进下一格。
+    const clear = rise < 0 ? height + 1 : height;
+    for (let i = 0; i < clear; i++) dig.push({ x: baseX, y: baseY + i, z: baseZ });
     return { index, dig, feet: { x: baseX, y: baseY, z: baseZ }, floor: { x: baseX, y: baseY - 1, z: baseZ } };
 }
 
@@ -2579,7 +2541,6 @@ export function tunnelReceipt(o: TunnelOutcome): string {
     lines.push(toolText + '。');
     if (o.bridges > 0) lines.push(`搭桥：这一趟垫了 ${o.bridges} 块（前方脚下是空洞时垫一块过去，横向的 pillarUp）。`);
     for (const line of capLines(o.progress, HUNT_MAX_PROGRESS_LINES, '进度')) lines.push(line);
-    lines.push(`下一步（照做即可）：${tunnelNextAction(o)}`);
     // 同 huntReceipt：隧道很长时进度行也不能无限堆。
     return capReceipt(lines.join('\n'));
 }
@@ -2613,6 +2574,8 @@ export interface TunnelDeps {
 
 export interface TunnelOptions {
     budgetMs?: number;
+    /** 挖穿模式：不在乎掉落，用最好的工具硬挖。默认 false = 采集（要掉落）。 */
+    force?: boolean;
     progressEvery?: number;
     /** 每一步之间的小停顿（让服务端把方块更新同步回来）。 */
     settleMs?: number;
@@ -2664,7 +2627,7 @@ export async function digLine(
     const position = deps.position ?? defaultPosition;
     const yaw = deps.yaw ?? ((b: any) => (Number.isFinite(Number(b?.entity?.yaw)) ? Number(b.entity.yaw) : null));
     const blockAt = deps.blockAt ?? defaultBlockObject;
-    const dig = deps.dig ?? ((b: any, x: number, y: number, z: number) => skills.mineBlockAt(b, x, y, z));
+    const dig = deps.dig ?? ((b: any, x: number, y: number, z: number) => skills.mineBlockAt(b, x, y, z, options.force === true));
     const travel = deps.travel ?? ((b: any, x: number, y: number, z: number) => skills.goToPosition(b, x, y, z, 1));
     const equip = deps.equip ?? ((b: any, item: string) => skills.equip(b, item));
     const health = deps.health ?? defaultTunnelHealth;
@@ -2986,13 +2949,17 @@ export async function digLine(
         }
         const needDig = digBlocks.filter(({ block }) => !isAirBlockName(block?.name));
         if (!hasPickaxe) {
-            const tooHard = needDig.find(({ block }) => {
+            // **统一的"能不能空手挖开"裁判**：见 `skills.handDigPlan`——日常 3.2 秒门槛，
+            // 人被封住（"真的动不了"）时放宽到 12 秒：石头徒手 7.5 秒、没有掉落，但出得去。
+            // 这边不能再自己算一套（以前这里就漏改过，导致 mineBlock 能脱身、上层却判停）。
+            const diggableWithoutTool = (block: any): boolean => {
                 try {
-                    return !skills.isHandMineable(block);
+                    return skills.planDig(bot, block, options.force === true).ok;
                 } catch {
-                    return true;
+                    return false;
                 }
-            });
+            };
+            const tooHard = needDig.find(({ block }) => !diggableWithoutTool(block));
             if (tooHard != null) {
                 outcome.stop = 'no_tool';
                 const replacement = bestPickaxeInInventory(bot);
@@ -3145,6 +3112,7 @@ export async function mineTunnelSkill(
     const startedAtMs = (deps.now ?? Date.now)();
     recordToolRun(bot, 'mineTunnel', startedAtMs);
     const handoffFrom = parseHandoff(options.handoff);
+    // **挖穿模式只从 options.force 来**（和 budgetMs/handoff 同级）：不新增位置参数，
     const resolved = resolveTunnelDirection(rawDirection, yaw(bot));
     if (resolved == null) {
         // 方向认不出来：保持原来的口径（回执里点名到底哪里不对，并给工具现状）。
@@ -3183,15 +3151,15 @@ export async function mineTunnelSkill(
         bot,
         { dir: resolved, length: requested, height, budgetMs: options.budgetMs ?? DEFAULT_TUNNEL_BUDGET_MS },
         deps,
-        options,
+        { ...options, force: options.force === true },
     );
     outcome.handoffFrom = handoffFrom;
     return tunnelReceipt(outcome);
 }
 
-/** 背包里最好的一把镐（有镐才能继续挖；换镐提示要能直接照抄）。 */
-// **耐久感知**（Lead 2026-10-21）：层级最高 ≠ 还能用；把选择交给共享决策函数，
-// 并且排除本次动作里已被安全门拒绝的工具（否则"拒绝→换手→选回同一把"是结构性震荡）。
+/** 背包里当前该用的那把镐（有镐才能继续挖；换镐提示要能直接照抄）。 */
+// **便宜优先**（用户 2026-10-28）：快断的镐先用，**断了再换下一把**——耐久不参与筛选，
+// 拿"这活要几次耐久"去挡等于替模型判断值不值得冒险。排除名单照旧（避免结构性震荡）。
 export function bestPickaxeInInventory(bot: any, exclude?: string | null, excluded?: string[]): string | null {
     let items: unknown[];
     try {
@@ -3202,8 +3170,7 @@ export function bestPickaxeInInventory(bot: any, exclude?: string | null, exclud
     if (!Array.isArray(items)) return null;
     const excludedNames = [...(excluded ?? [])];
     if (typeof exclude === 'string' && exclude !== '') excludedNames.push(exclude);
-    // 便宜优先：走一步路只需挖 1 格（usesNeeded=1）⇒ 快断的镐正好用掉，满耐久留给硬活。
-    const choice = chooseToolForJob({ tools: items as ToolCandidate[], kind: 'pickaxe', minimumTier: 'wooden', usesNeeded: 1, excluded: excludedNames });
+    const choice = chooseToolForJob({ tools: items as ToolCandidate[], kind: 'pickaxe', minimumTier: 'wooden', excluded: excludedNames });
     return choice.name;
 }
 
@@ -3476,28 +3443,6 @@ export function travelResumeCall(o: TravelOutcome): string {
     return `travelTo(${parts.join(', ')})`;
 }
 
-export function travelNextAction(o: TravelOutcome): string {
-    if (o.gateNextCall != null) return o.gateNextCall;
-    switch (o.stop) {
-        case 'arrived':
-            return 'stats(type="body")';
-        case 'no_pickaxe':
-            return 'useBlock(type="crafting_table", input="3 cobblestone, 2 stick", output="1 stone_pickaxe")';
-        case 'wrong_dimension':
-            return o.detail.includes('the_nether') ? 'enterNether()' : 'getPlaces';
-        case 'interrupted':
-        case 'low_health':
-            return 'survivalCheck';
-        case 'bad_target':
-            return 'stats(type="coords")';
-        default:
-            // **0 进度不许把同一条调用原样丢回去**（那正是"原地打转"的形状）：
-            // 先看清身体状态/手上工具，再决定要不要重来。
-            if (o.progressed < TUNNEL_MOVE_EPS) return 'stats(type="body")';
-            return travelResumeCall(o);
-    }
-}
-
 /** 剩余方向的短描述（+x 314 格、+z 40 格）。 */
 export function travelRemainingLabel(o: TravelOutcome): string {
     const dx = Math.round(o.target.x) - Math.round(o.here.x);
@@ -3571,7 +3516,6 @@ export function travelReceipt(o: TravelOutcome): string {
         );
     }
     if (o.cycle != null && o.cycle !== '') lines.push(o.cycle);
-    lines.push(`下一步（照做即可）：${travelNextAction(o)}`);
     return capReceipt(lines.join('\n'));
 }
 

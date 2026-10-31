@@ -50,11 +50,10 @@ import {
  */
 export const STALL_NUDGE =
   '【继续】上一轮你没有调用任何工具就结束了回合。在 Minecraft 里"只说话"等于原地停摆：'
-  + '世界不会因为你汇报了就往前走。现在必须调用工具继续干活——'
-  + '有未完成的计划就用 UpdatePlan 勾进度并做下一步；没有计划就先 UpdatePlan 建一个（目标 + 前 3 条 todo），然后立刻调第一个动作工具。'
-  + '只有一种情况可以结束回合：你确实在等外部条件（例如等天亮）。'
-  + '**但不要"原地等待"**——`stay` 已经从工具里删除，因为它只会吸收决策（真机：2 小时 141 次 stay、位置一动不动）。'
-  + '等天亮就做一个**有推进的**动作：往前挖一格、走到安全处、整理背包、或 sleepUnderground 真的躺下，并在正文里写清你在等什么。';
+  + '世界不会因为你汇报了就往前走。现在必须调用工具继续干活——发哪个、干什么由你决定。'
+  + '只有一种情况可以结束回合：你确实在等外部条件（例如等天亮），**并且用一个动作在等**（身体在做那件事），'
+  + '并在正文里写清你在等什么。`stay` 已从工具里删除（真机：2 小时 141 次 stay、位置一动不动）——'
+  + '"原地等待"不是等待，是停摆。';
 
 /**
  * 第 2 次起的催办：**把选择收窄成闭集，并且专门治"用正文描述要做的动作"**。
@@ -67,21 +66,21 @@ export const STALL_NUDGE =
  *   `Let me ACT — goToCoordinates(200,72,0,3) — NOW!`，然后正文输出
  *   `东进 100 格：(200,72,0)。`——把动作**描述**一遍就当完成了，回合到此结束。
  *   所以必须点破：**正文描述不算执行**。
+ *
+ * 2026-10-24：①②③ 闭集撤掉（Lead 定原则：模型想干什么只有它自己知道，框架
+ * 不替它选动作）。协议部分（正文不算执行、必须发调用）保留。**风险已知**：
+ * 当年加菜单是因为"选项太多导致权衡瘫痪"——如果空转复发，这里的教训是
+ * 先减工具数量/收敛局面，而不是重新替模型挑动作。
  */
 export const STALL_NUDGE_ESCALATED =
   '【继续·立刻发工具调用】**不要用正文描述你打算做什么——正文描述不算执行**，而且正文一写出来这一轮就结束了。'
-  + '这一轮**不要写任何正文、不要写计划、不要写汇报**，只发一个工具调用，从下面三条里选一条：\n'
-  + '① 不知道周围什么情况 → `stats(type=all)`；\n'
-  + '② 知道要去哪 → `goToCoordinates(x, y, z, closeness=3)`；\n'
-  + '③ 身边有威胁或被困 → `pillarUp(distance=3)` 或 `attack(entity_id)`。\n'
-  + '（如果你已经在思考里想好了目标坐标，就把那个坐标直接填进调用里发出来。）';
+  + '这一轮不要写正文、不要写计划、不要写汇报，只发一个工具调用——发哪个由你决定。'
+  + '（你已经在思考里想好的那个动作，直接填成调用发出来。）';
 
-/** 心跳兜底用的文案（连模型都没答，只能从"看状态、写计划"重新起步）。 */
+/** 心跳兜底用的文案（连模型都没答——只报事实与协议，发哪个工具由模型决定）。 */
 export const STALL_WATCHDOG_NUDGE =
-  '【心跳·空转兜底】你已经有一段时间既没有动作也没有回复了。现在立刻：'
-  + '1) 调 stats 看身体状态、背包、坐标和维度；'
-  + '2) 用 UpdatePlan 把计划重写成"下一步只有一个动作"（如果计划还在，就勾掉已完成项）；'
-  + '3) 立刻执行那个动作。不要只回复文字。';
+  '【心跳·空转兜底】你已经有一段时间既没有动作也没有回复了。'
+  + '现在发一个工具调用——发哪个由你决定。不要只回复文字。';
 
 /**
  * 汇报通道的工具名。
@@ -280,7 +279,11 @@ export function createStallGuard(options: StallGuardOptions = {}): StallGuard {
 
   const tick = (): void => {
     const t = now();
-    if (t - lastActivityAt < nextIdleMs) return;
+    // **先算真实空闲时长，再更新时钟**。原来先 `lastActivityAt = t` 再算
+    // `t - lastActivityAt + nextIdleMs`，报出去的永远是退避后的间隔而不是"它到底停了多久"，
+    // 诊断时最有用的那个数字被抹掉了（真机排查 10 小时停摆时被这个坑了一次）。
+    const idleForMs = t - lastActivityAt;
+    if (idleForMs < nextIdleMs) return;
     // 有动作正在跑，且还没超过宽限期：那是"在干活"，不是停摆。
     // （动作自己还有 10 分钟保险丝，真挂住了照样会被这里接手。）
     if (runningTools > 0 && t - lastToolStartAt < toolGraceMs) return;
@@ -297,7 +300,7 @@ export function createStallGuard(options: StallGuardOptions = {}): StallGuard {
     // "上一轮那三次没起作用"，此时必须重新给三次机会，否则护栏等于自杀。
     // 有界性仍然成立：每 `nextIdleMs`（≥10 分钟）最多 1 + maxContinues 次请求。
     continuesWithoutTool = 0;
-    options.onWatchdog?.(t - lastActivityAt + nextIdleMs, watchdogAttempt);
+    options.onWatchdog?.(idleForMs, watchdogAttempt);
     if (options.wake != null) {
       void Promise.resolve(options.wake(STALL_WATCHDOG_NUDGE)).catch(() => {
         /* 唤醒失败不该让定时器崩：下一拍还会再试。 */
@@ -321,7 +324,18 @@ export function createStallGuard(options: StallGuardOptions = {}): StallGuard {
       continuesWithoutTool = 0;
       watchdogAttempt = 0;
       nextIdleMs = idleMs;
-      lastActivityAt = now();
+      // **故意不动 `lastActivityAt`**（2026-10-26 修：这是"长时间工作后停滞"的根因）。
+      //
+      // 外部事件（`inventory.changed` / `item.drop.nearby` / `entity.hostile_far` /
+      // `world.light_low` …）**每秒都在来**，而这台机器上它们只是"世界在动"，
+      // 不代表"模型在干活"。原来这里把空闲时钟重置成 now()，于是：
+      //   心跳 tick 每 2.5 秒检查一次 → 总有事件刚把 lastActivityAt 刷新过 →
+      //   `t - lastActivityAt < nextIdleMs` **永远成立** → 心跳永远不触发。
+      // 真机证据（2026-10-22 overnight_a/b）：两个 bot 停摆整整 10 小时，
+      // 期间 agent 日志一直在写（全是上面这些被动事件），但
+      // **工具调用 0 次、反馈 0 条、死亡 0 次**，进程与连接都健康 —— 护栏一次都没响。
+      // 正确的判据只能是"模型真的答了 / 世界真的被改了"（afterResponse / afterTool），
+      // 不能是"世界在动"。
     },
     stop: () => {
       if (handle == null) return;

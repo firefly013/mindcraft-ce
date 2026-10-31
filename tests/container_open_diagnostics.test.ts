@@ -65,16 +65,16 @@ describe('失败诊断：说清"锅在谁身上"，并且不再重复无效建�
     expect(String(err)).toContain('不是站位或角度问题');
     expect(String(err)).toContain('(9,62,0)');
     expect(String(err)).toContain('没有界面开着');
-    expect(String(err)).toContain('换**另一个**容器');
+    // 2026-10-30：不再给"换另一个容器"的下一步（那是策略），只留事实
+    expect(String(err)).not.toContain('照做即可');
   });
 
-  it('连续第二次失败 ⇒ 回执**换形状**：别再重发同一个调用，改走非容器路径', async () => {
+  it('连续第二次失败 ⇒ 回执换形状：点名"连续第 N 次"，并说明重发同一调用不会有不同结果', async () => {
     const bot = fakeBot();
     await openBlockUi(bot, chest, { timeoutMs: 100 }).catch(() => undefined);
     const second = await openBlockUi(bot, chest, { timeoutMs: 100 }).catch((e: Error) => e.message);
     expect(String(second)).toContain('连续第 2 次');
-    expect(String(second)).toContain('别再重发同一个 useBlock');
-    expect(String(second)).toContain('代码级故障');
+    expect(String(second)).toContain('重发不会有不同结果');
     expect(String(second)).not.toContain('换**另一个**容器');
   });
 
@@ -100,7 +100,8 @@ describe('成功路径不许被诊断代码破坏', () => {
     await openBlockUi(bot2, chest, { timeoutMs: 100 }).catch(() => undefined);
     await openBlockUi(bot2, chest);
     const after = await openBlockUi(fakeBot(), chest, { timeoutMs: 100 }).catch((e: Error) => e.message);
-    expect(String(after)).toContain('换**另一个**容器');
+    // 计数确实清零了：这次是"第 1 次"的形状（同一种箱子的确定性说明），不是"连续第 N 次"
+    expect(String(after)).toContain('同一个箱子重复 useBlock');
   });
 
   it('熔炉族仍走 openFurnace（回归：分路不许坏）', async () => {
@@ -145,10 +146,11 @@ describe('结论只属于失败的那一种方块（B 自我纠正：熔炉可�
     expect(skills()).toContain('read(name)');
   });
 
-  it('回执不再下"容器全坏"的全局结论，而是 attempt-scoped + 指出换一种类型', () => {
+  it('回执不再下"容器全坏"的全局结论，而是 attempt-scoped', () => {
     const text = skills();
     expect(text).not.toContain('**别再开任何箱子/熔炉/柜子**');
-    expect(text).toContain('换另一种容器类型再试');
-    expect(text).toContain('21 块玻璃');
+    // 2026-10-30：删掉了"换另一种容器类型再试"那条策略处方，只留 attempt-scoped 的事实
+    expect(text).toContain('那一种容器');
+    expect(text).not.toContain('换另一种容器类型再试');
   });
 });

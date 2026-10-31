@@ -144,6 +144,41 @@ function num(value: unknown): number | null {
   return typeof value === 'number' && Number.isFinite(value) ? value : null;
 }
 
+/**
+ * MC 落伤规则：**掉 3 格及以内不掉血**，伤害 = 落距 − 3（HP）。
+ * 这是游戏规则，写死，不推导。
+ */
+export const FALL_DAMAGE_FREE_BLOCKS = 3;
+
+/**
+ * 当前血量 → **致死坠落**的下落速度阈值（负数，`entity.velocity.y`）。
+ *
+ * 推导（两条都不用猜）：
+ *  1. 落伤规则见 `FALL_DAMAGE_FREE_BLOCKS`：伤害 = 落距 − 3。
+ *     要死 ⇒ 落距 ≥ 血量 + 3（血 20 → 23 格；血 3 → 6 格）。
+ *  2. 下落速度由 MC 的逐刻递推 `v = (v − 0.08) × 0.98` 数值累加位移得到
+ *     （这就是 mineflayer/prismarine-physics 用的那条）。校准点：掉 8 格时
+ *     v ≈ −1.02（旧代码写死 −1.08，等价 8.5 格）。
+ *
+ * **为什么要跟着血量走**：真机 2026-10-24——血 3 时 `huntFor` 追猪摔了 6 格，
+ * 伤害 6−3=3 = 血量 ⇒ 死；而写死的 −1.08 要 8.5 格才亮，`world.fall.lethal`
+ * 全程没响，`fall_recovery` 没机会接手。血越少阈值越宽，只会更准不会更漏。
+ *
+ * 血量读不到按满血（20）算——那是旧阈值的行为，不许更宽松。
+ */
+export function lethalFallVelocity(health: number): number {
+  const hp = Number.isFinite(health) && health > 0 ? health : 20;
+  const lethalDistance = Math.floor(hp) + FALL_DAMAGE_FREE_BLOCKS;
+  let v = 0;
+  let y = 0;
+  for (let tick = 0; tick < 400; tick++) {
+    v = (v - 0.08) * 0.98;
+    y += v;
+    if (y <= -lethalDistance) return v;
+  }
+  return -1.08;
+}
+
 /** 有值且 <= 阈值（缺值不触发——没读数不算数）。 */
 function lte(value: unknown, t: number): boolean {
   const n = num(value);
@@ -884,13 +919,20 @@ export function snapshotFromBot(bot: unknown, extra: SnapshotExtra = {}): EdgeSn
 
         // 高坠：mineflayer **不暴露** fallDistance（mineflayer / prismarine-entity /
         // prismarine-physics 里零命中），所以用"离地 + 下落速度"做代理。
-        // 带阻力的真实递推是 v=(v-0.08)*0.98：恰好落下 8 格时 v≈-1.08，
-        // v<=-1.1 要到第 17 刻、已掉 9.67 格，所以阈值取 -1.08 才对得上"8 格"。
-        // 注意这是**近似**且受 300ms 轮询相位影响：8~9 格窗口很窄可能整段错过，
-        // 10~19 格概率性触发，≥20 格窗口超过轮询周期必中。保守方向，不会误报。
+        // MC 落伤公式：伤害 = 落距 − 3（HP）⇒ **致死的落距取决于当前血量**，
+        // 血 20 要掉 23 格、血 3 只要掉 6 格。
+        // 下落速度由 MC 的逐刻递推 `v=(v−0.08)·0.98` 数值算出（见
+        // `lethalFallVelocity`）：8 格 ↔ v≈−1.02（旧代码按 −1.08 写，等价 8.5 格）。
+        //
+        // **2026-10-24 修**：以前阈值写死 −1.08（按"满血打不死"校准）。真机：血 3 时
+        // `huntFor` 追猪，摔了 6 格就死了（6−3=3=血量），而 −1.08 的阈值要 8.5 格才亮
+        // ⇒ `world.fall.lethal` 全程没响，`fall_recovery` 没机会接手。
+        // 阈值必须跟着血量走。仍是**近似**且受 300ms 轮询相位影响：恰好压线的
+        // 那一格可能整段错过；但阈值越高（血越少）窗口越宽，只会更准，不会更漏。
         const vy = num(vel.y);
         const onGround = (entity as { onGround?: unknown }).onGround;
-        snap.fallLethal = onGround === false && vy != null && vy <= -1.08 ? true : undefined;
+        const lethalVy = lethalFallVelocity(snap.health ?? 20);
+        snap.fallLethal = onGround === false && vy != null && vy <= lethalVy ? true : undefined;
 
         // 前方岩浆：朝向方向上两格内脚下是岩浆。
         // mineflayer 的 yaw 是弧度且 0=北，此时水平朝向向量是 (-sin, -cos)。

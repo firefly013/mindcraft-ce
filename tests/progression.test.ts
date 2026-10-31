@@ -43,7 +43,6 @@ import {
     describeDropSweep,
     dropForEntity,
     exploreForSkill,
-    exploreNextAction,
     exploreReceipt,
     foodRouteLines,
     foodRoutePrimary,
@@ -52,7 +51,6 @@ import {
     huntBackoffMs,
     huntForSkill,
     huntMaxAttempts,
-    huntNextAction,
     huntReceipt,
     isPassiveFoodAnimal,
     isProtectedBlockName,
@@ -278,9 +276,30 @@ describe('exploreFor：系统性探索', () => {
         expect(receipt).toContain('已加载范围内确定没有 nether_bricks');
         expect(receipt).toContain('不是工具坏了');
         expect(receipt).toContain('继续沿同一方向走');
-        expect(receipt.trimEnd().split('\n').at(-1)).toBe(
-            '下一步（照做即可）：goToCoordinates(x=-332, y=64, z=32, closeness=2)',
-        );
+        expect(receipt.trimEnd().split('\n').at(-1)).not.toContain('照做即可');
+    });
+
+    // 2026-10-24：从「拒绝」降级成「警告 + 照走」。当时拒绝的理由是"每腿都被
+    // 溺水反射打断、回执全是空的"——那是在替"反射抢占不留原因"打补丁；现在
+    // 中断回执已指名道姓（`__interruptReason`），上岸还是继续游由模型自己定。
+    it('人在水里 ⇒ 回执带警告但**照走**（真机 2026-10-23 的空回执已在根因处修掉）', async () => {
+        const bot = makeBot({ hazard: 'water', blocks: [{ x: 0, y: 64, z: 0, name: 'water' }] });
+        let legs = 0;
+        const receipt = await exploreForSkill(bot, 'nether_bricks', 12, 32, {
+            travel: async (b, x, y, z) => {
+                legs += 1;
+                b.entity.position = { x, y, z };
+                return true;
+            },
+            scan: () => null,
+            settle: noSleep,
+            sleep: noSleep,
+        });
+
+        expect(legs).toBeGreaterThan(0); // 照走：要不要下水是模型的判断
+        expect(receipt).toContain('在水里');
+        expect(receipt).toContain('escapeWater'); // 事实+选项还在，但不替模型按
+        expect(receipt).toContain('想先上岸就调 escapeWater 再来');
     });
 
     it('找到 → found <方块> at (x, y, z)，并在那一腿就停（不多走）', async () => {
@@ -300,9 +319,7 @@ describe('exploreFor：系统性探索', () => {
 
         expect(receipt).toContain('found nether_bricks at (-33, 70, 96)');
         expect(legs).toBe(2); // 第 2 腿发现就停，后面 10 腿不该走
-        expect(receipt.trimEnd().split('\n').at(-1)).toBe(
-            '下一步（照做即可）：goToCoordinates(x=-33, y=70, z=96, closeness=2)',
-        );
+        expect(receipt.trimEnd().split('\n').at(-1)).not.toContain('照做即可');
     });
 
     it('默认扫描走 findBlocks/blockAt（不依赖 mcdata），且能找到', async () => {
@@ -330,7 +347,7 @@ describe('exploreFor：系统性探索', () => {
         });
         expect(travelled).toBe(0);
         expect(receipt).toContain('中止——脚所在格是 lava');
-        expect(receipt.trimEnd().split('\n').at(-1)).toBe('下一步（照做即可）：moveAway(distance=8)');
+        expect(receipt.trimEnd().split('\n').at(-1)).not.toContain('照做即可');
     });
 
     it('被打断（Stop/保命）→ 带着已完成的部分收手，不假装走完', async () => {
@@ -361,7 +378,7 @@ describe('exploreFor：系统性探索', () => {
             sleep: noSleep,
         });
         expect(receipt).toContain('方块表里没有 "nether_brick_wrong"');
-        expect(receipt.trimEnd().split('\n').at(-1)).toBe('下一步（照做即可）：stats(type="blocks")');
+        expect(receipt.trimEnd().split('\n').at(-1)).not.toContain('照做即可');
     });
 
     it('一腿都没走成 → 建议把 step 调小（而不是原地再来一次同样的）', async () => {
@@ -374,9 +391,7 @@ describe('exploreFor：系统性探索', () => {
         });
         expect(receipt).toContain(`失败 ${plannedSteps(4, 64)} 步`);
         expect(receipt).toContain('每一腿都没走到');
-        expect(receipt.trimEnd().split('\n').at(-1)).toBe(
-            '下一步（照做即可）：exploreFor(block="nether_bricks", max_steps=8, step=16)',
-        );
+        expect(receipt.trimEnd().split('\n').at(-1)).not.toContain('照做即可');
     });
 
     it('立即在身边找到 → 不走路（0 腿）', async () => {
@@ -416,7 +431,6 @@ describe('exploreFor：系统性探索', () => {
             unknownBlock: false,
             notes: [],
         };
-        expect(exploreNextAction(outcome)).toBe('goToCoordinates(x=332, y=64, z=32, closeness=2)');
         expect(exploreReceipt(outcome)).toContain(describeCoverage(64));
     });
 
@@ -460,9 +474,7 @@ describe('exploreFor：系统性探索', () => {
         expect(receipt).toContain('从 (0, 64, 0) 到');
         expect(receipt).toContain('实际移动约');
         // 最后一行仍是**一条**能照抄的调用：照原始腿数接着跑一轮
-        expect(receipt.trimEnd().split('\n').at(-1)).toBe(
-            '下一步（照做即可）：exploreFor(block="nether_bricks", max_steps=12, step=32)',
-        );
+        expect(receipt.trimEnd().split('\n').at(-1)).not.toContain('照做即可');
     });
 
     it('时间到（纯渲染）：措辞与"下一步"逐字可核', () => {
@@ -488,13 +500,11 @@ describe('exploreFor：系统性探索', () => {
             unknownBlock: false,
             notes: [],
         };
-        expect(exploreNextAction(outcome)).toBe('exploreFor(block="nether_bricks", max_steps=12, step=32)');
         const text = exploreReceipt(outcome);
         expect(text).toContain('时间到（预算 4.5 分钟）主动收手');
         expect(text).toContain('not found after 2 steps');
-        expect(text.trimEnd().split('\n').at(-1)).toBe(
-            '下一步（照做即可）：exploreFor(block="nether_bricks", max_steps=12, step=32)',
-        );
+        // 2026-10-30：不再补"下一步"（要不要再跑一轮是模型的计划）
+        expect(text).not.toContain('照做即可');
     });
 
     it('默认预算确实在生效（不给 budgetMs 也会收手）', async () => {
@@ -642,7 +652,7 @@ describe('huntFor：刷到够数 / 只认真实增量', () => {
         expect(receipt).toContain('击杀 2 只');
         expect(receipt).toContain('停止原因：够数了');
         expect(receipt).toContain('进度：');
-        expect(receipt.trimEnd().split('\n').at(-1)).toBe('下一步（照做即可）：stats(type="inventory")');
+        expect(receipt.trimEnd().split('\n').at(-1)).not.toContain('照做即可');
     });
 
     it('**怪死了、地上有掉落物、没捡到** ⇒ 四个事实分开说 + 下一步是"去踩它"（真机 overnight_b）', async () => {
@@ -674,9 +684,7 @@ describe('huntFor：刷到够数 / 只认真实增量', () => {
         expect(receipt).toContain('没捡到');
         expect(receipt).toContain('这**不是**"这种怪不掉东西"');
         // ③ 下一步是**去踩它**（可执行），不是收工
-        expect(receipt.trimEnd().split('\n').at(-1)).toBe(
-            '下一步（照做即可）：goToCoordinates(x=-43, y=58, z=6, closeness=1)',
-        );
+        expect(receipt.trimEnd().split('\n').at(-1)).not.toContain('照做即可');
     });
 
     it('**读不到掉落物实体** ⇒ 说"没读到"，绝不说"没有掉落物"', async () => {
@@ -825,9 +833,7 @@ describe('huntFor：刷到够数 / 只认真实增量', () => {
         // **时间预算到点也必须给完整回执**：进度逐条在，且最后一行是一条真实调用。
         expect(receipt).toContain('进度：');
         expect(receipt).toContain('攻击');
-        expect(receipt.trimEnd().split('\n').at(-1)).toBe(
-            '下一步（照做即可）：huntFor(entity="blaze", want=3, max_ms=300000)',
-        );
+        expect(receipt.trimEnd().split('\n').at(-1)).not.toContain('照做即可');
     });
 
     it('掉落物要自己走过去踩：走过去 + 背包涨了才算数', async () => {
@@ -869,9 +875,7 @@ describe('huntFor：刷到够数 / 只认真实增量', () => {
         expect(receipt).toContain('这一带（半径 48 格内）确实没有 blaze');
         expect(receipt).toContain('不是工具坏了');
         expect(receipt).toContain('烈焰人只在要塞里刷');
-        expect(receipt.trimEnd().split('\n').at(-1)).toBe(
-            '下一步（照做即可）：exploreFor(block="nether_bricks", max_steps=4)',
-        );
+        expect(receipt.trimEnd().split('\n').at(-1)).not.toContain('照做即可');
     });
 
     // ── 被动动物被打光：死胡同 → 可再生食物路线 ──
@@ -901,12 +905,9 @@ describe('huntFor：刷到够数 / 只认真实增量', () => {
         // ③ 鱼在哪：水的位置要写清楚（钓鱼路线才可执行）
         expect(receipt).toContain('最近的水在 (20, 63, 0)');
         expect(receipt).toContain('离你约 20.0 格');
-        // **只有一条**下一步
+        // **不再有"下一步"**（2026-10-30：回执只报事实）
         const nextLines = receipt.split('\n').filter((line) => line.startsWith('下一步（照做即可）：'));
-        expect(nextLines).toHaveLength(1);
-        expect(nextLines[0]).toBe(
-            '下一步（照做即可）：useBlock(type="crafting_table", input="3 stick, 2 string", output="1 fishing_rod")',
-        );
+        expect(nextLines).toHaveLength(0);
     });
 
     it('没有材料时主行动仍然可执行：腐肉 → 水边 → 去找水（逐级降级）', async () => {
@@ -916,7 +917,7 @@ describe('huntFor：刷到够数 / 只认真实增量', () => {
             sleep: noSleep,
         });
         expect(rotten).toContain('腐肉');
-        expect(rotten.trimEnd().split('\n').at(-1)).toBe('下一步（照做即可）：consume(item_name="rotten_flesh")');
+        expect(rotten.trimEnd().split('\n').at(-1)).not.toContain('照做即可');
 
         const bareBot = makeBot({ items: [] });
         const bare = await huntForSkill(bareBot, 'cow', 2, 48, 60_000, {
@@ -924,9 +925,7 @@ describe('huntFor：刷到够数 / 只认真实增量', () => {
             sleep: noSleep,
         });
         expect(bare).toContain('没扫到');
-        expect(bare.trimEnd().split('\n').at(-1)).toBe(
-            '下一步（照做即可）：searchForBlock(type="water", search_range=256)',
-        );
+        expect(bare.trimEnd().split('\n').at(-1)).not.toContain('照做即可');
     });
 
     it('非被动目标（烈焰人）不塞食物路线：原来的口径不变', async () => {
@@ -1020,7 +1019,7 @@ describe('huntFor：刷到够数 / 只认真实增量', () => {
         });
         expect(attacks).toBe(0);
         expect(receipt).toContain('停止原因：血量太低，先保命');
-        expect(receipt.trimEnd().split('\n').at(-1)).toBe('下一步（照做即可）：survivalCheck');
+        expect(receipt.trimEnd().split('\n').at(-1)).not.toContain('照做即可');
     });
 
     it('不认识掉落物的怪 → 用背包总件数核对，并说明"不知道掉什么"', async () => {
@@ -1075,23 +1074,6 @@ describe('huntFor：刷到够数 / 只认真实增量', () => {
         }
     });
 
-    it('huntNextAction：预算用尽 → 建议接着刷剩下的数量', () => {
-        const outcome: HuntOutcome = {
-            entity: 'blaze',
-            want: 7,
-            items: ['blaze_rod'],
-            gained: 3,
-            baseline: 0,
-            kills: 3,
-            attacks: 5,
-            stopReason: 'budget',
-            elapsedMs: 300_000,
-            netherBlaze: true,
-            warnings: [],
-            progress: [],
-        };
-        expect(huntNextAction(outcome)).toBe('huntFor(entity="blaze", want=4, max_ms=300000)');
-    });
 });
 
 // ───────────────────────── 辅助判据（纯函数） ─────────────────────────
@@ -1143,10 +1125,10 @@ describe('接线：registry 与 schema', () => {
         }
     });
 
-    it('参数签名就是任务要求的那四个/三个/六个，且参数顺序 = perform 的位置参数顺序', () => {
+    it('参数签名与 perform 的位置参数顺序一致', () => {
         expect(Object.keys(findCommand('exploreFor')?.params ?? {})).toEqual(['block', 'max_steps', 'step']);
         expect(Object.keys(findCommand('huntFor')?.params ?? {})).toEqual(['entity', 'want', 'radius', 'max_ms']);
-        expect(Object.keys(findCommand('mineTunnel')?.params ?? {})).toEqual(['length', 'height', 'direction', 'handoff']);
+        expect(Object.keys(findCommand('mineTunnel')?.params ?? {})).toEqual(['length', 'height', 'direction', 'force', 'handoff']);
         expect(Object.keys(findCommand('travelTo')?.params ?? {})).toEqual(['x', 'y', 'z', 'max_ms', 'layer', 'dimension', 'handoff']);
         expect(progressionActionList[0].params?.block.optional).toBeUndefined(); // block 必填
         expect(progressionActionList[1].params?.entity.optional).toBeUndefined(); // entity 必填
@@ -1209,7 +1191,7 @@ describe('接线：registry 与 schema', () => {
 
     it('mineTunnel 的三个参数全可选 + 方向/长度上限与常量同源', () => {
         const params = progressionActionList[2].params ?? {};
-        expect(Object.keys(params)).toEqual(['length', 'height', 'direction', 'handoff']);
+        expect(Object.keys(params)).toEqual(['length', 'height', 'direction', 'force', 'handoff']);
         expect(params.length.optional).toBe(true);
         expect(params.length.default).toBe(DEFAULT_TUNNEL_LENGTH);
         expect(params.length.domain).toEqual([1, MAX_TUNNEL_LENGTH]);
@@ -1217,6 +1199,7 @@ describe('接线：registry 与 schema', () => {
         expect(params.height.default).toBe(DEFAULT_TUNNEL_HEIGHT);
         expect(params.height.domain).toEqual([1, MAX_TUNNEL_HEIGHT]);
         expect(params.direction.optional).toBe(true);
+        expect(params.force.optional).toBe(true);
     });
 });
 
@@ -1236,7 +1219,7 @@ function tunnelHarness(
         tool?: { name: string | null; remaining: number | null; max: number | null; low: boolean };
         inventory?: Array<{ name: string; count: number }>;
         health?: number;
-        /** `"x,y,z"` → 方块名（默认 netherrack）。 */
+        /** `"x,y,z"` → 方块名（默认 dirt：不需要工具，空手也有掉落）。 */
         cells?: Record<string, string>;
         /** 这些格子读不到（blockAt 返回 null）。 */
         unreadable?: string[];
@@ -1263,13 +1246,18 @@ function tunnelHarness(
         position: () => ({ ...bot.entity.position }),
         blockAt: (_b: any, x: number, y: number, z: number) => {
             if ((options.unreadable ?? []).includes(key(x, y, z))) return null;
-            const name = placed.get(key(x, y, z)) ?? (dug.has(key(x, y, z)) ? 'air' : (special.get(key(x, y, z)) ?? 'netherrack'));
+            const name = placed.get(key(x, y, z)) ?? (dug.has(key(x, y, z)) ? 'air' : (special.get(key(x, y, z)) ?? 'dirt'));
+            // **要工具的方块必须照原版声明 `harvestTools`**：planDig 的能力判据读它。
+            // 默认用 dirt（真的不需要工具）；obsidian 只认钻石镐。
+            const needsTool = name === 'obsidian';
             return {
                 name,
-                // obsidian 徒手挖不动；下界岩徒手挖得动
-                hardness: name === 'obsidian' ? 50 : 0.4,
+                hardness: needsTool ? 50 : 0.5,
                 diggable: true,
                 position: { x, y, z },
+                harvestTools: needsTool ? { 999: true } : undefined,
+                canHarvest: (id: number | null) => (needsTool ? false : true),
+                digTime: () => (needsTool ? 250_000 : 2_000),
             };
         },
         dig: async (_b: any, x: number, y: number, z: number) => {
@@ -1334,7 +1322,7 @@ describe('mineTunnel：**不许挖穿容器/功能方块**（真机：travelTo �
         expect(receipt).toContain('净前进 0/3 格');
         expect(receipt).toContain('容器/功能方块');
         expect(receipt).toContain('绕不开');
-        expect(receipt.trimEnd().split('\n').at(-1)).toBe('下一步（照做即可）：mineTunnel(length=2, direction="+z")');
+        expect(receipt.trimEnd().split('\n').at(-1)).not.toContain('照做即可');
     });
 
     it('功能方块（工作台/熔炉/告示牌/床/潜影盒）同样不挖；普通方块照挖', () => {
@@ -1418,7 +1406,7 @@ describe('mineTunnel：方向端到端（模型参数 ⇒ 执行 ⇒ 回执 ⇒ 
         // 回执 + 续跑建议
         expect(receipt).toContain('沿 -x 净前进 3/3 格');
         expect(receipt).toContain('按你当时的朝向推出来的');
-        expect(receipt.trimEnd().split('\n').at(-1)).toBe('下一步（照做即可）：mineTunnel(length=32, direction="-x")');
+        expect(receipt.trimEnd().split('\n').at(-1)).not.toContain('照做即可');
     });
 
     it('明确给 -x ⇒ 不会被朝向改写（fromYaw=false，回执不出现"按朝向推"）', async () => {
@@ -1605,13 +1593,11 @@ describe('mineTunnel：进度必须是**量出来的**，不是数出来的（�
         expect(receipt).toContain('实测位移 5.0 格');
     });
 
-    it('0 进度时**下一步不是同一条挖隧道调用**（不许把会空转的调用原样丢回去）', async () => {
+    it('0 进度时不再把同一条挖隧道调用丢回去（回执只报事实）', async () => {
         const h = stuckInCave();
         const receipt = await mineTunnelSkill(h.bot, 64, 2, '+x', h.deps);
-        const next = receipt.trimEnd().split('\n').at(-1) ?? '';
-        expect(next).toMatch(/^下一步（照做即可）：/);
-        expect(next).not.toContain('mineTunnel(');
-        expect(next).toContain('stats(type="body")');
+        expect(receipt).not.toContain('照做即可');
+        expect(receipt).not.toContain('mineTunnel(');
     });
 
     it('**镐在背包里、只是没握在手上** ⇒ 不许说"手上没有镐"，自己换上再挖（真机 overnight_b）', async () => {
@@ -1721,9 +1707,7 @@ describe('mineTunnel：直线隧道', () => {
             expect(receipt, direction).toContain(`现在 (${end.x}, ${end.y}, ${end.z})`);
             expect(receipt, direction).toContain(`沿 ${direction} 净前进`);
             expect(receipt, direction).toContain('验证变空气**的方块 6 个');
-            expect(receipt.trimEnd().split('\n').at(-1), direction).toBe(
-                `下一步（照做即可）：mineTunnel(length=32, direction="${direction}")`,
-            );
+            expect(receipt.trimEnd().split('\n').at(-1), direction).not.toContain('照做即可');
         }
     });
 
@@ -1746,7 +1730,7 @@ describe('mineTunnel：直线隧道', () => {
         expect(receipt).toContain('前方脚所在格');
         expect(receipt).toContain('lava');
         expect(receipt).toContain('(1, 70, 0)');
-        expect(receipt.trimEnd().split('\n').at(-1)).toBe('下一步（照做即可）：moveAway(distance=8)');
+        expect(receipt.trimEnd().split('\n').at(-1)).not.toContain('照做即可');
     });
 
     it('水/岩浆在头上或前方脚下 → 同样停手（三处都要读）', async () => {
@@ -1772,7 +1756,7 @@ describe('mineTunnel：直线隧道', () => {
         expect(receipt).toContain('会掉下去');
         expect(receipt).toContain('(1, 69, 0)');
         expect(receipt).toContain('没有能垫的方块');
-        expect(receipt.trimEnd().split('\n').at(-1)).toBe('下一步（照做即可）：mineTunnel(length=2, direction="+z")');
+        expect(receipt.trimEnd().split('\n').at(-1)).not.toContain('照做即可');
     });
 
     it('前方脚下是空洞 + 背包里有方块 → **垫一块桥过去**（横向的 pillarUp）', async () => {
@@ -1809,7 +1793,7 @@ describe('mineTunnel：直线隧道', () => {
         expect(h.dugOrder).toEqual([]);
         expect(receipt).toContain('就是岩浆（桥下面）');
         expect(receipt).toContain('不能在上面搭桥');
-        expect(receipt.trimEnd().split('\n').at(-1)).toBe('下一步（照做即可）：moveAway(distance=8)');
+        expect(receipt.trimEnd().split('\n').at(-1)).not.toContain('照做即可');
     });
 
     it('"不是实心"不只是 air：没有碰撞箱的方块也算踩空（纯函数）', () => {
@@ -1838,7 +1822,7 @@ describe('mineTunnel：直线隧道', () => {
         expect(receipt).not.toContain('先换');
     });
 
-    it('没镐 + 徒手挖不动 → 停手并给装备提示；徒手挖得动 → 放行但明说"很慢"', async () => {
+    it('没镐 + 前方要工具 ⇒ 停手并给装备提示；不需要工具的方块 ⇒ 直接放行', async () => {
         const hard = tunnelHarness({
             tool: { name: null, remaining: null, max: null, low: false },
             cells: { '1,70,0': 'obsidian' },
@@ -1847,12 +1831,11 @@ describe('mineTunnel：直线隧道', () => {
         const r1 = await mineTunnelSkill(hard.bot, 4, 2, '+x', hard.deps);
         expect(hard.dugOrder).toEqual([]);
         expect(r1).toContain('徒手挖不动');
-        expect(r1.trimEnd().split('\n').at(-1)).toBe('下一步（照做即可）：equip(item_name="stone_pickaxe")');
+        expect(r1.trimEnd().split('\n').at(-1)).not.toContain('照做即可');
 
         const soft = tunnelHarness({ tool: { name: null, remaining: null, max: null, low: false } });
         const r2 = await mineTunnelSkill(soft.bot, 2, 2, '+x', soft.deps);
         expect(soft.dugOrder.length).toBe(4);
-        expect(r2).toContain('徒手挖');
         expect(r2).toContain('净前进 2/2 格');
     });
 
@@ -1861,9 +1844,7 @@ describe('mineTunnel：直线隧道', () => {
         const receipt = await mineTunnelSkill(h.bot, 5, 2, '+x', h.deps);
         expect(receipt).toContain('净前进 2/5 格');
         expect(receipt).toContain('被 Stop/保命打断');
-        expect(receipt.trimEnd().split('\n').at(-1)).toBe(
-            '下一步（照做即可）：mineTunnel(length=16, direction="+x")',
-        );
+        expect(receipt.trimEnd().split('\n').at(-1)).not.toContain('照做即可');
     });
 
     it('读不到方块 → 拒绝瞎挖（读不到就不猜）', async () => {
@@ -1887,7 +1868,7 @@ describe('mineTunnel：直线隧道', () => {
         const r1 = await mineTunnelSkill(low.bot, 4, 2, '+x', low.deps);
         expect(low.dugOrder).toEqual([]);
         expect(r1).toContain('停手保命');
-        expect(r1.trimEnd().split('\n').at(-1)).toBe('下一步（照做即可）：survivalCheck');
+        expect(r1.trimEnd().split('\n').at(-1)).not.toContain('照做即可');
 
         const hurt = tunnelHarness();
         let step = 0;
@@ -1926,9 +1907,7 @@ describe('mineTunnel：直线隧道', () => {
         );
         expect(receipt).toContain('时间到');
         expect(receipt).toContain('净前进 2/10 格');
-        expect(receipt.trimEnd().split('\n').at(-1)).toBe(
-            '下一步（照做即可）：mineTunnel(length=16, direction="+x")',
-        );
+        expect(receipt.trimEnd().split('\n').at(-1)).not.toContain('照做即可');
     });
 
     it('方向解析：显式四种写法都认；留空按 yaw 推；认不出来就拒绝', () => {
@@ -1962,7 +1941,7 @@ describe('mineTunnel：直线隧道', () => {
         expect(h.dugOrder).toEqual([]);
         expect(receipt).toContain('认不出来');
         expect(receipt).toContain('净前进 0/4 格');
-        expect(receipt.trimEnd().split('\n').at(-1)).toBe('下一步（照做即可）：stats(type="body")');
+        expect(receipt.trimEnd().split('\n').at(-1)).not.toContain('照做即可');
     });
 
     it('tunnelStep 的几何：脚/头/脚下三格逐一对得上', () => {
@@ -2163,7 +2142,7 @@ describe('huntFor：击杀必须有证据（真机事故 01:20，overnight_a）'
         // 每行如实写"瞬移"，不写击杀
         expect(receipt).toContain('它瞬移了');
         expect(receipt).not.toContain('击杀 enderman（已验证');
-        expect(receipt.trimEnd().split('\n').at(-1)).toMatch(/^下一步（照做即可）：/);
+        expect(receipt.trimEnd().split('\n').at(-1)).not.toContain('照做即可');
     });
 
     it('攻击"说"打死了但**读不到实体表** → 不算击杀（没证据就不许报战果）', async () => {
@@ -2278,7 +2257,7 @@ describe('huntFor 失控回执：参数名 / 熔断 / 下一步 / 长度上限',
             now: () => 0,
         });
         const next = lastLine(receipt);
-        expect(next).toBe('下一步（照做即可）：attack(type="mob", target="salmon")');
+        expect(next).not.toContain('照做即可');
         expect(next).not.toContain('huntFor(');
     });
 
@@ -2298,7 +2277,7 @@ describe('huntFor 失控回执：参数名 / 熔断 / 下一步 / 长度上限',
 
         expect(attacks).toBe(huntMaxAttempts(1));
         expect(receipt).toContain('尝试次数到上限');
-        expect(lastLine(receipt)).toBe('下一步（照做即可）：stats(type="entities")');
+        expect(lastLine(receipt)).not.toContain('照做即可');
     });
 
     it('④ 长度上限：列表级有天花板，单条超长也兜得住（尾部“下一步”必须还在）', () => {
@@ -2325,12 +2304,12 @@ describe('huntFor 失控回执：参数名 / 熔断 / 下一步 / 长度上限',
         const listed = huntReceipt(base);
         expect(listed.length).toBeLessThan(2_500);
         expect(listed).toContain('省略');
-        expect(lastLine(listed)).toBe('下一步（照做即可）：attack(type="mob", target="salmon")');
+        expect(lastLine(listed)).not.toContain('照做即可');
         // ② 字符级天花板：**单条**警告就有 5 万字符（列表级拦不住），必须靠硬上限兜
         const oneHuge = huntReceipt({ ...base, warnings: [`⚠️ ${'x'.repeat(50_000)}`], progress: [] });
         expect(oneHuge.length).toBeLessThanOrEqual(HUNT_RECEIPT_MAX_CHARS);
         expect(oneHuge).toContain('回执过长');
-        expect(lastLine(oneHuge)).toBe('下一步（照做即可）：attack(type="mob", target="salmon")');
+        expect(lastLine(oneHuge)).not.toContain('照做即可');
         expect(capReceipt('x'.repeat(50_000)).length).toBeLessThanOrEqual(HUNT_RECEIPT_MAX_CHARS);
     });
 
@@ -2375,12 +2354,8 @@ describe('huntFor 失控回执：参数名 / 熔断 / 下一步 / 长度上限',
             // 绝不能把模型打发去 debug 一个正常的工具
             expect(receipt).not.toContain('内部打怪动作');
             expect(receipt).not.toContain('参数/目标解析/服务端拒绝');
-            const next = lastLine(receipt);
-            expect(next.startsWith('下一步（照做即可）：')).toBe(true);
-            expect(next).not.toContain('attack(');
-            expect(next).not.toContain('huntFor(');
-            // 烈焰人 → 先 prepareBlaze（换打法，而不是调工具）
-            expect(next).toBe('下一步（照做即可）：prepareBlaze');
+            // 2026-10-30：不再给"下一步"——换什么打法（烈焰人/换武器）由模型决定
+            expect(receipt).not.toContain('照做即可');
         });
 
         it('打不死但包里有更好的武器 → 下一步是 equip（换武器也是"换打法"）', async () => {
@@ -2406,7 +2381,7 @@ describe('huntFor 失控回执：参数名 / 熔断 / 下一步 / 长度上限',
             });
 
             expect(receipt).toContain('**打不死**');
-            expect(lastLine(receipt)).toBe('下一步（照做即可）：equip(item_name="diamond_sword")');
+            expect(lastLine(receipt)).not.toContain('照做即可');
         });
 
         it('三次**亚秒级**失败 → 仍然是原来的熔断口径（诊断 attack）', async () => {
@@ -2426,7 +2401,7 @@ describe('huntFor 失控回执：参数名 / 熔断 / 下一步 / 长度上限',
             expect(receipt).toContain('停止原因：内部打怪动作连续失败');
             expect(receipt).toContain('几秒内就被拒');
             expect(receipt).not.toContain('**打不死**');
-            expect(lastLine(receipt)).toBe('下一步（照做即可）：attack(type="mob", target="salmon")');
+            expect(lastLine(receipt)).not.toContain('照做即可');
         });
 
         it('混合（慢、慢、快、慢）**不会提前熔断**，也不会诬告工具', async () => {

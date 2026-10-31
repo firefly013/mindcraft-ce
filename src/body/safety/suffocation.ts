@@ -1,6 +1,6 @@
 /**
  * **窒息自救 + 垫块占位判定**（Lead 2026-10-21：`pillarUp(14)` 把方块放进自己身体里，
- * 血 19→0 憋死，损失 82 件；在 Hard + keepInventory=false 里等于每小时重开一次）。
+ * 血 19→0 憋死，损失 82 件）。
  *
  * 两条都是**便宜、无歧义**的判定：
  * - `cellIntersectsBody`：这一格会不会和 bot 的 AABB 相交（放块前必须为 false）；
@@ -72,14 +72,17 @@ export function planSuffocationEscape(input: {
     const solid = (name: string | null): boolean =>
         name != null && name !== '' && name !== 'air' && name !== 'cave_air' && name !== 'void_air' &&
         name !== 'water' && name !== 'flowing_water' && name !== 'lava' && name !== 'flowing_lava';
-    if (!input.healthDropped) return { action: 'none', reason: 'health-stable' };
     if (input.feetBlock == null && input.headBlock == null) return { action: 'none', reason: 'unreadable' };
+    // **"身体嵌在方块里"本身就是证据，不需要等血掉**（真机 2026-10-23）：
+    // 以前只在 `healthDropped` 时才挖，于是 bot 卡进 1 格高的缝里、服务器又没扣血时
+    // **永远出不来**——第三人称看到的就是"原地晃、对着方块空挥、脚下冒粒子"，
+    // 每次动作都零位移。脚/头那格是实心 ⇒ 它站都站不下，这不是猜测。
     if (solid(input.feetBlock)) return { action: 'break-feet', reason: `脚那格是 ${input.feetBlock}` };
     if (solid(input.headBlock)) return { action: 'break-head', reason: `头那格是 ${input.headBlock}` };
-    return { action: 'none', reason: 'not-in-wall' };
+    return { action: 'none', reason: input.healthDropped ? 'not-in-wall' : 'health-stable' };
 }
 
-/** 给模型看的自救回执（说清：我在方块里、哪一格、血在掉、正在挖开）。 */
+/** 给模型看的自救回执（说清：我在方块里、哪一格、正在挖开）。 */
 export function formatSuffocationReceipt(input: {
     position: BodyCell;
     which: '脚' | '头';
@@ -88,8 +91,10 @@ export function formatSuffocationReceipt(input: {
     broke: boolean;
 }): string {
     const pos = `(${input.position.x}, ${input.position.y}, ${input.position.z})`;
-    const head = `**我在方块里**：${input.which}那格是 ${input.blockName}，血在掉（现在 ${input.health ?? '?'}）——我在 ${pos}。`;
+    // **别把"卡住"写成"血在掉"**：不一定在掉血（有时服务器根本不扣血），
+    // 回执只报测得到的事实——身体那格是实心、以及现在血是多少。
+    const head = `**我卡在方块里**：${input.which}那格是 ${input.blockName}（当前血量 ${input.health ?? '?'}）——我在 ${pos}。`;
     return input.broke
-        ? head + '已经把那一格挖开了，血应该会停；继续挖/走之前先确认脚下和头顶是空的。'
+        ? head + '已经把那一格挖开了；继续挖/走之前先确认脚下和头顶是空的。'
         : head + '**挖开失败**：先 Stop 把身体拿回来，再用 mineBlock 挖脚/头那一格——别继续垫方块或往前挤。';
 }

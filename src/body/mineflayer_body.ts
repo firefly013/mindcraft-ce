@@ -113,9 +113,10 @@ import { stripBang } from '../shared/tools.js';
 import { getFullState } from './library/full_state.js';
 import { decodeCursor, EMPTY_CURSOR, encodeCursor, readInbox, type InboxCursor } from './inbox.js';
 import { safeguards } from './safety/safeguards.js';
-import { OFFENSIVE_TOOL_NAMES, combatRefusalVerdict } from './safety/reflex_override.js';
-import { DEPARTURE_TOOLS, annotateReceipt, departureVerdict, isWeaponName, targetDimensionOf } from './safety/departure_guard.js';
-import { permits } from './safety/permits.js';
+import { COMBAT_OP, OFFENSIVE_TOOL_NAMES, combatRefusalVerdict } from './safety/reflex_override.js';
+import { isHarmlessFoodMob } from './library/hunt_reach.js';
+import { DEPARTURE_OP, DEPARTURE_TOOLS, annotateReceipt, departureVerdict, isWeaponName, targetDimensionOf } from './safety/departure_guard.js';
+import { opContextFor, permits } from './safety/permits.js';
 import { log, validateNameFormat, handleDisconnection } from './connection_handler.js';
 import { createLogger, type Logger } from '../shared/logger.js';
 import { MESSAGES } from '../shared/prompts.js';
@@ -125,7 +126,6 @@ import Vec3 from 'vec3';
 import { chooseSafeFleeTarget } from './safety/flee.js';
 import { planFallRecovery, readFallMedium, shouldEmitFallNotice } from './safety/fall_recovery.js';
 import { isEdibleName, shouldEmitUnrecoverable, unrecoverableVerdict } from './safety/unrecoverable.js';
-import type { DeadlockFacts } from './safety/deadlock.js';
 import { voidWalkVerdict } from './safety/void_walk.js';
 
 type EdgeWatcher = ReturnType<typeof createEdgeWatcher>;
@@ -945,7 +945,7 @@ export class MineflayerBody {
                 try {
                     (this.bot as any)._client?.on?.(packetName, (packet: any) => {
                         if (Number(packet?.windowId) === 0) {
-                            this.inventoryPacketSeen = true;
+                            this.inventoryPacketSeenAt = Date.now();
                             this.markInventorySynced();
                         }
                     });
@@ -1032,8 +1032,7 @@ export class MineflayerBody {
             // 真机 2026-10-19（overnight_a）：「背包清空 4 次」——查 A 的日志：
             // 14 次"背包变空"**全部落在死亡事件同一秒**，其中 12 次在几秒后又被
             // `inventory.changed` 填回来（22:15:52 空 → 22:16:39 有 55 件）。
-            // 这个存档 keepInventory=true，物品**没有丢**：那是复活瞬间服务端重发
-            // 背包之前的本地视图清空。标成"未知"后，stats/回执会说"还没同步上来，
+            // 那是复活瞬间服务端还没把背包推回来，本地视图先是空的。标成"未知"后，stats/回执会说"还没同步上来，
             // 不是空的"，而不是让模型以为家当没了。
             this.inventorySynced = false;
             try {
@@ -1517,13 +1516,9 @@ export class MineflayerBody {
     /** 最近一次死亡时刻（刺激"刚死且身上空"的逃生交还判定）+ 进度回执节流。 */
     private lastDeathAt = 0;
     private escapeProgressAt = 0;
-    /** 三方互锁的呼吸反射临时停用截止时间（只停 surface 一条，见 deadlock.ts）。 */
-    private surfaceStandDownUntil = 0;
     /** 位置卡住追踪：上次采样 + 最近一次"动过"的时刻。 */
     private lastPosSample: { x: number; y: number; z: number; at: number } | null = null;
     private lastMovedAt = 0;
-    /** 最近 3 分钟里呼吸反射触发的时刻（三方互锁的证据）。 */
-    private surfaceTriggerTimes: number[] = [];
     /** 击杀后拾取优先窗口的截止时刻 + 最近一次受伤时刻（保命优先于捡东西）。 */
     private pickupPriorityUntil = 0;
     /** 动作失败/被 Stop 打断时，收尾清扫的说明（接在失败回执末尾）。 */
@@ -1699,6 +1694,34 @@ export class MineflayerBody {
     }
 
     /**
+     * 这次进攻要打的目标**会不会还手**（猪/牛/羊/鸡/兔子 = 不会）。
+     *
+     * 读不到返回 null——守卫对 null 是 fail-closed（照旧拦）。
+     * 为什么需要它：2026-10-24 真机死锁——血 3、食物 11（<18 不回血）、猪在 4 格外，
+     * 重伤守卫把 `huntFor` 拒了，而猪根本打不还手。危险来自"被反击"，不是"发起攻击"。
+     */
+    private targetFightsBack(args?: Record<string, unknown>): boolean | null {
+        try {
+            const type = String((args as any)?.type ?? '');
+            const target = String((args as any)?.target ?? '');
+            // `attack` 的 target 在 type=id 时是实体编号，在 type=mob 时才是类型名。
+            if (type === 'id') {
+                const entity = (this.bot as any)?.entities?.[target];
+                const name = String(entity?.name ?? entity?.displayName ?? '');
+                return name === '' ? null : !isHarmlessFoodMob(name);
+            }
+            if (type === 'mob' && target !== '') return !isHarmlessFoodMob(target);
+            if (type === 'player') return true; // 玩家默认会还手
+            // `huntFor(entity=…)`：entity 就是类型名。
+            const entityArg = String((args as any)?.entity ?? '');
+            if (entityArg !== '') return !isHarmlessFoodMob(entityArg);
+            return null;
+        } catch {
+            return null;
+        }
+    }
+
+    /**
      * 重伤时拒掉**进攻类**动作（在身体动手之前），返回要退回给模型的文本；允许则 null。
      *
      * 真机 2026-10-19（overnight_b，下界第 8 次死亡）：血 **1.53**、食物 4，模型正在
@@ -1706,25 +1729,19 @@ export class MineflayerBody {
      * **拦不住"濒死时主动开打"**这个选择。这条守卫只拦进攻：
      * 逃跑/吃/垫方块/自救/保命反射一律放行（绝不让守卫削弱"跑得掉"的能力）。
      */
-    criticalHealthRefusalFor(toolName: string): string | null {
+    criticalHealthRefusalFor(toolName: string, args?: Record<string, unknown>): string | null {
         try {
             if (!OFFENSIVE_TOOL_NAMES.has(String(toolName ?? ''))) return null;
             const bot = this.bot as { health?: unknown; food?: unknown } | null;
             const health = Number(bot?.health);
             const food = Number(bot?.food);
-            const gameplay = (settings as any)?.gameplay ?? {};
-            const keepInventory =
-                gameplay.keepInventoryOnDeath === true ? true : gameplay.keepInventoryOnDeath === false ? false : null;
-            const immediateRespawn =
-                gameplay.doImmediateRespawn === true ? true : gameplay.doImmediateRespawn === false ? false : null;
             const verdict = combatRefusalVerdict({
                 health: Number.isFinite(health) ? health : null,
                 food: Number.isFinite(food) ? food : null,
                 // 只做"附近有没有威胁"的粗判：读不到就是 null（不拿它当理由）。
                 hostileMeters: this.nearestHostileMeters(),
-                // **背包里有没有吃的**：有 ⇒ 回执必须先让模型吃，而不是先谈"故意死一次"
-                // （Lead 2026-10-19：把死亡写进回执是最有效的人工干预，但也可能造出
-                // "有食物却去送死"这个新失败模式——所以这两种情况的措辞必须不同）。
+                // **背包里有没有吃的**：回执只报"有什么能吃的"这个事实，
+                // 不替模型挑吃哪样、也不描述吃不到该怎么办。
                 foodItems: (() => {
                     try {
                         return ((this.bot as any)?.inventory?.items?.() ?? [])
@@ -1734,8 +1751,12 @@ export class MineflayerBody {
                         return null;
                     }
                 })(),
-                keepInventory,
-                immediateRespawn,
+                // **这一下要打谁**：不会还手的（猪/牛/羊/鸡）不拦——低血时那是唯一的回血路。
+                // 读不到目标性质时传 null，守卫照旧拦（fail-closed）。
+                targetFightsBack: this.targetFightsBack(args),
+                // **显式授权**（`allowDangerousOps(ops="attack_at_low_health")`）：
+                // 只看许可，不再猜别的。额度用完自动回到默认拒绝。
+                authorized: permits.isAllowed(COMBAT_OP, opContextFor(this.bot), Date.now()).allowed,
             });
             if (!verdict.allowed) {
                 // **一行有界日志**：真机出现"有食物却去送死"时，这一行能直接给出证据
@@ -1843,6 +1864,9 @@ export class MineflayerBody {
                 // 拿在手上算数；拿不上但包里有，也算"有武器"（模型只要 equip 就能用）。
                 weapon: isWeaponName(heldName) ? heldName : typeof weapon?.name === 'string' ? weapon.name : null,
                 blocks,
+                // **显式授权**（`allowDangerousOps(ops="departure_underprepared")`）：
+                // 缺的东西照样写进 warning，但不再拦。
+                authorized: permits.isAllowed(DEPARTURE_OP, opContextFor(bot), Date.now()).allowed,
             };
             const verdict = departureVerdict(facts);
             if (!verdict.allowed) {
@@ -1976,9 +2000,8 @@ export class MineflayerBody {
     /**
      * **"僵尸状态"检测**：活着但无法自愈（血 ≤4、食物 0、背包无食物）。
      *
-     * **纯建议，不是锁**：不拦任何工具、不动身体、不取消反射；只是把状态和一个
-     * 有条件的出口说清楚。是否推荐"主动死"完全取决于**当场**读到的 `keepInventory`：
-     * true 才说；false 或读不到 ⇒ 明说"不要主动死"并指向找吃的（见 unrecoverable.ts）。
+     * **纯建议，不是锁**：不拦任何工具、不动身体、不取消反射；只是把状态和
+     * "只能去找吃的"这个事实说清楚（见 unrecoverable.ts）。
      */
     checkUnrecoverableState(): void {
         try {
@@ -2001,19 +2024,12 @@ export class MineflayerBody {
                 }
             })();
             if (names == null) return;
-            const gameplay = (settings as any)?.gameplay ?? {};
-            const keepInventory =
-                gameplay.keepInventoryOnDeath === true ? true : gameplay.keepInventoryOnDeath === false ? false : null;
-            const immediateRespawn =
-                gameplay.doImmediateRespawn === true ? true : gameplay.doImmediateRespawn === false ? false : null;
             if (this.unrecoverableSince === 0) this.unrecoverableSince = Date.now();
             const elapsedSec = Math.round((Date.now() - this.unrecoverableSince) / 1000);
             const verdict = unrecoverableVerdict({
                 health,
                 food,
                 itemNames: names,
-                keepInventory,
-                immediateRespawn,
                 elapsedSec,
             });
             if (!verdict.unrecoverable || verdict.advice == null) return;
@@ -2027,7 +2043,6 @@ export class MineflayerBody {
                     health,
                     food,
                     foodItems: names.filter((itemName: string) => isEdibleName(itemName)).slice(0, 5),
-                    keepInventory,
                     elapsedSec,
                 });
             } catch {
@@ -2051,85 +2066,6 @@ export class MineflayerBody {
         }
     }
 
-/**
-     * **三方互锁的事实**：只有全部可读、且都成立时才算"真的出不去"。
-     * 任何一项读不到 ⇒ 返回 null ⇒ 拒绝照旧（不许拿读不到当放行理由）。
-     */
-    deadlockFacts(): DeadlockFacts | null {
-        try {
-            const bot = this.bot as any;
-            const health = Number(bot?.health);
-            const food = Number(bot?.food);
-            if (!Number.isFinite(health) || !Number.isFinite(food)) return null;
-            if (this.inventorySynced === false) return null;
-            const items = ((bot?.inventory?.items?.() ?? []) as Array<{ name?: unknown }>).map((item) =>
-                String(item?.name ?? ''),
-            );
-            const hasDigTool = items.some((name) =>
-                ['_pickaxe', '_shovel', '_axe', '_hoe'].some((suffix) => name.endsWith(suffix)),
-            );
-            // 身边（含脚下）有没有可挖的方块：镐子有没有先不管，这里只回答"挖出去这条路成立吗"。
-            const p = bot?.entity?.position;
-            const hasDiggableNeighbour = (() => {
-                if (p == null) return false;
-                const base = { x: Math.floor(Number(p.x)), y: Math.floor(Number(p.y)), z: Math.floor(Number(p.z)) };
-                for (const d of [[0, 0, 0], [1, 0, 0], [-1, 0, 0], [0, 0, 1], [0, 0, -1], [0, -1, 0], [0, 1, 0]]) {
-                    const b = bot.blockAt?.(new Vec3(base.x + d[0]!, base.y + d[1]!, base.z + d[2]!));
-                    const name = String(b?.name ?? '');
-                    if (name === '' || name === 'air' || name === 'cave_air' || name === 'void_air') continue;
-                    if (name === 'bedrock' || name === 'lava' || name === 'water') continue;
-                    return true;
-                }
-                return false;
-            })();
-            const now = Date.now();
-            const window = this.surfaceTriggerTimes.filter((at) => now - at <= 180_000);
-            const gameplay = (settings as any)?.gameplay ?? {};
-            const keepInventory =
-                gameplay.keepInventoryOnDeath === true ? true : gameplay.keepInventoryOnDeath === false ? false : null;
-            const immediateRespawn =
-                gameplay.doImmediateRespawn === true ? true : gameplay.doImmediateRespawn === false ? false : null;
-            return {
-                stuckSec: this.lastMovedAt > 0 ? Math.round((now - this.lastMovedAt) / 1000) : 0,
-                health,
-                food,
-                hasDigTool,
-                hasDiggableNeighbour,
-                surfaceTriggers: window.length,
-                keepInventory,
-                immediateRespawn,
-            };
-        } catch {
-            return null;
-        }
-    }
-
-    /** **只停呼吸反射**这么多毫秒（三方互锁的唯一出口）；带响亮日志与自动恢复。 */
-    enableSurfaceStandDown(ms: number): void {
-        const bounded = Math.min(Math.max(1_000, Math.floor(ms)), 60_000);
-        const until = Date.now() + bounded;
-        this.surfaceStandDownUntil = Math.max(this.surfaceStandDownUntil, until);
-        try {
-            this.log.with('lifecycle').info({
-                event: 'deadlock-override-granted',
-                scope: 'surface',
-                ms: bounded,
-                health: Number((this.bot as any)?.health ?? null),
-                food: Number((this.bot as any)?.food ?? null),
-            });
-        } catch {
-            // 日志失败不影响放行。
-        }
-        // 自动恢复（有界；到点后呼吸反射照旧）。
-        const timer = setTimeout(() => {
-            try {
-                this.log.with('lifecycle').info({ event: 'deadlock-override-reverted', scope: 'surface' });
-            } catch {
-                // 同上。
-            }
-        }, bounded);
-        (timer as { unref?: () => void }).unref?.();
-    }
 
     /** 位置卡住追踪：每次采样路径更新一次（用来算"同一坐标多久没动"）。 */
     trackPositionStuck(): void {
@@ -2328,8 +2264,18 @@ export class MineflayerBody {
 
     /** 复活后的背包同步恢复：定时器句柄。 */
     private inventorySyncRecoveryTimer: ReturnType<typeof setTimeout> | null = null;
-    /** 是否收到过 windowId 0 的背包内容包（哪怕 0 格——那是**测量**,不是假设）。 */
-    private inventoryPacketSeen = false;
+    /**
+     * 最后一次收到 windowId 0 背包内容包的时间戳（0 = 从没收到过）。
+     *
+     * **必须单调**：只能往后推，绝不能在 spawn 时清零。
+     * 真机 2026-10-23 的死锁就是清零造成的——服务端在**登录时、spawn 之前**
+     * 就把完整背包推下来了（已用 tmp/probe_inventory.mjs 实测：
+     * `window_items windowId=0` 在 login 后 10ms 到，spawn 紧随其后），
+     * 而 spawn 处理器把标志清零 ⇒ 恢复轮询永远等不到"spawn 之后的新包"，
+     * 30 秒后记 `inventory-sync-stuck`，CLI 从此一直显示"读数未同步"。
+     * 空包也是测量（"收到过一次，内容是空"），不是"还没数据"。
+     */
+    private inventoryPacketSeenAt = 0;
     /** 开窗/关窗**包计数**（判断"真的还有残留界面"的唯一证据；currentWindow 只是代理）。 */
     private screenOpenPackets = 0;
     private screenClosePackets = 0;
@@ -2354,10 +2300,17 @@ export class MineflayerBody {
      * 恢复轮询里"3 秒后仍空 ⇒ 当作空"这条兜底，只在**死亡/复活**时成立；
      * 进程刚重连时物品还在世界里，把它报成"空"会让模型重采一切（`assumed-empty` 已误报 38 次）。
      *
-     * 现在的出口只有四个：
+     * 现在的出口只有五个：
      * - `read-nonempty`：读到非空 ⇒ 真同步；
-     * - `packet-empty`：**收到过 windowId 0 的内容包**（哪怕 0 格）⇒ 这是测量出的空；
-     * - `assumed-empty-after-death`：**最近确实死过/复活过**且 3 秒仍空 ⇒ 按空处理（keepInventory=false 下合理）；
+     * - `packet-empty`：**本次 spawn 之后**收到过 windowId 0 的内容包（哪怕 0 格）⇒ 这是测量出的空；
+     * - `assumed-empty-after-death`：**最近确实死过/复活过**且 3 秒仍空 ⇒ 按空处理；
+     * - `measured-empty-after-login`（2026-10-23 新增）：**不是死亡复活**，而本次进程里
+     *   收到过至少一次 windowId 0 的内容包，且 3 秒仍空 ⇒ 按空处理。
+     *   这条是修下面这个死锁的：服务端把完整背包推下来的时刻在 **spawn 之前**，
+     *   所以"等 spawn 之后的新包"在纯重连场景下永远等不到（实测见 `inventoryPacketSeenAt`）。
+     *   这次登录的包就是权威背包视图：它说空，那就是真空，不是"还没数据"。
+     *   死亡路径不走这条（复活瞬间本地视图可能被清空再回填，见 spawn 处理器注释），
+     *   那里继续用 `assumed-empty-after-death`。
      * - `still-unsynced-after-reconnect`：以上都不是 ⇒ **保持"未知"**，继续有界重试（最多 30 秒），
      *   然后记 `inventory-sync-stuck` 并停止重试（状态仍是未知；渲染层会说"刚重连、不是空的"）。
     /**
@@ -2393,7 +2346,9 @@ export class MineflayerBody {
     armInventorySyncRecovery(why: string): void {
         this.clearInventorySyncRecovery();
         if (this.inventorySynced) return;
-        this.inventoryPacketSeen = false;
+        // **不清零 `inventoryPacketSeenAt`**：它是"这份背包视图有没有被服务端喂过"的
+        // 单调证据。清零会把登录时已经到过的证据抹掉，纯重连场景再也等不到新包
+        // （真机 2026-10-23：CLI 停在"读数未同步"整整一局）。
         // **每个 login 只结算一次**（真机：35 秒内 4 次重复结论）。
         if (this.inventorySyncSettledForLogin && this.spawnFollowedDeath !== true) return;
         const startedAt = Date.now();
@@ -2410,7 +2365,11 @@ export class MineflayerBody {
                 itemCount = null;
             }
             const settle = (
-                via: 'read-nonempty' | 'packet-empty' | 'assumed-empty-after-death',
+                via:
+                    | 'read-nonempty'
+                    | 'packet-empty'
+                    | 'assumed-empty-after-death'
+                    | 'measured-empty-after-login',
             ): void => {
                 this.inventorySyncSettledForLogin = true;
                 this.markInventorySynced();
@@ -2427,12 +2386,15 @@ export class MineflayerBody {
                 }
             };
             if (itemCount != null && itemCount > 0) return settle('read-nonempty');
-            if (this.inventoryPacketSeen) return settle('packet-empty');
+            // **spawn 之后**到过一次完整背包 ⇒ 这个"空"是被测量出来的。
+            if (this.inventoryPacketSeenAt > startedAt) return settle('packet-empty');
             // **"空"必须能追溯到一次死亡**；重连不算。
             // "空"必须能追溯到一次**死亡事件**；重连不算（spawnFollowedDeath 只在死亡后置真）。
             const recentlyDied = this.spawnFollowedDeath === true;
             if (elapsed >= 3_000) {
                 if (recentlyDied) return settle('assumed-empty-after-death');
+                // 不是死亡复活，而本进程收到过一次权威背包 ⇒ 这份空是被测量过的空。
+                if (this.inventoryPacketSeenAt > 0) return settle('measured-empty-after-login');
                 if (!loggedStillUnsynced) {
                     loggedStillUnsynced = true;
                     try {
@@ -2505,9 +2467,15 @@ export class MineflayerBody {
         return this.modelActionsInFlight > 0 || this.modelActionRequested;
     }
 
-    requestInterrupt(): void {
+    requestInterrupt(reason?: string): void {
         if (this.bot == null) return;
         this.bot.interrupt_code = true;
+        // **中断必须留名**（2026-10-24 修）：真机上一局里大半空回执来自这里——
+        // 死亡等路径只置位不留言，回执只剩「原因未记录」，模型只能瞎猜重试。
+        // 只填空位：先到的具体原因（反射名等）优先于调用方的泛化说法。
+        if (typeof reason === 'string' && reason.trim() !== '' && this.bot.__interruptReason == null) {
+            this.bot.__interruptReason = reason.trim();
+        }
         // mineflayer 的 stopDigging 在同/异步两条路上都可能抛 `Digging aborted`；
         // 这里是保命/Stop 的中断路径，不能因为一次 abort rejection 杀 body。
         const swallow = (result: any): void => {
@@ -3351,9 +3319,67 @@ export class MineflayerBody {
         }
     }
 
-    /** 每 tick 调一次：**死亡 ≥2 次（窗口/同点）⇒ 不等模型回合，直接自救**。 */
-    maybeBreakRespawnLoop(): void {
+    /**
+     * **死亡后立刻自封**（不等第二次死亡）。
+     * 真机 2026-10-22：两个 bot 一天死了 239 次（A=109 / B=130），绝大多数死在复活点附近，
+     * 而复活点周围一直有敌对。原来只有"窗口内已经死过 ≥2 次"才触发的循环破解，
+     * **等于必须再死一次才肯自救**。这里改成：**只要刚死过、附近还有怪或血还低，就立刻挖进地下 2 格封顶**。
+     * 挖洞自封是空手也能做的零风险动作（挖泥土/草方块不需要工具），比在空地上跑安全得多。
+     */
+    private postDeathSealDone = false;
+    maybeSealAfterRespawn(): void {
         try {
+            const bot = this.bot as any;
+            const now = Date.now();
+            if (this.lastDeathAt <= 0) return;
+            if (now - this.lastDeathAt > 60_000) return;
+            if (this.postDeathSealDone) return;
+            if (this.respawnEscapeRunning || this.suffocationRunning) return;
+            if (bot?.interrupt_code != null) return;
+            const health = typeof bot?.health === 'number' ? bot.health : null;
+            if (health == null || health <= 0) return;
+            const self = bot?.entity?.position;
+            if (self == null) return;
+            let nearest = Number.POSITIVE_INFINITY;
+            try {
+                for (const entity of Object.values(bot?.entities ?? {}) as any[]) {
+                    const name = String(entity?.name ?? '').toLowerCase();
+                    if (!/zombie|skeleton|creeper|spider|drowned|pillager|witch|enderman|phantom/.test(name)) continue;
+                    const p = entity?.position;
+                    if (p == null) continue;
+                    const d = Math.hypot(Number(p.x) - Number(self.x), Number(p.z) - Number(self.z));
+                    if (d < nearest) nearest = d;
+                }
+            } catch {
+                nearest = Number.POSITIVE_INFINITY;
+            }
+            const inDanger = nearest <= 20 || health <= 12;
+            if (!inDanger) return;
+            this.postDeathSealDone = true;
+            this.respawnEscapeRunning = true;
+            void this.respawnDigAndSeal()
+                .then((sealed) => {
+                    this.notify('lifecycle', KIND.WORLD, LEVEL.STATE, {
+                        event: 'post-death-seal',
+                        sealed,
+                        nearestHostile: Number.isFinite(nearest) ? Math.round(nearest) : null,
+                        health,
+                        detail: sealed
+                            ? '死后自救：附近还有敌对、血也低 ⇒ **直接挖进地下 2 格并封顶**（已回读验证封住了）。先在这里恢复，别马上回空地。'
+                            : '死后自救失败：**没能挖进地下并封顶**（脚下挖不动、或背包里没有能放的方块）。下一步：往远离怪的方向走，捡到方块后再封。',
+                    });
+                })
+                .catch(() => {})
+                .finally(() => {
+                    this.respawnEscapeRunning = false;
+                });
+        } catch {
+            // 自封反射出错必须静默，不许拖垮 tick。
+        }
+    }
+
+    /** 每 tick 调一次：**死亡 ≥2 次（窗口/同点）⇒ 不等模型回合，直接自救**。 */
+    maybeBreakRespawnLoop(): void {        try {
             const bot = this.bot as any;
             const position = bot?.entity?.position ?? null;
             const verdict = respawnLoopVerdict({ deaths: this.respawnDeaths, now: Date.now(), position });
@@ -3390,7 +3416,6 @@ export class MineflayerBody {
                 this.lastHealthSeen = health;
             }
             const healthDropped = now - this.lastHealthDropAt <= 3_000;
-            if (!healthDropped) return;
             if (this.suffocationRunning) return;
             if (this.reflexRunning === true) return;
             if (now - this.suffocationLastAt < 4_000) return;
@@ -3407,6 +3432,11 @@ export class MineflayerBody {
             };
             const feet = cell(0);
             const head = cell(1);
+            // **卡在方块里不必等掉血**：脚/头那格是实心 ⇒ 它站都站不下（见 planSuffocationEscape）。
+            const embedded =
+                (feet.name != null && feet.name !== '' && !['air', 'cave_air', 'void_air'].includes(feet.name)) ||
+                (head.name != null && head.name !== '' && !['air', 'cave_air', 'void_air'].includes(head.name));
+            if (!healthDropped && !embedded) return;
             const plan = planSuffocationEscape({
                 healthDropped,
                 feetBlock: feet.name,
@@ -3867,6 +3897,14 @@ export class MineflayerBody {
         this.yieldNonSurvivalReflexes(`保命优先（${type}）：已放弃这次自动拾取。`);
         // 新的保命需求来了：清掉上一次的急停标记，让这一棒能真的跑起来。
         this.reflexAbortRequested = false;
+        // **抢占必须指名道姓**（2026-10-24 修）：以前只靠 `forceStopBody` 的兜底文案
+        // 「保命反射/急停抢走了身体」，事件类型和反射名全丢——被抢占的动作拿到的
+        // 回执等于零信息。现在把「谁（反射）、因为什么（事件）、细节（payload.detail）」
+        // 拼进去，被抢占动作的回执第一行就能看到元凶。
+        const preemptDetail = String((payload as { detail?: unknown })?.detail ?? '').trim();
+        const preemptReason = '保命反射 ' + String(reflex ?? '') + ' 接管（' + String(type ?? '') + '）'
+            + (preemptDetail !== '' ? '：' + preemptDetail : '');
+        if (this.bot != null && this.bot.__interruptReason == null) this.bot.__interruptReason = preemptReason;
         // **先硬中断正在跑的模型动作**，再通知/排队保命：
         // 真机 Feedback #24 长寻路遇敌时，反射只是排队，身体还在被寻路带走，
         // 等 rescue 跑到 stopAll 时人已经在水里了。
@@ -4209,18 +4247,30 @@ export class MineflayerBody {
                 // **"正在挨打"**：击杀后的拾取优先窗口靠它决定要不要让位给保命
                 // （见 shouldBypassThreatGateForPickup）。
                 this.lastDamageAt = Date.now();
-                // 挨打即事件（带伤害量）：阈值越线是另一组检测器的事，
-                // 这里只管"挨打了"这个事实；持续掉血 1.5 秒只报一次。
+                // 挨打即事件（带伤害量）。
                 //
-                // **L2 而不是 L3**：掉血本身不该唤醒模型——`bot.health_low`（L3）
-                // 和 `bot.health_danger`（L5）才是该唤醒的那两档。真机日志里
-                // 一场骷髅战掉 8 次血就是 8 次 L3 唤醒。
+                // **等级分两种**（Lead 2026-10-23 的要求："单说这个受到攻击，改成 4 级"）：
+                //   - 附近有敌对生物 ⇒ **L4 PREEMPT**：`abort` 正在进行的那一轮推理、
+                //     带着这条事件重新 `submit`（见 runtime/events.ts 的投递矩阵）。
+                //     **注意它打断的是"思考"，不是"身体"**——身体停手是下面
+                //     `emergency('bot.attacked')` 那条反射的职责（L5 才会锁动作通道）。
+                //   - 没有敌人（摔伤、岩浆、饥饿）⇒ 仍是 L2 记账：那些不该打断手头的事，
+                //     血量阈值（health_low / health_danger）负责叫醒。
+                const threat = (() => {
+                    try {
+                        const p = this.bot.entity.position;
+                        return this.threatNear({ x: p.x, y: p.y, z: p.z }, 16);
+                    } catch {
+                        return null;
+                    }
+                })();
                 const hurt = shouldEmitHurt(prev_health, this.bot.health, this.lastHurtEmitAt, Date.now());
                 if (hurt.fire) {
                     this.lastHurtEmitAt = Date.now();
-                    this.notify('bot.hurt', KIND.WORLD, LEVEL.STATE, {
+                    this.notify('bot.hurt', KIND.WORLD, threat != null ? LEVEL.PREEMPT : LEVEL.STATE, {
                         health: this.bot.health,
                         damage: hurt.damage,
+                        byHostile: threat != null,
                     });
                     // **被敌对生物打了就直接保命，不等血线。**
                     // 保命以前只看血线（30% = 6/20）——prober 实测 17.5 → 12.5 →
@@ -4230,14 +4280,7 @@ export class MineflayerBody {
                 }
                 // **威胁保命独立于 hurt 的节流**：骷髅连射可能被 debounce 掉，
                 // 但敌人还贴着脸，必须立刻中断当前动作（Feedback #24）。
-                const threat = (() => {
-                    try {
-                        const p = this.bot.entity.position;
-                        return this.threatNear({ x: p.x, y: p.y, z: p.z }, 16);
-                    } catch {
-                        return null;
-                    }
-                })();
+                // （threat 在上面算 bot.hurt 的等级时已经取过一次，这里复用。）
                 const threatDamage = Math.max(0, Math.round((prev_health - this.bot.health) * 100) / 100);
                 if (
                     shouldThreatEmergency({
@@ -4286,7 +4329,7 @@ export class MineflayerBody {
             // 死着不该继续干活。真机日志里 pia 12:32:38 被骷髅射死，
             // 12:32:39 还在 claim `moveAway` 躲怪——因为死亡只停了身体，
             // 没中断模型那一轮推理。
-            this.requestInterrupt();
+            this.requestInterrupt('模型身体死亡：正在跑的动作随之中止（重生/掉落按存档规则处理，用 stats 核对背包）');
             // 中断推理是大脑的事：推一条 L4（PREEMPT），大脑收到会 abort
             // 当前请求。主线在这里还额外直接调了一次 `runtime.abort()`，
             // 那是同进程时代的"belt and braces"，跨进程后由 L4 承担。
@@ -5705,16 +5748,11 @@ export class MineflayerBody {
                 swimUp: (): void => {
                     if (run.aborted) return;
                     try {
-                        // 记录"呼吸反射在把我们顶上去"的证据（三方互锁判定要用）。
-                        // 惰性初始化：测试 fixture 用 Object.create，拿不到类字段初值。
-                        if (!Array.isArray(this.surfaceTriggerTimes)) this.surfaceTriggerTimes = [];
-                        this.surfaceTriggerTimes.push(Date.now());
-                        if (this.surfaceTriggerTimes.length > 200) this.surfaceTriggerTimes.splice(0, 100);
-                        // **三方互锁例外**：确认卡死时只停呼吸反射 60 秒（其它保命照旧）。
-                        if (Date.now() < this.surfaceStandDownUntil) return;
-                        // 水里/岩浆里按 jump 就是上浮；顺便抬头，免得贴着天花板原地顶。
+                        // 水里/岩浆里按 jump 就是上浮；顺便抬头（**+90° 才是抬头**，
+                        // 见 skills.ts 的注释：mineflayer 的 pitch 正 = 朝上），游得更快一点。
+                        // 以前写的是 −90°（actually 低头），和上浮动作对着干。
                         bot.setControlState('jump', true);
-                        void bot.look(bot.entity.yaw, -Math.PI / 2, true);
+                        void bot.look(bot.entity.yaw, Math.PI / 2, true);
                     } catch {
                         // 拿不到实体就没什么可做的。
                     }
@@ -6032,7 +6070,7 @@ export class MineflayerBody {
                     // **重伤不打架**：进攻类动作在这里被拒（在身体真的动手之前），
                     // 但只拒进攻——逃跑/吃/垫方块/自救一律放行，绝不让这条守卫
                     // 削弱"跑得掉"的能力。见 reflex_override.ts 的 combatRefusalVerdict。
-                    const combatRefusal = this.criticalHealthRefusalFor(baseName);
+                    const combatRefusal = this.criticalHealthRefusalFor(baseName, args as Record<string, unknown>);
                     if (combatRefusal != null) {
                         return {
                             ok: true,
@@ -6083,8 +6121,27 @@ export class MineflayerBody {
                             // 日志失败不影响动作。
                         }
                     }
+                    // **正在挨打时先让保命把这一口气喘完**（真机 2026-10-23：
+                    // 每条 CLI 命令进 `_executeAction` 都会 `stop()`，而 `stop()` 会在
+                    // 2 秒内逼 escape/surface 反射交还身体——骷髅每 2 秒一箭，于是画面
+                    // 永远是"挨打 → 站住 → 再被射"。事件本身收得到（`bot.on('health')`
+                    // 会发 bot.hurt 并触发 bot.attacked），被掐掉的是**执行它的那双手**。
+                    // 这里给反射最多 8 秒收尾；超时就照旧执行，但把这件事写进回执。
+                    let reflexYieldNote = '';
+                    if (this.reflexRunning === true && Date.now() - this.lastDamageAt <= 3_000) {
+                        const deadline = Date.now() + 8_000;
+                        while (this.reflexRunning === true && Date.now() < deadline) {
+                            await new Promise<void>((resolve) => setTimeout(resolve, 100));
+                        }
+                        if (this.reflexRunning === true) {
+                            reflexYieldNote =
+                                '（注意：保命反射还在跑，这条命令可能把它打断——现在真的在挨打，' +
+                                '**先解决威胁**比推进任务重要。）\n';
+                        }
+                    }
                     try {
                         text = await executeToolCall(this, name, args);
+                        if (reflexYieldNote !== '') text = reflexYieldNote + String(text ?? '');
                         // **击杀确认 ⇒ 开 5 秒拾取优先窗口**：战利品就躺在脚下，而
                         // "附近有怪就跳过拾取"这条闸门恰好在这一刻最容易关着（真机：
                         // 骷髅死后 id 434443 在击杀点躺了 8 秒以上没人踩）。有界 + 有日志。

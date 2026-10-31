@@ -6,7 +6,7 @@
  * 旧守卫只覆盖"金甲被换成非金甲"，**没覆盖"这件东西没了"**。
  *
  * 这里钉住四件事：消失要吼、吼里要有后果和修法、下界丢最后一件金要提前警告、
- * keepInventory 世界死亡后护甲应该还在（掉的是我们的读取 bug）。
+ * 死亡/重生前后的消失要先怀疑读取（而不是直接当成"已经没了"）。
  */
 import { describe, expect, it } from 'vitest';
 import {
@@ -55,7 +55,7 @@ describe('"原来有 → 现在空"：消失不是换甲，必须吼出来', () 
   it('下界丢掉金盔 ⇒ 报告点名"凭空消失"、后果（猪灵开火）和修法（1 块金锭做金盔）', () => {
     const text = armorVanishReport(
       { slotName: 'head', from: 'golden_helmet', to: null },
-      { dimension: 'minecraft:the_nether', keepInventory: true, goldLeft: false, via: 'updateSlot' },
+      { dimension: 'minecraft:the_nether', goldLeft: false, via: 'updateSlot' },
     );
     expect(text).toContain('护甲凭空消失');
     expect(text).toContain('head');
@@ -66,14 +66,13 @@ describe('"原来有 → 现在空"：消失不是换甲，必须吼出来', () 
     expect(text).toContain('golden_helmet');
   });
 
-  it('死亡前后丢甲 + keepInventory=true ⇒ 明说这是我们的读取/同步问题，不是世界规则', () => {
+  it('死亡前后丢甲 ⇒ 先提示可能是读取/同步问题，不直接当成"已经没了"', () => {
     const text = armorVanishReport(
       { slotName: 'head', from: 'golden_helmet', to: null },
-      { dimension: 'minecraft:the_nether', deathHappened: true, keepInventory: true, goldLeft: false, via: 'spawn' },
+      { dimension: 'minecraft:the_nether', deathHappened: true, goldLeft: false, via: 'spawn' },
     );
-    expect(text).toContain('keepInventory=true');
-    expect(text).toContain('读取/同步的问题');
-    expect(text).not.toContain('掉光');
+    expect(text).toContain('读取/同步');
+    expect(text).toContain('stats');
   });
 
   it('主世界丢甲也给下一步（stats 核对 → 箱子/熔炉 → 重做），不误报猪灵', () => {
@@ -86,9 +85,9 @@ describe('"原来有 → 现在空"：消失不是换甲，必须吼出来', () 
     expect(text).not.toContain('猪灵');
   });
 
-  it('keepInventory=true 时"死而复生"的快照差分 = 没有变化（世界规则：护甲应该还在）', () => {
+  it('"死而复生"时护甲没变的快照差分 = 没有变化', () => {
     const before = { head: 'golden_helmet', torso: null, legs: null, feet: null } as const;
-    const after = { ...before }; // keepInventory: true ⇒ 重生后还是同一件
+    const after = { ...before };
     expect(diffArmorSnapshot(before as any, after as any)).toEqual([]);
     expect(isGoldArmorName('golden_helmet')).toBe(true);
     expect(goldArmorNameFor('head')).toBe('golden_helmet');
@@ -99,7 +98,7 @@ describe('守卫接线：所有护甲槽变化路径都要落到报告上', () =
   it('updateSlot 把金盔写成 null ⇒ 一行"凭空消失"（走我们自己的报告，不是普通换甲）', () => {
     logs.length = 0;
     const bot = armorBot({ 5: { name: 'golden_helmet' } });
-    const guard = installArmorGuard(bot, { log, inventoryItems: () => [], keepInventory: true });
+    const guard = installArmorGuard(bot, { log, inventoryItems: () => [] });
     bot._emitInventory('updateSlot', 5, { name: 'golden_helmet' }, null);
     guard.dispose();
     expect(logs.some((line) => line.includes('护甲凭空消失'))).toBe(true);
@@ -111,19 +110,19 @@ describe('守卫接线：所有护甲槽变化路径都要落到报告上', () =
   it('整窗 update 覆盖掉金盔（updateSlot 不触发）⇒ 快照差分也要吼出来', () => {
     logs.length = 0;
     const bot = armorBot({ 5: { name: 'golden_helmet' } });
-    const guard = installArmorGuard(bot, { log, inventoryItems: () => [], keepInventory: true });
+    const guard = installArmorGuard(bot, { log, inventoryItems: () => [] });
     bot.inventory.slots[5] = null; // 整窗同步把它抹掉了
     bot._emitInventory('update');
     guard.dispose();
     expect(logs.some((line) => line.includes('护甲凭空消失') && line.includes('update'))).toBe(true);
   });
 
-  it('死亡后再重生：keepInventory 世界护甲仍在 ⇒ 不许报"消失"；真丢了才报', () => {
+  it('死亡后再重生：护甲还在 ⇒ 不许报"消失"；真丢了才报', () => {
     logs.length = 0;
     const bot = armorBot({ 5: { name: 'golden_helmet' } });
-    const guard = installArmorGuard(bot, { log, inventoryItems: () => [], keepInventory: true });
+    const guard = installArmorGuard(bot, { log, inventoryItems: () => [] });
     bot._emitBot('death');
-    // keepInventory=true：重生后同一件还在
+    // 重生后同一件还在
     bot._emitBot('spawn');
     expect(logs.filter((line) => line.includes('护甲凭空消失'))).toHaveLength(0);
     // 现在把它弄丢（槽位被清空）
@@ -137,7 +136,7 @@ describe('守卫接线：所有护甲槽变化路径都要落到报告上', () =
   it('普通换甲（铁→钻）仍走原来的"护甲变化"报告（不回归）', () => {
     logs.length = 0;
     const bot = armorBot({ 6: { name: 'iron_chestplate' } }, 'minecraft:overworld');
-    const guard = installArmorGuard(bot, { log, inventoryItems: () => [], keepInventory: true });
+    const guard = installArmorGuard(bot, { log, inventoryItems: () => [] });
     bot.inventory.slots[6] = { name: 'diamond_chestplate' };
     bot._emitInventory('updateSlot', 6, { name: 'iron_chestplate' }, { name: 'diamond_chestplate' });
     guard.dispose();
@@ -150,7 +149,7 @@ describe('本地视图错位：报告不许断言"真丢了"（Lead 2026-10-19 �
   it('任何消失报告都要带"可能是本地视图错位 + 先用 stats 核对"的提示', () => {
     const text = armorVanishReport(
       { slotName: 'head', from: 'golden_helmet', to: null },
-      { dimension: 'minecraft:the_nether', keepInventory: true, goldLeft: false, via: 'update' },
+      { dimension: 'minecraft:the_nether', goldLeft: false, via: 'update' },
     );
     expect(text).toContain('本地视图错位');
     expect(text).toContain('stats');
@@ -167,3 +166,4 @@ describe('本地视图错位：报告不许断言"真丢了"（Lead 2026-10-19 �
     expect(text).toContain('stats');
   });
 });
+

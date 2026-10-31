@@ -19,6 +19,7 @@ import {
     supportedThrowables,
     throwItemSkill,
     throwProfileOf,
+    yawTo,
     type FlatPosition,
 } from '../src/body/library/throwing.js';
 import { throwingActionList } from '../src/body/commands/throwing.js';
@@ -166,20 +167,21 @@ afterEach(() => {
 
 // ─────────────────────────── 一、弹道瞄准（纯函数） ───────────────────────────
 
+// **pitch 正 = 抬头**（mineflayer 约定，见 throwing.ts 的源码引用与真机验证）。
 describe('抛物线瞄准：闭式低伸解', () => {
-    it('60 格平射 → 抬头 ≈26.57°（取低伸解，不是 63.43° 的高抛）', () => {
+    it('60 格平射 → 抬头 ≈+26.57°（取低伸解，不是 63.43° 的高抛）', () => {
         const pitch = solveBallisticPitch(60, 0, 1.5, 0.03);
         expect(pitch).not.toBeNull();
-        const degrees = (-(pitch as number) * 180) / Math.PI;
+        const degrees = ((pitch as number) * 180) / Math.PI;
         expect(degrees).toBeCloseTo(26.57, 1);
         // 高抛解是 63.43°：必须**没**取它
         expect(degrees).toBeLessThan(45);
     });
 
     it('目标更高要抬得更高；目标更低可以压低', () => {
-        const flat = -(solveBallisticPitch(30, 0, 1.5, 0.03) as number);
-        const up = -(solveBallisticPitch(30, 10, 1.5, 0.03) as number);
-        const down = -(solveBallisticPitch(30, -10, 1.5, 0.03) as number);
+        const flat = solveBallisticPitch(30, 0, 1.5, 0.03) as number;
+        const up = solveBallisticPitch(30, 10, 1.5, 0.03) as number;
+        const down = solveBallisticPitch(30, -10, 1.5, 0.03) as number;
         expect(up).toBeGreaterThan(flat);
         expect(down).toBeLessThan(flat);
     });
@@ -259,8 +261,8 @@ describe('throwItem：投掷与核验', () => {
 
         expect(h.activated).toBe(1);
         expect(h.equipped).toBe('egg');
-        // 40 格平射：解出来的 pitch 必须是"抬头"（负值），且回执写了 v/g
-        expect(h.look?.pitch).toBeLessThan(0);
+        // 40 格平射：解出来的 pitch 必须是"抬头"（**正值**），且回执写了 v/g
+        expect(h.look?.pitch).toBeGreaterThan(0);
         expect(receipt).toContain('抬头');
         expect(receipt).toContain('v=1.5 格/刻、g=0.03 格/刻²');
         expect(receipt).toContain('投出：egg 3 → 2');
@@ -272,6 +274,29 @@ describe('throwItem：投掷与核验', () => {
         expect(h.count('egg')).toBe(2);
     });
 
+    // 以前 `yawTo` 写成 `atan2(−dx, +dz)`（z 分量漏了负号）⇒ 投掷物朝**反方向**飞，
+    // 整整 180°。这条把四个方位都钉住。
+    it('朝向：算出来的 yaw 用 getViewDirection 反解，必须真的指向目标', () => {
+        const from = { x: 3, y: 70, z: -4 };
+        for (const to of [
+            { x: 3, y: 70, z: -24 },   // 正北（−Z）
+            { x: 3, y: 70, z: 16 },    // 正南（+Z）
+            { x: 23, y: 70, z: -4 },   // 正东（+X）
+            { x: -17, y: 70, z: -4 },  // 正西（−X）
+            { x: -5, y: 70, z: 9 },    // 斜向（西南方向的分量）
+        ]) {
+            const yaw = yawTo(from, to);
+            // mineflayer 的 `getViewDirection(pitch, yaw)` 水平分量 = (−sin yaw, −cos yaw)
+            const fx = -Math.sin(yaw);
+            const fz = -Math.cos(yaw);
+            const wantX = to.x - from.x;
+            const wantZ = to.z - from.z;
+            const len = Math.hypot(wantX, wantZ);
+            expect(fx).toBeCloseTo(wantX / len, 6);
+            expect(fz).toBeCloseTo(wantZ / len, 6);
+        }
+    });
+
     it('目标超出射程 → 明确说"打不到"，并且**一格都没扔**', async () => {
         const h = harness({ items: [{ name: 'ender_pearl', count: 2 }] });
         const receipt = await throwItemSkill(h.bot, 'ender_pearl', 100, 70, 0, h.deps, FAST);
@@ -280,8 +305,9 @@ describe('throwItem：投掷与核验', () => {
         expect(receipt).toContain('没有扔');
         expect(h.activated).toBe(0);
         expect(h.count('ender_pearl')).toBe(2);
-        // 下一步是"走近一点"，而且是一条能照抄的调用
-        expect(receipt.trimEnd().split('\n').at(-1)).toMatch(/^下一步（照做即可）：goToCoordinates\(x=-?\d+, y=\d+, z=-?\d+, closeness=2\)$/);
+        // 2026-10-30 用户裁定：回执只报事实（距离/射程/没扔），不替模型规划怎么走近
+        expect(receipt).not.toContain('照做即可');
+        expect(receipt).not.toContain('goToCoordinates');
     });
 
     it('数量没少 → "没扔出去"（绝不假装成功）', async () => {
@@ -296,7 +322,8 @@ describe('throwItem：投掷与核验', () => {
         expect(receipt).toContain('没扔出去');
         expect(receipt).toContain('数量没变（3 → 3）');
         expect(receipt).not.toContain('投出：');
-        expect(receipt.trimEnd().split('\n').at(-1)).toBe('下一步（照做即可）：stats(type="inventory")');
+        // 2026-10-30：不再补一条"下一步"，回执到事实为止
+        expect(receipt).not.toContain('照做即可');
     });
 
     it('扔出去了但没看到实体 → 如实说"没看到"，不编落点', async () => {

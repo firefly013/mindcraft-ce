@@ -80,8 +80,16 @@ export function formatNoObstacleDiagnosis(input: {
 }): string {
     const where = `(${input.target.x}, ${input.target.y}, ${input.target.z})`;
     const facts: string[] = [];
+    // **脚下那格是"名字"，不是"solid/不 solid"**：以前直接拿名字和字符串 'solid' 比，
+    // 于是 `stone` 会被写成"站不住"——把能站的地板说成站不住，比不说更误导。
+    // 只有空气/液体才是站不住；其余方块名都算实心。
+    const floorUnstandable =
+        input.floorSolid != null &&
+        ['air', 'cave_air', 'void_air', 'water', 'flowing_water', 'lava', 'flowing_lava'].includes(
+            input.floorSolid.toLowerCase(),
+        );
     if (input.headSolid != null) facts.push(`你头顶那格是 ${input.headSolid}`);
-    if (input.floorSolid != null && input.floorSolid !== 'solid') facts.push(`目标脚下是 ${input.floorSolid}（站不住）`);
+    if (floorUnstandable) facts.push(`目标脚下是 ${input.floorSolid}（站不住）`);
     if (input.onGround === false) facts.push('你现在没站在地面上（悬空/被顶回）');
     if (!input.movedAny) facts.push('按键期间位置完全没变');
     return (

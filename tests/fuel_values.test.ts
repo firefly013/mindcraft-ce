@@ -33,6 +33,16 @@ describe('getFuelSmeltOutput：任何可烧的东西都要算', () => {
     expect(getFuelSmeltOutput('cobblestone')).toBe(0);
     expect(getFuelSmeltOutput('iron_ingot')).toBe(0);
   });
+  it('**非木制工具不是燃料**（真机 2026-10-23：系统打算烧两把石镐炼铁）', () => {
+    expect(getFuelSmeltOutput('stone_pickaxe')).toBe(0);
+    expect(getFuelSmeltOutput('iron_pickaxe')).toBe(0);
+    expect(getFuelSmeltOutput('diamond_sword')).toBe(0);
+    expect(getFuelSmeltOutput('bow')).toBe(0);
+    expect(getFuelSmeltOutput('fishing_rod')).toBe(0);
+    // 木制的照旧能烧
+    expect(getFuelSmeltOutput('wooden_pickaxe')).toBe(1);
+    expect(getFuelSmeltOutput('oak_boat')).toBe(1);
+  });
 });
 
 describe('planFuelTotals：全背包求和，够就 ok', () => {

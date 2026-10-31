@@ -150,7 +150,11 @@ describe('collectBlocks 回执统一口径', () => {
     expect(text).toContain('背包 0 → 0');
     expect(text).toContain('以背包账目为准');
     expect(text).not.toContain('已采集到');
-    expect(text).toContain('stats');
+    // 2026-10-24：处方与猜测清掉——"用 stats 核对/不要重复挖"是替模型定流程，
+    // "掉落被抢/不可达"是没验证的猜想。回执只报账目与位移。
+    expect(text).not.toContain('stats');
+    expect(text).not.toContain('不要重复挖');
+    expect(text).not.toContain('autoPickup 抢走');
   });
 
   it('背包确实增加：按 before→after 报成功', () => {

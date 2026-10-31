@@ -6,13 +6,11 @@
  * 而 `travelTo` 是按坐标算方向、自己规划腿、续跑也带坐标的。工具说明里已经写了，
  * 但**今晚量出来的事实是：模型跟回执比跟散文说明可靠得多**。
  *
- * **最后一行是"能照抄就能做的调用"**（全晚的硬规矩）。所以当大脑知道目标在 343 格外、
- * 而工具自己给的建议是"再挖一段"时，工具那条**不是**最好的下一步 —— 那就：
- *   ① 把工具自己那条降级成"- 工具自己的建议（**不要照做**）：…"（**留在原地可见**，
- *      而且明确说出被顶掉的是哪一条 —— 悄悄换掉会留下两条互相矛盾的"照抄即可"）；
- *   ② 追加一行说明为什么；
- *   ③ 把 `travelTo(x=…, z=…)` 放成**唯一**的「下一步（照做即可）：…」。
- * 没有要覆盖的时候（用 travelTo、目标很近、读不到位置、有歧义），**回执一个字节都不动**。
+ * **2026-10-30 起只追加说明，不改回执**（用户裁定：大脑不许替模型写"下一步"）。
+ * 它现在做的唯一一件事：当大脑知道目标在 343 格外、而 mineTunnel 需要调用方自己保证方向时，
+ * 在回执末尾补一句**事实**（目标在哪、多远、这个工具的方向要你自己给）。
+ * 不回执里塞调用、不把工具自己那行降级、不覆盖任何内容。
+ * 不该提醒的时候（用 travelTo、目标很近、读不到位置、有歧义），**回执一个字节都不动**。
  *
  * **目标从哪来**：身体**不知道 goal**（`edges.ts`：目标是大知识，身体不知道也不该知道），
  * 所以这件事只能在大脑侧做——它同时知道 plan（goal/todos）和 places（地名→坐标）。
@@ -21,9 +19,6 @@
 
 /** 少于这么多格就不算"长途"（近处用 mineTunnel 完全合理）。 */
 export const LONG_RANGE_MIN_BLOCKS = 96;
-
-/** 回执里「下一步」那一行的前缀（**唯一**允许出现在最后一行的那种）。 */
-export const NEXT_CALL_PREFIX = '下一步（照做即可）：';
 
 export interface LongRangeNudgeInput {
   /** 工具名（**不带**前导 `!`，和 `invokeTool` 的口径一致）。 */
@@ -45,9 +40,6 @@ export interface LongRangeNudgeInput {
   handoffFrom?: string | null;
 }
 
-/** 检测到循环时的出路：**不是兄弟工具**（先看清身体状态，再决定换路）。 */
-export const HANDOFF_CYCLE_ESCAPE_CALL = 'stats(type="body")';
-
 /** `handoff` 参数可能是 `"travelTo"`/`"!travelTo"`/大小写混写 ⇒ 归一到工具名。 */
 export function normalizeToolName(raw: unknown): 'travelTo' | 'mineTunnel' | null {
   if (typeof raw !== 'string') return null;
@@ -64,12 +56,9 @@ export interface LongRangeTarget {
   distance: number;
 }
 
-/** 大脑侧要往回执里加的东西：一行说明 + 一个"应该照做"的调用。 */
+/** 大脑侧要往回执里追加的东西：**只有一行说明**（不给调用）。 */
 export interface ReceiptHint {
-  /** 追加的说明行（会插在最后的「下一步」之前）。 */
   note: string;
-  /** 要**顶掉**最后一行「下一步」的调用；不填 = 不动最后一行。 */
-  nextCall?: string;
 }
 
 /**
@@ -103,79 +92,40 @@ export function pickLongRangeTarget(input: LongRangeNudgeInput): LongRangeTarget
   return far[0] ?? null;
 }
 
-/** 要顶上去的那条调用（要能照抄：坐标是量出来的整数）。 */
-export function longRangeNextCall(target: LongRangeTarget): string {
-  return `travelTo(x=${Math.round(target.x)}, z=${Math.round(target.z)})`;
-}
-
 /**
- * 提醒内容（纯函数）：`note` 是说明行，`nextCall` 是要顶掉最后一行的调用。
- * 不该提醒时返回 null（用 travelTo、目标不够远、位置读不到、有歧义）。
+ * 提醒内容（纯函数）：**只给事实**（目标在哪、多远、工具自己那条建议不成立），
+ * 不给"该调哪个工具"。2026-10-30 用户裁定：下一步由模型决定。
+ * 不该提醒时返回 null（用的就是 travelTo、目标不够远、位置读不到、有歧义）。
  */
 export function longRangeNudge(input: LongRangeNudgeInput): ReceiptHint | null {
   if (input.toolName !== 'mineTunnel') return null; // travelTo 本来就是干这个的
   const target = pickLongRangeTarget(input);
   if (target == null) return null;
-  // **循环闸门**：这条是 travelTo 交过来的 ⇒ **不许再交回 travelTo**（真机：来回踢皮球、
-  // 同一位置都 0 位移）。只报循环 + 给一条**不是兄弟工具**的出路。
+  // **循环的事实**：这条是 travelTo 交过来的 ⇒ 两边都动不了（真机：来回踢皮球、0 位移）。
   if (normalizeToolName(input.handoffFrom) === 'travelTo') {
     return {
       note:
-        '⚠️ **两个工具在互相踢皮球**：travelTo 把你交给 mineTunnel，**不要再交回 travelTo** —— ' +
-        '两边互相丢就是两边都不动。mineTunnel 必须自己说清**挖不动的具体原因**（脚下没有可站的方块 / ' +
-        '前面是容器·功能方块 / 手上没镐 / 读不到方块），然后换轴、换层，或先垫方块。',
-      nextCall: HANDOFF_CYCLE_ESCAPE_CALL,
+        '⚠️ **两个工具在互相踢皮球**：travelTo 把这一趟交给了 mineTunnel，' +
+        '而它上一次也没能让你前进——两边互相丢就是两边都不动。',
     };
   }
   return {
-    // **点名被顶掉的是哪一条**（"上面 mineTunnel 那条不要照做"）——悄悄换掉会留下两条
-    // 互相矛盾的"照抄即可"，那正是我们整晚在删的"回执与世界不一致"。
     note:
-      `⚠️ 上面 mineTunnel 那条**不要照做**：目标是 ${Math.round(target.distance)} 格外的 ${target.name}` +
-      `（(x=${Math.round(target.x)}, z=${Math.round(target.z)})），mineTunnel 需要你自己保证方向对` +
-      '（不给 direction 就按朝向猜，朝向常常是反的）。',
-    nextCall: longRangeNextCall(target),
+      `⚠️ 目标是 ${Math.round(target.distance)} 格外的 ${target.name}` +
+      `（(x=${Math.round(target.x)}, z=${Math.round(target.z)})）；` +
+      'mineTunnel 要你自己保证方向对（不给 direction 就按朝向猜，朝向常常是反的）。',
   };
 }
 
 /**
- * 把提醒应用到回执上（纯函数）。
+ * 把提醒应用到回执上（纯函数）：**只在末尾追加一段说明**，不改、不顶掉任何已有内容。
  *
- * - 没有提醒 ⇒ **原样返回**（一个字节都不动）。
- * - 只有说明、没有 nextCall ⇒ 说明插在最后的「下一步」**之前**（最后一行不动）。
- * - 有 nextCall ⇒ 工具自己那条「下一步」**降级**成可见的"不要照做"，说明接在它后面，
- *   最后一行换成 `下一步（照做即可）：<nextCall>`；**全文只剩一条**「照做即可」。
+ * 以前这里会把工具自己那条「下一步」降级成"不要照做"，再顶上一句我们写的调用——
+ * 等于大脑替模型改写了工具的证据。2026-10-30 起回执里不再有那种行，这里也就只剩追加。
  */
 export function applyReceiptHint(text: string, hint: ReceiptHint | null): string {
-  if (hint == null || (hint.note === '' && hint.nextCall == null)) return text;
-  const lines = text.split('\n');
-  const lastIndex = lines.length - 1;
-  const last = lastIndex >= 0 ? (lines[lastIndex] ?? '') : '';
-  const hasNextCallLine = last.startsWith(NEXT_CALL_PREFIX);
-  // **幂等**：已经应用过同一条（说明在、最后一行也是它）就一个字节都不动。
-  if (hint.nextCall != null && text.includes(hint.note) && last === `${NEXT_CALL_PREFIX}${hint.nextCall}`) return text;
-  if (hint.nextCall == null && text.includes(hint.note)) return text;
-
-  if (hint.nextCall == null) {
-    // 不覆盖最后一行：说明插在它前面（保持"最后一行 = 能照抄的调用"）。
-    if (hasNextCallLine) {
-      lines.splice(lastIndex, 0, hint.note);
-      return lines.join('\n');
-    }
-    return `${text}\n${hint.note}`;
-  }
-
-  if (!hasNextCallLine) {
-    // 工具没给"下一步"行：说明 + 我们这条调用直接接在末尾。
-    return `${text}\n${hint.note}\n${NEXT_CALL_PREFIX}${hint.nextCall}`;
-  }
-
-  const demoted = last.slice(NEXT_CALL_PREFIX.length);
-  const replacement = [
-    `- 工具自己的建议（**不要照做**）：${demoted}`,
-    hint.note,
-    `${NEXT_CALL_PREFIX}${hint.nextCall}`,
-  ];
-  lines.splice(lastIndex, 1, ...replacement);
-  return lines.join('\n');
+  if (hint == null || hint.note === '') return text;
+  if (text.includes(hint.note)) return text; // 幂等
+  return `${text}
+${hint.note}`;
 }

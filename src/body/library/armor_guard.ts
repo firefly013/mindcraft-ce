@@ -18,7 +18,6 @@
  */
 
 import * as skills from './skills.js';
-import settings from '../../shared/settings.js';
 
 /** 玩家背包窗口里的护甲槽（和插件 `inventory.slots.slice(5, 9)` 同一套）。 */
 export const ARMOR_SLOTS: Readonly<Record<number, ArmorSlotName>> = Object.freeze({
@@ -166,8 +165,6 @@ export interface ArmorVanishContext {
     dimension: string | null;
     /** 这次变化是不是发生在死亡/重生前后。 */
     deathHappened?: boolean;
-    /** 这个存档是否 keepInventory（true 时死亡不该掉甲）。 */
-    keepInventory?: boolean | null;
     /** 背包里是否还有任何金装备。 */
     goldLeft?: boolean;
     /** 从哪条路发现的：updateSlot / update / death / spawn / unequip。 */
@@ -191,8 +188,8 @@ export function armorVanishReport(change: ArmorChange, ctx: ArmorVanishContext):
         '注意：这也**可能是一次容器/穿甲操作中途失败造成的本地视图错位**（东西可能还在真实背包或容器里）——' +
             '先用 stats / 重开容器核对，**不要**据此判定"已经没了"、更不要因此重做一件。',
     );
-    if (ctx.deathHappened === true && ctx.keepInventory === true) {
-        parts.push('它发生在死亡/重生前后，而**这个存档 keepInventory=true：死亡不应该掉护甲**——所以这是**我们读取/同步的问题**，不是世界规则，不要接受这个结果。');
+    if (ctx.deathHappened === true) {
+        parts.push('它发生在死亡/重生前后：先确认是不是读取/同步的问题（东西可能还在），不要直接当成"已经没了"。');
     }
     if (nether && isGoldArmorName(from)) {
         parts.push(`**后果：下界没有金甲 ⇒ 猪灵见即开火**（这一条会直接致死）。修法：用 1 块金锭做一件 \`${goldArmorNameFor(slotName)}\`（craft output=${goldArmorNameFor(slotName)}），做好立刻穿上。`);
@@ -213,8 +210,6 @@ export interface ArmorGuardDeps {
     /** 某个部位现在穿着什么（默认读 `inventory.slots[5..8]`）。 */
     worn?: (bot: any, slotName: ArmorSlotName) => any | null;
     inventoryItems?: (bot: any) => Array<{ name?: unknown; type?: unknown; count?: unknown }>;
-    /** 这个存档是否 keepInventory（用于"死亡后掉甲 = 我们的 bug"的判定）。 */
-    keepInventory?: boolean | null;
 }
 
 function defaultWorn(bot: any, slotName: ArmorSlotName): any | null {
@@ -308,7 +303,6 @@ export function installArmorGuard(
                     { slotName, from, to },
                     {
                         dimension: dimension(bot),
-                        keepInventory: readKeepInventory(deps),
                         goldLeft: inventoryItems(bot).some((item) => isGoldArmorName(item?.name)),
                         via: 'updateSlot',
                     },
@@ -371,7 +365,6 @@ export function installArmorGuard(
                 armorVanishReport(change, {
                     dimension: dimension(bot),
                     deathHappened,
-                    keepInventory: readKeepInventory(deps),
                     goldLeft: inventoryItems(bot).some((item) => isGoldArmorName(item?.name)),
                     via,
                 }),
@@ -423,17 +416,4 @@ export function installArmorGuard(
             }
         },
     };
-}
-
-/** keepInventory 的运行时值（deps 优先，其次 settings；读不到 = null，别硬说）。 */
-function readKeepInventory(deps: ArmorGuardDeps): boolean | null {
-    if (deps.keepInventory === true || deps.keepInventory === false) return deps.keepInventory;
-    try {
-        const gameplay = (settings as any)?.gameplay ?? {};
-        const value = gameplay.keepInventoryOnDeath;
-        if (value === true || value === false) return value;
-    } catch {
-        /* 读不到就说读不到 */
-    }
-    return null;
 }

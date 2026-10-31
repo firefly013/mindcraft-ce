@@ -1,8 +1,8 @@
 /**
  * "僵尸状态"：活着但无法自愈（真机 2026-10-19：0.375 血 / 食物 0 / 空背包 / 站了十多分钟）。
  *
- * 唯一的便宜出口是主动死一次——但**只有当场读到 `keepInventory=true` 才允许这么说**。
- * 这一条测试就是钉住"允许说这句话的条件"。
+ * 引擎只做一件事：把这个状态说清楚，并指出唯一还有进展的方向（去找吃的）。
+ * **它不提供任何"主动结束"的出口**——这一条测试钉住"回执里不许出现送死建议"。
  */
 import { describe, expect, it } from 'vitest';
 import {
@@ -17,45 +17,32 @@ const facts = (over: Partial<Parameters<typeof unrecoverableVerdict>[0]> = {}) =
   health: 0.375,
   food: 0,
   itemNames: ['dirt', 'cobblestone', 'iron_pickaxe'],
-  keepInventory: true,
-  immediateRespawn: true,
   elapsedSec: 660,
   ...over,
 });
 
 describe('判定：什么时候算"无法自愈"', () => {
-  it('0.375 血 / 食物 0 / 背包无食物 + keepInventory=true ⇒ 建议主动死，并带上"一次重生"的事实', () => {
+  it('0.375 血 / 食物 0 / 背包无食物 ⇒ 触发，内容只讲事实 + 去找吃的', () => {
     const verdict = unrecoverableVerdict(facts());
     expect(verdict.unrecoverable).toBe(true);
     expect(verdict.advice).toContain('无法自愈');
     expect(verdict.advice).toContain('0.38 血');
-    expect(verdict.advice).toContain('主动死一次');
-    expect(verdict.advice).toContain('keepInventory=true');
-    expect(verdict.advice).toContain('物品和经验都保留');
-    expect(verdict.advice).toContain('getFood(want=3)');
+    expect(verdict.advice).toContain('getFood');
     expect(verdict.advice).toContain('已持续 11 分钟');
     expect(verdict.advice).toContain('不是拒绝');
   });
 
-  it('同一状态但 keepInventory=false ⇒ **绝不给死亡建议**，改成指路找吃的', () => {
-    const verdict = unrecoverableVerdict(facts({ keepInventory: false }));
-    expect(verdict.unrecoverable).toBe(true);
-    expect(verdict.advice).toContain('不要主动死');
-    expect(verdict.advice).toContain('掉光背包');
-    expect(verdict.advice).toContain('getFood');
-    expect(verdict.advice).not.toContain('最快的出路是主动死一次');
+  it('**任何情况下都不许出现"主动死/送死/结束"这类建议**', () => {
+    for (const over of [{}, { health: 1, food: 0 }, { elapsedSec: 0 }]) {
+      const advice = String(unrecoverableVerdict(facts(over)).advice ?? '');
+      expect(advice).not.toContain('主动死');
+      expect(advice).not.toContain('故意死');
+      expect(advice).not.toContain('主动结束');
+      expect(advice).not.toContain('重生');
+    }
   });
 
-  it('keepInventory 读不到 ⇒ 同样**不给**死亡建议（不许拿命赌未确认的规则）', () => {
-    const verdict = unrecoverableVerdict(facts({ keepInventory: null }));
-    expect(verdict.unrecoverable).toBe(true);
-    expect(verdict.advice).toContain('不要主动死');
-    expect(verdict.advice).toContain('读不到');
-    expect(verdict.advice).not.toContain('最快的出路是主动死一次');
-  });
-
-  it('血 3 但食物 8 ⇒ **不触发**（它能自己回血）', () => {
-    expect(unrecoverableVerdict(facts({ health: 3, food: 8 })).unrecoverable).toBe(false);
+  it('血 3 但食物 8 ⇒ **不触发**（它能自己回血）', () => {    expect(unrecoverableVerdict(facts({ health: 3, food: 8 })).unrecoverable).toBe(false);
   });
 
   it('食物 0 但背包里有 cooked_beef ⇒ **不触发**（它能吃）', () => {
@@ -91,7 +78,7 @@ describe('播报节奏：进入状态立刻说，之后最多每 45 秒一次', 
     const src = readFileSync(join(process.cwd(), 'src', 'body', 'mineflayer_body.ts'), 'utf8');
     expect(src).toContain('this.checkUnrecoverableState();');
     expect(src).toContain("event: 'unrecoverable-state'");
-    expect(src).toContain('keepInventory,');
+    expect(src).toContain('unrecoverableVerdict({');
     expect(src).toContain('elapsedSec,');
     // 建议写进 output，而不是变成拒绝：动作入口里没有针对它的 return/false
     const adviceBlock = src.slice(src.indexOf('checkUnrecoverableState(): void'), src.indexOf('private async writeAdvice'));

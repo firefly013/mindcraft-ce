@@ -227,8 +227,15 @@ export function pickBestFood(names: string[]): string | null {
   let best: { name: string; score: number } | null = null;
   for (const name of names) {
     // 走 foodValueOf：两代物品名（mutton / raw_mutton）都认，熟食自然排在生食前面。
-    const value = foodValueOf(name) ?? [0, 0];
+    const value = foodValueOf(name);
+    // **不是食物就不算候选**（真机 2026-10-23：背包里只有泥土/原木时，这里把
+    // `dirt` 当成"最佳食物"返回，emergency 反复 `consume dirt` 失败
+    // （Food is full），动作通道被堵死，人站着被僵尸打死 6 次）。
+    // `foodValueOf` 对非食物返回 null——以前用 `?? [0, 0]` 把它降级成"0 分食物"，
+    // 于是一定会选中某个 0 分的方块。宁可返回 null（没食物可吃），也不吃土。
+    if (value == null) continue;
     const score = value[1] * 100 + value[0];
+    if (score <= 0) continue;
     if (best == null || score > best.score) best = { name, score };
   }
   return best?.name ?? null;

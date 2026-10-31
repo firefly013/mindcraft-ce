@@ -32,11 +32,15 @@ describe('shouldTriggerEmergency', () => {
 });
 
 describe('pickBestFood', () => {
-  it('ranks by saturation first, then hunger; unknown foods last', () => {
+  it('ranks by saturation first, then hunger', () => {
     expect(pickBestFood(['bread', 'golden_carrot', 'apple'])).toBe('golden_carrot');
     expect(pickBestFood(['rotten_flesh', 'dried_kelp'])).toBe('rotten_flesh');
-    expect(pickBestFood(['mystery_meat'])).toBe('mystery_meat');
     expect(pickBestFood([])).toBeNull();
+  });
+
+  it('**不是食物就不选**（真机 2026-10-23：背包只有泥土/原木时，它选了 dirt 去"吃"，失败后堵死动作通道）', () => {
+    expect(pickBestFood(['dirt', 'oak_log', 'cobblestone'])).toBeNull();
+    expect(pickBestFood(['dirt', 'bread'])).toBe('bread');
   });
 
   it('熟食优先于生食（两代名字都算数）', () => {

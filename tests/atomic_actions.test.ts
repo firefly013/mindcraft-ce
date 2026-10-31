@@ -7,6 +7,7 @@
  */
 import { describe, expect, it, vi } from 'vitest';
 import {
+  DIRECTION_YAW,
   describeArrival,
   jump,
   lookInDirection,
@@ -51,26 +52,36 @@ function fakeBot(options: { yaw?: number; pitch?: number; onGround?: boolean } =
     return bot;
 }
 
-describe('moveBy：方向换算（Minecraft 约定：yaw 0 面朝南（+Z），90 朝西（-X））', () => {
-    it('面朝南时：forward 按 forward，north 按 back，east 按 left', async () => {
+describe('moveBy：方向换算（mineflayer 约定：yaw 0 面朝北（−Z），90 朝西（−X），180 朝南（+Z））', () => {
+    // **yaw 的约定以 mineflayer 源码为准**（lib/plugins/ray_trace.js 的
+    // getViewDirection：(-sin·cosP, sinP, -cos·cosP)）：yaw=0 面朝**北（-Z）**，
+    // yaw=+90° 面朝**西（-X）**。旧测试按"yaw 0 朝南"写，和引擎相反，
+    // 真机 2026-10-23 实测（`move north` 往南走）后才改过来。
+    // 这条会连跑 4 次 `moveBy`，而"走不动"的假身体每次都要走完三次起跳尝试
+    // （真机语义：卡住才起跳），累计超过了默认 5 秒，所以单独放宽超时。
+    it('面朝北（yaw=0）时：forward/north 按 forward，south 按 back，east 按 right', async () => {
         const forward = fakeBot({ yaw: 0 });
         await moveBy(forward, 'forward', 3);
         expect(forward._pressed).toContain('forward');
 
         const north = fakeBot({ yaw: 0 });
         await moveBy(north, 'north', 3);
-        // 面朝南，北在背后。
-        expect(north._pressed).toContain('back');
+        // 面朝北，北就是正前方。
+        expect(north._pressed).toContain('forward');
+
+        const south = fakeBot({ yaw: 0 });
+        await moveBy(south, 'south', 3);
+        expect(south._pressed).toContain('back');
 
         const east = fakeBot({ yaw: 0 });
         await moveBy(east, 'east', 3);
-        // 面朝南时东在左手边（不是右手边）——这里正是最容易写反的一处。
-        expect(east._pressed).toContain('left');
-        expect(east._pressed).not.toContain('right');
-    });
+        // 面朝北时东在右手边。
+        expect(east._pressed).toContain('right');
+        expect(east._pressed).not.toContain('left');
+    }, 30_000);
 
-    it('面朝北（yaw=180）时 forward 就是走北', async () => {
-        const bot = fakeBot({ yaw: 180 });
+    it('面朝南（yaw=π）时 forward 就是走南', async () => {
+        const bot = fakeBot({ yaw: Math.PI });
         await moveBy(bot, 'forward', 3);
         expect(bot._pressed).toContain('forward');
     });
@@ -79,6 +90,45 @@ describe('moveBy：方向换算（Minecraft 约定：yaw 0 面朝南（+Z），9
         const bot = fakeBot({ yaw: 0 });
         await moveBy(bot, 'east', 3);
         expect(bot.look).not.toHaveBeenCalled();
+    });
+});
+
+describe('moveBy：一格台阶会自己起跳', () => {
+    /**
+     * 假身体：**只有按过 jump 才真的往前走 5 格**。
+     * 这精确复现真机里的位置——`move(east, 64)` 走 4.9 格就卡住，
+     * 挡路的是**一格高的土坎**，裸按键不会自动起跳。
+     */
+    function stepBot(): any {
+        const bot = fakeBot({ yaw: 0 });
+        let jumped = false;
+        const originalSet = bot.setControlState;
+        bot.setControlState = (key: string, down: boolean) => {
+            originalSet(key, down);
+            if (key === 'jump' && down) jumped = true;
+        };
+        Object.defineProperty(bot.entity, 'position', {
+            get: () => ({ x: jumped ? 5 : 0, y: 64, z: 0 }),
+        });
+        return bot;
+    }
+
+    it('卡住后起跳 → 越过台阶，走满目标距离', async () => {
+        const bot = stepBot();
+        const ok = await moveBy(bot, 'east', 3);
+        expect(ok).toBe(true);
+        expect(bot._pressed).toContain('jump');
+        expect(bot._held.size).toBe(0); // 跳跃键也必须松开，否则会一直弹
+    });
+
+    it('真的走不动时只跳有限次就收手（不在墙前面一直弹）', async () => {
+        const bot = fakeBot({ yaw: 0 }); // 永远不动
+        const ok = await moveBy(bot, 'east', 3);
+        expect(ok).toBe(false);
+        // MAX_JUMP_TRIES = 3：跳三次，然后如实报"没迈开步"。
+        expect(bot._pressed.filter((k: string) => k === "jump")).toHaveLength(3);
+        expect(bot._held.size).toBe(0);
+        expect(bot.output).toContain('没迈开步');
     });
 });
 
@@ -138,11 +188,15 @@ describe('jump：离地即松键，落地才算完成', () => {
 });
 
 describe('视角命令', () => {
-    it('lookInDirection 的方位角符合 Minecraft 约定（南 0 / 西 90 / 北 180 / 东 -90）', async () => {
+    // **这里是 mineflayer 的角度，不是原版 Notchian 的。** mineflayer 的
+    // `conversions.fromNotchianYaw(deg) = (π − deg·π/180) mod 2π`，代入四方得：
+    // 北 0 / 西 90 / 南 180 / 东 −90。以前写的是 Notchian 表（南 0 / 北 180），
+    // 于是 `lookInDirection north` 真的把头转向南。
+    it('lookInDirection 的方位角符合 mineflayer 约定（北 0 / 西 90 / 南 180 / 东 −90）', async () => {
         for (const [direction, expected] of [
-            ['south', 0],
+            ['north', 0],
             ['west', Math.PI / 2],
-            ['north', Math.PI],
+            ['south', Math.PI],
             ['east', -Math.PI / 2],
         ] as const) {
             const bot = fakeBot();
@@ -151,14 +205,35 @@ describe('视角命令', () => {
         }
     });
 
-    it('up / down 只改俯仰，不动水平朝向', async () => {
+    // pitch **正 = 抬头**：getViewDirection 的 y 分量是 sin(pitch)，
+    // bot.lookAt 里 pitch = atan2(delta.y, groundDistance)（目标更高 ⇒ 正）。
+    it('up / down 只改俯仰，不动水平朝向（up=+90°，down=−90°）', async () => {
         const bot = fakeBot({ yaw: 145 });
         await lookInDirection(bot, 'up');
-        expect(bot.entity.pitch).toBeCloseTo(-Math.PI / 2, 5);
+        expect(bot.entity.pitch).toBeCloseTo(Math.PI / 2, 5);
         expect(bot.entity.yaw).toBeCloseTo(145, 5);
 
         await lookInDirection(bot, 'down');
-        expect(bot.entity.pitch).toBeCloseTo(Math.PI / 2, 5);
+        expect(bot.entity.pitch).toBeCloseTo(-Math.PI / 2, 5);
+    });
+
+    // **同一件事的两张表不许冲突**：`move(east)` 走的世界向量和 `lookInDirection east`
+    // 转出来的朝向必须真的指着同一边。以前前者是对的（也是 mineflayer 约定），
+    // 后者照抄了原版 Notchian 表 ⇒ 南北互换，而且**没有任何测试会发现**。
+    it('lookInDirection 的方位表和 move 的世界向量必须指着同一边', () => {
+        for (const [name, want] of [
+            ['north', { x: 0, z: -1 }],
+            ['south', { x: 0, z: 1 }],
+            ['east', { x: 1, z: 0 }],
+            ['west', { x: -1, z: 0 }],
+        ] as const) {
+            const yaw = DIRECTION_YAW[name];
+            expect(yaw, name).toBeDefined();
+            const rad = (yaw as number) * (Math.PI / 180);
+            // mineflayer `getViewDirection` 的水平分量
+            expect(-Math.sin(rad), `${name}.x`).toBeCloseTo(want.x, 6);
+            expect(-Math.cos(rad), `${name}.z`).toBeCloseTo(want.z, 6);
+        }
     });
 
     it('不认识的方位给出可用值清单', async () => {

@@ -102,14 +102,18 @@ export function formatPlaceHereReceipt(input: {
     const cell = `${input.target.x},${input.target.y},${input.target.z}`;
     const read = input.readBack == null ? '' : String(input.readBack);
     const matches = read !== '' && (read === input.expected || read.endsWith(input.expected) || input.expected.endsWith(read));
+    // **先看回读，再谈"那是我站的位置"**（真机 2026-10-23：placeHere 明明放上了
+    // （回读 crafting_table），回执却接着说"放不下，那就是你站的位置"——放成功之后
+    // 人已经被顶到方块上面，脚的格子当然就是那一格。先判成功，bodyCell 只在**没放上**时
+    // 才是解释。）
+    if (input.ok && matches) {
+        return `placeHere 确认：(${cell}) 现在是 ${read}（回读确认）。`;
+    }
     if (input.bodyCell) {
         return (
             `**placeHere 放不下**：(${cell}) 就是我现在站的位置（feet/head 都在里面），方块放进去会被占位守卫拒绝。` +
             '改用：① 先跳起来在最高点放（pillarUp 会做），或 ② 用 placeBlock 指定旁边一格坐标（先 goToCoordinates 挪开也可以）。'
         );
-    }
-    if (input.ok && matches) {
-        return `placeHere 确认：(${cell}) 现在是 ${read}（回读确认）。`;
     }
     return (
         `placeHere **没有生效**：(${cell}) 读到的是 ${read === '' ? '读不到' : read}，不是 ${input.expected}` +

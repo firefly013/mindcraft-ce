@@ -856,7 +856,9 @@ describe('食物储备：告急与存粮', () => {
         expect(sampleSurvivalSignals(bot).difficulty).toBeNull();
     });
 
-    it('打烈焰人前被存粮规则拦下 → 说"存粮先留着"，不谎报"没吃成"', async () => {
+    // 2026-10-24：consume 不再因存粮拒绝进食，prepareBlaze 里那支"存粮先留着"的
+    // 甄别已不可能触发（删掉了）。现在模型说吃就吃，只剩"没吃成"一种失败。
+    it('打烈焰人前吃最后一份：照吃，不谎报"没吃成"', async () => {
         const blocks: BlockMap = { '0,64,0': { name: 'stone' } };
         const bot = fakeBody(blocks, {
             y: 60,
@@ -864,12 +866,15 @@ describe('食物储备：告急与存粮', () => {
             slots: [{ name: 'cooked_beef', count: 1 }],
             items: [{ name: 'cooked_beef', count: 1 }],
         });
-        // food 16（≥ 存粮线 14）+ 背包只剩 1 份 → consume 会按存粮规则拒绝
+        // food 16（< 18 所以会吃）+ 背包只剩 1 份。consume 真的把食物顶上去，
+        // 这样回执报的是"吃成了"而不是"没吃成"。
         bot.food = 16;
+        bot.consume = vi.fn(() => {
+            bot.food = 21;
+            return Promise.resolve();
+        });
         const text = await prepareBlazeSkill(bot);
-        expect(text).toContain('存粮先留着');
-        const refresh = assessSurvival(sampleSurvivalSignals(bot));
-        expect(refresh.foodCount).toBe(1);
+        expect(text).toContain('吃了 cooked_beef');
         expect(text).not.toContain('没吃成');
     });
 

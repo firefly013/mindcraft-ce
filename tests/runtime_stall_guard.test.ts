@@ -354,4 +354,39 @@ describe('心跳看门狗：连请求都没有时主动唤醒', () => {
     expect(h.woken).toHaveLength(4);
     h.guard.stop();
   });
+
+  it('**外部世界事件不能顶掉空闲时钟**（2026-10-22 两个 bot 停摆 10 小时的成因）', () => {
+    // 真机证据：10-22 09:36~19:30，overnight_a/b 的 agent 日志一直在写，但写的全是
+    // `inventory.changed` / `item.drop.nearby` / `entity.hostile_far` / `world.light_low`
+    // 这些**被动事件**；期间工具调用 0 次、反馈 0 条、死亡 0 次，进程与连接都健康。
+    // 旧实现里 `noteExternalInput()` 会把 `lastActivityAt` 重置成 now()，
+    // 而这些事件每秒都在来 ⇒ `t - lastActivityAt < nextIdleMs` 永远成立
+    // ⇒ **心跳永远不触发**，护栏形同不存在。
+    // 正确判据只能是"模型真的答了 / 世界真的被改了"，不能是"世界在动"。
+    const h = harness();
+    for (let i = 0; i < 20; i += 1) {
+      h.advance(5_000); // 每 5 秒一个世界事件，整整 100 秒
+      h.guard.noteExternalInput();
+      h.tick();
+    }
+    // 100 秒 > idleMs(60s)：心跳必须已经响过，否则就是停摆。
+    expect(h.woken.length).toBeGreaterThanOrEqual(1);
+    expect(h.woken[0]).toBe(STALL_WATCHDOG_NUDGE);
+    h.guard.stop();
+  });
+
+  it('心跳回执里的空闲时长是**真实值**，不是退避后的间隔', () => {
+    // 旧实现先 `lastActivityAt = t` 再算 `t - lastActivityAt + nextIdleMs`，
+    // 报出去的永远是退避后的间隔（60s→120s→240s），而不是"它到底停了多久"。
+    // 排查 10 小时停摆时，最有用的那个数字恰恰被抹掉了。
+    const idleSeen: number[] = [];
+    const h = harness({ onWatchdog: (idleMs) => idleSeen.push(idleMs) });
+    h.advance(61_000);
+    h.tick();
+    h.advance(121_000);
+    h.tick();
+    expect(idleSeen[0]).toBe(61_000);
+    expect(idleSeen[1]).toBe(121_000);
+    h.guard.stop();
+  });
 });

@@ -17,7 +17,7 @@ function bareBody(items: Array<{ name: string; count: number }>, over: Record<st
   const body: any = Object.create(MineflayerBody.prototype);
   body.inventorySynced = false;
   body.inventorySyncRecoveryTimer = null;
-  body.inventoryPacketSeen = false;
+  body.inventoryPacketSeenAt = 0;
   body.inventorySyncSettledForLogin = false;
   body.spawnFollowedDeath = false;
   body.lastDeathAt = 0;
@@ -65,7 +65,8 @@ describe('死亡门槛：只认"死亡事件之后的那次 spawn"', () => {
     const withPacket = bareBody([]);
     withPacket.armInventorySyncRecovery('login');
     vi.advanceTimersByTime(300);
-    withPacket.inventoryPacketSeen = true;
+    // spawn **之后**才收到完整背包 ⇒ 这个"空"是被测量出来的。
+    withPacket.inventoryPacketSeenAt = Date.now();
     vi.advanceTimersByTime(300);
     expect(vias(withPacket)).toContain('packet-empty');
 
@@ -73,6 +74,27 @@ describe('死亡门槛：只认"死亡事件之后的那次 spawn"', () => {
     withItems.armInventorySyncRecovery('login');
     vi.advanceTimersByTime(300);
     expect(vias(withItems)).toContain('read-nonempty');
+  });
+
+  it('**纯重连、包在 spawn 之前就到过** ⇒ measured-empty-after-login，不再卡在"读数未同步"（真机 2026-10-23）', () => {
+    vi.useFakeTimers();
+    const body = bareBody([]);
+    // 服务端在登录时（spawn 之前）就把完整背包推下来了，实测证据见
+    // `inventoryPacketSeenAt` 的注释（tmp/probe_inventory.mjs 量到 window_items windowId=0）。
+    body.inventoryPacketSeenAt = Date.now();
+    body.armInventorySyncRecovery('spawn');
+    vi.advanceTimersByTime(3_500);
+    expect(vias(body)).toContain('measured-empty-after-login');
+    expect(body.inventorySynced).toBe(true);
+  });
+
+  it('**一次包都没收到过** ⇒ 仍然是"未知"，不许把"还没数据"当成空', () => {
+    vi.useFakeTimers();
+    const body = bareBody([]);
+    body.armInventorySyncRecovery('spawn');
+    vi.advanceTimersByTime(5_000);
+    expect(vias(body)).not.toContain('measured-empty-after-login');
+    expect(body.inventorySynced).toBe(false);
   });
 });
 

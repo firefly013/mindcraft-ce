@@ -49,11 +49,21 @@ describe('朝向工具', () => {
     expect(bot.output).toContain('0.0° → 90.0°');
   });
 
-  it('lookInDirection north 用 π 弧度', async () => {
+  // **北是 0，不是 π**：π 那是原版 Notchian 的角度。mineflayer 的
+  // `entity.yaw` 经过 `conversions.fromNotchianYaw(deg) = (π − deg·π/180) mod 2π`，
+  // 代入即"北 0 / 西 90 / 南 180 / 东 −90"。
+  it('lookInDirection north 用 0 弧度（mineflayer 约定：π 是南）', async () => {
     const bot = fakeBot();
     await lookInDirection(bot, 'north', 0);
-    expect(bot.look.mock.calls[0][0]).toBeCloseTo(Math.PI, 5);
+    expect(bot.look.mock.calls[0][0]).toBeCloseTo(0, 5);
     expect(bot.output).toContain('朝 north');
+  });
+
+  it('lookInDirection south 用 π 弧度', async () => {
+    const bot = fakeBot();
+    await lookInDirection(bot, 'south', 0);
+    expect(bot.look.mock.calls[0][0]).toBeCloseTo(Math.PI, 5);
+    expect(bot.output).toContain('朝 south');
   });
 
   it('lookAtCoordinates 真正面向坐标并带准星校验', async () => {

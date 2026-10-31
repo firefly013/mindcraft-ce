@@ -81,8 +81,9 @@ describe('能力在 useBlock 里，且回执不再点名不存在的工具', () 
     }
   });
 
-  it('死亡代价口径跟着 keepInventory=false 走（新世界 Hard、不掉保）', () => {
+  it('死亡代价口径不再由引擎描述（回执只报掉落清单，不做"划算/不划算"的判断）', () => {
     const src = readFileSync(join(process.cwd(), 'src', 'body', 'safety', 'reflex_override.ts'), 'utf8');
-    expect(src).toContain('这个存档**没有** keepInventory，死了会掉光背包——绝不能拿命去赌。');
+    expect(src).not.toContain('keepInventory');
+    expect(src).not.toContain('deathCostLine');
   });
 });

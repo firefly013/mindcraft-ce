@@ -7,26 +7,6 @@
 
 import { findCommand } from './registry.js';
 
-/** 需要「有头有尾」的动作类工具：身体返回空串也必须给模型一句交代。 */
-const ACTION_TOOLS_NEEDING_RECEIPT = new Set([
-    'useBlock',
-    'useEntity',
-    'craft',
-    'searchForBlock',
-    'collectBlocks',
-    'digDown',
-    'mineBlock',
-    'placeBlock',
-    'placeHere',
-    'goToCoordinates',
-    'goToPlayer',
-    'moveAway',
-    'equip',
-    'consume',
-    'attack',
-    'useOn',
-]);
-
 interface Position {
     x: number;
     y: number;
@@ -118,11 +98,16 @@ export function parseFoundPosition(text: string): Position | null {
  */
 export function annotateCollectBlocks(text: string): string {
     const body = text.trim();
-    const done = /采集完成：([^\s]+) 背包 (\d+)\s*→\s*(\d+)（\+(\d+)），移动 ([\d.]+) 格/.exec(body);
+    // **允许中间那段"（掉落 xxx）"**：actions.ts 的真实文案是
+    // `采集完成：iron_ore（掉落 raw_iron）背包 0 → 6（+6），移动 12 格。`
+    // 旧正则要求"类型"后面**立刻**是"背包"，于是一次都没匹配上——真机 2026-10-23
+    // 用 CLI 通关时，48 块圆石到手，回执却只会说"无法确认结果"。
+    const done = /采集完成：([^\s（]+)(?:（掉落 ([^）]*)）)?\s*背包 (\d+)\s*→\s*(\d+)（\+(\d+)），移动 ([\d.]+) 格/.exec(body);
     if (done != null) {
+        const dropped = done[2] != null && done[2] !== '' ? `（掉落 ${done[2]}）` : '';
         return (
-            `collectBlocks：已采集到 ${done[1]}（背包 ${done[2]} → ${done[3]}，+${done[4]}）；` +
-            `移动 ${done[5]} 格。`
+            `collectBlocks：已采集到 ${done[1]}${dropped}（背包 ${done[3]} → ${done[4]}，+${done[5]}）；` +
+            `移动 ${done[6]} 格。`
         );
     }
     // **缺工具是独立原因**：技能层已经写了"没有能挖 X 的工具（手持 Y）"，
@@ -142,12 +127,13 @@ export function annotateCollectBlocks(text: string): string {
             '但**没有工具就不会有掉落**。请用 stats 核对背包。'
         );
     }
-    const unchanged = /采集结束：([^\s]+) 数量没变（仍是 (\d+)）。移动 ([\d.]+) 格/.exec(body);
+    const unchanged = /采集结束：([^\s（]+)(?:（掉落 [^）]*）)?\s*数量没变(?:（仍是 (\d+)）)?[。，,]?\s*移动 ([\d.]+) 格/.exec(body);
     if (unchanged != null) {
+        const still = unchanged[2] != null ? `背包 ${unchanged[2]} → ${unchanged[2]}，没变化` : '背包没有增加';
         return (
-            `collectBlocks：没有采集到 ${unchanged[1]}（背包 ${unchanged[2]} → ${unchanged[2]}，没变化）。` +
-              '技能内部日志可能写过 Collected，但以背包账目为准：掉落可能还在附近、被 autoPickup 抢走，或目标不可达。' +
-            `移动 ${unchanged[3]} 格。请用 stats 再核对背包，不要重复挖。`
+            `collectBlocks：没有采集到 ${unchanged[1]}（${still}）。` +
+              '回执以背包账目为准（背包计数没动）。' +
+            `移动 ${unchanged[3]} 格。`
         );
     }
     return (
@@ -273,10 +259,25 @@ export async function executeToolCall(agent: any, toolName: string, args: Record
         if (toolName === 'collectBlocks') {
             return annotateCollectBlocks(String(text));
         }
-        if (String(text).trim() === '' && ACTION_TOOLS_NEEDING_RECEIPT.has(toolName)) {
+        // **空回执一律给一句交代**（2026-10-23：用 CLI 通关时，goToCoordinates /
+        // collectBlocks 有时返回空串，终端上就是一片空白——操作者既不知道成没成，
+        // 也不知道该不该重试）。以前这里是一张手写清单，清单漏掉的工具照样沉默；
+        // 改成按结果判断：只要没内容就说清楚，不再维护第二份名单。
+        if (String(text).trim() === '') {
+            // **能指名就指名**（2026-10-23 真机：exploreFor 连续三次返回空串，
+            // 终端上一片空白，操作者只能猜。查事件日志才看到是 `world.water.drowning`
+            // 抢走了身体——走螺旋一头扎进海里。**原因身体里就有**（`__interruptReason`），
+            // 只是空回执这条分支没去读它）。
+            const who = String((agent?.bot as any)?.__interruptReason ?? '').trim();
+            const cause =
+                who !== ''
+                    ? `**是被打断的**：${who}。`
+                    : '动作可能被中断、被保命反射抢占，或者什么都没发生。';
             return (
-                `${toolName} 执行结束，但身体没有返回具体结果（可能被中断，或被 autoPickup 抢走了身体）。` +
-                '请用 stats 核对当前位置和背包，再决定是否重试。'
+                `${toolName} 执行结束，但身体**没有返回任何内容**——${cause}` +
+                // **2026-10-24：处方删掉**（看 events / 用 stats 核对 / 决定重做还是换路）——那是替
+                // 模型安排调查流程。留一句关于回执本身语义的事实：空 ≠ 成功也不 = 失败。
+                '空回执里既没有「做成了」也没有「失败」的证据。'
             );
         }
         return text;
@@ -293,5 +294,25 @@ export async function executeToolCall(agent: any, toolName: string, args: Record
             );
         }
         return `Tool ${toolName} failed: ${msg}`;
+    } finally {
+        // **每个工具结束都松开方向盘**（真机 2026-10-23 用 CLI 通关时定位的浪费时间大头）：
+        // 上一个动作留下的 `sprint`/`forward` 不会自己松，人看到的画面是
+        // "站在原地晃、脚下冒冲刺粒子、对着方块连续空挥、还 180 度转身"——
+        // 那不是物理算错，是**按键还按着**。控制状态是身体状态，不是动作的一部分，
+        // 工具退出时必须兜底清掉；清不掉也要留下痕迹，别让它无声地耗时间。
+        try {
+            const bot: any = (agent as { bot?: unknown })?.bot;
+            if (bot != null && !bot.interrupt_code) {
+                for (const key of ['forward', 'back', 'left', 'right', 'jump', 'sprint', 'sneak']) {
+                    try {
+                        bot.setControlState(key, false);
+                    } catch {
+                        // 拿不到控制就尽力而为。
+                    }
+                }
+            }
+        } catch {
+            // 清理失败不影响回执。
+        }
     }
 }

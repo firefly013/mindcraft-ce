@@ -8,7 +8,6 @@
  */
 import { describe, expect, it, vi } from 'vitest';
 import {
-  BARE_HAND_MAX_DIG_MS,
   BOT_OUTPUT_HEAD_CHARS,
   KILL_WAIT_BUDGET_MS,
   MAX_BOT_OUTPUT_CHARS,
@@ -23,13 +22,14 @@ import {
   consume,
   describeKillGiveUp,
   describeStairJumpFailure,
+  digWithTimeout,
   equip,
   foodValueOf,
   formatFoodDelta,
   formatFoodState,
   heldToolState,
-  isHandMineable,
   isFootingBlock,
+  requiresHarvestTool,
   listEdibleItems,
   log,
   mineBlockAt,
@@ -138,51 +138,50 @@ describe('D2 安全：徒手挖不能挖自己的立足点', () => {
 });
 
 describe('D2 徒手挖软方块', () => {
-  it('isHandMineable：下界岩/泥土/沙/沙砾可以，石头/黑曜石/基岩不行', () => {
-    // 3000 → 3200：原木徒手正好 3000ms，<= 3000 零余量；留 200ms 给浮点/数据抖动
-    // （空手 bootstrap 的第一步是砍木头，见 tests/hand_mine_bootstrap.test.ts）。
-    expect(BARE_HAND_MAX_DIG_MS).toBe(3200);
-    expect(isHandMineable(blockOf({ name: 'netherrack', hardness: 0.4, digTime: () => 2000 }))).toBe(true);
-    expect(isHandMineable(blockOf({ name: 'dirt', hardness: 0.5, digTime: () => 2500 }))).toBe(true);
-    expect(isHandMineable(blockOf({ name: 'sand', hardness: 0.5, digTime: () => 2500 }))).toBe(true);
-    expect(isHandMineable(blockOf({ name: 'gravel', hardness: 0.6, digTime: () => 3000 }))).toBe(true);
-    expect(isHandMineable(blockOf({ name: 'stone', hardness: 1.5, digTime: () => 7500 }))).toBe(false);
-    expect(isHandMineable(blockOf({ name: 'obsidian', hardness: 50, digTime: () => 250000 }))).toBe(false);
-    // 没有 digTime 时按 硬度 × 5s 兜底。
-    expect(isHandMineable({ name: 'netherrack', hardness: 0.4 })).toBe(true);
-    expect(isHandMineable({ name: 'stone', hardness: 1.5 })).toBe(false);
-    // -1 = 不可破坏；digTime 为 Infinity 也不能放行。
-    expect(isHandMineable({ name: 'bedrock', hardness: -1 })).toBe(false);
-    expect(isHandMineable(blockOf({ digTime: () => Infinity }))).toBe(false);
-    expect(isHandMineable(null)).toBe(false);
+  it('判据是「要不要工具」，不是「徒手快不快」', () => {
+    // 不需要工具（原版 harvestTools 为空）：空手也有掉落，直接挖。
+    expect(requiresHarvestTool(blockOf({ name: 'dirt', hardness: 0.5 }))).toBe(false);
+    expect(requiresHarvestTool(blockOf({ name: 'sand', hardness: 0.5 }))).toBe(false);
+    expect(requiresHarvestTool(blockOf({ name: 'oak_log', hardness: 2 }))).toBe(false);
+    // 需要工具（**下界岩要镐**——空手挖得开但一个也不掉；石头同理）。
+    expect(requiresHarvestTool(blockOf({ name: 'netherrack', hardness: 0.4, harvestTools: { 11: true } }))).toBe(true);
+    expect(requiresHarvestTool(blockOf({ name: 'stone', hardness: 1.5, harvestTools: { 11: true } }))).toBe(true);
+    // 读不到就当作"不需要工具"：宁可让 dig 自己试，也不凭读不到的数封路。
+    expect(requiresHarvestTool(null)).toBe(false);
+    expect(requiresHarvestTool({ name: 'mystery' })).toBe(false);
   });
 
-  it('mineBlock 无镐挖下界岩：放行 + 空手回执 + 真的 dig 了', async () => {
-    const bot = bareHandBot(blockOf());
+  it('mineBlock 无镐挖泥土：放行（不需要工具）+ 真的 dig 了', async () => {
+    const bot = bareHandBot(blockOf({ name: 'dirt', hardness: 0.5, harvestTools: undefined }));
     await expect(mineBlockAt(bot, 0, 0, 0)).resolves.toBe(true);
     expect(bot.dig).toHaveBeenCalledTimes(1);
-    expect(bot.output).toContain('没有能挖 netherrack 的工具（手持 空手）');
-    expect(bot.output).toContain('空手挖');
-    expect(bot.output).toContain('挖掉了 netherrack');
+    expect(bot.output).toContain('挖掉了 dirt');
+  });
+
+  it('mineBlock 无镐挖下界岩：**拒**（它要镐），并给出 force 这条出路', async () => {
+    const bot = bareHandBot(blockOf({ name: 'netherrack', hardness: 0.4, harvestTools: { 11: true } }));
+    await expect(mineBlockAt(bot, 0, 0, 0)).resolves.toBe(false);
+    expect(bot.dig).not.toHaveBeenCalled();
+    expect(bot.output).toContain('没有能挖 netherrack 的工具');
+    expect(bot.output).toContain('force=true');
   });
 
   it('mineBlock 无镐挖深板岩：仍旧拒绝，不白等超时', async () => {
-    const bot = bareHandBot(blockOf({ name: 'deepslate', hardness: 3, digTime: () => 15000 }));
+    const bot = bareHandBot(blockOf({ name: 'deepslate', hardness: 3, harvestTools: { 11: true }, digTime: () => 15000 }));
     await expect(mineBlockAt(bot, 0, 0, 0)).resolves.toBe(false);
     expect(bot.dig).not.toHaveBeenCalled();
     expect(bot.output).toContain('没有能挖 deepslate 的工具');
-    expect(bot.output).not.toContain('空手挖');
+    expect(bot.output).not.toContain('挖掉了');
   });
 
-  it('breakBlockAt（digDown/pillarUp 的开路原语）同样允许徒手挖软方块', async () => {
-    const bot = bareHandBot(blockOf());
+  it('breakBlockAt（digDown/pillarUp 的开路原语）同样放行不需要工具的方块', async () => {
+    const bot = bareHandBot(blockOf({ name: 'dirt', hardness: 0.5, harvestTools: undefined }));
     await expect(breakBlockAt(bot, 0, 0, 0)).resolves.toBe(true);
-    expect(bot.output).toContain('它硬度低，改用空手挖');
-    expect(bot.output).toContain('Broke netherrack');
+    expect(bot.output).toContain('Broke dirt');
   });
 
   it('breakBlockAt 对硬方块仍旧拒绝', async () => {
-    const bot = bareHandBot(blockOf({ name: 'stone', hardness: 1.5, digTime: () => 7500 }));
+    const bot = bareHandBot(blockOf({ name: 'stone', hardness: 1.5, harvestTools: { 11: true }, digTime: () => 7500 }));
     await expect(breakBlockAt(bot, 0, 0, 0)).resolves.toBe(false);
     expect(bot.dig).not.toHaveBeenCalled();
     expect(bot.output).toContain('没有能挖 stone 的工具');
@@ -343,6 +342,143 @@ describe('D7 工具坏了要有一句话', () => {
     expect(heldToolState(bot).max).toBeNull();
     expect(toolDurabilityGuard(bot).remaining).toBeNull();
     expect(toolDurabilityGuard(bot).low).toBe(false);
+  });
+});
+
+// 用户 2026-10-28：**耐久不够也先用着，爆了再换**。
+// 耐久是每挖完一块扣 1，所以"换"只发生在**下一块开始前**——`digWithTimeout` 一进来
+// 就 `ensureHarvestTool`（手里这把能收获就只查一次、不换手）。不存在"挖到一半镐断了"。
+describe('D7b 爆了再换：下一块开始前换下一把', () => {
+  function miningBot(state: { name: string }) {
+    const inv: any[] = [
+      { name: 'iron_pickaxe', type: 11, count: 1, durabilityUsed: 250, maxDurability: 251 },
+      { name: 'diamond_pickaxe', type: 13, count: 1 },
+    ];
+    const bot: any = {
+      output: '',
+      game: { gameMode: 'survival' },
+      heldItem: { ...inv[0] },
+      entity: { position: { distanceTo: () => 1 } },
+      digTime: () => 400,
+      blockAt: () => ({
+        name: state.name,
+        hardness: 1.5,
+        diggable: true,
+        position: { x: 0, y: 0, z: 0 },
+        harvestTools: { 11: true, 13: true },
+        canHarvest: (id: number | null) => id === 11 || id === 13,
+        digTime: () => 400,
+      }),
+      inventory: {
+        slots: inv,
+        items: () => inv.filter((item) => item.count > 0),
+        findInventoryItem: (name: string) => inv.find((item) => item.name === name && item.count > 0) ?? null,
+      },
+      equip: vi.fn(async (item: any) => {
+        bot.heldItem = { ...item };
+      }),
+      dig: vi.fn(async () => {
+        // 挖完这一块：铁镐同时烧掉（原版就是挖完扣 1 点耐久，归零即碎，不报错）
+        if (bot.heldItem?.name === 'iron_pickaxe') {
+          inv[0].count = 0;
+          bot.heldItem = null;
+        }
+        state.name = 'air';
+      }),
+      stopDigging: vi.fn(),
+      targetDigBlock: null,
+    };
+    return { bot, inv };
+  }
+
+  function pickBot(state: { name: string }, digImpl: () => Promise<void>) {
+    const inv: any[] = [{ name: 'iron_pickaxe', type: 11, count: 1, durabilityUsed: 10, maxDurability: 251 }];
+    return {
+      output: '',
+      game: { gameMode: 'survival' },
+      heldItem: { ...inv[0] },
+      entity: { position: { distanceTo: () => 1 } },
+      digTime: () => 400,
+      blockAt: () => ({
+        name: state.name,
+        hardness: 1.5,
+        diggable: true,
+        position: { x: 0, y: 0, z: 0 },
+        harvestTools: { 11: true },
+        canHarvest: (id: number | null) => id === 11,
+        digTime: () => 400,
+      }),
+      inventory: { slots: inv, items: () => inv, findInventoryItem: () => null },
+      equip: vi.fn(async () => {}),
+      dig: vi.fn(digImpl),
+      stopDigging: vi.fn(),
+      targetDigBlock: null,
+    } as any;
+  }
+
+  it('第一块把铁镐用碎 ⇒ 第二块开始前自动换上钻石镐', async () => {
+    const state = { name: 'stone' };
+    const { bot } = miningBot(state);
+
+    await expect(digWithTimeout(bot, bot.blockAt(), '@(0,0,0)')).resolves.toBe(true);
+    expect(bot.output).toContain('耐久耗尽坏掉了');
+    expect(bot.heldItem).toBeNull();
+
+    state.name = 'stone'; // 下一块
+    await expect(digWithTimeout(bot, bot.blockAt(), '@(0,1,0)')).resolves.toBe(true);
+    expect(bot.heldItem?.name).toBe('diamond_pickaxe');
+    expect(bot.dig).toHaveBeenCalledTimes(2);
+  });
+
+  it('空手挖不需要工具的方块（泥土）⇒ 不为了"换手"而换手，也不拦', async () => {
+    const state = { name: 'dirt' };
+    const bot: any = {
+      output: '',
+      game: { gameMode: 'survival' },
+      heldItem: null,
+      entity: { position: { distanceTo: () => 1 } },
+      digTime: () => 400,
+      blockAt: () => ({
+        name: state.name,
+        hardness: 0.5,
+        diggable: true,
+        position: { x: 0, y: 0, z: 0 },
+        canHarvest: () => true,
+        digTime: () => 400,
+      }),
+      inventory: { slots: [], items: () => [], findInventoryItem: () => null },
+      equip: vi.fn(async () => {}),
+      dig: vi.fn(async () => {
+        state.name = 'air';
+      }),
+      stopDigging: vi.fn(),
+      targetDigBlock: null,
+    };
+
+    await expect(digWithTimeout(bot, bot.blockAt(), '@(0,0,0)')).resolves.toBe(true);
+    expect(bot.equip).not.toHaveBeenCalled();
+  });
+
+  it('"Digging aborted" 但那一格已经是空气 ⇒ 按挖掉算，不报失败', async () => {
+    const state = { name: 'stone' };
+    const bot = pickBot(state, async () => {
+      state.name = 'air'; // 方块其实已经掉了，只是中断先到
+      throw new Error('Digging aborted');
+    });
+
+    await expect(digWithTimeout(bot, bot.blockAt(), '@(0,0,0)')).resolves.toBe(true);
+    expect(bot.output).toContain('按挖掉算');
+  });
+
+  it('"Digging aborted" 且方块还在 ⇒ 照旧报中断、返回 false', async () => {
+    const state = { name: 'stone' };
+    const bot = pickBot(state, async () => {
+      throw new Error('Digging aborted');
+    });
+
+    await expect(digWithTimeout(bot, bot.blockAt(), '@(0,0,0)')).resolves.toBe(false);
+    expect(bot.output).toContain('正常中断');
+    expect(state.name).toBe('stone');
   });
 });
 
@@ -717,8 +853,9 @@ describe('consume：失败也要给事实，不给堆栈', () => {
     expect(bot.output).not.toContain('at Object.');
     // 自动重试了一次（1 次正常 + 1 次重试）
     expect(bot.consume).toHaveBeenCalledTimes(2);
-    // 下一步是**一条**能照抄的调用
-    expect(bot.output.trimEnd().split('\n').at(-1)).toBe('下一步（照做即可）：consume(item_name="mutton")');
+    // 2026-10-30：不再补"下一步"——重试还是换一种，是模型的判断
+    expect(bot.output).not.toContain('照做即可');
+    expect(bot.output).toContain('还在手上');
   });
 
   it('第一次超时 + 第二次成功 → 回执写明"重试后吃成了"，且重试前重新 equip', async () => {
@@ -740,13 +877,13 @@ describe('consume：失败也要给事实，不给堆栈', () => {
     expect(bot.equip).toHaveBeenCalledTimes(2);
   });
 
-  it('手里没有该食物 → 点名缺什么，并给"换一种"的一条调用', async () => {
+  it('手里没有该食物 → 点名缺什么 + 还有什么能吃的，不指定换哪一样', async () => {
     const bot = consumeBot({ held: [{ name: 'bread', count: 2 }] });
 
     await expect(consume(bot, 'mutton', NO_WAIT)).resolves.toBe(false);
     expect(bot.output).toContain('背包里没有 mutton');
     expect(bot.output).toContain('breadx2');
-    expect(bot.output.trimEnd().split('\n').at(-1)).toBe('下一步（照做即可）：consume(item_name="bread")');
+    expect(bot.output).not.toContain('照做即可');
     expect(bot.consume).not.toHaveBeenCalled();
   });
 
@@ -787,18 +924,22 @@ describe('consume：失败也要给事实，不给堆栈', () => {
   });
 
   // ── 存粮规则：别把最后一口吃掉（真机：五小时吃光全世界，然后血 1.68 无法回血） ──
-  it('**只剩 ≤2 份且不饿（food ≥ 14）→ 拒绝吃**，并说明这是救命粮', async () => {
+  // **契约 2026-10-24 改**：模型明确说"吃"，工具就吃。存粮的风险只**警告**，
+  // 不拒绝——"你现在不饿"这个判断只有模型能做（它知道接下来是去打怪还是回城）。
+  // 以前这里是 `resolves.toBe(false)` + `bot.consume` 一次都没调，
+  // 还为此打过 `lowHealthEmergency` 补丁；打补丁正是"工具在猜"的症状。
+  it('**只剩 ≤2 份且不饿（food ≥ 14）→ 照吃，但回执里带存粮警告**', async () => {
     const bot = consumeBot({ held: [{ name: 'cooked_beef', count: 2 }], food: 16 });
+    bot.consume = vi.fn(async () => {
+      bot.food = 21;
+    });
 
-    await expect(consume(bot, 'cooked_beef', NO_WAIT)).resolves.toBe(false);
-    expect(bot.output).toContain('先留着');
-    expect(bot.output).toContain('你现在不饿');
-    expect(bot.output).toContain('food 16/sat 0');
+    await expect(consume(bot, 'cooked_beef', NO_WAIT)).resolves.toBe(true);
+    expect(bot.consume).toHaveBeenCalled(); // 说了就执行
+    expect(bot.output).toContain('吃成了');
+    expect(bot.output).toContain('短期内没吃的了');
     expect(bot.output).toContain('2 份能吃的');
     expect(bot.output).toContain('cooked_beefx2');
-    expect(bot.output).toContain('救命粮');
-    expect(bot.consume).not.toHaveBeenCalled(); // 一口都没动
-    expect(bot.output.trimEnd().split('\n').at(-1)).toBe('下一步（照做即可）：searchForBlock(type="water", search_range=128)');
   });
 
   it('真饿（food < 14）时照吃：存粮规则不该把人饿死', async () => {
@@ -834,20 +975,28 @@ describe('consume：失败也要给事实，不给堆栈', () => {
     expect(bot.output).toContain('furnace');
   });
 
-  it('拒绝动存粮时，如果存粮是生肉就顺带说"先烤"', async () => {
+  // 2026-10-24：存粮规则从"拒绝"改成"照吃 + 警告"。模型说了吃就吃，
+  // 风险只在回执里说清——"该不该动存粮"只有模型能判断。
+  it('存粮是生肉时，警告里顺带说"先烤"', async () => {
     const bot = consumeBot({ held: [{ name: 'raw_beef', count: 1 }], food: 18 });
+    bot.consume = vi.fn(async () => {
+      bot.food = 21;
+    });
 
-    await expect(consume(bot, 'raw_beef', NO_WAIT)).resolves.toBe(false);
-    expect(bot.output).toContain('先留着');
+    await expect(consume(bot, 'raw_beef', NO_WAIT)).resolves.toBe(true);
+    expect(bot.output).toContain('短期内没吃的了');
     expect(bot.output).toContain('cooked_beef');
   });
 
   it('存粮提醒里带难度说明（Easy 饿不死：别恐慌性清空存粮）', async () => {
     const bot = consumeBot({ held: [{ name: 'cooked_beef', count: 2 }], food: 16 });
     bot.game = { difficulty: 1 };
+    bot.consume = vi.fn(async () => {
+      bot.food = 21;
+    });
 
-    await expect(consume(bot, 'cooked_beef', NO_WAIT)).resolves.toBe(false);
-    expect(bot.output).toContain('先留着');
+    await expect(consume(bot, 'cooked_beef', NO_WAIT)).resolves.toBe(true);
+    expect(bot.output).toContain('短期内没吃的了');
     expect(bot.output).toContain('Easy 难度饿不死人');
   });
 });
@@ -988,11 +1137,11 @@ describe('attackEntity 击杀等待：有界 + 诊断', () => {
     expect(h.stops).toBe(1); // 停手，不把 pvp 挂着
     expect(h.bot.output).toContain('还没打死 zombie');
     expect(h.bot.output).toContain('一点没掉');
-    expect(h.bot.output).toContain('下一步（照做即可）：');
+    expect(h.bot.output).not.toContain('照做即可');
     expect(h.bot.output).not.toContain('Successfully killed');
   });
 
-  it('掉血但没死：诊断说"在掉血，只是慢"，下一步是补刀（不是同一个狩猎调用）', async () => {
+  it('掉血但没死：诊断说"在掉血，只是慢"，不替它决定要不要补刀', async () => {
     const h = fightBot({ health: 20 });
     // 打了两轮后掉到 12 血，但一直不死
     setTimeout(() => {
@@ -1003,16 +1152,16 @@ describe('attackEntity 击杀等待：有界 + 诊断', () => {
     expect(killed).toBe(false);
     expect(h.bot.output).toContain('在掉血，只是慢');
     expect(h.bot.output).toContain('血量 20 → 12');
-    expect(h.bot.output).toContain('attack(target="zombie", type="mob")');
+    expect(h.bot.output).not.toContain('照做即可');
   });
 
-  it('血量读不到：如实说"看不出掉没掉血"，让模型自己看实体表', async () => {
+  it('血量读不到：如实说"看不出掉没掉血"，不编一条下一步', async () => {
     const h = fightBot({ health: null });
     const killed = await attackEntity(h.bot, h.entity, true, FAST);
 
     expect(killed).toBe(false);
     expect(h.bot.output).toContain('血量读不到');
-    expect(h.bot.output).toContain('stats(type="entities")');
+    expect(h.bot.output).not.toContain('照做即可');
   });
 
   it('最后一刻打死了：仍然算击杀（返回 true、写 Successfully killed）', async () => {
@@ -1093,13 +1242,15 @@ describe('attackEntity 击杀等待：有界 + 诊断', () => {
     expect(h.bot.output).not.toContain('还没打死'); // 不是超时放弃，是被 Stop 打断
   });
 
-  it('describeKillGiveUp 是纯渲染：远距离给"走过去"的坐标', () => {
+  it('describeKillGiveUp 是纯渲染：远距离说清"打不到"，不塞坐标处方', () => {
     const bot: any = { entity: { position: { x: 0, y: 64, z: 0, distanceTo: () => 14.7 } } };
     const entity: any = { name: 'zombie', health: 20, position: { x: 14, y: 64, z: 0, distanceTo: () => 14.7 } };
     const text = describeKillGiveUp(bot, entity, { waitedMs: 90_000, polls: 90, healthBefore: 20 });
     expect(text).toContain('打了 90.0 秒还没打死 zombie');
     expect(text).toContain('你打不到它');
-    expect(text).toContain('goToCoordinates(x=14, y=64, z=0, closeness=2)');
+    // 2026-10-30：距离是事实（head 里已经报了），怎么接近由模型决定
+    expect(text).not.toContain('goToCoordinates');
+    expect(text).not.toContain('照做即可');
   });
 });
 

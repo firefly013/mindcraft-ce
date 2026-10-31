@@ -153,7 +153,6 @@ function fishHarness(
 
 const WATER = { x: 3, y: 62, z: 0 };
 const ROD = stack('fishing_rod', 1);
-const lastLine = (receipt: string): string => receipt.trimEnd().split('\n').at(-1) ?? '';
 
 // ─────────────────────────── 纯判据 ───────────────────────────
 
@@ -194,9 +193,9 @@ describe('fish：信号驱动 + 增量核对', () => {
         // 生鳕鱼 2 点、熟鳕鱼 5 点：要提醒先烤，并给能照抄的熔炉调用
         expect(receipt).toContain('生鱼先烤再吃');
         expect(receipt).toContain('cooked_cod');
-        expect(lastLine(receipt)).toBe(
-            '下一步（照做即可）：useBlock(type="furnace", input="1 raw_cod", output="1 cooked_cod")',
-        );
+        // 2026-10-30：事实留（烤了更值），但不再补一条"下一步"——烤不烤是模型的计划
+        expect(receipt).toContain('useBlock(type="furnace"');
+        expect(receipt).not.toContain('照做即可');
     });
 
     it('**收竿时机由信号决定**：咬钩挪后两拍，收竿也跟着挪后', async () => {
@@ -233,7 +232,7 @@ describe('fish：信号驱动 + 增量核对', () => {
         expect(receipt).toContain('没咬钩');
         expect(receipt).toContain('这一竿没钓到');
         expect(receipt).not.toContain('钓到 1');
-        expect(lastLine(receipt)).toBe('下一步（照做即可）：fish(max_ms=90000, max_casts=1)');
+        expect(receipt).not.toContain('照做即可');
     });
 
     it('咬钩了但背包没多出鱼 → 明说"没多出鱼，别当钓到了"', async () => {
@@ -301,9 +300,8 @@ describe('fish：早停与诚实失败', () => {
         expect(receipt).toContain('没有钓鱼竿');
         expect(receipt).toContain('工作台');
         expect(receipt).toContain('3 木棍 + 2 线');
-        expect(lastLine(receipt)).toBe(
-            '下一步（照做即可）：useBlock(type="crafting_table", input="3 stick, 2 string", output="1 fishing_rod")',
-        );
+        expect(receipt).toContain('useBlock(type="crafting_table"');
+        expect(receipt).not.toContain('照做即可');
         // 2×2 的 craft 放不下这个配方：不能把模型指到那条死路
         expect(receipt).not.toContain('craft(input=');
     });
@@ -315,7 +313,7 @@ describe('fish：早停与诚实失败', () => {
         expect(h.casts).toBe(0);
         expect(receipt).toContain('水太远');
         expect(receipt).toContain('80.0 格');
-        expect(lastLine(receipt)).toBe('下一步（照做即可）：goToCoordinates(x=80, y=62, z=0, closeness=3)');
+        expect(receipt).not.toContain('照做即可');
     });
 
     it('半径内没有水 → 早停并让去找水', async () => {
@@ -324,7 +322,7 @@ describe('fish：早停与诚实失败', () => {
 
         expect(h.casts).toBe(0);
         expect(receipt).toContain('没扫到水面');
-        expect(lastLine(receipt)).toBe('下一步（照做即可）：searchForBlock(type="water", search_range=256)');
+        expect(receipt).not.toContain('照做即可');
     });
 
     it('竿断了 → 报断竿 + 做新竿（钓到的鱼照算）', async () => {
@@ -345,19 +343,18 @@ describe('fish：早停与诚实失败', () => {
         expect(receipt).toContain('钓到 1 条');
         expect(receipt).toContain('断了');
         expect(receipt).toContain('快断了'); // 耐久 63/64 → 报告里同时提醒
-        expect(lastLine(receipt)).toBe(
-            '下一步（照做即可）：useBlock(type="crafting_table", input="3 stick, 2 string", output="1 fishing_rod")',
-        );
+        expect(receipt).not.toContain('照做即可');
     });
 
-    it('背包已经够吃（≥4 份）→ 一竿都不抛，说清"不用钓"', async () => {
+    it('背包已经够吃（≥4 份）→ 一竿都不抛，只报事实（不说"去干正事"）', async () => {
         const h = fishHarness({ items: [ROD, stack('cooked_beef', FISH_FOOD_ENOUGH)], water: WATER });
         const receipt = await fishSkill(h.bot, 90_000, 3, h.deps, FAST);
 
         expect(h.casts).toBe(0);
-        expect(receipt).toContain('不用钓');
+        expect(receipt).toContain('一竿都没抛');
         expect(receipt).toContain(`已经有 ${FISH_FOOD_ENOUGH} 份能吃的`);
-        expect(lastLine(receipt)).toBe('下一步（照做即可）：stats(type="inventory")');
+        expect(receipt).not.toContain('去干正事');
+        expect(receipt).not.toContain('照做即可');
     });
 
     it('时间预算用完 → 收手并说明（不会无限钓）', async () => {

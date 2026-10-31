@@ -18,7 +18,6 @@ import { Vec3 } from 'vec3';
 import * as skills from './skills.js';
 import type { MoveDirection } from './skills.js';
 import * as world from './world.js';
-import settings from '../../shared/settings.js';
 // 找水只留一份实现（`nearestWater` 在 progression 里，只扫已加载区块）：
 // progression 不 import survival，所以这条依赖不会成环。
 import { capLines, capReceipt, nearestWater } from './progression.js';
@@ -345,7 +344,7 @@ export const FOOD_REGEN_THRESHOLD = 18;
 export const FOOD_EMERGENCY_HEALTH = 12;
 /** 存粮下限：能直接吃的 ≤ 这个数就算"只剩一点"。 */
 export const FOOD_RESERVE_LOW = 2;
-/** 不饿的界线：food ≥ 它就别动存粮（consume 会拒绝，报告也不催）。 */
+/** 不饿的界线：food ≥ 它就不催（consume 只警告不拒绝，吃不吃由模型定）。 */
 export const FOOD_RESERVE_COMFORT = 14;
 
 export interface FoodReserveAssets {
@@ -433,7 +432,7 @@ export function foodEmergencyLine(input: {
 
 /**
  * 存粮告急：**还有吃的但只剩 ≤2 份** + food < 14 → 现在就补，别等饿到 18 以下。
- * （与 consume 的"别吃最后一口"互补：那边管 food ≥ 14 时不许动存粮，这边管 food < 14 时催你去补。）
+ * （consume 那边只警告不拒绝——吃不吃由模型定；这一条管的是 food < 14 时把"该补了"说出来。）
  */
 export function foodReserveLine(input: {
     health: number | null;
@@ -828,14 +827,10 @@ export async function prepareBlazeSkill(bot: any): Promise<string> {
             if (ate) {
                 notes.push(`吃了 ${best} 补饱食度。`);
             } else {
-                // 没吃上要分清是"没吃成"还是**存粮规则拦下的**（后者不是故障，别让它去重试）。
-                const fresh = sampleSurvivalSignals(bot);
-                const kept = (fresh.food ?? 0) >= FOOD_RESERVE_COMFORT && countFood(fresh.inventory) <= FOOD_RESERVE_LOW;
-                notes.push(
-                    kept
-                        ? `存粮先留着（food ${fresh.food}、背包只剩 ${countFood(fresh.inventory)} 份）：**打烈焰人之前先补食物**，别把最后两份吃掉。`
-                        : `想吃 ${best} 但没吃成。`,
-                );
+                // 没吃成只说没吃成（原因在 consume 的回执里）。
+                // 2026-10-24 之前这里还有一支"存粮先留着"的甄别——那时 consume 会因为
+                // 存粮规则拒绝进食；现在 consume 不再拒绝，那支已经不可能触发，删掉。
+                notes.push(`想吃 ${best} 但没吃成（原因看上一条回执）。`);
             }
         }
     } else {
@@ -1239,38 +1234,15 @@ function inventoryItemNames(bot: any): string[] {
 }
 
 /**
- * 最后手段：主动溺水。**只在 keepInventory 明确时才敢断言代价**。
+ * 溺水时的最后一条提示：**不要主动溺水**，继续找路或等人来救。
  *
- * 用户核对过这个存档 `level.dat` 的 keepInventory 是 `"true"`（物品和经验都保留）。
- * 但代码不能假设每个存档都一样，所以三态：true = 说清低代价；false = 不要选；
- * null = 先让模型确认。**这不是首选**，只在"所有物理逃生手段都失败"时才给。
+ * 引擎不提供"用死亡脱困"这种出口，也不描述死亡划不划算——只把当前该做的事说清楚。
  */
-export function deliberateDrownAdvice(keepInventory: boolean | null | undefined): string {
-    if (keepInventory === false) {
-        return '最后手段：**不要**主动溺水——这个存档没开 keepInventory，死了会掉光背包。继续找路或等人来救。';
-    }
-    if (keepInventory === true) {
-        return (
-            '最后手段（这个存档**开了 keepInventory，死亡不掉落**）：实在出不去就主动溺水。' +
-            '代价只有一次重生——满血复活、背包和经验都保留，比在水里继续掉血划算；' +
-            '要这么做就停止上浮、让它沉，别再浪费体力。'
-        );
-    }
+export function deliberateDrownAdvice(): string {
     return (
-        '如果这个存档开了 keepInventory（死亡不掉落；先确认：/gamerule keepInventory 或问管理员），' +
-        '**主动溺水是一个真选项**：满血复活、物品与经验都保留，代价只剩一次走位；' +
-        '没开就会掉光背包——确认之后再决定。'
+        '**不要主动溺水**：先继续找路（往最近干地游/挖台阶），或者等人来救。' +
+        '要停止挣扎也不是现在——空着手沉下去对谁都没有好处。'
     );
-}
-
-function configuredKeepInventory(): boolean | null {
-    try {
-        const raw = (settings as any)?.gameplay?.keepInventoryOnDeath;
-        if (raw === true || raw === false) return raw;
-    } catch {
-        // 读不到就按"未知"处理。
-    }
-    return null;
 }
 
 function posText(bot: any): string {
@@ -1287,8 +1259,6 @@ export interface EscapeWaterDeps {
     digBlock?: (bot: any, x: number, y: number, z: number) => Promise<boolean>;
     /** 逃生口径的"这一格挖得动吗"（默认 `escapeDiggableName`，会看镐）。 */
     canDig?: (bot: any, name: string) => boolean;
-    /** 这个存档是否开了 keepInventory（主动溺水那个选项的代价判断）。 */
-    keepInventory?: boolean | null;
     sleep?: (ms: number) => Promise<void>;
     now?: () => number;
     maxMs?: number;
@@ -1470,7 +1440,6 @@ export async function escapeWaterSkill(bot: any, deps: EscapeWaterDeps = {}): Pr
     const mineUp = deps.mineUp ?? ((b: any, x: number, y: number, z: number) => skills.mineBlockAt(b, x, y, z));
     const digBlock = deps.digBlock ?? ((b: any, x: number, y: number, z: number) => skills.mineBlockAt(b, x, y, z));
     const canDig = deps.canDig ?? ((b: any, name: string) => escapeDiggableName(b, name));
-    const keepInventory = deps.keepInventory ?? configuredKeepInventory();
     const sleep = deps.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
     const now = deps.now ?? Date.now;
     const maxMs = deps.maxMs ?? 12000;
@@ -1591,12 +1560,8 @@ export async function escapeWaterSkill(bot: any, deps: EscapeWaterDeps = {}): Pr
             : wallPlan == null
                 ? '四周是实心墙，而且**挖不动**（手上没有能快速挖开它的镐，徒手在水里等不起）'
                 : '四周的墙能挖，但挖完还是没找到落脚点';
-    const nextSteps =
-        wallPlan != null && wallPlan.dig.length > 0
-            ? `下一步（照做即可）：mineBlock(x=${wallPlan.dig[0].x}, y=${wallPlan.dig[0].y}, z=${wallPlan.dig[0].z}) 挖开它，` +
-                `再朝 ${wallPlan.direction} 挪一步；背包里有方块也可以 placeHere/pillarUp 垫高。`
-            : '下一步（照做即可）：先确认背包有没有可放置方块（placeHere/pillarUp 垫高），' +
-                '或用 mineBlock 点名挖开你旁边那面墙；别在原地重复 escapeWater。';
+    // **不给下一步菜单**（2026-10-30 用户裁定）：能从墙挖出去、还是先垫方块，
+    // 是模型看着现场决定的事。这里只把"墙能不能挖开"这条事实写进 why。
     return logLine(
         bot,
         `没能脱险（浅水坑困死）：${why}。` +
@@ -1605,10 +1570,9 @@ export async function escapeWaterSkill(bot: any, deps: EscapeWaterDeps = {}): Pr
             (current ? '脚下/头所在的水在流动（上浮被往下推）；' : '') +
             `起点 ${start}，现在 ${posText(bot)}，水位变化 y ${riseText}；` +
             '硬校验仍未上岸（脚/头仍在水里或脚下没有实心）。' +
-            nextSteps +
             '不要往下游。' +
             ' ' +
-            deliberateDrownAdvice(keepInventory),
+            deliberateDrownAdvice(),
     );
 }
 
@@ -2036,28 +2000,8 @@ export function fishStopText(reason: FishStopReason): string {
     return FISH_STOP_TEXT[reason] ?? reason;
 }
 
-/** 一条能照抄的下一步（规矩同 exploreFor/huntFor：只给一条）。 */
-export function fishNextAction(o: FishOutcome): string {
-    if (o.stopReason === 'no_rod' || o.stopReason === 'rod_broke') {
-        // **要用工作台**：fishing_rod 是 3×3 配方，2×2 的 craft 放不下（真机踩过）。
-        return 'useBlock(type="crafting_table", input="3 stick, 2 string", output="1 fishing_rod")';
-    }
-    if (o.caughtTotal > 0) {
-        const first = o.caught[0];
-        const cooked = cookedCounterpartOf(first.name) ?? first.name;
-        return `useBlock(type="furnace", input="${first.count} ${first.name}", output="${first.count} ${cooked}")`;
-    }
-    if (o.stopReason === 'food_enough') return 'stats(type="inventory")';
-    if (o.stopReason === 'no_water') {
-        if (o.water == null) return 'searchForBlock(type="water", search_range=256)';
-        return `goToCoordinates(x=${Math.round(o.water.position.x)}, y=${Math.round(o.water.position.y)}, z=${Math.round(o.water.position.z)}, closeness=3)`;
-    }
-    if (o.stopReason === 'interrupted') return 'stats(type="body")';
-    return `fish(max_ms=${o.maxMs}, max_casts=${o.maxCasts})`;
-}
-
 /**
- * 钓鱼回执（纯函数）：逐竿事实 + 净增量 + 生鱼要烤的提醒 + **一条**下一步。
+ * 钓鱼回执（纯函数）：逐竿事实 + 净增量 + 生鱼要烤的提醒。
  */
 export function fishReceipt(o: FishOutcome): string {
     const lines: string[] = [];
@@ -2113,7 +2057,7 @@ export function fishReceipt(o: FishOutcome): string {
         );
     }
     for (const warning of capLines(o.warnings, HUNT_MAX_FISH_WARNINGS, '警告')) lines.push(warning);
-    lines.push(`下一步（照做即可）：${fishNextAction(o)}`);
+    // 2026-10-30：不再补"下一步"（钓到要不要烤、没竿要不要做，是模型自己的计划）
     // 同 huntReceipt：回执是循环里拼出来的，必须有硬长度上限（单条超长警告也要兜得住）。
     return capReceipt(lines.join('\n'));
 }
@@ -2279,8 +2223,7 @@ export async function fishSkill(
     } else if (foodCountNow >= FISH_FOOD_ENOUGH) {
         stopReason = 'food_enough';
         warnings.push(
-            `背包里已经有 ${foodCountNow} 份能吃的（≥${FISH_FOOD_ENOUGH}）：**不用钓**，去干正事；` +
-                `存粮规则也不许现在把它们吃掉，留着低血期用。`,
+            `背包里已经有 ${foodCountNow} 份能吃的（≥${FISH_FOOD_ENOUGH}）：这一趟**一竿都没抛**，没动。`,
         );
     } else if (water == null || water.distance > FISH_WATER_REACH) {
         stopReason = 'no_water';

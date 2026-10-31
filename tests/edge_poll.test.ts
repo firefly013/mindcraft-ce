@@ -123,10 +123,16 @@ describe('snapshotFromBot', () => {
     expect(snapshotFromBot(stubBot()).belowVoid).toBeUndefined();
 
     // 高坠：mineflayer 没有 fallDistance，判据是"离地 + 下落速度够快"。
-    const falling = (vy: number, onGround: boolean): Record<string, unknown> =>
-      stubBot({ entity: { position: { x: 0, y: 64, z: 0 }, velocity: { x: 0, y: vy, z: 0 }, onGround } });
-    expect(snapshotFromBot(falling(-1.2, false)).fallLethal).toBe(true);
-    expect(snapshotFromBot(falling(-0.5, false)).fallLethal).toBeUndefined();
+    // **阈值跟着血量走**（MC 落伤 = 落距 − 3）：血 20 ⇒ 致死落距 23 格 ⇒ v≈−1.60；
+    // 血 3 ⇒ 致死落距 6 格 ⇒ v≈−0.91。旧代码写死 −1.08（按满血校准），
+    // 真机 2026-10-24：血 3 摔 6 格死了，`world.fall.lethal` 全程没响。
+    const falling = (vy: number, onGround: boolean, health = 20): Record<string, unknown> =>
+      stubBot({ health, entity: { position: { x: 0, y: 64, z: 0 }, velocity: { x: 0, y: vy, z: 0 }, onGround } });
+    expect(snapshotFromBot(falling(-1.7, false)).fallLethal).toBe(true);
+    expect(snapshotFromBot(falling(-1.2, false)).fallLethal).toBeUndefined(); // 满血时 12 格摔不死
+    // 同样 −1.2 的速度，血 3 就是致命的（6 格）——这正是这次修的洞
+    expect(snapshotFromBot(falling(-1.2, false, 3)).fallLethal).toBe(true);
+    expect(snapshotFromBot(falling(-0.5, false, 3)).fallLethal).toBeUndefined();
     // 已经落地：不是坠落风险。
     expect(snapshotFromBot(falling(-1.2, true)).fallLethal).toBeUndefined();
     // 回归线：`fallDistance` 不是 mineflayer 的字段，光有它不能触发

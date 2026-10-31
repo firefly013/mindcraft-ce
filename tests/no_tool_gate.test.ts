@@ -28,11 +28,11 @@ describe('安全门已删除', () => {
 describe('便宜优先工具选择仍是默认便利（不是门）', () => {
   const pick = (name: string, remaining: number) => ({ name, count: 1, maxDurability: 251, durabilityUsed: 251 - remaining });
   it('(d) 只剩一把快断的镐 ⇒ 直接用它，回执里没有"先换"', () => {
-    const choice = chooseToolForJob({ tools: [pick('iron_pickaxe', 4)], usesNeeded: 2 });
+    const choice = chooseToolForJob({ tools: [pick('iron_pickaxe', 4)] });
     expect(choice.name).toBe('iron_pickaxe');
     expect(choice.message).not.toContain('先换');
   });
-  it('(a) 3 把铁镐含剩 4 次、活只要 2 次 ⇒ 用剩 4 次那把（便宜优先）', () => {
-    expect(chooseToolForJob({ tools: [pick('iron_pickaxe', 250), pick('iron_pickaxe', 4)], usesNeeded: 2 }).remaining).toBe(4);
+  it('(a) 3 把铁镐含剩 4 次 ⇒ 用剩 4 次那把（便宜优先）', () => {
+    expect(chooseToolForJob({ tools: [pick('iron_pickaxe', 250), pick('iron_pickaxe', 4)] }).remaining).toBe(4);
   });
 });

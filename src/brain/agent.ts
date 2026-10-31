@@ -446,6 +446,10 @@ export class Agent {
     async _setupEventHandlers(save_data: unknown, init_message: string | null): Promise<void> {
         void save_data;
 
+        // 手动模式（profile 没有 model）：没有会话可写，也没有模型要问候。
+        // 事件照旧进 intake，等谁来读就是谁的事——CLI 读的是 cliEvents。
+        if (this.wiring == null) return;
+
         if (init_message && save_data) {
             // 载入旧存档时不会走 handleMessage（那会把开场白当成新事件重放），
             // 但开场白本身得留在上下文里。被动写一条 entry：不唤醒模型。
@@ -698,6 +702,14 @@ export class Agent {
     private async openRuntime(caps: BodyCapabilities): Promise<void> {
         const profile = this.profile;
         if (profile == null) return;
+        // **没有 model = 手动模式**：身体照连、工具照跑（CLI 走 bodyAct），
+        // 但不建会话、不调模型。这是 `cli spawn` 早就承诺过的"木偶"：
+        // 想自己操控一个角色，就不该给它配脑子。
+        if (profile['model'] == null) {
+            this.log.with('lifecycle').info({ event: 'manual-mode', bot: this.name });
+            console.log(`${this.name} 手动模式：profile 没有 model，只接受 CLI 命令。`);
+            return;
+        }
         const baseDir = `./bots/${this.name}`;
         const sink = createRequestLogSink({ dir: `${baseDir}/logs`, tools: () => this.toolNames() });
         try {
@@ -1207,10 +1219,15 @@ export class Agent {
     /** 跑一条命令（工具或内置命令）。`force` = 先把身体抢过来再跑。 */
     private async runOneCommand(name: string, args: Record<string, unknown>, force: boolean): Promise<string> {
         // 内置命令（不是游戏工具）：这些得在大脑进程里跑，因为要碰会话数据库。
-        if (name === 'tools') return this.cliListTools();
-        if (name === 'jobs') return this.cliListJobs();
-        if (name === 'history') return await this.cliHistory(Number(args.limit ?? 40) || 40);
-        if (name === 'events') return this.cliRecentEvents(Number(args.limit ?? 30) || 30);
+        // 它们**也拍照**（覆盖写 latest）——"CLI 被调用就留一张现场"，不分命令种类。
+        if (name === 'tools') return await this.attachScreenshotFile(this.cliListTools(), false);
+        if (name === 'jobs') return await this.attachScreenshotFile(this.cliListJobs(), false);
+        if (name === 'history') {
+            return await this.attachScreenshotFile(await this.cliHistory(Number(args.limit ?? 40) || 40), false);
+        }
+        if (name === 'events') {
+            return await this.attachScreenshotFile(this.cliRecentEvents(Number(args.limit ?? 30) || 30), false);
+        }
 
         if (force) {
             try {
@@ -1221,6 +1238,17 @@ export class Agent {
         }
         const found = this.catalog.get(name);
         if (found == null) return `没有这条命令：${name}。用 tools 看看有哪些。`;
+        // **参数名写错必须当场报错**（真机 2026-10-23：`cli equip --type stone_pickaxe`
+        // 与 `cli mineBlock --type …` 都被静默忽略——人以为换好了镐，下一条命令又报
+        // "没有工具"；`mineBlock` 更离谱，报"(undefined,undefined,undefined) 读不到方块"。
+        // 一个拼错的参数浪费十几分钟，这是 CLI 最不该沉默的地方。位置参数会被铺成
+        // '0','1'…（由 `Agent.runOneCommand` 按声明顺序展开），不在校验范围。
+        const declared = new Set(Object.keys(found.params ?? {}));
+        const unknown = Object.keys(args).filter((key) => !/^\d+$/.test(key) && !declared.has(key));
+        if (unknown.length > 0) {
+            const valid = declared.size > 0 ? [...declared].join(', ') : '(这条命令没有参数)';
+            return `参数名不认识：${unknown.map((key) => `--${key}`).join('、')}。${name} 的参数是：${valid}。`;
+        }
         // **不在大脑里执行 `perform`**：那些实现全是 mineflayer 调用。走协议到
         // 身体上去跑，由那边 `executeToolCall` 按同样的具名参数展开——语义一致。
         const result = await this.bodyAct(name, args);
@@ -1228,22 +1256,36 @@ export class Agent {
         // **CLI 这条路不走 `commandToRegistration`**（那个是给模型用的，把图塞进
         // 工具回执的多模态 content 里）。这里是终端，塞 base64 只会刷屏——
         // 存成临时文件，回执给路径，人自己打开看。
-        return found.withScreenshot === true ? await this.attachScreenshotFile(text) : text;
+        // 每条命令都存：stats 每次一张独立文件，其余覆盖写 latest（见 attachScreenshotFile）。
+        return await this.attachScreenshotFile(text, found.withScreenshot === true);
     }
 
     /**
      * 把这一刻的画面存成临时文件，回执里给路径。
      *
+     * **每次 CLI 调用都拍一张**：命令行是外部唯一的一双眼睛，跑完一条命令却不看
+     * 结果长什么样，等于闭着眼开车。两种生命周期：
+     *   - `stats`（声明了 `withScreenshot`）：**每次一个独立文件**，按时间排下来
+     *     就是一条可回看的现场时间线；
+     *   - 其余命令：固定写 `<name>-latest.jpg`，**不断覆盖**——只关心"现在什么样"。
+     *
      * 为什么不直接给 base64：终端显示不了图片，几千个字符只会把有用信息淹没。
      * 存 Temp 是系统临时目录（`os.tmpdir()`），系统会自己清理，不用我们管生命周期。
+     *
+     * 拍不到就**如实说**（相机没开 / 还没进游戏）。非 stats 命令不为此多刷一行
+     * ——它们的正文才是重点，没有图不该变成噪音。
      */
-    private async attachScreenshotFile(text: string): Promise<string> {
+    private async attachScreenshotFile(text: string, keepHistory: boolean): Promise<string> {
         const b64 = await this.captureScreenshot();
-        if (b64 == null) return `${text}\n\n（没拍到画面：相机没开，或者还没就绪）`;
+        if (b64 == null) {
+            return keepHistory ? `${text}\n\n（没拍到画面：相机没开，或者还没就绪）` : text;
+        }
         try {
             const dir = join(tmpdir(), 'mindcraft-cli');
             mkdirSync(dir, { recursive: true });
-            const file = join(dir, `${this.name}-${Date.now()}.jpg`);
+            const file = keepHistory
+                ? join(dir, `${this.name}-${Date.now()}.jpg`)
+                : join(dir, `${this.name}-latest.jpg`);
             writeFileSync(file, Buffer.from(b64, 'base64'));
             return `${text}\n\n画面：${file}`;
         } catch (err: unknown) {

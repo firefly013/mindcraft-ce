@@ -5,7 +5,7 @@ import { enterNether } from '../library/nether_portal.js';
 import { markDiscarded } from '../auto_pickup.js';
 import { permits } from '../safety/permits.js';
 import { safeguards } from '../safety/safeguards.js';
-import { collectOverrideFacts, deathCostLine, disableSafeguardsVerdict } from '../safety/reflex_override.js';
+import { collectOverrideFacts, disableSafeguardsVerdict } from '../safety/reflex_override.js';
 import { DANGEROUS_OPS, isAuthorizable } from '../safety/dangerous_ops.js';
 import { td, tp, MESSAGES } from '../../shared/prompts.js';
 import { formatPlaceHereReceipt } from '../library/placement_guard.js';
@@ -384,13 +384,14 @@ export const actionsList: AgentCommand[] = [
         params: {
             'x': { type: 'float', description: tp('mineBlock', 'x') },
             'y': { type: 'float', description: tp('mineBlock', 'y') },
-            'z': { type: 'float', description: tp('mineBlock', 'z') }
+            'z': { type: 'float', description: tp('mineBlock', 'z') },
+            'force': { type: 'boolean', description: tp('mineBlock', 'force') },
         },
-        perform: runAsAction(async (agent: any, x: number, y: number, z: number) => {
+        perform: runAsAction(async (agent: any, x: number, y: number, z: number, force?: boolean) => {
             // **挖指定的那一格**。collectBlocks 是自己找最近的、digDown 只会往下；
             // 模型真机报过硬缺口："我在 100 格深的洞里没有挖掉头顶方块的工具，
             // 所以搭不了落脚点"。和 placeBlock 对称的原语。
-            await skills.mineBlockAt(agent.bot, x, y, z);
+            await skills.mineBlockAt(agent.bot, x, y, z, force === true);
         })
     },
     {
@@ -433,19 +434,23 @@ export const actionsList: AgentCommand[] = [
     {
         name: '!digDown',
         description: td('digDown'),
-        params: {'distance': { type: 'int', description: tp('digDown', 'distance'), domain: [1, Number.MAX_SAFE_INTEGER] }},
-        perform: runAsAction(async (agent: any, distance: number) => {
-            await skills.digDown(agent.bot, distance);
+        params: {
+            'distance': { type: 'int', description: tp('digDown', 'distance'), domain: [1, Number.MAX_SAFE_INTEGER] },
+            'force': { type: 'boolean', description: tp('digDown', 'force') },
+        },
+        perform: runAsAction(async (agent: any, distance: number, force?: boolean) => {
+            await skills.digDown(agent.bot, distance, force === true);
         })
     },
     {
         name: '!stairUp',
         description: td('stairUp'),
         params: {
-            'distance': { type: 'int', description: tp('stairUp', 'distance'), domain: [1, 64] }
+            'distance': { type: 'int', description: tp('stairUp', 'distance'), domain: [1, 64] },
+            'force': { type: 'boolean', description: tp('stairUp', 'force') },
         },
-        perform: runAsAction(async (agent: any, distance: number) => {
-            await skills.stairUp(agent.bot, distance);
+        perform: runAsAction(async (agent: any, distance: number, force?: boolean) => {
+            await skills.stairUp(agent.bot, distance, force === true);
         }, 4)
     },
     {
@@ -558,16 +563,8 @@ export const actionsList: AgentCommand[] = [
             const facts = collectOverrideFacts(agent);
             const verdict = disableSafeguardsVerdict(facts);
             if (!verdict.allowed) return pad(verdict.text);
-            // **三方互锁的放行只针对呼吸反射**：不碰全局 safeguards，只让 surface 停 60 秒
-            // （其它保命照旧）。这是"引擎造出来的墙由引擎拆"，不是"允许随便关保命"。
-            if (typeof verdict.grantSurfaceMs === 'number' && verdict.grantSurfaceMs > 0) {
-                const enable = (agent as { enableSurfaceStandDown?: (ms: number) => void }).enableSurfaceStandDown;
-                if (typeof enable === 'function') enable.call(agent, verdict.grantSurfaceMs);
-                return pad(verdict.text);
-            }
             const honesty =
-                '\n    说明：上面那句"原因"是**你自己写的理由**，不是安全评估；关掉之后出事由你承担。' +
-                '\n    ' + deathCostLine(facts);
+                '\n    说明：上面那句"原因"是**你自己写的理由**，不是安全评估；关掉之后出事由你承担。';
             const byCalls = typeof calls === 'number' && Number.isFinite(calls) && calls > 0;
             if (byCalls) {
                 safeguards.suppressCalls(calls, reason, Date.now());

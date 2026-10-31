@@ -21,7 +21,6 @@ import {
     chooseTravelLayer,
     normalizeDimensionName,
     planTravelLegs,
-    travelNextAction,
     travelReceipt,
     travelResumeCall,
     travelToSkill,
@@ -276,7 +275,7 @@ describe('travelTo：一次调用往前走（执行）', () => {
         expect(receipt).toContain('时间预算用完');
         const next = receipt.trimEnd().split('\n').at(-1) ?? '';
         // 下界水平长途会自动带上推荐层高，续跑照抄即可
-        expect(next).toBe('下一步（照做即可）：travelTo(x=500, y=70, z=0, layer=116, max_ms=60000)');
+        expect(next).not.toContain('照做即可');
     });
 
     it('前方是岩浆 ⇒ 停，且用的是 mineTunnel 的原话与下一步（不放宽安全门）', async () => {
@@ -296,7 +295,7 @@ describe('travelTo：一次调用往前走（执行）', () => {
         expect(receipt).toContain('前方');
         expect(receipt).toContain('岩浆');
         expect(receipt).toContain('(4, 70, 0)');
-        expect(receipt.trimEnd().split('\n').at(-1)).toBe('下一步（照做即可）：moveAway(distance=8)');
+        expect(receipt.trimEnd().split('\n').at(-1)).not.toContain('照做即可');
     });
 
     // 用户判决（2026-10-21）：'加安全门就是过度设计……当我们的设计不能省事的时候，这就是坑了'。
@@ -365,9 +364,7 @@ describe('travelTo：诚实拒绝（不出发）', () => {
         expect(receipt).toContain('**没出发**');
         expect(receipt).toContain('没有镐');
         expect(receipt).toContain('工作台');
-        expect(receipt.trimEnd().split('\n').at(-1)).toBe(
-            '下一步（照做即可）：useBlock(type="crafting_table", input="3 cobblestone, 2 stick", output="1 stone_pickaxe")',
-        );
+        expect(receipt.trimEnd().split('\n').at(-1)).not.toContain('照做即可');
         expect(h.bot.entity.position.x).toBe(0);
     });
 
@@ -378,7 +375,7 @@ describe('travelTo：诚实拒绝（不出发）', () => {
         expect(receipt).toContain('**没出发**');
         expect(receipt).toContain('目标不在当前维度');
         expect(receipt).toContain('enterNether()');
-        expect(receipt.trimEnd().split('\n').at(-1)).toBe('下一步（照做即可）：enterNether()');
+        expect(receipt.trimEnd().split('\n').at(-1)).not.toContain('照做即可');
     });
 
     it('坐标读不出来 ⇒ 拒绝（不当成 0）', async () => {
@@ -428,7 +425,7 @@ describe('travelTo：不许挖穿容器 + 小推进必须点名拦路的东西�
         expect(receipt).toContain('卡在');
         expect(receipt).toContain('chest');
         expect(receipt).toContain('(1, 70, 0)');
-        expect(receipt.trimEnd().split('\n').at(-1)).toBe('下一步（照做即可）：mineTunnel(length=2, direction="+z", handoff="travelTo")');
+        expect(receipt.trimEnd().split('\n').at(-1)).not.toContain('照做即可');
     });
 
     it('寻路卡住（一直不靠近）⇒ **15 秒熔断**、停手改挖隧道，而不是干等 90 秒', async () => {
@@ -476,16 +473,14 @@ describe('travelTo ↔ mineTunnel 不许互相踢皮球（真机：同一位置�
         expect(receipt).toContain('(1, 70, 0)');
         expect(receipt).toContain('容器/功能方块');
         // 交给 mineTunnel 的建议**盖了章**（模型照抄就带着 handoff 走）
-        expect(receipt.trimEnd().split('\n').at(-1)).toBe(
-            '下一步（照做即可）：mineTunnel(length=2, direction="+z", handoff="travelTo")',
-        );
+        expect(receipt.trimEnd().split('\n').at(-1)).not.toContain('照做即可');
         expect(receipt).not.toContain('踢皮球');
     });
 
-    it('**踢皮球熔断**：travelTo → mineTunnel → travelTo ⇒ 第二次拒绝再交回去，并报循环', async () => {
+    it('**踢皮球熔断**：travelTo → mineTunnel → travelTo ⇒ 第二次识别出循环', async () => {
         const h = blockedHarness();
         const first = await travelToSkill(h.bot, 8, 70, 0, 300_000, undefined, undefined, h.deps);
-        expect(first).toContain('handoff="travelTo"'); // 第一次：正常交出去
+        expect(first).not.toContain('踢皮球'); // 第一次：正常交出去
 
         // 兄弟跑一趟、**也动不了**（往 +x 就是那三个箱子：真机里两边都不动才是循环）
         await mineTunnelSkill(h.bot, 2, 2, '+x', h.deps);
@@ -497,20 +492,19 @@ describe('travelTo ↔ mineTunnel 不许互相踢皮球（真机：同一位置�
         expect(second).toContain('mineTunnel');
         expect(second).toContain('卡在'); // 说清两边都不动的原因
         // 拒绝再交回去：最后一行换成**不是兄弟工具**的出路
-        expect(second.trimEnd().split('\n').at(-1)).toBe('下一步（照做即可）：stats(type="body")');
+        expect(second.trimEnd().split('\n').at(-1)).not.toContain('照做即可');
         expect(second).not.toContain('handoff="travelTo"');
         expect(second).not.toContain('mineTunnel(length=2');
     });
 
-    it('正常交接不受影响：兄弟没跑过 ⇒ 照样盖章交出去（不是"一律拒绝"）', async () => {
+    it('正常交接不受影响：兄弟没跑过 ⇒ 第一次不报循环（不是"一律拒绝"）', async () => {
         const h = blockedHarness();
         const first = await travelToSkill(h.bot, 8, 70, 0, 300_000, undefined, undefined, h.deps);
-        expect(first).toContain('handoff="travelTo"');
         expect(first).not.toContain('踢皮球');
         // 换个 bot（没有账本）也一样：第一次永远放行
         const fresh = blockedHarness();
         const again = await travelToSkill(fresh.bot, 8, 70, 0, 300_000, undefined, undefined, fresh.deps);
-        expect(again).toContain('handoff="travelTo"');
+        expect(again).not.toContain('踢皮球');
     });
 });
 
@@ -551,9 +545,8 @@ describe('travelTo：搭桥（横向的 pillarUp）', () => {
         expect(h.bridgeCalls).toHaveLength(0);
         expect(h.bot.entity.position.x).toBe(0);
         expect(receipt).toContain('没有能垫的方块');
-        const next = receipt.trimEnd().split('\n').at(-1) ?? '';
-        expect(next).not.toContain('pillarUp');
-        expect(next).toContain('mineTunnel(length=2');
+        // 2026-10-30：不再给"下一步"（用 mineTunnel 还是别的，是模型的判断）
+        expect(receipt).not.toContain('照做即可');
     });
 
     it('**连续两次调用都不许"推进 0 格 + 同一个门"**（有方块就必须走出这个洞）', async () => {
@@ -634,7 +627,7 @@ describe('travelTo：搭桥（横向的 pillarUp）', () => {
         expect(receipt).toContain('搭桥');
         expect(receipt).toContain('都没成功');
         expect(receipt).toContain('试了');
-        expect(receipt.trimEnd().split('\n').at(-1)).toBe('下一步（照做即可）：moveAway(distance=3)');
+        expect(receipt.trimEnd().split('\n').at(-1)).not.toContain('照做即可');
     });
 
     it('桥下是岩浆 → 拒绝搭桥（沿用液体门的措辞，一块都不垫）', async () => {
@@ -651,7 +644,7 @@ describe('travelTo：搭桥（横向的 pillarUp）', () => {
 
         expect(h.bridgeCalls).toHaveLength(0);
         expect(receipt).toContain('就是岩浆（桥下面）');
-        expect(receipt.trimEnd().split('\n').at(-1)).toBe('下一步（照做即可）：moveAway(distance=8)');
+        expect(receipt.trimEnd().split('\n').at(-1)).not.toContain('照做即可');
     });
 
     it('搭桥之后继续正常挖：**没有重复挖、也没有漏步**（连续性不变式）', async () => {
@@ -692,7 +685,7 @@ describe('travelTo：进度必须是量出来的（真机 02:0x：挖了但位�
         expect(receipt).toContain('**矛盾**');
         expect(receipt).toContain('别把挖掉的方块当成走过的路');
         // 位移 0 就不许给"接着走"的同一条调用
-        expect(lastLineOf(receipt)).toBe('下一步（照做即可）：stats(type="body")');
+        expect(lastLineOf(receipt)).not.toContain('照做即可');
         expect(lastLineOf(receipt)).not.toContain('travelTo(');
     });
 
@@ -706,8 +699,8 @@ describe('travelTo：进度必须是量出来的（真机 02:0x：挖了但位�
         const receipt = await travelToSkill(h.bot, 500, 70, 0, 300_000, undefined, undefined, h.deps);
 
         const next = lastLineOf(receipt);
-        expect(next.startsWith('下一步（照做即可）：')).toBe(true);
-        expect(next).not.toContain('travelTo(');
+        expect(next).not.toContain('照做即可');
+        expect(receipt).not.toContain('travelTo(x=500');
         expect(displacementOf(receipt)).toBe(0);
     });
 });
@@ -716,12 +709,11 @@ describe('travelTo：几何不变式（续跑真的接得上）', () => {
     it('两次调用的接点严格连续：第二次从第一次停下那点出发，剩余距离单调减少，不回头', async () => {
         // 预算刚好挖一段：每格 400ms × 60s ≈ 145 格
         const h = travelHarness({ pos: { x: 0, y: 70, z: 0 }, msPerDig: 400 });
-        const first = await travelToSkill(h.bot, 500, 70, 0, 60_000, undefined, undefined, h.deps);
+        await travelToSkill(h.bot, 500, 70, 0, 60_000, undefined, undefined, h.deps);
         const stop1 = { ...h.bot.entity.position };
         const remaining1 = 500 - stop1.x;
 
-        const resume = /下一步（照做即可）：(travelTo\([^)]*\))/.exec(first)?.[1] ?? '';
-        expect(resume).toBe('travelTo(x=500, y=70, z=0, layer=116, max_ms=60000)');
+        // 2026-10-30：回执不再给"续跑调用"，但**几何必须连续**这条不变式还要守
         expect(remaining1).toBeGreaterThan(0);
 
         // 第二趟：**同一个目标**，所以它必然从断点接着往前走
@@ -737,7 +729,7 @@ describe('travelTo：几何不变式（续跑真的接得上）', () => {
         expect(remaining1 - remaining2).toBeLessThanOrEqual(remaining1 + 1);
     });
 
-    it('travelResumeCall / travelNextAction 是纯函数：目标坐标原样带回去，layer 也带上', () => {
+    it('travelResumeCall 是纯函数：目标坐标原样带回去，layer 也带上；回执不再排下一步', () => {
         const base = {
             target: { x: -332, y: 116, z: 88 },
             start: { x: 0, y: 70, z: 0 },
@@ -763,16 +755,9 @@ describe('travelTo：几何不变式（续跑真的接得上）', () => {
         } satisfies TravelOutcome;
 
         expect(travelResumeCall(base)).toBe('travelTo(x=-332, y=116, z=88, layer=116, max_ms=300000)');
-        expect(travelNextAction(base)).toBe(travelResumeCall(base));
-        // 安全门自己的下一步优先（不许用"续跑"把它盖掉）
-        expect(travelNextAction({ ...base, gateNextCall: 'moveAway(distance=8)' })).toBe('moveAway(distance=8)');
-        expect(travelNextAction({ ...base, stop: 'arrived' })).toBe('stats(type="body")');
-        expect(travelNextAction({ ...base, stop: 'no_pickaxe' })).toContain('crafting_table');
-        expect(travelNextAction({ ...base, stop: 'wrong_dimension', detail: '目标是 the_nether' })).toBe('enterNether()');
-        // 回执结尾永远只有一条"下一步"
+        // 2026-10-30：回执只报事实，不再给"下一步"（续跑还是换路，是模型的判断）
         const text = travelReceipt(base);
-        const nextLines = text.split('\n').filter((line) => line.startsWith('下一步（照做即可）：'));
-        expect(nextLines).toHaveLength(1);
+        expect(text).not.toContain('照做即可');
         expect(text).toContain('离目标还剩');
     });
 

@@ -69,52 +69,229 @@ export function log(bot: any, ...messages: any[]): void {
 }
 
 /**
- * 徒手能挖的最长耗时（毫秒）。
+ * 这块方块**必须有工具**才掉东西吗（用户 2026-10-27 的裁定）。
  *
- * 空手破坏"要镐才有掉落"的软方块——下界岩 0.4（约 2s）、沙子 0.5（2.5s）、
- * 沙砾 0.6（3s）——都在 3 秒内；石头 1.5 要 7.5s、深板岩 3 要 15s，
- * 不该鼓励徒手硬挖。门槛卡在 3s 正好把"挖得动"和"挖到天亮"分开。
- */
-/**
- * 徒手挖穿的上限（毫秒）。
+ * 判据只有原版数据 `harvestTools`：空表/缺失 = 空手也能正常收获
+ * （泥土/沙/沙砾/原木这类），非空 = 只有表里的工具才有掉落
+ * （石头/**下界岩**要镐，黑曜石要钻石镐）。
+ * ⚠️ **下界岩不是"软方块"**：空手挖得开（约 2 秒），但**一个也不掉**。
  *
- * **3000 → 3200 的理由（真机 2026-10-19/20）**：`oak_log` 徒手 digTime 正好
- * **3000ms**（hardness 2.0 × 1.5），而判定是 `ms <= 上限` ⇒ 零余量，
- * 浮点误差或数据版本一变就掉出去，木头的"空手可挖"承诺立刻失效
- * （而这是空手 bootstrap 链的第一步：木头 → 木板 → 工作台 → 木剑/木镐）。
- * 抬到 3200 只多放行"徒手 3.0–3.2 秒"这一档，等于把这几个原木的抖动吃掉。
+ * ⚠️ **不再按"徒手耗时"猜**。以前这里有一条 `BARE_HAND_MAX_DIG_MS = 3200` 的豁免：
+ * 空手 ≤3.2 秒就放行。那是错的判据——它回答的是"挖得快不快"，而想要的是
+ * "**身上有没有工具能让它正常掉落**"。两者在真机上给出的答案不一样
+ * （比如背包里有镐、手上没举起来：耗时判据说"不行"，能力判据说"行"）。
  */
-export const BARE_HAND_MAX_DIG_MS = 3200;
+export function requiresHarvestTool(block: any): boolean {
+    try {
+        return Object.keys(block?.harvestTools ?? {}).length > 0;
+    } catch {
+        return false;
+    }
+}
+
+/** 工具档位（**只**在"都能收获"时用来挑最好的一把；不参与能不能挖的判断）。 */
+function toolRank(name: string): number {
+    if (name.startsWith('netherite_')) return 5;
+    if (name.startsWith('diamond_')) return 4;
+    if (name.startsWith('iron_')) return 3;
+    if (name.startsWith('stone_')) return 2;
+    if (name.startsWith('golden_')) return 1;
+    if (name.startsWith('wooden_')) return 0;
+    return -1;
+}
+
+export interface HarvestTool {
+    name: string;
+    /** 物品 type id —— `block.canHarvest()` 吃的是这个。 */
+    type: number;
+}
 
 /**
- * 没有正确工具时，能不能徒手挖掉这个方块（只求挖开，不保证掉落）。
+ * **背包里**能收获这块方块的工具，按档位从高到低；一把都没有 ⇒ 空数组。
  *
- * 为什么需要：模型真机报告无镐的机器人在下界被封在实心 netherrack 口袋里
- * ——寻路器因为 `Cannot break netherrack with current tools` 不肯挖路，
- * `mineBlock` 又因为 `canHarvest` 为 false 直接拒绝，两边一夹就是永久卡死
- * （Feedback #38/#43：`move` 只挪 0.2 格、`goToCoordinates` 报寻路停、
- * `mineBlock` 报没有工具）。**挖穿不需要正确工具，只需要挖得动。**
+ * 判据只有 `block.canHarvest(item.type)`（原版语义：这一下会不会掉东西）。
+ * **不看手上拿着什么**：躺在背包里的镐就是"有工具"，换手是执行层的事
+ * （`ensureHarvestTool` 会换上；换不上是另一个 bug，不该在这里判成"没工具"）。
  */
-export function isHandMineable(block: any): boolean {
-    if (block == null) return false;
+export function harvestToolsFor(bot: any, block: any): HarvestTool[] {
+    let items: Array<{ name?: unknown; type?: unknown }>;
+    try {
+        items = (bot?.inventory?.items?.() ?? []) as Array<{ name?: unknown; type?: unknown }>;
+    } catch {
+        return [];
+    }
+    const out: HarvestTool[] = [];
+    const seen = new Set<string>();
+    const consider = (name: unknown, type: unknown): void => {
+        const itemName = typeof name === 'string' ? name : '';
+        const itemType = typeof type === 'number' ? type : null;
+        if (itemName === '' || itemType == null) return;
+        const key = `${itemType}:${itemName}`;
+        if (seen.has(key)) return;
+        let harvests: boolean;
+        try {
+            harvests = block?.canHarvest(itemType) === true;
+        } catch {
+            harvests = false;
+        }
+        if (!harvests) return;
+        seen.add(key);
+        out.push({ name: itemName, type: itemType });
+    };
+    // **手上那把也算"有"**：`items()` 一般包含手持槽，但不能依赖它——
+    // 少算一件就会把"举着镐的人"判成没有工具。
+    consider(bot?.heldItem?.name, bot?.heldItem?.type);
+    for (const item of items) consider(item?.name, item?.type);
+    return out.sort((a, b) => toolRank(b.name) - toolRank(a.name));
+}
+
+/** 背包里最好的那把；一把都没有 ⇒ null。 */
+export function bestHarvestTool(bot: any, block: any): HarvestTool | null {
+    return harvestToolsFor(bot, block)[0] ?? null;
+}
+
+/**
+ * 背包里所有"像工具"的物品名，按档位从高到低。
+ *
+ * **不判能不能收获**——只给"不需要工具的方块"换手兜底用（挖土换铲子是为了快，
+ * 不是为了掉落）。能不能收获一律走 `harvestToolsFor`。
+ */
+function harvestToolCandidates(bot: any): string[] {
+    let items: Array<{ name?: unknown }>;
+    try {
+        items = (bot?.inventory?.items?.() ?? []) as Array<{ name?: unknown }>;
+    } catch {
+        return [];
+    }
+    return items
+        .map((item) => (typeof item?.name === 'string' ? item.name : ''))
+        .filter(
+            (name) =>
+                name.endsWith('_pickaxe') || name.endsWith('_axe') || name.endsWith('_shovel') || name.endsWith('_hoe'),
+        )
+        .sort((a, b) => toolRank(b) - toolRank(a));
+}
+
+/** 用某个工具 type（null = 空手）挖这块要多久；读不到返回 null。 */
+export function digTimeWith(block: any, toolType: number | null): number | null {
+    if (block == null) return null;
+    if (typeof block.digTime === 'function') {
+        try {
+            const t = block.digTime(toolType, false, false, false);
+            if (Number.isFinite(t) && t > 0) return t;
+            if (t === Infinity) return null;
+        } catch {
+            // 落到徒手估算。
+        }
+    }
+    return bareHandDigMs(block);
+}
+
+/** 徒手挖这个方块要多久（毫秒）；读不到/挖不动返回 null。 */
+export function bareHandDigMs(block: any): number | null {
+    if (block == null) return null;
     const hardness = typeof block.hardness === 'number' ? block.hardness : null;
-    if (hardness == null || hardness < 0) return false;   // -1 = 不可破坏（基岩/屏障）
-    if (block.diggable === false) return false;
-    let ms: number | null = null;
+    if (hardness == null || hardness < 0) return null;
+    if (block.diggable === false) return null;
     if (typeof block.digTime === 'function') {
         try {
             const t = block.digTime(null, false, false, false);
-            if (Number.isFinite(t) && t > 0) ms = t;
-            else if (t === Infinity) return false;
+            if (Number.isFinite(t) && t > 0) return t;
+            if (t === Infinity) return null;
         } catch {
-            ms = null;
+            // 落到下面的经验公式。
         }
     }
-    // 没有 digTime（替身/旧版本）：徒手基准 硬度 × 5 秒。
-    if (ms == null) ms = hardness * 5000;
-    return ms <= BARE_HAND_MAX_DIG_MS;
+    return hardness * 5000;
 }
 
+/**
+ * 挖掘只有两种意图（用户 2026-10-24 定的设计；判据 2026-10-27 修正）：
+ *
+ *  1. **采集**（默认，`force` 缺省/false）：我要这一格的**掉落物**。
+ *     判据是「**背包里**有没有能收获它的工具」——不是"手上举着什么"，也不是
+ *     "空手挖它快不快"（用户 2026-10-27：手上没举起来 ≠ 没有工具）。
+ *  2. **挖穿**（`force=true`）：我不在乎掉落，用最好的工具把它挖下来。
+ *     可能很慢（石头徒手 7.5 秒、黑曜石 250 秒），目的就是"挖开"——
+ *     开路、逃命、拆挡路的墙。**只有真的挖不动（基岩/不可破坏）才拒绝。**
+ *
+ * 为什么不再"猜"：以前这里靠 `isStuckInPlace`（头顶/四面实心）**推断**模型是不是卡住了，
+ * 卡住才放宽到 12 秒。那是工具替模型做决定，而且猜的维度也不对——模型想强制挖的时候
+ * 往往并不"被困住"（抄近路、赶时间、拆一面墙），而"被困住"也可能根本不想挖。
+ * **意图只能由调用方说出来。**
+ */
+export function planDig(
+    bot: any,
+    block: any,
+    force: boolean = false,
+): {
+    ok: boolean;
+    /** 预计挖多久（毫秒）；null = 读不到。 */
+    ms: number | null;
+    /** 这一下有没有掉落（决定回执怎么说）。 */
+    drops: boolean;
+    /** 给模型看的说明；拒绝时必须是"下一步能照做"的那种。 */
+    note: string;
+} {
+    const heldName = bot?.heldItem?.name ?? '空手';
+    const name = String(block?.name ?? '方块');
+    const secs = (n: number): string => (Math.round(n / 100) / 10).toString();
+
+    if (bot?.game?.gameMode === 'creative') return { ok: true, ms: 0, drops: true, note: '' };
+
+    // **挖不动的先拒**（基岩/屏障）：这条对两种意图都成立，不能等到 force 分支。
+    if (!isBreakable(block)) {
+        return {
+            ok: false,
+            ms: null,
+            drops: false,
+            note: `${name} 挖不动（不可破坏：硬度 ${block?.hardness ?? '?'} 或 diggable=false）。` +
+                'force 也帮不了你——只能绕开，或者换个目标。',
+        };
+    }
+
+    // 判据：这块要工具吗？背包里有没有能收获它的？（**都不看手上举着什么**）
+    const needsTool = requiresHarvestTool(block);
+    const best = bestHarvestTool(bot, block);
+    const ms = digTimeWith(block, best?.type ?? null);
+
+    // ① 不需要工具：泥土/沙/沙砾/原木这类，空手也有掉落，直接挖。
+    // （下界岩不在此列——它要镐：空手能挖开，但一个也不掉，所以走 ③ 让模型加 force。）
+    if (!needsTool) return { ok: true, ms, drops: true, note: '' };
+
+    // ② 需要工具，而背包里有能收获它的：**直接挖**（挖之前会先换上那把）。
+    if (best != null) {
+        const heldIsBest = bot?.heldItem?.name === best.name;
+        return {
+            ok: true,
+            ms,
+            drops: true,
+            note: heldIsBest
+                ? ''
+                : `用 ${best.name}（背包里能收获 ${name} 的最好一把；手上是 ${heldName}，会先换上）。`,
+        };
+    }
+
+    // ③ 需要工具、背包里一把能收获它的都没有（等级不够）。
+    if (force) {
+        return {
+            ok: true,
+            ms,
+            drops: false,
+            note: `**force 挖穿 ${name}**：${ms == null ? '时间读不到' : `约 ${secs(ms)} 秒`}、` +
+                `**没有掉落**（手持 ${heldName}，背包里没有能收获它的工具）——` +
+                '这是为了把它挖开，不是为了采集。',
+        };
+    }
+    return {
+        ok: false,
+        ms,
+        drops: false,
+        note: `没有能挖 ${name} 的工具（手持 ${heldName}，背包里没有能收获它的工具）` +
+            (ms == null ? '（徒手时间读不到）' : `，徒手约 ${secs(ms)} 秒且不掉落`) + '。' +
+            '只想**挖开**它（开路/逃命/拆挡路的墙）就加 `force=true`——那时候没有掉落、会很慢，但会真的挖。',
+    };
+}
 /**
  * 这个方块**到底能不能被挖穿**——与"有没有掉落"无关。
  *
@@ -233,7 +410,8 @@ export function toolBreakNotice(before: HeldToolState, bot: any): string | null 
     if (before.count == null || after == null || after >= before.count) return null;
     const remain = after > 0
         ? `背包里还剩 ${after} 个 ${before.name}，先换下一把。`
-        : `背包里已经没有 ${before.name} 了——接下来挖石头/矿会挖不动；先找替代工具，或对软方块（泥土/沙砾/下界岩）改用空手挖。`;
+        : `背包里已经没有 ${before.name} 了——接下来挖石头/矿会挖不动；先找替代工具。` +
+          '泥土/沙/沙砾这类可以空手挖（有掉落）；石头类和下界岩不行（要镐，只想挖开就 mineBlock(force=true)，没有掉落）。';
     return `⚠ 手上的 ${before.name} 耐久耗尽坏掉了（${before.used}/${before.max}）。${remain}`;
 }
 
@@ -1213,26 +1391,21 @@ export function describeKillGiveUp(
 
     if (info.healthBefore == null || after == null) {
         return (
-            `${head}${teleportNote}\n血量读不到（服务端没给），**看不出掉没掉血**——先看一眼实体表再决定。` +
-            `\n下一步（照做即可）：stats(type="entities")`
+            `${head}${teleportNote}\n血量读不到（服务端没给），**看不出掉没掉血**——这是全部能说的。`
         );
     }
     if (after < info.healthBefore) {
         return (
-            `${head}${teleportNote}\n血量 ${info.healthBefore} → ${after}（**在掉血，只是慢**）：不是打不到，是没打死（护甲/回血/你输出不够）。` +
-            `\n下一步（照做即可）：attack(target="${name}", type="mob")`
+            `${head}${teleportNote}\n血量 ${info.healthBefore} → ${after}（**在掉血，只是慢**）：不是打不到，是没打死（护甲/回血/你输出不够）。`
         );
     }
     if (distance != null && distance > 6) {
-        const target = entity?.position ?? {};
         return (
-            `${head}${teleportNote}\n血量 ${info.healthBefore} → ${after}（**一点没掉**）：**你打不到它**——太远/隔着方块，或者它在水里、在飞。` +
-            `\n下一步（照做即可）：goToCoordinates(x=${Math.round(Number(target.x ?? 0))}, y=${Math.round(Number(target.y ?? 0))}, z=${Math.round(Number(target.z ?? 0))}, closeness=2)`
+            `${head}${teleportNote}\n血量 ${info.healthBefore} → ${after}（**一点没掉**）：**你打不到它**——太远/隔着方块，或者它在水里、在飞。`
         );
     }
     return (
-        `${head}${teleportNote}\n血量 ${info.healthBefore} → ${after}（**一点没掉**，而且就在手边）：它可能是无敌/被方块挡着/根本不在射程内。` +
-        `换个目标，别对着它耗。\n下一步（照做即可）：stats(type="entities")`
+        `${head}${teleportNote}\n血量 ${info.healthBefore} → ${after}（**一点没掉**，而且就在手边）：它可能是无敌/被方块挡着/根本不在射程内。`
     );
 }
 
@@ -1266,6 +1439,22 @@ export async function attackEntity(
         // 用手里已装备的精确武器名，避免插件按子串拿错武器；空手则不指定
         if (bot.heldItem?.name) {
             bot.swordpvp.weaponOfChoice = bot.heldItem.name;
+        }
+        // **追击必须继承我们的移动安全基线**（2026-10-24，真机摔死复盘）：
+        // `swordpvp.attack()` 追目标时走 `bot.pathfinder.setGoal(goal, true)`
+        // （`mineflayer-custom-pvp/lib/sword/swordutil.js:112`），但它**从不调
+        // `setMovements`** ⇒ pathfinder 用的是"最后一次设置的"或者它自己的默认
+        // Movements（`maxDropDown=4`、可垫塔、可乱挖）——我们在 `movementsFor()`
+        // 里设的 `maxDropDown=2` 整个被绕开。真机：huntFor 追一头猪，
+        // 插件按着 `forward+spr­int+jump` 一路冲出崖边，`fell from a high place`。
+        //
+        // 所以在把身体交给插件**之前**，把安全基线重新套上。这和
+        // "安全配置跟着创建实例的地方走"是同一条原则：任何会替我们动身体的
+        // 第三方，都得先拿到同一套安全策略。
+        try {
+            bot.pathfinder.setMovements(movementsFor(bot));
+        } catch {
+            // pathfinder 不在（老版本/替身）就不设，别让攻击本身失败。
         }
         const healthBefore = readEntityHealth(entity);
         await bot.swordpvp.attack(entity);
@@ -1422,7 +1611,15 @@ export async function collectBlock(bot: any, blockType: string, num: number = 1,
 
     const movements: any = movementsFor(bot);
     movements.dontMineUnderFallingBlock = false;
-    movements.dontCreateFlow = true;
+    // **采集不设防水流**（2026-10-24 真机）：`dontCreateFlow = true` 会让
+    // `safeToBreak` 拒掉一切"挖掉会有水流进来"的方块——而水边的树正是这种。
+    // 真机现场：oak_log 就在 1.2 格外的水边，`searchForBlock` 找得到，
+    // `collectBlocks` 却每次都"没有采集到、移动 0 格"：扫描过滤器把水边的
+    // 原木全滤掉了。挖掉一格原木、水流进来一格，是**可恢复的小事**
+    // （有落水/上岸反射兜底），不该由工具替模型否决"我要这个方块"。
+    // `dontCreateFlow` 的真正用武之地是挖**隧道**（mineTunnel 自己设 Movements），
+    // 那里水流进工作面才是真麻烦。
+    movements.dontCreateFlow = false;
 
     // Blocks to ignore safety for, usually next to lava/water
     const unsafeBlocks: string[] = ['obsidian'];
@@ -1468,7 +1665,7 @@ export async function collectBlock(bot: any, blockType: string, num: number = 1,
             break;
         }
         const block: any = blocks[0];
-        await bot.tool.equipForBlock(block);
+        await ensureHarvestTool(bot, block);
         if (isLiquid) {
             const bucket: any = bot.inventory.findInventoryItem('bucket');
             if (!bucket) {
@@ -1487,7 +1684,7 @@ export async function collectBlock(bot: any, blockType: string, num: number = 1,
             log(
                 bot,
                 `没有能挖 ${block.name} 的工具（手持 ${bot?.heldItem?.name ?? '空手'}）；` +
-                    '先换正确的工具（对应镐/铲/斧）再来；急着清路可以用 mineBlock 徒手挖软方块。',
+                    '先换正确的工具（对应镐/铲/斧）再来；急着清路可以用 mineBlock(force=true) 硬挖开（没有掉落）。',
             );
             reportToolBreak();
             return false;
@@ -1703,6 +1900,11 @@ export function digTargetState(bot: any, block: any): {
  * 超时后先 stopDigging 再续挖，并在回执里带目标方块/工具状态。
  */
 export async function digWithTimeout(bot: any, block: any, where: string): Promise<boolean> {
+    // **爆了再换的落点**（用户 2026-10-28）：每次下镐前先确保手里这把能收获它。
+    // 耐久是**每挖完一块扣 1**，所以上一块把镐用碎之后，这里就是换下一把的地方；
+    // 手里已经能收获时 `ensureHarvestTool` 立刻返回（一次 canHarvest 查询），不换手。
+    // 换不出来也不拦——照挖（该没掉落就没掉落，回执会说清）。
+    if (bot?.game?.gameMode !== 'creative') await ensureHarvestTool(bot, block);
     // **工具坏掉要留一句话。** bot.dig 不会因为镐子耐久耗尽而报错——它只是
     // 让那件东西从背包里消失，模型下一轮才发现"手上空了"（Feedback #40）。
     // 统一在这里对账：挖之前/之后同名物品数变少且手持换了人，就是坏了。
@@ -1778,6 +1980,12 @@ async function digOnce(bot: any, block: any, where: string): Promise<boolean> {
             const msg = err instanceof Error ? err.message : String(err);
             if (/Digging aborted/i.test(msg)) {
                 // 外部 health/death/插件调 stopDigging 会走到这里：这是正常中断，不是故障。
+                // **但"被中断"和"没挖到"是两件事**：那一格已经是空气就别报失败
+                // （窄窗口里会出现"挖 stone 失败"而格子其实是空的，模型下一轮对着空气重挖）。
+                if (isAirBlockName(digTargetState(bot, block).name)) {
+                    log(bot, '挖 ' + name + ' ' + where + ' 被外部 stopDigging 中断，但那一格已经是空气——按挖掉算。');
+                    return true;
+                }
                 log(bot, '挖 ' + name + ' ' + where + ' 被外部 stopDigging 正常中断（Digging aborted），本次动作结束。');
                 try {
                     bot.stopDigging?.();
@@ -1853,7 +2061,58 @@ async function digOnce(bot: any, block: any, where: string): Promise<boolean> {
     return false;
 }
 
-export async function breakBlockAt(bot: any, x: number, y: number, z: number): Promise<boolean> {
+/**
+ * **确保手上拿着能挖这块方块的工具**（换手，不换目标）。
+ *
+ * mineflayer 的 `equipForBlock` 对某些方块（深层变种、模组方块）会**原地不动**，
+ * 于是一把躺在背包里的镐被当成"没有工具"——真机 2026-10-23：
+ * `deepslate_diamond_ore` 连续三次报"手持 wooden_axe"，而包里有石镐，钻石就在眼前。
+ * 这里在它之后再补一条：按工具品质从高到低试，能 harvest 就停。
+ *
+ * 为什么这不算"替模型做决定"：目标方块是模型选的，这里只解决"手没举起来"。
+ */
+export async function ensureHarvestTool(bot: any, block: any): Promise<boolean> {
+    const harvests = (): boolean => {
+        try {
+            return block.canHarvest(bot.heldItem ? bot.heldItem.type : null);
+        } catch {
+            return false;
+        }
+    };
+    if (harvests()) return true;
+    // **需要工具的方块：按 `harvestTools` 认（和 planDig 同一个判据），不交给
+    // `equipForBlock`。** 真机 2026-10-23：`deepslate_diamond_ore` 被它换成了
+    // `wooden_axe`，然后整条链路判"没有工具"——包里有镐、钻石在眼前，硬是挖不了。
+    if (requiresHarvestTool(block)) {
+        for (const candidate of harvestToolsFor(bot, block)) {
+            try {
+                await equip(bot, candidate.name);
+            } catch {
+                continue;
+            }
+            if (harvests()) return true;
+        }
+        return false;
+    }
+    // 不需要工具（泥土/沙/原木…）：这一步只为**快**，挑错也无所谓；换不上就算了。
+    try {
+        await bot.tool.equipForBlock(block);
+    } catch {
+        // 换不上就按下面的候选兜底。
+    }
+    if (harvests()) return true;
+    for (const candidate of harvestToolCandidates(bot)) {
+        try {
+            await equip(bot, candidate);
+        } catch {
+            continue;
+        }
+        if (harvests()) return true;
+    }
+    return harvests();
+}
+
+export async function breakBlockAt(bot: any, x: number, y: number, z: number, force: boolean = false): Promise<boolean> {
     /**
      * Break the block at the given position. Will use the bot's equipped item.
      * @param {MinecraftBot} bot, reference to the minecraft bot.
@@ -1886,75 +2145,67 @@ export async function breakBlockAt(bot: any, x: number, y: number, z: number): P
             await goToGoal(bot, new (pf as any).goals.GoalNear(pos.x, pos.y, pos.z, 4));
         }
         if (bot.game.gameMode !== 'creative') {
-            await bot.tool.equipForBlock(block);
-            const itemId: any = bot.heldItem ? bot.heldItem.type : null;
-            if (!block.canHarvest(itemId)) {
-                // 硬方块仍旧拒绝；软方块（下界岩/沙/沙砾）允许徒手挖开——
-                // 理由见 isHandMineable：无镐时被封在方块里，两边都不肯挖
-                // 就是永久卡死（Feedback #38/#43）。
-                if (!isHandMineable(block)) {
-                    // **裸装的真话 + 实测哪条路真的能走**（Lead 2026-10-21 两次踩到）：
-                    // 一开始只给三条通用建议（找软土/找洞穴/换个方向）。用 CLI 当玩家时发现
-                    // **这三条可能一条都不可行**（周围全是石头、只有 2 个土、洞口已不记得），
-                    // 于是模型读到一段"看起来有出路、实际没有"的文案，继续对 stone 发同一命令。
-                    // 现在把建议换成**就地测出来的事实**：附近有没有软方块、有没有洞口、都没有就直说"没路"。
-                    let softNearby = 0;
-                    let softAt: string | null = null;
-                    let caveNearby = 0;
-                    try {
-                        const origin = bot.entity?.position;
-                        if (origin) {
-                            for (let dx = -6; dx <= 6 && softNearby < 1; dx++) {
-                                for (let dy = -4; dy <= 4 && softNearby < 1; dy++) {
-                                    for (let dz = -6; dz <= 6; dz++) {
-                                        const b = bot.blockAt?.(origin.offset(dx, dy, dz));
-                                        if (!b) continue;
-                                        if (b.name === 'dirt' || b.name === 'gravel' || b.name === 'sand'
-                                            || b.name === 'red_sand' || b.name === 'clay') {
-                                            softNearby += 1;
-                                            softAt = `${b.name} @(${Math.round(origin.x + dx)},${Math.round(origin.y + dy)},${Math.round(origin.z + dz)})`;
-                                            break;
-                                        }
-                                    }
-                                }
-                            }
-                            // 洞口：附近有一格空气且它上方也是空气（能钻进去的那种）
-                            for (let dx = -4; dx <= 4 && caveNearby < 1; dx++) {
-                                for (let dy = -2; dy <= 3 && caveNearby < 1; dy++) {
-                                    for (let dz = -4; dz <= 4; dz++) {
-                                        const p = origin.offset(dx, dy, dz);
-                                        const b = bot.blockAt?.(p);
-                                        const up = bot.blockAt?.(p.offset(0, 1, 0));
-                                        const up2 = bot.blockAt?.(p.offset(0, 2, 0));
-                                        if (b?.name === 'air' && up?.name === 'air' && up2?.name === 'air') {
-                                            caveNearby += 1;
-                                            break;
-                                        }
+            // 换手 + 兜底（见 ensureHarvestTool：equipForBlock 认不出的方块会原地不动）。
+            await ensureHarvestTool(bot, block);
+            // **唯一裁判**（planDig）：采集要掉落、挖穿要挖开，两件事分开说。
+            const plan = planDig(bot, block, force);
+            if (!plan.ok) {
+                // **裸装的真话 + 实测哪条路真的能走**（Lead 2026-10-21 两次踩到）：
+                // 一开始只给三条通用建议（找软土/找洞穴/换个方向）。用 CLI 当玩家时发现
+                // **这三条可能一条都不可行**（周围全是石头、只有 2 个土、洞口已不记得），
+                // 于是模型读到一段"看起来有出路、实际没有"的文案，继续对 stone 发同一命令。
+                // 现在把建议换成**就地测出来的事实**：附近有没有软方块、有没有洞口、都没有就直说"没路"。
+                let softNearby = 0;
+                let softAt: string | null = null;
+                let caveNearby = 0;
+                try {
+                    const origin = bot.entity?.position;
+                    if (origin) {
+                        for (let dx = -6; dx <= 6 && softNearby < 1; dx++) {
+                            for (let dy = -4; dy <= 4 && softNearby < 1; dy++) {
+                                for (let dz = -6; dz <= 6; dz++) {
+                                    const b = bot.blockAt?.(origin.offset(dx, dy, dz));
+                                    if (!b) continue;
+                                    if (b.name === 'dirt' || b.name === 'gravel' || b.name === 'sand'
+                                        || b.name === 'red_sand' || b.name === 'clay') {
+                                        softNearby += 1;
+                                        softAt = `${b.name} @(${Math.round(origin.x + dx)},${Math.round(origin.y + dy)},${Math.round(origin.z + dz)})`;
+                                        break;
                                     }
                                 }
                             }
                         }
-                    } catch {
-                        // 读不到世界就退回"未测量"，不编数字。
+                        // 洞口：附近有一格空气且它上方也是空气（能钻进去的那种）
+                        for (let dx = -4; dx <= 4 && caveNearby < 1; dx++) {
+                            for (let dy = -2; dy <= 3 && caveNearby < 1; dy++) {
+                                for (let dz = -4; dz <= 4; dz++) {
+                                    const p = origin.offset(dx, dy, dz);
+                                    const b = bot.blockAt?.(p);
+                                    const up = bot.blockAt?.(p.offset(0, 1, 0));
+                                    const up2 = bot.blockAt?.(p.offset(0, 2, 0));
+                                    if (b?.name === 'air' && up?.name === 'air' && up2?.name === 'air') {
+                                        caveNearby += 1;
+                                        break;
+                                    }
+                                }
+                            }
+                        }
                     }
-                    const measured = softNearby > 0 || caveNearby > 0;
-                    log(
-                        bot,
-                        `没有能挖 ${block.name} 的工具（手持 ${bot?.heldItem?.name ?? '空手'}），空手挖不动 ${block.name}。` +
-                            (measured
-                                ? `**附近实测**：软方块 ${softNearby > 0 ? `有（最近的 ${softAt}）` : '0 个'}；` +
-                                  `可钻的洞口 ${caveNearby > 0 ? '有（4 格内有 3 格高的空腔）' : '0 个'}。` +
-                                  (softNearby > 0
-                                      ? '走那里挖软土是对的。'
-                                      : '那就往洞口方向走，别在这一列凿石头。')
-                                : '**附近实测：6 格内没有 dirt/gravel/sand，4 格内也没有能钻的洞口——这一列确实没路。**' +
-                                  '别再对 stone 发 digDown（只会再得到这一行）：换个方向走远一点找软土/洞口，' +
-                                  '或者用 pillarUp 垫着往上（有方块的话）。'),
-                    );
-                    return false;
+                } catch {
+                    // 读不到世界就退回"未测量"，不编数字。
                 }
-                log(bot, `没有能挖 ${block.name} 的工具（手持 ${bot?.heldItem?.name ?? '空手'}）；它硬度低，改用空手挖（更慢，而且可能不掉落）。`);
+                const measured = softNearby > 0 || caveNearby > 0;
+                log(
+                    bot,
+                    plan.note +
+                        (measured
+                            ? `**附近实测**：软方块 ${softNearby > 0 ? `有（最近的 ${softAt}）` : '0 个'}；` +
+                              `可钻的洞口 ${caveNearby > 0 ? '有（4 格内有 3 格高的空腔）' : '0 个'}。`
+                            : '**附近实测：6 格内没有 dirt/gravel/sand，4 格内也没有能钻的洞口——这一列确实没路。**'),
+                );
+                return false;
             }
+            if (plan.note !== '') log(bot, plan.note);
         }
         // **给 dig 加超时**。mineflayer 的 `bot.dig` promise 在方块中途被改、
         // 被打断、或者 bot 被 Stop 过之后会**永不 resolve**——模型真机三次数据点：
@@ -2111,7 +2362,7 @@ export async function placeBlock(bot: any, blockType: string, x: number, y: numb
             return false;
         }
         log(bot, `Placing air (removing block) at ${target_dest}.`);
-        return await breakBlockAt(bot, x, y, z);
+        return await breakBlockAt(bot, x, y, z, true);
     }
 
     if (settings.cheat && !dontCheat) {
@@ -2224,7 +2475,7 @@ export async function placeBlock(bot: any, blockType: string, x: number, y: numb
             return false;
         }
         log(bot, `${targetBlock.name} in the way at ${targetBlock.position}.`);
-        const removed: boolean = await breakBlockAt(bot, x, y, z);
+        const removed: boolean = await breakBlockAt(bot, x, y, z, true);
         if (!removed) {
             log(bot, `Cannot place ${blockType} at ${targetBlock.position}: block in the way.`);
             return false;
@@ -2737,6 +2988,30 @@ export async function lootContainer(bot: any, block: any): Promise<LootOutcome> 
         return map;
     };
     const before = snapshot();
+    /**
+     * **等背包把这次取物反映出来**（有界，最多 1.2 秒）。
+     *
+     * `withdraw()` 返回只说明"点击包发出去了"；背包内容是服务端随后推的
+     * window_items。点完立刻快照读到的是**旧的**，于是回执会说"一件都没拿走"，
+     * 而东西其实已经进包（真机 2026-10-23：石镐/木板/面包全拿到了，回执说增量 0，
+     * 差点被当成 bug 去修箱子）。这是**没等测量对象**，不是"客户端延迟"——所以
+     * 等它，而不是给它编一个理由。
+     */
+    const snapshotSettled = async (baseline: Map<string, number>): Promise<Map<string, number>> => {
+        const total = (map: Map<string, number>): number => {
+            let sum = 0;
+            for (const count of map.values()) sum += count;
+            return sum;
+        };
+        const target = total(baseline);
+        let current = snapshot();
+        const deadline = Date.now() + 1200;
+        while (total(current) <= target && Date.now() < deadline) {
+            await sleep(50);
+            current = snapshot();
+        }
+        return current;
+    };
     const container: any = await openBlockUi(bot, block);
     try {
         const slots: Array<{ name?: string; type?: number; count?: number } | null> = container?.slots ?? [];
@@ -2789,7 +3064,7 @@ export async function lootContainer(bot: any, block: any): Promise<LootOutcome> 
         } catch {
             // 取物失败也要照实报告（下面的背包增量会说明实际拿到了多少）。
         }
-        const after = snapshot();
+        const after = await snapshotSettled(before);
         const taken: Array<{ name: string; count: number }> = [];
         for (const entry of merged.values()) {
             const gained = (after.get(entry.name) ?? 0) - (before.get(entry.name) ?? 0);
@@ -2803,7 +3078,7 @@ export async function lootContainer(bot: any, block: any): Promise<LootOutcome> 
         const reason =
             takenCount < wantedTotal
                 ? taken.length === 0
-                    ? '点了取物但背包增量是 0——可能是客户端同步延迟，用 stats 核对'
+                    ? '点了取物，背包里没读出新东西（可能没取到，也可能读数还没跟上——用 stats 核对，别据此断定箱子拿不动）'
                     : '有一部分没装下/没取到：剩下的留在箱子里'
                 : null;
         return {
@@ -2990,25 +3265,23 @@ function describeEdibles(edibles: readonly EdibleItem[]): string {
 }
 
 /** 失败之后：说清换哪一种、够不够、要不要先烤/做，并给**一条**能照抄的调用。 */
-function consumeAdvice(bot: any, wanted: string, edibles: readonly EdibleItem[]): { text: string; call: string } {
+function consumeAdvice(bot: any, wanted: string, edibles: readonly EdibleItem[]): { text: string } {
     const others = edibles.filter((e) => normalizeFoodName(e.name) !== normalizeFoodName(wanted));
+    // 2026-10-30 用户裁定：只说事实（还有什么能吃的、还剩几个），
+    // 不排"下一步调用"——吃哪个、要不要烤，是模型自己的判断。
     if (others.length > 0) {
-        const best = others[0] as EdibleItem;
         return {
-            text: `手里还有别的能吃（${others.map((e) => `${e.name}x${e.count}`).join('、')}）：**换一种**比重复同一次调用有用；生肉也能吃但补得少，有熔炉就先烤熟（熟食补得多）。`,
-            call: `consume(item_name="${best.name}")`,
+            text: `背包里还有别的能吃：${others.map((e) => `${e.name}x${e.count}`).join('、')}（生肉也能吃，只是补得少；烤熟补得多）。`,
         };
     }
     const same = wanted === '' ? null : inventoryCountOf(bot, wanted);
     if (same != null && same > 0) {
         return {
-            text: `背包里没有别的食物了，${wanted} 还有 ${same} 个：可以照下面这条再试一次；**如果还是超时，就别在原地反复吃**——先离开/找食物（生肉放熔炉烤熟更划算）。`,
-            call: `consume(item_name="${wanted}")`,
+            text: `背包里没有别的食物了，${wanted} 还有 ${same} 个。`,
         };
     }
     return {
-        text: `背包里没有别的食物，${wanted || '这一种'}也没了：先去找或做吃的（打猎拿生肉→熔炉烤熟），别空着肚子打架。`,
-        call: 'stats(type="inventory")',
+        text: `背包里没有别的食物，${wanted || '这一种'}也没了。`,
     };
 }
 
@@ -3053,21 +3326,22 @@ export async function consume(bot: any, itemName: string = "", options: ConsumeO
             `没吃成：背包里没有 ${wanted || '(没给物品名)'}。${describeEdibles(edibles)}` +
                 `现在 ${formatFoodState(before)}。${advice.text}`,
         );
-        log(bot, `下一步（照做即可）：${advice.call}`);
         return false;
     }
 
-    // ── 存粮规则：**别把最后一口吃掉** ──
+    // ── 存粮规则：**只警告，不拒绝**（用户 2026-10-24 定的原则：工具不许替模型做决定）──
     // 真机教训（2026-10-18 晚）：两个 bot 边打边吃，五小时把 1000 格内能吃的东西全吃光，
     // 之后 food 2 / 血 1.68、背包和所有箱子里都没有食物——"现在吃了，一小时后饿死"。
-    // 所以：包里能直接吃的只剩 ≤2 份、而自己并不饿（food ≥ 14）时，**拒绝动存粮**。
+    // **但这个判断只能由模型做**：它知道自己接下来是去打怪还是回城，工具不知道。
+    // 所以这里照它说的吃，只把后果写进回执（吃掉了最后一份、接下来没吃的了），
+    // 让它当场就能改主意。以前这里是 `return false` 直接拒绝，还为此打过一次
+    // `lowHealthEmergency` 补丁——打补丁正是"工具在猜"的典型症状。
+    // 存粮警告（见下面"只警告不拒绝"）：吃成功了也要把它带进回执，
+    // 否则模型只看到"吃成了"，不知道那是最后一份。
+    let reserveWarning = '';
     const edibleTotal = edibles.reduce((sum, edible) => sum + edible.count, 0);
     const rawInPack = edibles.filter((edible) => cookedCounterpartOf(edible.name) != null);
-    // **低血时存粮保护让位**（Lead 2026-10-21 真机 B：血 7、food 13、背包只剩 1 份腐肉，
-    // `consume` 说"先留着——你现在不饿"，把最后一份也留着 ⇒ 6 分钟无法回血）。
-    // 存粮规则的前提是"你不在危险里"；health ≤ 10 时回血比留粮重要。
-    const lowHealthEmergency = typeof bot?.health === 'number' && bot.health <= 10;
-    if (!lowHealthEmergency && edibleTotal > 0 && edibleTotal <= FOOD_RESERVE_MIN && before.food != null && before.food >= FOOD_RESERVE_COMFORT) {
+    if (edibleTotal > 0 && edibleTotal <= FOOD_RESERVE_MIN && before.food != null && before.food >= FOOD_RESERVE_COMFORT) {
         const keep = edibles.map((edible) => `${edible.name}x${edible.count}`).join('、');
         const rawHint =
             rawInPack.length > 0
@@ -3076,16 +3350,12 @@ export async function consume(bot: any, itemName: string = "", options: ConsumeO
         // 难度说明：Easy/Normal 饿不死，真正致命的是"不能回血 + 挨打"——
         // 说清楚它才不会恐慌性清空存粮（真机原话：一捡到就吃掉，然后饿死）。
         const starving = starvationNote(difficultyOf(bot));
-        log(
-            bot,
-            `consume ${wanted}：**先留着——你现在不饿**（${formatFoodState(before)}）。` +
-                `背包里只剩 ${edibleTotal} 份能吃的（${keep}），这是低血期的救命粮：饿到 food ≤ ${FOOD_RESERVE_COMFORT - 1} 再吃。` +
-                `${rawHint}${starving === '' ? '' : ` ${starving}`} 趁现在去补：钓鱼（工作台做 fishing_rod）／打猎／种小麦。`,
-        );
-        log(bot, `下一步（照做即可）：searchForBlock(type="water", search_range=128)`);
-        return false;
+        reserveWarning =
+            `⚠️ 背包里只剩 ${edibleTotal} 份能吃的（${keep}），这份吃掉之后**短期内没吃的了**。` +
+            `${rawHint}${starving === '' ? '' : ` ${starving}`}` +
+            '接下来趁早补：钓鱼（工作台做 fishing_rod）／打猎／种小麦。';
+        log(bot, reserveWarning);
     }
-
     let failures: string[] = [];
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
         const item = findItem();
@@ -3128,6 +3398,7 @@ export async function consume(bot: any, itemName: string = "", options: ConsumeO
                       : `${countText}（饱食度读数没变，服务端可能还没同步——别再连吃）`;
             const retryNote = retried ? `第 ${attempt - 1} 次同步超时（${failures.join('；')}），退避后重试成功——` : '';
             log(bot, `${retryNote}吃成了：${wanted}（${how}）。`);
+            if (reserveWarning !== '') log(bot, reserveWarning);
             // 生肉只有熟食的一半左右：吃都吃了，但把"下次先烤"说清楚（有熔炉就直接给调用）。
             const cooked = cookedCounterpartOf(wanted);
             const rawValue = foodValueOf(wanted);
@@ -3155,7 +3426,6 @@ export async function consume(bot: any, itemName: string = "", options: ConsumeO
                     : `consume ${wanted}：**无法确认**——调用没报错，但饥饿值和背包数量都读不到，不能证明吃进去了。` +
                           ` 请用 stats(type="inventory") 核对。 ${advice.text}`,
             );
-            log(bot, `下一步（照做即可）：${advice.call}`);
             return false;
         }
         failures.push(failure);
@@ -3177,7 +3447,6 @@ export async function consume(bot: any, itemName: string = "", options: ConsumeO
             (stillHeld ? `东西**还在手上**（${countAfter} 个），可以重试。` : '东西已经不在手上了，先确认背包再决定。') +
             `饥饿值 ${formatFoodDelta(before, after)}——这一口没起效。${advice.text}`,
     );
-    log(bot, `下一步（照做即可）：${advice.call}`);
     return false;
 }
 
@@ -4677,7 +4946,7 @@ export async function tillAndSow(bot: any, x: number, y: number, z: number, seed
             log(bot, `Land is already farmed with ${above.name}.`);
             return true;
         }
-        const broken: boolean = await breakBlockAt(bot, x, y+1, z);
+        const broken: boolean = await breakBlockAt(bot, x, y+1, z, true);
         if (!broken) {
             log(bot, `Cannot cannot break above block to till.`);
             return false;
@@ -4997,7 +5266,7 @@ export function isFootingBlock(
     return tx === fx && tz === fz && (ty === fy || ty === fy - 1);
 }
 
-export async function mineBlockAt(bot: any, x: number, y: number, z: number): Promise<boolean> {
+export async function mineBlockAt(bot: any, x: number, y: number, z: number, force: boolean = false): Promise<boolean> {
     /**
      * 挖掉**指定坐标**的那一格。
      *
@@ -5037,29 +5306,19 @@ export async function mineBlockAt(bot: any, x: number, y: number, z: number): Pr
         return false;
     }
     try {
-        // 尽力换上合适的工具；换不上也让 dig 自己试（原版手也能挖土/木）。
-        try { await bot.tool?.equipForBlock?.(target); } catch { /* best-effort */ }
-        // 工具不够别急着拒绝：**挖穿不等于有掉落**。下界岩/沙/沙砾这类软方块
-        // 徒手也能挖开，只是慢且不掉落；无镐的机器人被封在实心方块里时，
-        // 这是唯一能自己走出来的路（Feedback #38/#43：寻路器报
-        // `Cannot break netherrack with current tools`，mineBlock 又拒绝，
-        // 于是永久卡死）。硬方块（石头/深板岩/黑曜石）仍旧明确拒绝，不白等超时。
-        const heldId: number | null = typeof bot?.heldItem?.type === 'number' ? bot.heldItem.type : null;
-        const heldName = bot?.heldItem?.name ?? '空手';
-        if (
-            bot?.game?.gameMode !== 'creative' &&
-            typeof target.canHarvest === 'function' &&
-            !target.canHarvest(heldId)
-        ) {
-            if (!isHandMineable(target)) {
-                log(bot, '没有能挖 ' + target.name + ' 的工具（手持 ' + heldName + '）；先换镐/正确工具再来。');
+        // **先换上能收获它的工具**（和 planDig 同一个判据：能不能收获看 `harvestTools`）。
+        // 决策说"背包里有"，执行就必须真的举起来——以前这里是 best-effort
+        // `equipForBlock`，它认不出的方块（深层变种/模组方块）会原地不动，
+        // 于是"允许挖"变成"挖了没掉落"。换不上也让 dig 自己试（不需要工具的方块照样掉）。
+        if (bot?.game?.gameMode !== 'creative') await ensureHarvestTool(bot, target);
+        // **唯一裁判**（planDig）：默认是"我要掉落物"，加 force 才是"我只要挖开"。
+        if (bot?.game?.gameMode !== 'creative') {
+            const plan = planDig(bot, target, force);
+            if (!plan.ok) {
+                log(bot, plan.note);
                 return false;
             }
-            log(
-                bot,
-                '没有能挖 ' + target.name + ' 的工具（手持 ' + heldName + '）；它硬度低，改用**空手挖**' +
-                    '（比用镐慢，而且可能不掉落；先挖开走出去，工具以后再补）。',
-            );
+            if (plan.note !== '') log(bot, plan.note);
         }
         // **同一个入口**：mineBlock 以前是裸的 await bot.dig()，8 秒超时没覆盖到它
         // （模型真机报"mineBlock 挖黑曜石空回执×2 + 卡死 280 秒"，而其他 17 格全正常）。
@@ -5127,7 +5386,12 @@ export function classifyDigDownStep(
     const atHead = nameAt(fx, fy + 1, fz);
     if (isDigHazard(atHead)) return { kind: 'stop', reason: 'head is in ' + String(atHead) };
 
-    const targetY = fy - depth;
+    // **永远挖"脚下那一格"**（`targetY = fy - 1`），不是 `fy - depth`
+    // （真机 2026-10-23 用 CLI 通关时定位的索引 bug）：`depth` 是循环序号，
+    // 第 6 步于是去挖脚下 6 格——挖出一个够不着的深孔，接着"走不进去"，
+    // 每次 digDown 都挖 1~6 格就停。这个参数只在判危险/落差时用得上，不该决定目标高度。
+    void depth;
+    const targetY = fy - 1;
     const target = blockAt(fx, targetY, fz);
     if (!target) return { kind: 'stop', reason: 'reached the end of the world' };
     // 目标格是水/岩浆要先报：不能在下方读不到时伪装成 end of world。
@@ -5483,7 +5747,7 @@ export async function pillarUp(bot: any, blocks: number = 1): Promise<boolean> {
             return false;
         }
         if (plan.kind === 'mine') {
-            const dug = await breakBlockAt(bot, plan.target.x, plan.target.y, plan.target.z);
+            const dug = await breakBlockAt(bot, plan.target.x, plan.target.y, plan.target.z, true);
             if (!dug) {
                 log(bot, 'pillarUp 停止：挖头顶方块失败（已完成 ' + done + '/' + wanted + ' 格）。');
                 return false;
@@ -5556,7 +5820,7 @@ export async function pillarUp(bot: any, blocks: number = 1): Promise<boolean> {
                                 (headFilled ? '头部 ' + String(headBlk) : '脚下 ' + String(feetBlk)) +
                                 '），正在挖掉自救——这一格本来绝不该被填。已垫 ' + done + '/' + wanted + ' 格。',
                         );
-                        await breakBlockAt(bot, bx, rescueY, bz);
+                        await breakBlockAt(bot, bx, rescueY, bz, true);
                     }
                 } catch {
                     // 读不到位置就不做判断（宁可少一次检查，也不要因此中断爬升）。
@@ -5578,7 +5842,7 @@ export async function pillarUp(bot: any, blocks: number = 1): Promise<boolean> {
         // 放完再验一次：万一位置抖动让方块落进身体，立刻挖掉它（**绝不把方块留在身体里继续垫**）。
         const placedCell = standingCell;
         if (placed && cellIntersectsBody(bot?.entity?.position, placedCell) === true) {
-            const rescued = await breakBlockAt(bot, placedCell.x, placedCell.y, placedCell.z);
+            const rescued = await breakBlockAt(bot, placedCell.x, placedCell.y, placedCell.z, true);
             log(bot, 'pillarUp 紧急自救：方块落进了身体里，' + (rescued ? '已立刻挖掉' : '**没能挖掉**——先 Stop 再 mineBlock') + '（位置 ' + placedCell.x + ',' + placedCell.y + ',' + placedCell.z + '）。');
             return false;
         }
@@ -5629,7 +5893,7 @@ export async function pillarUp(bot: any, blocks: number = 1): Promise<boolean> {
 }
 
 /** 台阶上行：挖开前方/头顶，跳上高一层的实心格；空着就放一块垫脚。 */
-export async function stairUp(bot: any, blocks: number = 1): Promise<boolean> {
+export async function stairUp(bot: any, blocks: number = 1, force: boolean = false): Promise<boolean> {
     const requested = Math.max(1, Math.floor(blocks));
     // 同 pillarUp：单次上限（真机出现过 258 格的"上地表"）。
     const wanted = Math.min(requested, MAX_VERTICAL_CLIMB_PER_CALL);
@@ -5673,7 +5937,7 @@ export async function stairUp(bot: any, blocks: number = 1): Promise<boolean> {
             return false;
         }
         if (plan.kind === 'mine') {
-            const dug = await breakBlockAt(bot, plan.target.x, plan.target.y, plan.target.z);
+            const dug = await breakBlockAt(bot, plan.target.x, plan.target.y, plan.target.z, force);
             if (!dug) {
                 log(bot, 'stairUp 停止：挖 ' + plan.target.x + ',' + plan.target.y + ',' + plan.target.z + ' 失败（已完成 ' + done + '/' + wanted + ' 格）。');
                 return false;
@@ -5739,7 +6003,7 @@ export async function stairUp(bot: any, blocks: number = 1): Promise<boolean> {
     return false;
 }
 
-export async function digDown(bot: any, distance: number = 10): Promise<boolean> {
+export async function digDown(bot: any, distance: number = 10, force: boolean = false): Promise<boolean> {
     // **入口探针**（同上：区分"工具真在跑"与"两次调用之间的间隔"）。
     log(bot, 'dig-down-entry{' + JSON.stringify({ distance }) + '}');
     /**
@@ -5801,7 +6065,7 @@ export async function digDown(bot: any, distance: number = 10): Promise<boolean>
             continue;
         }
 
-        const dug: boolean = await breakBlockAt(bot, verdict.target.x, verdict.target.y, verdict.target.z);
+        const dug: boolean = await breakBlockAt(bot, verdict.target.x, verdict.target.y, verdict.target.z, force);
         if (!dug) {
             log(bot, 'Dug down ' + (i - 1) + ' blocks, failed to dig block at (' + verdict.target.x + ',' + verdict.target.y + ',' + verdict.target.z + ').');
             return false;
@@ -5811,6 +6075,41 @@ export async function digDown(bot: any, distance: number = 10): Promise<boolean>
         // 这一动作以前完全没有——只挖不走，于是人停在洞口、下一铲继续挖空气。
         const sunkInto = await stepIntoCellClearing(bot, { x: verdict.target.x, y: verdict.target.y, z: verdict.target.z });
         if (!sunkInto.moved) {
+            // **原语走不进去 ⇒ 让寻路器再试一次**（真机 2026-10-23 用 CLI 通关时定位）：
+            // 挖通了却报"走不进去"，而同一次调用的收尾清扫用寻路器一步就进了——
+            // 说明路是通的，只是按键原语在 1×1 洞里推不动人。给 5 秒上限，失败才认输。
+            const viaPath = await (async (): Promise<boolean> => {
+                try {
+                    const goal = new (pf as any).goals.GoalBlock(verdict.target.x, verdict.target.y, verdict.target.z);
+                    let timedOut = false;
+                    await Promise.race([
+                        bot.pathfinder.goto(goal),
+                        new Promise<void>((resolve) =>
+                            setTimeout(() => {
+                                timedOut = true;
+                                resolve();
+                            }, 5_000),
+                        ),
+                    ]);
+                    if (timedOut) {
+                        try {
+                            bot.pathfinder.stop();
+                        } catch {
+                            // 停不下来也不影响下面按实测位移判定。
+                        }
+                    }
+                    const p = bot.entity.position;
+                    return (
+                        Math.hypot(p.x - verdict.target.x - 0.5, p.y - verdict.target.y, p.z - verdict.target.z - 0.5) < 1.2
+                    );
+                } catch {
+                    return false;
+                }
+            })();
+            if (viaPath) {
+                log(bot, 'Dug down ' + i + '/' + distance + ' blocks 后原语没推进，寻路器进去了（继续往下）。');
+                continue;
+            }
             log(bot, 'Dug down ' + (i - 1) + ' blocks 后**下不去**：' + String(sunkInto.reason) + '。');
             log(bot, '建议：先 mineBlock 掉那一格再走；若那是空气/水，改用 goToCoordinates 移到旁边再 digDown，或用 placeHere 垫一块站上去再挖。');
             return false;
@@ -5979,9 +6278,9 @@ export async function goToSurface(bot: any): Promise<boolean> {
         // 它在 y=20、背包只有 2 个土、离地表 45 格、没有镐；在"上不去"这句话之后
         // **原地耗了 3 小时**——不是模型懒，是这个局面在资源上真的无解：
         // 没有方块垫不上去，没有镐挖不动石头，来路是自己挖的竖井。
-        // 而 keepInventory=false 的世界里，**"死一次回出生点"往往是这个局面的最优解**，
-        // 引擎却从来不会这么说，于是模型只能一直试。
         // 判据很窄（没有镐 + 可垫方块 < 高差），只在真无解时才说，不当通用建议。
+        // 只说"这里无解"这个事实 + 手上有什么；**怎么脱身由模型决定**，引擎不推荐任何
+        // 以死亡为代价的做法（2026-10-30 用户裁定）。
         let deadEndAdvice = '';
         try {
             const here = Number(bot?.entity?.position?.y ?? 0);
@@ -5996,9 +6295,7 @@ export async function goToSurface(bot: any): Promise<boolean> {
                 deadEndAdvice =
                     ` **这个局面在资源上无解**：离地表 ${gap} 格、能垫脚的方块只有 ${placeable} 个、` +
                     `而且没有能挖石头的镐——往上没有路，继续在这里试只会耗掉整晚。` +
-                    `你身上一共 ${carried} 件东西，这个档 keepInventory=false：` +
-                    `**如果这里不值得留，让一次死亡把你送回出生点，代价比你想象的更小**，` +
-                    `这比困在竖井底部一直试要强。`;
+                    `你身上一共 ${carried} 件东西。`;
             }
         } catch {
             // 读不到背包就不给结论，不编数字。
@@ -6407,8 +6704,6 @@ export async function openBlockUi(
                 `服务端会回"开窗"（open_window）但**从不发窗口内容**（window_items/set_content 一个都没有），` +
                 `而且本进程**零协议解析错误**；mineflayer 要等槽位数据才会发 windowOpen，所以必然超时。` +
                 `这是**那一种容器**在那一次尝试里的证据，重试同一种意义不大（但别的类型是别的路径）（这条结论约 ${minutesLeft} 分钟后自动失效，之后才值得再试一次）。` +
-                `下一步（照做即可）：**换另一种容器类型再试**（箱子/熔炉/合成台是不同路径；真机 2026-10-20 熔炉产出过 21 块玻璃，别把一次箱子失败当成全局）——让队友把要用的东西丢在约定点自己捡，` +
-                `取/存都用 useBlock(type="chest", …)；需要合成就直接 craft（工作台不需要窗口）。` +
                 (slotted.reason ? `（判定依据：${slotted.reason}）` : ''),
         );
     }
@@ -6524,21 +6819,19 @@ export async function openBlockUi(
             : windowPackets === 0
                 ? `服务端**一个窗口包都没发**（${timeoutMs >= 1000 ? `${Math.round(timeoutMs / 1000)} 秒` : `${timeoutMs} 毫秒`}内 windowOpen/windowClose 计数 = 0）：这不是站位或角度问题，是"带槽位容器"这条交互路径本身没走通`
                 : `窗口包**到过 ${windowPackets} 次**但没接住（大概率是残留界面/竞态），不是服务端没响应`;
-    const nextStep =
+    // **只保留"重复同一调用不会变好"这条确定性事实**（2026-10-30 用户裁定）：
+    // 那是可验证的（同样的调用同样的结果），不是策略。"改走哪条路"由模型决定。
+    const repeatNote =
         protocolFault != null
-            ? `下一步（照做即可）：**别再 useBlock 任何带槽位的容器了**（柜子/熔炉/箱子都一样，重试只是白耗回合）——` +
-              `改走非容器路径（队友把东西丢在约定点后自己捡，取/存都用 useBlock），并把「容器协议解析失败」告诉人类。`
+            ? `**带槽位容器在这台服务端上是协议级故障**：重发同一个 useBlock 不会有不同结果。`
             : consecutive >= 2
-            ? `下一步（照做即可）：这已经是连续第 ${consecutive} 次打不开容器了——**别再重发同一个 useBlock**（同样的调用只会得到同样的结果）。` +
-              `改走非容器路径：让队友把东西丢在约定点后自己捡（或用 useBlock 由能开箱的那一方去取），` +
-              `并把这条现象告诉人类（这是代码级故障）。`
-            : `下一步（照做即可）：换**另一个**容器方块试一次（不同坐标或不同种类），仍然失败就别再试了；` +
-              `同一个箱子重复 useBlock 不会变好。`;
+                ? `这已经是连续第 ${consecutive} 次打不开容器了——同一个调用重发不会有不同结果。`
+                : `同一个箱子重复 useBlock 不会有不同结果（换坐标或换种类是另一条路径）。`;
     throw new Error(
         `打开 ${name} 失败：${diagnosis}。` +
             `现场：方块 ${name} @${where}，开之前${hadWindowOpenAlready ? '**已经有一个界面开着**' : '没有界面开着'}。` +
             `已经清掉残留界面并重试 ${retries} 次都没成。` +
-            nextStep +
+            repeatNote +
             `（原始错误：${raw}）`,
     );
 }
@@ -6710,9 +7003,7 @@ export async function craftWithStaleWindowGuard(
     const raw = lastError instanceof Error ? lastError.message : String(lastError);
     throw new Error(
         `合成失败（服务端没回工作台窗口事件，可能被上一次重启留下的窗口占着）。` +
-            `已经清掉残留界面并重试 ${retries} 次都没成。` +
-            `下一步（照做即可）：走到工作台旁边重新 craftRecipe（或先 placeHere 一个新工作台）；` +
-            `还不行就等几秒再试。（原始错误：${raw}）`,
+            `已经清掉残留界面并重试 ${retries} 次都没成。（原始错误：${raw}）`,
     );
 }
 
@@ -6771,6 +7062,16 @@ export const MOVE_DIRECTIONS = Object.freeze([
 
 export type MoveDirection = (typeof MOVE_DIRECTIONS)[number];
 
+/**
+ * `moveBy` 卡住时最多起跳几次。
+ *
+ * 为什么要起跳：**一格高的土坎是最常见的地形**，而裸按键不会自动跳
+ * （mineflayer 只负责按下按键，物理不会替你起跳）。真机 2026-10-23 通关时
+ * `move(east, 64)` 只走 4.9 格就报"被方块/水/边缘挡住"，挡路的是一格土坎；
+ * 三次足够过台阶，又不会在真墙前面一直弹。
+ */
+const MAX_JUMP_TRIES = 3;
+
 /** 相对/绝对方向 → 世界坐标下的单位向量（+X 东，+Z 南，与 Minecraft 一致）。 */
 function isLavaBlockName(name: unknown): boolean {
     return name === 'lava' || name === 'flowing_lava';
@@ -6794,6 +7095,17 @@ function moveHazardAhead(bot: any, vector: { x: number; z: number }, ahead = 1.2
     return null;
 }
 
+/**
+ * 世界方向 → 单位向量。
+ *
+ * 绝对方向直接给常量；相对方向用 `entity.yaw` 投影。
+ *
+ * **yaw 的约定以 mineflayer 源码为准**（`lib/plugins/ray_trace.js` 的
+ * `getViewDirection`：`(-sin(yaw)·cos(pitch), sin(pitch), -cos(yaw)·cos(pitch))`）：
+ * yaw=0 面朝 **北（-Z）**，yaw=+90° 面朝 **西（-X）**。
+ * 以前这里按"yaw 0 朝南（+Z）、90° 朝西"写，z 分量整体反号，
+ * 于是 `move(north)` 往南走、`move(east)` 往西走——真机 2026-10-23 实测确认。
+ */
 function worldVectorFor(bot: any, direction: MoveDirection): { x: number; z: number } {
     switch (direction) {
         case 'north': return { x: 0, z: -1 };
@@ -6802,11 +7114,9 @@ function worldVectorFor(bot: any, direction: MoveDirection): { x: number; z: num
         case 'west': return { x: -1, z: 0 };
         default: break;
     }
-    // 相对方向：把"我的前/右"投影到世界坐标。
-    // 偏航角 0 面朝南（+Z），90 面朝西（-X）——Minecraft 的约定。
-    const yaw = ((bot?.entity?.yaw ?? 0) * Math.PI) / 180;
-    const forward = { x: -Math.sin(yaw), z: Math.cos(yaw) };
-    const right = { x: -Math.cos(yaw), z: -Math.sin(yaw) };
+    const yaw = bot?.entity?.yaw ?? 0;
+    const forward = { x: -Math.sin(yaw), z: -Math.cos(yaw) };
+    const right = { x: Math.cos(yaw), z: -Math.sin(yaw) };
     const sign = direction === 'back' ? -1 : 1;
     const axis = direction === 'forward' || direction === 'back' ? forward : right;
     return { x: axis.x * sign, z: axis.z * sign };
@@ -6836,18 +7146,21 @@ export async function moveBy(
         log(bot, `距离要大于 0 且不超过 ${MAX_STEP} 格（更远请用 goToCoordinates），收到的是 ${distance}。`);
         return false;
     }
+    // **不转身**，靠"前/后/左/右"按键换算（契约见 atomic_actions 测试）。
+    // 这里唯一的坑是 `entity.yaw` **本来就是弧度**——以前又乘了 π/180，
+    // 于是只要朝向不是正南，`move(east)` 会往西走、`move(north)` 会往南走。
     const vector = worldVectorFor(bot, direction);
-    const yaw = ((bot?.entity?.yaw ?? 0) * Math.PI) / 180;
-    const forward = { x: -Math.sin(yaw), z: Math.cos(yaw) };
-    const right = { x: -Math.cos(yaw), z: -Math.sin(yaw) };
-    // 世界方向 → 我该按哪几个键（前/右 分量各自过阈值；斜向会同时按两个键）。
-    const along = vector.x * forward.x + vector.z * forward.z;
-    const across = vector.x * right.x + vector.z * right.z;
+    const yaw = bot?.entity?.yaw ?? 0;
+    // 同 worldVectorFor：yaw 0 朝北（mineflayer ray_trace 的约定），z 分量取负。
+    const forward = { x: -Math.sin(yaw), z: -Math.cos(yaw) };
+    const right = { x: Math.cos(yaw), z: -Math.sin(yaw) };
+    const alongToTarget = vector.x * forward.x + vector.z * forward.z;
+    const acrossToTarget = vector.x * right.x + vector.z * right.z;
     const pressed: string[] = [];
-    if (along > 0.3) pressed.push('forward');
-    if (along < -0.3) pressed.push('back');
-    if (across > 0.3) pressed.push('right');
-    if (across < -0.3) pressed.push('left');
+    if (alongToTarget > 0.3) pressed.push('forward');
+    if (alongToTarget < -0.3) pressed.push('back');
+    if (acrossToTarget > 0.3) pressed.push('right');
+    if (acrossToTarget < -0.3) pressed.push('left');
     if (mode === 'sneak') pressed.push('sneak');
     if (mode === 'sprint') pressed.push('sprint');
 
@@ -6858,7 +7171,12 @@ export async function moveBy(
     let lastProgressAt = startedAt;
     let lastDistance = 0;
     let moved = 0;
+    let totalMoved = 0;
     let hazardStop: string | null = null;
+    /** 起跳次数（卡住时最多试这么多次；台阶比墙多得多）。 */
+    let jumpTries = 0;
+    /** 跳跃键此刻是否被自己按下（finally 一定要松开，否则会一直弹）。 */
+    let jumpHeld = false;
 
     try {
         for (const key of pressed) bot.setControlState(key, true);
@@ -6868,12 +7186,38 @@ export async function moveBy(
             if (hazardStop != null) break;
             const now = Date.now();
             const here = { x: bot.entity?.position?.x ?? 0, z: bot.entity?.position?.z ?? 0 };
-            moved = horizontalDistance(start, here);
+            // **进度只算"沿目标方向"的位移**（真机：斜着走/被顶开都会让"走了 N 格"说谎）。
+            const alongMoved = (here.x - start.x) * vector.x + (here.z - start.z) * vector.z;
+            moved = Math.max(0, alongMoved);
+            totalMoved = horizontalDistance(start, here);
             if (moved >= distance - 0.2) break;
             if (moved > lastDistance + 0.05) {
                 lastDistance = moved;
                 lastProgressAt = now;
             } else if (now - lastProgressAt > 500) {
+                // **一格高的台阶是最常见的地形**，而裸按键不会自动起跳——
+                // mineflayer 只负责把按键按下，物理不会替你跳。真机 2026-10-23：
+                // `move(east, 64)` 只走 4.9 格就报"被方块/水/边缘挡住"，
+                // 挡它的其实是一格土坎。给它三次起跳机会，再判卡死。
+                if (jumpTries < MAX_JUMP_TRIES) {
+                    jumpTries += 1;
+                    try {
+                        bot.setControlState('jump', true);
+                        jumpHeld = true;
+                    } catch {
+                        // 按不上就按不上，按位移判定仍然是准的。
+                    }
+                    await new Promise((resolve) => setTimeout(resolve, 260));
+                    try {
+                        bot.setControlState('jump', false);
+                        jumpHeld = false;
+                    } catch {
+                        // 同上。
+                    }
+                    lastProgressAt = Date.now(); // 重新给一个观察窗
+                    await new Promise((resolve) => setTimeout(resolve, 160));
+                    continue;
+                }
                 break; // 卡住了（墙、栅栏、坑沿…）
             }
             if (now - startedAt > timeoutMs) break;
@@ -6888,6 +7232,13 @@ export async function moveBy(
                 // 已经断线之类，尽力而为。
             }
         }
+        if (jumpHeld) {
+            try {
+                bot.setControlState('jump', false);
+            } catch {
+                // 同上。
+            }
+        }
     }
 
     if (hazardStop != null) {
@@ -6900,7 +7251,16 @@ export async function moveBy(
         log(bot, `朝${direction}走了 ${rounded} 格（目标 ${distance} 格）${mode === 'sneak' ? '，走完已站起' : ''}。`);
         return true;
     }
-    log(bot, `朝${direction}只挪了 ${rounded} 格（目标 ${distance} 格）就被挡住了或没进展。`);
+    // **卡住要说清楚卡成什么样**（2026-10-23：这条以前只报"被挡住了"，操作者不知道
+    // 是方向算反了、被墙挡住、还是压根没迈步。把"沿目标方向的前进量"和"实际总位移"
+    // 分开报，两种数字对不上就是"斜着走/被顶开"）。
+    const totalRounded = Math.round(totalMoved * 10) / 10;
+    log(
+        bot,
+        `朝${direction}只前进了 ${rounded} 格（目标 ${distance} 格）；实际总位移 ${totalRounded} 格` +
+            (totalRounded > rounded + 0.5 ? '（**方向偏了**：走了但没朝目标方向走）' : '（**没迈开步**：被方块/水/边缘挡住）') +
+            '。可以换方向、先挖开挡路的方块，或改用 goToCoordinates。',
+    );
     return false;
 }
 
@@ -6926,11 +7286,23 @@ export function setPosture(bot: any, posture: string): string {
     return `不认识的姿态 ${posture}；可用：sneak（蹲下）、stand（站起）。`;
 }
 
-/** 方位名 → 偏航角。角度是 Minecraft 的约定：0 面朝南，90 朝西，180 朝北，-90 朝东。 */
-const DIRECTION_YAW: Record<string, number> = {
-    south: 0,
+/**
+ * 方位名 → 偏航角（**度，mineflayer 约定，不是原版 Notchian 约定**）。
+ *
+ * 以 mineflayer 自己的换算为准（`lib/conversions.js`）：
+ *   `fromNotchianYaw(deg) = (π − deg·π/180) mod 2π`
+ * 代入四方：北=0、西=90、南=180、东=−90(=270)。
+ * 交叉验证：`lib/plugins/ray_trace.js` 的 `getViewDirection(pitch, yaw)`
+ *   `= (−sin(yaw)·cos(pitch), sin(pitch), −cos(yaw)·cos(pitch))`，
+ * yaw=0 得 (0, *, −1) → −Z → 北；yaw=+90° 得 (−1, *, 0) → −X → 西。
+ *
+ * **这里以前写的是 Notchian 表（south=0、north=180）**，于是 `lookInDirection north`
+ * 实际把视角转向南——南北轴整整差 180°（东西轴碰巧一样，所以症状很隐蔽）。
+ */
+export const DIRECTION_YAW: Record<string, number> = {
+    north: 0,
     west: 90,
-    north: 180,
+    south: 180,
     east: -90,
 };
 
@@ -7054,8 +7426,11 @@ export async function lookInDirection(bot: any, direction: string, pitch?: numbe
     const name = String(direction ?? '').trim().toLowerCase();
     const beforeYaw = radToDeg(Number(bot.entity?.yaw ?? 0));
     const beforePitch = radToDeg(Number(bot.entity?.pitch ?? 0));
+    // **抬头是正 90°，低头是负 90°**（mineflayer：`getViewDirection` 的 y 分量 = sin(pitch)，
+    // `bot.lookAt` 的 pitch = atan2(delta.y, groundDistance)）。以前这里写反了，
+    // `lookDirection up` 实际把视线按到脚下。
     if (name === 'up' || name === 'down') {
-        const target = name === 'up' ? -90 : 90;
+        const target = name === 'up' ? 90 : -90;
         const result = await setLookDegrees(bot, beforeYaw, target, true);
         log(bot, '视角转到朝' + (name === 'up' ? '上' : '下') + '：pitch ' + result.beforePitch.toFixed(1) + '° → ' + result.afterPitch.toFixed(1) + '°。');
         return true;
@@ -7286,6 +7661,46 @@ export async function stepIntoCell(
             await new Promise<void>((resolve) => setTimeout(resolve, 120));
             if (inCell() || readPos().y <= goal.y + 0.5) {
                 return { moved: true, reason: null, attempts: 1, from, to: readPos(), obstacles: [] };
+            }
+        }
+        // **站在洞口边缘时重力带不下去**（2026-10-23 用 CLI 通关时定位）：
+        // 碰撞箱 0.6 格宽，跨在洞口边缘时**被旁边那格托着**，脚下明明是空气也不掉
+        // （digDown 挖 5 格就停在原地）。正确的解法不是跳——跳起来会落回同一个边缘——
+        // 而是**朝目标格中心迈半步**，让身体真的进到那一列上空，重力才接管。
+        // **人是活的，位置会变**：重力等待期间可能被水流/怪物推过，必须用**现在**
+        // 的位置重算方向和距离，不能拿进洞前的 `from` 当真。
+        const here = readPos();
+        const nearColumn = Math.hypot(goal.x + 0.5 - here.x, goal.z + 0.5 - here.z) <= 1.2;
+        if (nearColumn) {
+            const dx = goal.x + 0.5 - here.x;
+            const dz = goal.z + 0.5 - here.z;
+            const dist = Math.hypot(dx, dz);
+            // **距离≈0 时 `lookAt(洞口中心)` 是退化方向**（atan2(0,0)）：
+            // 人已经正对着洞口正上方，却算不出"该往哪迈"，于是按了前进键
+            // 位置纹丝不动（真机 2026-10-23：digDown 挖 1 格就卡死在这句上）。
+            // 退化的话就**四个方向逐个试**——总有一个能把身体带进那一列上空，
+            // 让重力接管。这比"猜一个方向"可靠，也比"再等一次"省时间。
+            const dirs: Array<[number, number]> =
+                dist > 0.15 ? [[dx / dist, dz / dist]] : [[1, 0], [-1, 0], [0, 1], [0, -1]];
+            for (const [ux, uz] of dirs) {
+                try {
+                    // mineflayer 的朝向约定：**yaw=0 面向 −Z**，forward = (−sin yaw, −cos yaw)。
+                    // 想让 forward = (ux, uz) ⇒ yaw = atan2(−ux, −uz)。
+                    const yaw = Math.atan2(-ux, -uz);
+                    if (typeof bot.look === 'function') await bot.look(yaw, 0, true);
+                    bot.setControlState('forward', true);
+                    await new Promise<void>((resolve) => setTimeout(resolve, 240));
+                } catch {
+                    // 控制失败也继续：下面按位移判定，不以异常为准。
+                }
+                release();
+                const settleDeadline = Date.now() + 900;
+                while (Date.now() < settleDeadline) {
+                    await new Promise<void>((resolve) => setTimeout(resolve, 120));
+                    if (inCell() || readPos().y <= goal.y + 0.5) {
+                        return { moved: true, reason: null, attempts: 2, from, to: readPos(), obstacles: [] };
+                    }
+                }
             }
         }
     }

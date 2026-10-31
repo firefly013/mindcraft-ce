@@ -242,7 +242,8 @@ describe('协议解析失败（真机 04:10 的最终根因）：抓得到、说
     expect(text).toContain('协议解析失败');
     expect(text).toContain('包 id 62');
     expect(text).toContain('这个服务端的容器协议和我们的定义对不上');
-    expect(text).toContain('别再 useBlock 任何带槽位的容器');
+    // 2026-10-30：删掉了"别再 useBlock…"那条策略处方，保留协议级故障这条事实
+    expect(text).toContain('重发同一个 useBlock 不会有不同结果');
     expect(text).not.toContain('一个窗口包都没发');
     expect(text).not.toContain('但没接住');
     expect(text).not.toContain('一个窗口包都没发')
@@ -333,9 +334,9 @@ describe('确证失效 ⇒ 工具层快速失败（不烧 6 秒 × 重试）', (
     expect(text).toContain('直接失败');
     expect(text).toContain('从不发窗口内容');
     expect(text).toContain('零协议解析错误');
-    expect(text).toContain('换另一种容器类型再试');
+    expect(text).toContain('重试同一种意义不大');
     // 旧回执点名了一个不存在的工具（takeFromChest）——现在必须说真话。
-    expect(text).toContain('useBlock');
+    expect(text).toContain('chest');
     expect(text).not.toContain('takeFromChest');
   });
 

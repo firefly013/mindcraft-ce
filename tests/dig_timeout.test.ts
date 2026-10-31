@@ -4,13 +4,17 @@
 import { describe, expect, it, vi } from 'vitest';
 import { estimateDigTimeoutMs, digWithTimeout, mineBlockAt } from '../src/body/library/skills.js';
 
-function block(name: string, digMs: number, hardness = 1): any {
+function block(name: string, digMs: number, hardness = 1, bareMs?: number): any {
   return {
     name,
     hardness,
     position: { x: 0, y: 0, z: 0 },
     canHarvest: () => true,
-    digTime: () => digMs,
+    // **替身必须和真方块一样"看工具说话"**：`digTime(itemId)` 的 `null` 参数是**徒手**，
+    // 给仪表就是"用这件工具要多久"。以前这一版对谁都返回同一个数，于是造出
+    // "黑曜石徒手 9.4 秒"这种假事实，正好喂给"卡住就徒手硬挖"的逃生分支 ——
+    // 用一个假数字让机器人去啃 250 秒才碎、且毫不可能掉落的方块。
+    digTime: (itemId?: number | null) => (itemId == null ? (bareMs ?? digMs) : digMs),
   };
 }
 
@@ -134,13 +138,43 @@ describe('mineBlockAt 共用动态超时', () => {
   });
 
   it('工具不够：不白等动态超时，明确报工具不对', async () => {
-    const target = block('obsidian', 9400, 50);
+    // 黑曜石：钻石镐 9.4 秒，**徒手 250 秒**（硬度 50 × 5 秒/硬度）。
+    const target = block('obsidian', 9400, 50, 250_000);
     target.canHarvest = () => false;
+    // **要工具的方块必须照原版声明 `harvestTools`**：planDig 的能力判据读它。
+    // 只把它标成"非空"（=这块必须有工具），`canHarvest` 上面已经固定成 false。
+    target.harvestTools = { 9999: true };
     const bot = {
       output: '',
       game: { gameMode: 'survival' },
       heldItem: { type: 1, name: 'wooden_pickaxe' },
       entity: { position: { distanceTo: () => 2 } },
+      blockAt: () => target,
+      tool: { equipForBlock: async () => {} },
+      dig: vi.fn(),
+      stopDigging: vi.fn(),
+      targetDigBlock: null,
+    };
+    await expect(mineBlockAt(bot, 0, 0, 0)).resolves.toBe(false);
+    expect(bot.output).toContain('没有能挖');
+    expect(bot.dig).not.toHaveBeenCalled();
+  });
+
+  // 回归：**被封住也不能拿空手去啃黑曜石**。2026-10-23 加的"卡住就徒手硬挖"出路
+  // 有 12 秒的上限，黑曜石徒手 250 秒必须被拦住——否则机器人会在一个永远挖不穿的
+  // 方块前耗到超时，还以为自己在脱身。
+  it('卡住了也不等于可以硬啃：黑曜石徒手 250 秒，照样拒绝', async () => {
+    const target = block('obsidian', 9400, 50, 250_000);
+    target.canHarvest = () => false;
+    // **要工具的方块必须照原版声明 `harvestTools`**：planDig 的能力判据读它。
+    // 只把它标成"非空"（=这块必须有工具），`canHarvest` 上面已经固定成 false。
+    target.harvestTools = { 9999: true };
+    const bot = {
+      output: '',
+      game: { gameMode: 'survival' },
+      heldItem: { type: 1, name: 'wooden_pickaxe' },
+      entity: { position: { distanceTo: () => 2 } },
+      // 四面八方都是目标方块 ⇒ `isStuckInPlace` 为真（真的被封住了）
       blockAt: () => target,
       tool: { equipForBlock: async () => {} },
       dig: vi.fn(),

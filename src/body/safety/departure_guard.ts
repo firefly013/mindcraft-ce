@@ -9,15 +9,30 @@
  * 真正生效的约束都是**引擎强制**的。所以这一条进引擎。
  *
  * 三条纪律：
- *   ① **只拦"进去"**：`returnFromEnd` 之类的出口、逃跑、保命反射、甚至故意死，
+ *   ① **只拦"进去"**：`returnFromEnd` 之类的出口、逃跑、保命反射，
  *      永远不受这条限制——已经在里面的人绝不能被它困住；
  *   ② **粗糙检查**（有没有武器、有没有吃的、有没有垫脚方块、血够不够），
  *      不做配装优化；
  *   ③ **能救就救**：武器在包里没拿在手上 ⇒ 帮它 `equip`，然后放行，而不是拒绝。
+ *
+ * ## 默认拒绝，但**可以显式授权**（2026-10-30 用户裁定）
+ *
+ * 这道闸挂在 `allowDangerousOps(…, ops="departure_underprepared")` 上：
+ * 默认照样拒，模型要硬进就必须自己点一次"我知道我在干什么"（时间制或次数制都行）。
+ *
+ * 为什么要有这个口子：门槛（没武器 / 食物 ≤2 / 垫脚块 <8）是算术，但"这次要不要赌"
+ * 仍是模型的判断——它可能只是去下界门口看一眼就回来，或者带着别的 bot 一起走。
+ * 引擎的职责是把代价说清楚（缺什么、进去会怎样），不是替它决定值不值得。
+ * 拒绝回执会直接写出授权写法，所以这道闸也不会变成"拒绝 + 无法执行的出路"。
  */
+
+import { findOp, refuseText } from './dangerous_ops.js';
 
 /** 进维度类工具：只有这些会被检查。 */
 export const DEPARTURE_TOOLS: ReadonlySet<string> = new Set(['enterEnd', 'enterNether']);
+
+/** `dangerous_ops.ts` 里注册的授权项：模型显式点头才能硬进。 */
+export const DEPARTURE_OP = 'departure_underprepared';
 
 /** 硬性红线（明显必死）：没武器 / 食物 ≤2 / 方块 <8。 */
 export const MIN_FOOD_HARD = 2;
@@ -37,6 +52,13 @@ export interface DepartureFacts {
     weapon: string | null;
     /** 背包里可垫脚的方块总数；读不到 = null（读不到就不拿它当拒绝理由）。 */
     blocks: number | null;
+    /**
+     * 模型已经用 `allowDangerousOps(…, ops="departure_underprepared")` 显式授权过这一次。
+     *
+     * 用户 2026-10-30 裁定：安全闸也走同一套授权机制——闸门默认拒绝，但"我知道我在干什么"
+     * 必须能表达出来（能不能玩得转交给提示词工程，不交给引擎替它决定）。
+     */
+    authorized?: boolean;
 }
 
 export interface DepartureVerdict {
@@ -114,41 +136,37 @@ export function departureVerdict(facts: DepartureFacts): DepartureVerdict {
 
     // **已知的坏**才硬拦；**未知**一律不拦（`null` 当"没读到"）。
     const hardRefuse = !hasWeapon || (food != null && food <= MIN_FOOD_HARD) || (blocks != null && blocks < MIN_BLOCKS_HARD);
+    if (hardRefuse && facts.authorized === true) {
+        // 授权过就放行，但把"你赌的是什么"留在回执里——出事时这一行就是证据。
+        return {
+            allowed: true,
+            warning:
+                `（**这次是你显式授权过的**：${missing.length > 0 ? missing.join('、') : '准备不足'}。` +
+                '授权只覆盖一次/一段时间，到了那边自己看着办。）',
+        };
+    }
     if (hardRefuse) {
-        const wantBlocks = facts.tool === 'enterEnd' ? 32 : 16;
-        const prep: string[] = [];
-        if (!hasWeapon) prep.push('先弄一把武器（**空手就能起步**，见下一步那条链）');
-        if (food != null && food <= MIN_FOOD_SUGGESTED) prep.push('`getFood()` / `consume(item_name="…")` 把食物补到 12 以上');
-        if (blocks == null || blocks < MIN_BLOCKS_SUGGESTED)
-            prep.push(`\`collectBlocks(type="dirt", num=${wantBlocks})\` 收集 ${wantBlocks} 个方块`);
-        if (health != null && health < MIN_HEALTH_SUGGESTED) prep.push('先把血回到 12 以上（吃食物）');
         return {
             allowed: false,
             text:
                 `**拒绝进${place}**：` +
                 (missing.length > 0 ? missing.join('、') : '准备不足') +
-                `。先补齐：${prep.join('；')}，然后再 \`${facts.tool}()\`。\n    ` +
-                `下一步（照做即可）：${
-                    !hasWeapon
-                        ? // **拒绝的下一步必须在"当前状态"里可执行**：空手也能走通的一条链
-                          // （真机 overnight_a 的四路死锁就是"拒绝 + 无法执行的出路"）。
-                          // 材料账核过（receipts-dev 复核）：工作台 4 板 + 木剑 4 板（2 板 + 木棍 2 板）
-                          //   = 8 板 = **2 根原木** ⇒ 采 3 根留余量。1 根会在做剑那步才不够，
-                          //   然后模型又回到"空手死锁"的报告里。
-                          // 也别写 `placeHere` + `useBlock`：`craft` 自己会从背包放工作台、合完收回
-                          //   （`skills.craftRecipe` 的 3×3 分支）——那两步只是额外的失败点。
-                          '先弄到武器（**从空手开始就能走**，4 步）：' +
-                          '① `collectBlocks(type="oak_log", num=3)`（木头**不带工具要求**：徒手既挖得动、也掉木头，不要镐；**要 2 根以上**，1 根不够做剑）' +
-                          ' → ② `craft(input="3 oak_log", output="12 oak_planks")`' +
-                          ' → ③ `craft(input="4 oak_planks", output="1 crafting_table")` + `craft(input="2 oak_planks", output="4 stick")`' +
-                          ' → ④ `craft(input="2 oak_planks, 1 stick", output="1 wooden_sword")`' +
-                          '（剑是 3×3：`craft` 会自己用/放下背包里的工作台，**不用**你手动 `placeHere`）' +
-                          `；然后再 \`${facts.tool}()\`。`
-                        : food !== null && food <= MIN_FOOD_SUGGESTED
-                            ? '`getFood()`（或 `consume`）先把食物补够；'
-                            : `\`collectBlocks(type="dirt", num=${wantBlocks})\` 先攒垫脚方块；`
+                `。补齐这些再来 \`${facts.tool}()\`——怎么补由你安排。\n    ` +
+                // **不给四步合成链**（2026-10-30 用户裁定）：那是替模型排计划。
+                // 只留一条**算术事实**——空手做剑要多少料，是可核对的，不是选择。
+                (hasWeapon
+                    ? ''
+                    : '（材料账：木剑 = 2 木板 + 1 木棍，工作台 = 4 木板，合计 8 木板 = **2 根原木**；1 根不够。）\n    ') +
+                // **唯一出口**：这次就想去。写清确切的调用，别让它去猜参数名。
+                `硬要现在进就显式授权这一次：${
+                    (() => {
+                        const op = findOp(DEPARTURE_OP);
+                        return op != null
+                            ? refuseText(op, 5)
+                            : `\`allowDangerousOps(5, "原因", "${DEPARTURE_OP}")\``;
+                    })()
                 }\n    ` +
-                '**出口/逃跑不受这条限制**：`returnFromEnd` 之类、保命反射、甚至故意死，都随时可用——已经在里面的人不会被它困住。',
+                '**出口/逃跑不受这条限制**：`returnFromEnd` 之类、保命反射都随时可用——已经在里面的人不会被它困住。',
         };
     }
 

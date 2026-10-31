@@ -2,9 +2,9 @@
  * `getFood`：把"找吃的"从五步链变成一次调用的编排测试。
  *
  * 钉的是**行为与诚实**，不是"跑得通"：
- *   1) 背包够吃 ⇒ 什么都不做（want 是下限，不是目标）；
+ *   1) 背包已经到 want ⇒ 什么都不做（**判据只认 want**：它自己说要几份）；
  *   2) 真饿 + 包里有吃的 ⇒ 吃，并报出食物/饱和度前后值；
- *   3) **存粮规则穿过去**：不饿 + 只剩 ≤2 份时不吃（和 consume 同一套阈值，不许打架）；
+ *   3) 吃不吃由模型定：不饿 + 只剩 ≤2 份时**照吃**，只把后果写进回执（10-24 定的原则）；
  *   4) 没动物 + 没竿 + 够得到蛛网 ⇒ 下一步是蛛网/竿的具体调用，不是"去找吃的"；
  *   5) 竿那条路**永远点名工作台**（3×3 配方，2×2 放不下）；
  *   6) 够不到水 ⇒ 说清水的位置/距离，并给一条可执行的下水调用；
@@ -13,22 +13,17 @@
  */
 import { describe, expect, it } from 'vitest';
 import {
-    FOOD_ACCEPTABLE,
     GETFOOD_MAX_MS_LIMIT,
     KNOWN_COBWEB_CLUSTER_RADIUS,
     KNOWN_COBWEB_CLUSTER_Y,
     KNOWN_COBWEB_SITES,
     bestKnownCobwebSite,
-    cookCallFor,
     craftingTableCall,
     edibleItemsFrom,
     firstLine,
     foodDistributionLines,
-    foodNextCallFromSurvey,
     getFoodSkill,
-    lastNextCall,
     surveyFood,
-    rodNextCall,
 } from '../src/body/library/get_food.js';
 import { FOOD_RESERVE_COMFORT, FOOD_RESERVE_LOW, FOOD_REGEN_THRESHOLD } from '../src/body/library/survival.js';
 import { parseGetFoodArgs, GETFOOD_TIMEOUT_MIN, survivalActionList, SURVIVAL_TOOL_TEXT } from '../src/body/commands/survival.js';
@@ -143,16 +138,29 @@ function harness(
 }
 
 describe('getFood：优先级与"不做多余的事"', () => {
-    it('背包已经够吃（≥4 份）→ **什么都不做**，并说清理由', async () => {
-        const h = harness({ items: [stack('cooked_beef', FOOD_ACCEPTABLE)], food: 8 });
+    it('背包已经到 want（4 份 ≥ 要 3 份）→ **什么都不做**，并说清理由', async () => {
+        const h = harness({ items: [stack('cooked_beef', 4)], food: 8 });
         const receipt = await getFoodSkill(h.bot, 3, 300_000, h.deps as any);
 
         expect(receipt).toContain('不用动');
-        expect(receipt).toContain(`已经有 ${FOOD_ACCEPTABLE} 份能吃的`);
+        expect(receipt).toContain('已经有 4 份能吃的');
+        expect(receipt).toContain('你要的是 3 份');
         expect(h.calls.eat).toBe(0);
         expect(h.calls.hunt).toHaveLength(0);
         expect(h.calls.fish).toBe(0);
-        expect(lastLine(receipt)).toBe('下一步（照做即可）：stats(type="inventory")');
+        expect(lastLine(receipt)).not.toContain('照做即可');
+    });
+
+    // 2026-10-26：want 以前被全局门槛吞掉——背包有 4 份时 getFood(want=10) 直接判"不用动"。
+    // 模型说了它要几份，工具不许按自己的阈值驳回。
+    it('want 比现有份数大（4 份 < 要 10 份）→ **必须继续找**，不许说"不用动"', async () => {
+        const h = harness({ items: [stack('cooked_beef', 4)], food: 8 });
+        const receipt = await getFoodSkill(h.bot, 10, 300_000, h.deps as any);
+
+        expect(receipt).not.toContain('不用动');
+        // 继续走"打猎 → 钓鱼"那条链（这一带恰好没动物/没水，所以拿到 0 份，
+        // 但**必须尝试**：不能因为背包有 4 份就把 want=10 当成已经满足）。
+        expect(receipt).toContain('打猎');
     });
 
     it('真饿 + 包里有吃的 → 吃，并报出食物/饱和度的前后值', async () => {
@@ -168,25 +176,26 @@ describe('getFood：优先级与"不做多余的事"', () => {
         expect(receipt).toContain('只吃了东西，没补到新的');
     });
 
-    it('食物 ≥ 回血线 → 先补库存，不白吃', async () => {
+    // 2026-10-24：回血线也从"不吃"改成"照吃 + 事实"。接下来是打架还是回城
+    // 只有模型知道；"吃了不涨"作为事实进回执，判断权交还模型。
+    it('食物 ≥ 回血线 → 照吃，回执里写清"现在吃不涨"', async () => {
         const h = harness({ items: [stack('bread', 3)], food: FOOD_REGEN_THRESHOLD });
         const receipt = await getFoodSkill(h.bot, 3, 300_000, h.deps as any);
 
-        expect(h.calls.eat).toBe(0);
-        expect(receipt).toContain(`吃：跳过（食物 ${FOOD_REGEN_THRESHOLD} ≥ 回血线 ${FOOD_REGEN_THRESHOLD}`);
+        expect(h.calls.eat).toBe(1);
+        expect(receipt).toContain(`食物 ${FOOD_REGEN_THRESHOLD} ≥ 回血线 ${FOOD_REGEN_THRESHOLD}（现在吃不涨饱食度）`);
+        expect(receipt).toContain('吃了 bread');
     });
 
-    it('**存粮规则与吃这一步不打架**：不饿（≥14）+ 只剩 ≤2 份 → 不吃，先去补', async () => {
+    // 2026-10-24：存粮规则从"不吃"改成"照吃 + 警告"（和 `skills.consume` 同一套契约）。
+    // "最后两份该不该动"只有模型能判断，工具不再替它决定。
+    it('**存粮规则与吃这一步不打架**：不饿（≥14）+ 只剩 ≤2 份 → 照吃，但回执带存粮警告', async () => {
         const h = harness({ items: [stack('cooked_beef', FOOD_RESERVE_LOW)], food: FOOD_RESERVE_COMFORT });
         const receipt = await getFoodSkill(h.bot, 3, 300_000, h.deps as any);
 
-        expect(h.calls.eat).toBe(0);
-        expect(receipt).toContain('**先留着**');
-        expect(receipt).toContain('存粮规则要求留给低血期');
-        // 同一套阈值：把食物降到 <14 就该吃（否则两条规则会振荡）
-        const hungry = harness({ items: [stack('cooked_beef', FOOD_RESERVE_LOW)], food: FOOD_RESERVE_COMFORT - 1 });
-        await getFoodSkill(hungry.bot, 1, 300_000, hungry.deps as any);
-        expect(hungry.calls.eat).toBe(1);
+        expect(h.calls.eat).toBe(1);
+        expect(receipt).toContain('短期内没吃的了');
+        expect(receipt).toContain('先去补');
     });
 });
 
@@ -212,7 +221,7 @@ describe('getFood：打猎 → 钓鱼（含"自己弄竿"）', () => {
         expect(receipt).toContain('找线');
         expect(receipt).toContain('蛛网');
         const next = lastLine(receipt);
-        expect(next).toBe('下一步（照做即可）：goToCoordinates(x=30, y=40, z=5, closeness=2)');
+        expect(next).not.toContain('照做即可');
         expect(next).not.toContain('find food');
     });
 
@@ -234,42 +243,6 @@ describe('getFood：打猎 → 钓鱼（含"自己弄竿"）', () => {
         expect(receipt).toContain('找线');
     });
 
-    it('别的维度/维度未知都不照抄主世界的蛛网点', () => {
-        for (const dimension of ['the_nether', 'the_end', null]) {
-            const next = rodNextCall({
-                hasRod: false,
-                string: 0,
-                sticks: 0,
-                cobweb: null,
-                spawner: null,
-                water: null,
-                here: { x: 0, y: 64, z: 0 },
-                dimension,
-            });
-            expect(next, String(dimension)).toBe('exploreFor(block="cobweb", max_steps=8, step=32)');
-            expect(next, String(dimension)).not.toContain('71');
-        }
-    });
-
-    it('半径内没有蛛网 ⇒ 直接给**已知更浅的那个点**（(71, 28, -76)），不瞎撞', () => {
-        const next = rodNextCall({
-            hasRod: false,
-            string: 0,
-            sticks: 0,
-            cobweb: null,
-            spawner: null,
-            water: null,
-            here: { x: 0, y: 64, z: 0 },
-            dimension: 'overworld',
-        });
-        expect(next).toBe('travelTo(x=71, y=28, z=-76)'); // **从侧面进**：travelTo 会自己绕开水层
-        expect(next).not.toContain('exploreFor');
-        expect(next).not.toContain('goToCoordinates'); // 那个只会在水边干等
-        expect(KNOWN_COBWEB_SITES[0]).toEqual({ x: 71, y: 28, z: -76 });
-        expect(KNOWN_COBWEB_CLUSTER_RADIUS).toBe(40);
-        expect(KNOWN_COBWEB_CLUSTER_Y).toEqual([24, 30]);
-    });
-
     it('主世界缺线 ⇒ 回执把这条链**提到优先**，并给"从侧面进"的具体调用', async () => {
         const h = harness({ items: [stack('stone', 4)], food: 6, nearest: null, dimension: 'overworld' });
         const receipt = await getFoodSkill(h.bot, 3, 300_000, h.deps as any);
@@ -289,21 +262,6 @@ describe('getFood：打猎 → 钓鱼（含"自己弄竿"）', () => {
         expect(receipt).not.toContain('优先做这条');
     });
 
-    it('别的维度不照抄主世界的蛛网点（坐标是主世界的）', () => {
-        const next = rodNextCall({
-            hasRod: false,
-            string: 0,
-            sticks: 0,
-            cobweb: null,
-            spawner: null,
-            water: null,
-            here: { x: 0, y: 64, z: 0 },
-            dimension: 'the_nether',
-        });
-        expect(next).toBe('exploreFor(block="cobweb", max_steps=8, step=32)');
-        expect(next).not.toContain('71');
-    });
-
     it('bestKnownCobwebSite：竖直代价权重更高（浅的优先）', () => {
         const here = { x: 0, y: 64, z: 0 };
         expect(bestKnownCobwebSite(here, [{ x: 3, y: 120, z: 0 }, { x: 60, y: 30, z: 0 }])).toEqual({ x: 60, y: 30, z: 0 });
@@ -311,16 +269,15 @@ describe('getFood：打猎 → 钓鱼（含"自己弄竿"）', () => {
         expect(bestKnownCobwebSite(here, [])).toBeNull();
     });
 
-    it('**竿这条路永远点名工作台**（3 木棍 + 2 线，2×2 放不下）', async () => {        const h = harness({ items: [stack('string', 2), stack('stick', 3)], food: 6, nearest: null });
+    it('**竿这条路失败时说清"没成"**，不再补合成处方', async () => {
+        const h = harness({ items: [stack('string', 2), stack('stick', 3)], food: 6, nearest: null });
         const receipt = await getFoodSkill(h.bot, 3, 300_000, h.deps as any);
 
         // 注入的 craftRod 故意失败（模拟"附近没有工作台"）
         expect(h.calls.craftRod).toBe(1);
         expect(receipt).toContain('做竿：**没成**');
-        expect(lastLine(receipt)).toBe(
-            '下一步（照做即可）：useBlock(type="crafting_table", input="3 stick, 2 string", output="1 fishing_rod")',
-        );
-        expect(receipt).toContain('crafting_table');
+        // 2026-10-30：回执到"没成"为止（要不要去工作台做，是模型的计划）
+        expect(receipt).not.toContain('照做即可');
     });
 
     it('有竿但够不到水 → 说清水的位置与距离，下一步是走过去/找水', async () => {
@@ -334,12 +291,12 @@ describe('getFood：打猎 → 钓鱼（含"自己弄竿"）', () => {
         const farReceipt = await getFoodSkill(far.bot, 3, 300_000, far.deps as any);
         expect(farReceipt).toContain('最近的水在 (80, 62, 0)');
         expect(farReceipt).toContain('80.0 格');
-        expect(lastLine(farReceipt)).toBe('下一步（照做即可）：goToCoordinates(x=80, y=62, z=0, closeness=3)');
+        expect(lastLine(farReceipt)).not.toContain('照做即可');
 
         const none = harness({ items: [stack('fishing_rod', 1)], food: 6, nearest: null, water: null });
         const noneReceipt = await getFoodSkill(none.bot, 3, 300_000, none.deps as any);
         expect(noneReceipt).toContain('没扫到水面');
-        expect(lastLine(noneReceipt)).toBe('下一步（照做即可）：searchForBlock(type="water", search_range=256)');
+        expect(lastLine(noneReceipt)).not.toContain('照做即可');
     });
 
     it('有竿 + 水在抛竿距离内 → 真的去钓（并报净增量）', async () => {
@@ -355,7 +312,7 @@ describe('getFood：打猎 → 钓鱼（含"自己弄竿"）', () => {
         expect(receipt).toContain('拿到了 1 份能吃的');
         expect(receipt).toContain('钓鱼：fish：钓到 1 条');
         // 拿到生鱼 → 提醒先烤（不是"接着找"）
-        expect(lastLine(receipt)).toBe('下一步（照做即可）：useBlock(type="furnace", input="1 raw_cod", output="1 cooked_cod")');
+        expect(lastLine(receipt)).not.toContain('照做即可');
     });
 });
 
@@ -371,7 +328,7 @@ describe('getFood：诚实与可续', () => {
         expect(receipt).toContain('停止原因');
     });
 
-    it('每个部分结果都以**一条**能照抄的下一步收尾', async () => {
+    it('每种结局都**不**补"下一步"（回执只报事实）', async () => {
         const scenarios = [
             harness({ items: [stack('cooked_beef', 5)], food: 20 }),
             harness({ items: [stack('bread', 2)], food: 6 }),
@@ -383,8 +340,7 @@ describe('getFood：诚实与可续', () => {
         for (const h of scenarios) {
             const receipt = await getFoodSkill(h.bot, 3, 300_000, h.deps as any);
             const nextLines = receipt.split('\n').filter((line) => line.startsWith('下一步（照做即可）：'));
-            expect(nextLines, receipt).toHaveLength(1);
-            expect(nextLines[0]?.replace('下一步（照做即可）：', '').trim().length, receipt).toBeGreaterThan(3);
+            expect(nextLines, receipt).toHaveLength(0);
         }
     });
 
@@ -400,7 +356,7 @@ describe('getFood：诚实与可续', () => {
 
         expect(h.calls.hunt).toHaveLength(0);
         expect(receipt).toContain('跳过（剩余预算不足');
-        expect(lastLine(receipt).startsWith('下一步（照做即可）：')).toBe(true);
+        expect(lastLine(receipt)).not.toContain('照做即可');
     });
 
     it('长期方案：有种子就说清"生长 20~40 分钟、别站着等"，并给工作台上的锄头调用', async () => {
@@ -424,47 +380,6 @@ describe('getFood：诚实与可续', () => {
 });
 
 describe('getFood：纯函数与接线', () => {
-    it('rodNextCall：永远是"接着做"的那一步，且竿点名工作台', () => {
-        const water = { position: { x: 10, y: 62, z: 4 }, distance: 11 };
-        expect(rodNextCall({ hasRod: true, string: 0, sticks: 0, cobweb: null, spawner: null, water })).toBe(
-            'goToCoordinates(x=10, y=62, z=4, closeness=3)',
-        );
-        expect(rodNextCall({ hasRod: true, string: 0, sticks: 0, cobweb: null, spawner: null, water: null })).toBe(
-            'searchForBlock(type="water", search_range=256)',
-        );
-        expect(rodNextCall({ hasRod: false, string: 0, sticks: 0, cobweb: null, spawner: 'spider', water })).toBe(
-            'huntFor(entity="spider", want=2, max_ms=60000)',
-        );
-        expect(
-            rodNextCall({ hasRod: false, string: 0, sticks: 0, cobweb: { x: 30, y: 40, z: 5 }, spawner: null, water }),
-        ).toBe('goToCoordinates(x=30, y=40, z=5, closeness=2)');
-        expect(rodNextCall({ hasRod: false, string: 0, sticks: 0, cobweb: null, spawner: null, water })).toBe(
-            'exploreFor(block="cobweb", max_steps=8, step=32)',
-        );
-        expect(rodNextCall({ hasRod: false, string: 2, sticks: 0, cobweb: null, spawner: null, water })).toContain('stick');
-        expect(rodNextCall({ hasRod: false, string: 2, sticks: 3, cobweb: null, spawner: null, water })).toBe(
-            'useBlock(type="crafting_table", input="3 stick, 2 string", output="1 fishing_rod")',
-        );
-    });
-
-    it('子回执取"接着做"：取最后一条下一步；摘要有兜底', () => {
-        expect(lastNextCall('a\n下一步（照做即可）：X\nb\n下一步（照做即可）：Y')).toBe('Y');
-        expect(lastNextCall('没有下一步')).toBeNull();
-        expect(lastNextCall('下一步（照做即可）：')).toBeNull();
-        expect(firstLine('\n\nhuntFor cow：…\n后面')).toBe('huntFor cow：…');
-        expect(firstLine('')).toBe('');
-    });
-
-    it('cookCallFor / craftingTableCall / edibleItemsFrom 是纯函数', () => {
-        expect(cookCallFor('raw_cod', 2)).toBe('useBlock(type="furnace", input="2 raw_cod", output="2 cooked_cod")');
-        expect(cookCallFor('bread', 1)).toBeNull();
-        expect(craftingTableCall('3 stick, 2 string', '1 fishing_rod')).toContain('crafting_table');
-        expect(edibleItemsFrom({ bread: 2, stone: 64, wheat_seeds: 3, cooked_beef: 1 })).toEqual([
-            { name: 'bread', count: 2 },
-            { name: 'cooked_beef', count: 1 },
-        ]);
-    });
-
     it('参数归一：want/max_ms 夹住，默认值正确', () => {
         const defaults = parseGetFoodArgs(undefined, undefined);
         expect(defaults.want).toBe(3);
@@ -504,27 +419,6 @@ describe('失败时必须告诉模型"吃的在哪"（真机 overnight_a：血 8
     const here = { x: 0, y: 64, z: 0 };
     const at = (x: number, y: number, z: number) => ({ x, y, z });
 
-    it('看见动物 ⇒ 回执里有名字 + 坐标 + 距离（一条候选一行）', () => {
-        const survey = surveyFood({} as any, {
-            position: () => here,
-            nearbyEntities: () => [
-                { name: 'cow', position: at(10, 64, 4) },
-                { name: 'pig', position: at(2, 64, 1) },
-                { name: 'zombie', position: at(1, 64, 1) }, // 不是食物动物，不许出现
-            ],
-            findBlock: () => null,
-            water: () => null,
-        });
-        expect(survey.readable).toBe(true);
-        expect(survey.animals.map((a) => a.name)).toEqual(['pig', 'cow']); // 按距离排序
-        const text = foodDistributionLines(survey, {}).join('\n');
-        expect(text).toContain('最近的动物');
-        expect(text).toContain('cow 在 (10, 64, 4)，约');
-        expect(text).not.toContain('zombie');
-        // 可执行的下一步就是去猎它
-        expect(foodNextCallFromSurvey(survey, here)).toContain('huntFor(entity="pig"');
-    });
-
     it('**看得见但没猎到** ⇒ 明说，别让模型以为"这一带没有动物"', () => {
         const survey = surveyFood({} as any, {
             position: () => here,
@@ -537,53 +431,6 @@ describe('失败时必须告诉模型"吃的在哪"（真机 overnight_a：血 8
         expect(text).not.toContain('确实没有食物来源');
     });
 
-    it('**什么都没找到** ⇒ 说"确实没有" + 给方向和距离（绝不只写"没找到"）', () => {
-        const survey = surveyFood({} as any, {
-            position: () => here,
-            nearbyEntities: () => [],
-            findBlock: () => null,
-            water: () => null,
-            probeOpen: (_b: any, pos: { x: number }) => (pos.x >= 4 ? true : false), // -x 方向走不通
-        });
-        const lines = foodDistributionLines(survey, {});
-        const text = lines.join('\n');
-        expect(text).toContain('确实没有食物来源');
-        expect(text).toContain('往 +x 方向走约 48 格再 getFood');
-        expect(text).toContain('探了 4 个点、4 个能走');
-        // 下一步必须是"走过去换个地方"，不是再调一次 getFood
-        const call = foodNextCallFromSurvey(survey, here);
-        expect(call).toContain('goToCoordinates(');
-        expect(call).toContain('x=48');
-        expect(call).not.toContain('getFood(');
-    });
-
-    it('**扫描读不到** ⇒ 说"读不到"，绝不说"这一带没有"', () => {
-        const survey = surveyFood({} as any, {
-            position: () => here,
-            nearbyEntities: () => null, // 实体表读不到
-            findBlock: () => null,
-            water: () => null,
-        });
-        expect(survey.readable).toBe(false);
-        const text = foodDistributionLines(survey, {}).join('\n');
-        expect(text).toContain('读不到');
-        expect(text).toContain('不代表没有动物');
-        expect(text).not.toContain('确实没有食物来源');
-        expect(foodNextCallFromSurvey(survey, here)).toBeNull(); // 没读到就不指方向
-    });
-
-    it('**没有水/没有钓竿** ⇒ 水面那行明说"要先去弄竿"', () => {
-        const survey = surveyFood({} as any, {
-            position: () => here,
-            nearbyEntities: () => [],
-            findBlock: () => null,
-            water: () => ({ position: at(0, 62, 20), distance: 20 }),
-        });
-        const text = foodDistributionLines(survey, { hasRod: false }).join('\n');
-        expect(text).toContain('最近的水面');
-        expect(text).toContain('没有钓竿');
-        expect(foodNextCallFromSurvey(survey, here)).toContain('travelTo(');
-    });
 });
 
 describe('端到端：失败回执带上分布 + 一条可执行下一步', () => {
@@ -597,7 +444,7 @@ describe('端到端：失败回执带上分布 + 一条可执行下一步', () =
         const receipt = await getFoodSkill(h.bot, 3, 6_000, h.deps as any);
         expect(receipt).toContain('可采的食物方块');
         expect(receipt).toContain('sweet_berry_bush 在 (5, 64, 7)');
-        expect(lastLine(receipt)).toBe('下一步（照做即可）：collectBlocks(type="sweet_berry_bush", num=3)');
+        expect(lastLine(receipt)).not.toContain('照做即可');
     });
 
     it('什么都看不见 ⇒ 回执明说"这一带确实没有食物来源"（实体读不到时则说读不到）', async () => {

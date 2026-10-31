@@ -36,7 +36,7 @@ describe('MESSAGES', () => {
     expect(MESSAGES.death('x:1', 'overworld', 'boom', 'dirt×1')).toBe(
       "你死在了overworld维度 x:1。死因（临终消息）：'boom'。" +
         "死亡点已存为 'last_death_position'，想回去可以找它。" +
-        '死亡瞬间身上带着（若没开 keepInventory 就是掉落清单，回去捡可得）：dirt×1。' +
+        "死亡瞬间身上带着（掉落清单，回去捡可得）：dirt×1。" +
         '之前的动作已停止，你已重生。',
     );
     expect(MESSAGES.modelUnsupported).toBe(

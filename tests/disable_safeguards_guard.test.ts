@@ -9,7 +9,6 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import {
   collectOverrideFacts,
-  deathCostLine,
   disableSafeguardsVerdict,
   type OverrideFacts,
 } from '../src/body/safety/reflex_override.js';
@@ -25,8 +24,6 @@ const facts = (overrides: Partial<OverrideFacts> = {}): OverrideFacts => ({
   inLava: false,
   submerged: false,
   belowVoid: false,
-  keepInventory: true,
-  immediateRespawn: true,
   ...overrides,
 });
 
@@ -61,13 +58,13 @@ describe('判定：该拒的必须拒', () => {
     expect(verdict.text).toContain('stop()');
   });
 
-  it('② 血 3.87 + 15 米外有怪 ⇒ 拒，理由与下一步都写清（真机现场）', () => {
+  it('② 血 3.87 + 15 米外有怪 ⇒ 拒，理由写清、不排下一步（真机现场）', () => {
     const verdict = disableSafeguardsVerdict(facts({ health: 3.87, hostileMeters: 15, food: 8 }));
     expect(verdict.allowed).toBe(false);
     expect(verdict.text).toContain('3.87 血');
     expect(verdict.text).toContain('15 格');
-    expect(verdict.text).toContain('下一步（照做即可）');
-    expect(verdict.text).toMatch(/getFood|consume|goToCoordinates/);
+    // 2026-10-30：只有"身体被反射占着"才给下一步（stop），其余只报原因
+    expect(verdict.text).not.toContain('下一步（照做即可）');
   });
 
   it('② 血 3.87 但**周围什么都没有** ⇒ 照样拒（≤3 血不看环境）', () => {
@@ -93,13 +90,6 @@ describe('判定：该拒的必须拒', () => {
   it('④ 满血、没反射、没危险 ⇒ **允许**（正当用途必须活下来）', () => {
     const verdict = disableSafeguardsVerdict(facts());
     expect(verdict.allowed).toBe(true);
-  });
-
-  it('拒绝的回执里带上"这个世界死一次多贵"（keepInventory 三态）', () => {
-    expect(deathCostLine({ keepInventory: true, immediateRespawn: true })).toContain('物品和经验都保留');
-    expect(deathCostLine({ keepInventory: true, immediateRespawn: true })).toContain('合法的重置');
-    expect(deathCostLine({ keepInventory: false, immediateRespawn: true })).toContain('绝不能拿命去赌');
-    expect(deathCostLine({ keepInventory: null, immediateRespawn: null })).toContain('gamerule');
   });
 });
 
@@ -144,61 +134,3 @@ describe('事实采集：从 agent 读得出该读的东西', () => {
   });
 });
 
-describe('三方互锁例外：确认卡死时只放行呼吸反射 60 秒（Lead 2026-10-19 授权）', () => {
-  const lock = (over: Record<string, unknown> = {}) => ({
-    stuckSec: 2_400,
-    health: 0.375,
-    food: 0,
-    hasDigTool: false,
-    hasDiggableNeighbour: false,
-    surfaceTriggers: 60,
-    keepInventory: true,
-    immediateRespawn: true,
-    ...over,
-  });
-  const trapped = (over: Record<string, unknown> = {}) =>
-    facts({ health: 0.375, food: 0, reflex: 'surface', reflexMs: 90_000, submerged: true, deadlock: lock(over) as any });
-
-  it('三个拒绝条款同时成立 + 确认卡死 ⇒ **放行**，但只给 60 秒呼吸反射', () => {
-    const verdict = disableSafeguardsVerdict(trapped());
-    expect(verdict.allowed).toBe(true);
-    expect(verdict.grantSurfaceMs).toBe(60_000);
-    expect(String(verdict.text)).toContain('你被卡死了');
-    expect(String(verdict.text)).toContain('引擎的死锁');
-    expect(String(verdict.text)).toContain('只让 surface 这一条规则停手 60 秒');
-    expect(String(verdict.text)).toContain('下一步（照做即可）');
-  });
-
-  it('背包里有镐 ⇒ **拒绝**（它能挖，所以不是被困）', () => {
-    const verdict = disableSafeguardsVerdict(trapped({ hasDigTool: true, hasDiggableNeighbour: true }));
-    expect(verdict.allowed).toBe(false);
-    expect(verdict.grantSurfaceMs).toBeUndefined();
-  });
-
-  it('身边没有可挖的邻居 ⇒ 仍算被困（挖不动那一条成立）', () => {
-    expect(disableSafeguardsVerdict(trapped({ hasDigTool: true, hasDiggableNeighbour: false })).allowed).toBe(true);
-  });
-
-  it('有食物/食物非 0 ⇒ 拒绝（不是卡死，是饿，去吃）', () => {
-    expect(disableSafeguardsVerdict(trapped({ food: 3 })).allowed).toBe(false);
-  });
-
-  it('位置没卡够 3 分钟 / 呼吸反射只触发几次 ⇒ 拒绝（不许瞬时状态触发例外）', () => {
-    expect(disableSafeguardsVerdict(trapped({ stuckSec: 60 })).allowed).toBe(false);
-    expect(disableSafeguardsVerdict(trapped({ surfaceTriggers: 2 })).allowed).toBe(false);
-  });
-
-  it('岩浆/溺水但**不满足**完整卡死谓词 ⇒ 照旧拒绝（本例的读不到/缺字段）', () => {
-    expect(disableSafeguardsVerdict(facts({ health: 1, food: 0, inLava: true })).allowed).toBe(false);
-    expect(disableSafeguardsVerdict(facts({ health: 1, food: 0, submerged: true })).allowed).toBe(false);
-  });
-
-  it('血量/食物/背包读不到（deadlock=null）⇒ 拒绝', () => {
-    expect(disableSafeguardsVerdict(facts({ health: 0.5, food: 0, submerged: true, deadlock: null })).allowed).toBe(false);
-  });
-
-  it('keepInventory 不是 true ⇒ 放行但**不给**死亡出路（standDown=0 ⇒ 走拒绝）', () => {
-    const verdict = disableSafeguardsVerdict(trapped({ keepInventory: false }));
-    expect(verdict.allowed).toBe(false);
-  });
-});

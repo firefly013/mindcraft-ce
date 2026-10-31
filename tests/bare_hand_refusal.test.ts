@@ -15,29 +15,37 @@ import { join } from 'node:path';
 const skills = (): string => readFileSync(join(process.cwd(), 'src', 'body', 'library', 'skills.ts'), 'utf8');
 
 describe('裸手挖不动的拒绝文案', () => {
-  it('不再只说"先换正确的工具再来"（那对裸装不可能）', () => {
+  // 锚点：breakBlockAt 里那段"就地测量"（附近软方块/可钻洞口），
+  // 它**紧跟** planDig 的拒绝 note 之后打印，所以一起看。
+  const anchor = 'const measured = softNearby > 0 || caveNearby > 0;';
+  const region = (): string => {
     const code = skills();
-    const region = code.slice(code.indexOf('空手挖不动'), code.indexOf('空手挖不动') + 3000);
-    expect(region).not.toContain('先换正确的工具再来');
-    expect(region).toContain('空手挖不动');
+    const i = code.indexOf(anchor);
+    return i < 0 ? '' : code.slice(i, i + 3000);
+  };
+
+  it('不再只说"先换正确的工具再来"（那对裸装不可能）', () => {
+    expect(region()).not.toContain('先换正确的工具再来');
+    // 拒绝 note 本身必须给出 force 这条出路
+    expect(skills()).toContain('force=true');
   });
 
   it('拒绝里带**就地测量**的结果，而不是没验证过的通用建议', () => {
-    const code = skills();
-    const region = code.slice(code.indexOf('空手挖不动'), code.indexOf('空手挖不动') + 3000);
+    const r = region();
     // 测出来的软方块
-    expect(region).toMatch(/dirt/);
-    expect(region).toMatch(/gravel|sand/);
+    expect(r).toMatch(/dirt/);
+    expect(r).toMatch(/gravel|sand/);
     // 测出来的洞口
-    expect(region).toMatch(/洞口|cave|空腔/);
+    expect(r).toMatch(/洞口|cave|空腔/);
     // 关键：有"实测"和"没路"这两个分支的说法
-    expect(region).toContain('实测');
-    expect(region).toMatch(/确实没路|没有/);
+    expect(r).toContain('实测');
+    expect(r).toMatch(/确实没路|没有/);
   });
 
-  it('没有出路时必须明说、并拦住重复 digDown', () => {
-    const code = skills();
-    const region = code.slice(code.indexOf('空手挖不动'), code.indexOf('空手挖不动') + 3000);
-    expect(region).toMatch(/别再对 stone 发 digDown|别再/);
+  // 2026-10-24：处方删掉（"别再对着它硬挖：换个方向…"）——回执只报实测事实，
+  // 怎么走由模型判断。守卫反过来：不许再把"别再"式命令写回回执。
+  it('实测都没有出路时，只报事实，不再塞"别再…"式命令', () => {
+    expect(region()).not.toMatch(/别再/);
+    expect(region()).toContain('这一列确实没路');
   });
 });

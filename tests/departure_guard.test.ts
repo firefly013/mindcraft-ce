@@ -58,37 +58,28 @@ function departureBody(items: Array<{ name: string; count: number }>, over: Reco
 }
 
 describe('判定：明显必死才硬拦，边界只提醒', () => {
-  it('空手进末地 ⇒ 拒，清单点名"没有武器"（末影人 40 血/4-7 伤害）并给下一步', () => {
+  it('空手进末地 ⇒ 拒，清单点名"没有武器"（末影人 40 血/4-7 伤害），**不排下一步**', () => {
     const verdict = departureVerdict(facts({ weapon: null, food: 0, blocks: 10, health: 20 }));
     expect(verdict.allowed).toBe(false);
     expect(verdict.text).toContain('拒绝进末地');
     expect(verdict.text).toContain('没有武器');
     expect(verdict.text).toContain('末影人 40 血');
-    expect(verdict.text).toContain('下一步（照做即可）');
+    // 2026-10-30 用户裁定：回执不替模型排计划
+    expect(verdict.text).not.toContain('下一步（照做即可）');
+    expect(verdict.text).toContain('怎么补由你安排');
     expect(verdict.text).toContain('出口/逃跑不受这条限制');
   });
 
-  it('没武器的下一步**必须在空手状态可执行**：4 步链 + 材料账够（2 根原木起，采 3）', () => {
-    const verdict = departureVerdict(facts({ weapon: null, food: 20, blocks: 20, health: 20 }));
+  it('没武器时只给**材料账**（可核对的算术），不给合成步骤', () => {    const verdict = departureVerdict(facts({ weapon: null, food: 20, blocks: 20, health: 20 }));
     expect(verdict.allowed).toBe(false);
     const text = verdict.text ?? '';
-    // ① 起点是**徒手**能做的（不是"拿镐挖石头"，那对空手的 bot 是一堵墙）
-    expect(text).toContain('collectBlocks(type="oak_log", num=3)');
-    expect(text).toContain('徒手');
-    expect(text).not.toContain('石剑'); // 石剑要圆石 ⇒ 要木镐 ⇒ 对空手就是墙
-    // ② 材料账：1 根原木不够（工作台 4 板 + 剑 4 板 = 8 板 = 2 根）⇒ 回执必须点名
-    expect(text).toContain('要 2 根以上');
-    // ③ 4 步链每一环都在（模型照抄就能走），木板一次做够
-    expect(text).toContain('craft(input="3 oak_log", output="12 oak_planks")');
-    expect(text).toContain('craft(input="4 oak_planks", output="1 crafting_table")');
-    expect(text).toContain('craft(input="2 oak_planks", output="4 stick")');
-    expect(text).toContain('craft(input="2 oak_planks, 1 stick", output="1 wooden_sword")');
-    // ④ 3×3 由 craft 自己解决（别再让模型手动放/用工作台——那两步是额外的失败点）
-    expect(text).toContain('3×3');
-    expect(text).toContain('不用**你手动 `placeHere`');
-    expect(text).not.toContain('useBlock(type="crafting_table"');
-    // ⑤ 链走完还要回到"去哪"（这条 facts 是 enterEnd ⇒ 就该说 enterEnd）
-    expect(text).toContain('然后再 `enterEnd()`');
+    // 材料账：1 根原木不够（工作台 4 板 + 剑 4 板 = 8 板 = 2 根）⇒ 必须点名
+    expect(text).toContain('2 根原木');
+    expect(text).toContain('1 根不够');
+    // 但不许替模型排合成顺序：那是它的计划，不是工具的事实
+    expect(text).not.toContain('collectBlocks(type="oak_log"');
+    expect(text).not.toContain('craft(input=');
+    expect(text).not.toContain('然后再 `enterEnd()`');
   });
 
   it('食物 0 / 方块 10 / 没武器 ⇒ 拒（真机那次的三条同时成立）', () => {
@@ -284,5 +275,29 @@ describe('提醒不许长得像拒绝、也不许挤掉动作（Lead 2026-10-19 
   it('准备齐全 ⇒ 连 warning 字段都不出现（零噪音）', () => {
     const verdict = departureVerdict(facts());
     expect(verdict.warning).toBeUndefined();
+  });
+});
+
+describe('显式授权（用户 2026-10-30）：默认拒，点头就放', () => {
+  it('空手进末地默认拒；authorized=true ⇒ 放行，但把"你赌的是什么"写进 warning', () => {
+    const bare = facts({ weapon: null, food: 20, blocks: 20, health: 20 });
+    expect(departureVerdict(bare).allowed).toBe(false);
+
+    const allowed = departureVerdict({ ...bare, authorized: true });
+    expect(allowed.allowed).toBe(true);
+    expect(allowed.warning).toContain('你显式授权过');
+    expect(allowed.warning).toContain('没有武器');
+  });
+
+  it('准备齐全时 authorized 不制造额外噪音', () => {
+    const verdict = departureVerdict({ ...facts(), authorized: true });
+    expect(verdict.allowed).toBe(true);
+    expect(verdict.warning).toBeUndefined();
+  });
+
+  it('拒绝回执里写着确切的授权调用（含 op id，不让模型猜）', () => {
+    const text = departureVerdict(facts({ weapon: null })).text ?? '';
+    expect(text).toContain('allowDangerousOps');
+    expect(text).toContain('departure_underprepared');
   });
 });

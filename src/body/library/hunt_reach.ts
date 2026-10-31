@@ -26,6 +26,33 @@ export function isAquaticTarget(name: string): boolean {
     return [...AQUATIC].some((entry) => normalized === entry || normalized.includes(entry));
 }
 
+/**
+ * **打不还手的食物动物**：牛/猪/羊/鸡/兔/蘑菇牛/海龟——攻击它们玩家一滴血都不会掉。
+ * （山羊会顶、猪灵蛮兽会主动攻击、羊驼会吐口水，所以都不在这份名单里。）
+ *
+ * 用途：`huntFor` 的**低血门控（血量 ≤6 就停手）对它们不生效**。
+ * 那条门控的本意是"快死了别去打会还手的东西"，可它把唯一安全的回血路也堵死了：
+ * 真机 2026-10-23 —— 血 4.17、食物 5、背包全空，`getFood` / `huntFor(cow)` 全部立刻收手，
+ * 而食物 <18 时 Minecraft 根本不启动自然回血 ⇒ **低血 → 不敢打 → 更没血**的死锁。
+ * 牛猪羊鸡不会还手，血再低打它们也不增加死亡风险，所以这条门控不该拦它们。
+ */
+const HARMLESS_FOOD_MOBS = new Set([
+    'cow',
+    'mooshroom',
+    'pig',
+    'sheep',
+    'chicken',
+    'rabbit',
+    'turtle',
+]);
+
+export function isHarmlessFoodMob(name: string): boolean {
+    const normalized = String(name ?? '')
+        .toLowerCase()
+        .replace(/^minecraft:/, '');
+    return HARMLESS_FOOD_MOBS.has(normalized);
+}
+
 export function isLandAnimal(name: string): boolean {
     const normalized = String(name ?? '')
         .toLowerCase()
@@ -33,7 +60,7 @@ export function isLandAnimal(name: string): boolean {
     return LAND_ANIMALS.has(normalized);
 }
 
-export interface WaterHuntStopInput {
+export interface WaterHuntNoticeInput {
     /** 从"开始追这个水里目标"到现在的毫秒数。 */
     elapsedMs: number;
     /** 与目标的距离（格）。 */
@@ -42,7 +69,7 @@ export interface WaterHuntStopInput {
     attempts: number;
     /** 扫描到的附近陆生动物数量（0 = 没有；null = 没扫描/读不到）。 */
     landAnimals: number | null;
-    /** 人是否已经在水里（在水里就照常追，不早停）。 */
+    /** 人是否已经在水里（在水里就照常追）。 */
     botInWater: boolean;
     /** 目标是否在水里。 */
     targetInWater: boolean;
@@ -50,29 +77,35 @@ export interface WaterHuntStopInput {
     targetName?: string;
 }
 
-export interface WaterHuntStop {
-    stop: boolean;
+export interface WaterHuntNotice {
+    /** true = 该把这条事实报给模型（调用方决定只报一次，防刷屏）。 */
+    notice: boolean;
     text: string;
 }
 
 /**
- * 是否该早停。条件：目标在水里、人不在水里、且已经空转 ≥20 秒、且附近没有陆生动物。
- * （有陆生动物就不早停——那条路更有希望；但也不阻止继续尝试。）
+ * 水中目标的**事实提示**（2026-10-24 起不再早停）。
+ *
+ * 以前这个函数叫 `planWaterHuntStop`：岸上追水里空转 20 秒就替模型收工
+ * （`water_unreachable`）。那是用「耗了很久」猜「你肯定拿不到」——违反
+ * "模型想干什么只有它自己知道"：目标在水里泡一会儿可能自己上岸，或者模型
+ * 就是要等它、就是想把它引过来。现在只产出事实（距离/已空转多久/附近还有
+ * 什么可打的），**照常追**；停不停由模型 Stop 或它自己设的预算/次数上限决定。
  */
-export function planWaterHuntStop(input: WaterHuntStopInput): WaterHuntStop {
-    if (input.botInWater || !input.targetInWater) return { stop: false, text: '' };
-    if (input.landAnimals == null || input.landAnimals > 0) return { stop: false, text: '' };
-    if (input.elapsedMs < HUNT_WATER_EARLY_STOP_MS) return { stop: false, text: '' };
+export function planWaterHuntNotice(input: WaterHuntNoticeInput): WaterHuntNotice {
+    if (input.botInWater || !input.targetInWater) return { notice: false, text: '' };
+    if (input.landAnimals == null || input.landAnimals > 0) return { notice: false, text: '' };
+    if (input.elapsedMs < HUNT_WATER_EARLY_STOP_MS) return { notice: false, text: '' };
     const target = String(input.targetName ?? '水生动物').replace(/^minecraft:/, '');
     const repeat =
         input.attempts >= 2
             ? `（这是第 ${input.attempts} 次空转——同样的死路不要再花整段预算）`
             : '';
     return {
-        stop: true,
+        notice: true,
         text:
-            `\`huntFor\` 停了：**${target} 在水里 ${Math.round(input.distance)} 格，我在岸上，下水追不到**${repeat}。` +
-            '要么放弃水生猎物，要么换个方向找岸上的动物（附近 48 格内陆生动物：无）。' +
-            '已经空转 ' + Math.round(input.elapsedMs / 1000) + ' 秒，没有移动也没有攻击命中。',
+            `**${target} 在水里 ${Math.round(input.distance)} 格，我在岸上**${repeat}。` +
+            '已空转 ' + Math.round(input.elapsedMs / 1000) + ' 秒，没有移动也没有攻击命中。' +
+            '附近 48 格内陆生动物：无。要么继续等它上岸/换角度，要么 Stop 换目标——怎么选由你。',
     };
 }

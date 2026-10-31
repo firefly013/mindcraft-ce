@@ -112,7 +112,7 @@ describe('ActionRunner 进度回执（带位置，能判断卡没卡）', () => 
     return { runner, notices, gate };
   }
 
-  it('位置没变 → 明说"很可能是卡住了"并给出下一步', async () => {
+  it('位置没变 → 只报位移数，不判"卡住了"、也不给 Stop 处方', async () => {
     vi.useFakeTimers();
     try {
       const h = runnerWithPosition([{ x: 1, y: 64, z: 2 }]);
@@ -121,8 +121,28 @@ describe('ActionRunner 进度回执（带位置，能判断卡没卡）', () => 
       const text = h.notices.map((n) => String((n.result as { data?: unknown }).data)).join('\n');
       expect(text).toContain('还在跑');
       expect(text).toContain('(1.0, 64.0, 2.0)');
-      expect(text).toContain('很可能是卡住了');
-      expect(text).toContain('Stop');
+      expect(text).toContain('位置几乎没变');
+      expect(text).toContain('位移 0.0 格');
+      // 位移小 ≠ 卡住：钓鱼/睡觉/熔炼本来就不动。判断归模型。
+      expect(text).not.toContain('卡住了');
+      expect(text).not.toContain('Stop');
+      h.gate.resolve('done');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('站桩型动作（fish）也不许被扣"卡住"的帽子', async () => {
+    vi.useFakeTimers();
+    try {
+      // fish 默认 3 分钟，全程不动；60 秒的进度回执以前会喊"很可能是卡住了，Stop 掉它"。
+      const h = runnerWithPosition([{ x: 5, y: 63, z: 5 }]);
+      await h.runner.run('fish', {});
+      await vi.advanceTimersByTimeAsync(ACTION_PROGRESS_NOTICE_MS * 2 + 50);
+      const text = h.notices.map((n) => String((n.result as { data?: unknown }).data)).join('\n');
+      expect(text).toContain('现在在 (5.0, 63.0, 5.0)');
+      expect(text).toContain('位移 0.0 格');
+      expect(text).not.toContain('卡住了');
       h.gate.resolve('done');
     } finally {
       vi.useRealTimers();
@@ -141,7 +161,7 @@ describe('ActionRunner 进度回执（带位置，能判断卡没卡）', () => 
       const text = h.notices.map((n) => String((n.result as { data?: unknown }).data)).join('\n');
       expect(text).toContain('移动了');
       expect(text).toContain('格/秒');
-      expect(text).not.toContain('很可能是卡住了');
+      expect(text).not.toContain('卡住了');
       h.gate.resolve('done');
     } finally {
       vi.useRealTimers();
@@ -156,8 +176,8 @@ describe('ActionRunner 进度回执（带位置，能判断卡没卡）', () => 
       await vi.advanceTimersByTimeAsync(ACTION_PROGRESS_NOTICE_MS + 50);
       const text = h.notices.map((n) => String((n.result as { data?: unknown }).data)).join('\n');
       expect(text).toContain('读不到坐标');
-      expect(text).not.toContain('很可能是卡住了');
-      expect(text).toContain('可以继续等');
+      expect(text).not.toContain('卡住了');
+      expect(text).not.toContain('位移'); // 读不到坐标就不许编位移
       h.gate.resolve('done');
     } finally {
       vi.useRealTimers();

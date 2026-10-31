@@ -49,14 +49,18 @@ await (async () => {
     }
 
     let server: BodyServer | null = null;
-    const body = new MineflayerBody({
+    // 这个仓库只有一种身体：协议级 bot（mineflayer）。
+    // 真客户端内的身体是另一套实现，不在这里——它接的是同一份线协议，
+    // 见 `shared/protocol/types.ts` 的 `BodyKind`。
+    const bodyOpts = {
         name: agentName,
         countId: argv.count_id,
-        sink: (push: BodyPush) => {
+        sink: (push: BodyPush): void => {
             // 身体出生前可能已经有事件（比如登录失败）——那时 server 还是 null。
             server?.push(push);
         },
-    });
+    };
+    const body = new MineflayerBody(bodyOpts);
 
     const shutdown = (): void => {
         void server?.close().then(() => process.exit(0));

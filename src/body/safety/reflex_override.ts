@@ -20,18 +20,13 @@
  *   2. **血少 + 怪近**（≤6 血且有敌对生物 ≤16 米），或 **≤3 血**（不管周围有什么）;
  *   3. **身处致命介质**：岩浆里 / 正在溺水 / 正在掉进虚空。
  *
- * 另外两件事：
+ * 另外一件事：
  *   - 回执**不再把模型自己写的理由当成正当理由**引用（那是我们的文本在替它的
- *     坏判断背书）；
- *   - 这个存档 `keepInventory=true` + `doImmediateRespawn=true`：**死亡只花一次
- *     重生，物品和经验都保留**——所以诚实的建议不是"关了保命硬拼"，而是
- *     "去弄吃的，或者让它结束、满血复活"。
+ *     坏判断背书）。
  */
 import Vec3 from 'vec3';
 import { isHostile } from '../data/mcdata.js';
 import { headInWater } from './water_safety.js';
-import settings from '../../shared/settings.js';
-import { deadlockVerdict, type DeadlockFacts } from './deadlock.js';
 
 /** 这些反射的名字/意图一旦在跑，就不许关保命。 */
 export const LIFE_SAVING_REFLEXES: ReadonlySet<string> = new Set([
@@ -48,8 +43,6 @@ export const LIFE_SAVING_REFLEXES: ReadonlySet<string> = new Set([
 export interface OverrideFacts {
     health: number | null;
     food: number | null;
-    /** 三方互锁的事实（只有能证明"这个 bot 真的出不去"时才填）。 */
-    deadlock?: DeadlockFacts | null;
     /** 最近的敌对生物距离（米）；没有就是 null。 */
     hostileMeters: number | null;
     /** 正在跑的保命反射名（没有就是 null）。 */
@@ -59,15 +52,11 @@ export interface OverrideFacts {
     /** 头在水里（正在溺水）。 */
     submerged: boolean;
     belowVoid: boolean;
-    keepInventory: boolean | null;
-    immediateRespawn: boolean | null;
 }
 
 export interface OverrideVerdict {
     allowed: boolean;
     text: string;
-    /** 非空 = 这次放行**只针对呼吸反射**这么多毫秒（其它保命照旧）。 */
-    grantSurfaceMs?: number;
 }
 
 const REFLEX_HOSTILE_RADIUS_M = 16;
@@ -131,7 +120,6 @@ export function collectOverrideFacts(agent: any): OverrideFacts {
     const minY = Number(bot?.game?.minY);
     const y = Number(pos?.y);
     const belowVoid = Number.isFinite(y) && Number.isFinite(minY) && y <= minY + 2;
-    const gameplay = (settings as any)?.gameplay ?? {};
     return {
         health: Number.isFinite(health) ? health : null,
         food: Number.isFinite(food) ? food : null,
@@ -147,68 +135,23 @@ export function collectOverrideFacts(agent: any): OverrideFacts {
             }
         })(),
         belowVoid,
-        keepInventory: gameplay.keepInventoryOnDeath === true ? true : gameplay.keepInventoryOnDeath === false ? false : null,
-        immediateRespawn: gameplay.doImmediateRespawn === true ? true : gameplay.doImmediateRespawn === false ? false : null,
-        // **三方互锁的事实**：由身体提供（它才知道位置卡了多久、呼吸反射触发了几次）。
-        // 读不到就是 null ⇒ 上面那三条拒绝照旧，不放行。
-        deadlock: (() => {
-            try {
-                const read = (agent as { deadlockFacts?: () => DeadlockFacts | null })?.deadlockFacts;
-                return typeof read === "function" ? read.call(agent) : null;
-            } catch {
-                return null;
-            }
-        })(),
     };
-}
-
-/** 这个世界里"死一次"到底多贵（诚实的代价说明）。 */
-export function deathCostLine(facts: Pick<OverrideFacts, 'keepInventory' | 'immediateRespawn'>): string {
-    if (facts.keepInventory === true && facts.immediateRespawn === true) {
-        return '这个存档 **keepInventory=true + doImmediateRespawn=true**：死亡只花一次重生，**物品和经验都保留**、立刻满血复活——故意死一次是合法的重置，比在几点血上硬拼安全得多。';
-    }
-    if (facts.keepInventory === true) {
-        return '这个存档开了 **keepInventory**：死亡只花一次重生，物品和经验都保留——故意死一次是合法的重置。';
-    }
-    if (facts.keepInventory === false) {
-        return '注意：这个存档**没有** keepInventory，死了会掉光背包——绝不能拿命去赌。';
-    }
-    return '先确认这个存档有没有开 keepInventory（/gamerule keepInventory）：开了的话，死亡只花一次重生、物品和经验都保留，故意死一次是合法重置。';
 }
 
 /**
  * 能不能关保命。**拒绝时绝不改动 safeguards**（调用方拿到 allowed=false 就直接返回文本）。
  */
 export function disableSafeguardsVerdict(facts: OverrideFacts): OverrideVerdict {
-    const cost = deathCostLine(facts);
-    const refuse = (why: string, advice: string, nextCall: string): OverrideVerdict => ({
+    // **只有"身体被保命反射占着"这一条给下一步**（2026-10-30 用户裁定）：
+    // 那是这一步失败的唯一出口（不先 Stop 就拿不回身体），不是策略选择。
+    // 其余拒绝只陈述原因——怎么绕开是模型的事。
+    const refuse = (why: string, advice: string, nextCall?: string): OverrideVerdict => ({
         allowed: false,
-        text: `**拒绝**：${why}，现在关掉保命等于自杀。${advice}\n    ${cost}\n    下一步（照做即可）：${nextCall}`,
+        text:
+            `**拒绝**：${why}，现在关掉保命等于自杀。${advice}` +
+            (nextCall == null || nextCall === '' ? '' : `\n    下一步（照做即可）：${nextCall}`),
     });
 
-    // ⓪ **三方互锁例外**（Lead 2026-10-19 授权）：确认过的"卡死"状态下，
-    // 只放行**呼吸反射（surface）60 秒**，其它保命一律照旧。
-    //
-    // 为什么必须开这个口子：真机 overnight_a 同时踩中下面三条——
-    //   ① `surface` 每秒触发 ⇒ "反射正在跑"永远成立；
-    //   ② 头在水里 ⇒ "先出水"；
-    //   ③ 0.375 血 ⇒ "先把血回到 8"。
-    // 而它挖不动（空背包）、走不动（1×1×1 封闭）、饿不死也淹不死（反射每秒把它顶上去）。
-    // 三条拒绝各自都对，**合起来是一堵墙**：拒绝给出的"下一步"在当前状态下做不到。
-    // 可推广的规则：**"下一步"做不到的拒绝，不是拒绝，是墙。**
-    if (facts.deadlock != null) {
-        const lock = deadlockVerdict(facts.deadlock);
-        if (lock.deadlocked && lock.standDownSurfaceMs > 0 && lock.text != null) {
-            return {
-                allowed: true,
-                text:
-                    lock.text +
-                    '\n    下一步（照做即可）：趁这 60 秒**别做任何挣扎动作**（不要 moveAway/jump），' +
-                    '就待在原地让氧气耗尽；60 秒后呼吸反射会自动恢复。',
-                grantSurfaceMs: lock.standDownSurfaceMs,
-            };
-        }
-    }
     // ① 正在跑保命反射：中途静音就是 F-23 那个洞的另一扇门。
     if (facts.reflex != null && LIFE_SAVING_REFLEXES.has(facts.reflex)) {
         const seconds = Math.max(0, Math.round(facts.reflexMs / 1000));
@@ -223,21 +166,18 @@ export function disableSafeguardsVerdict(facts: OverrideFacts): OverrideVerdict 
         return refuse(
             '你**在岩浆里**',
             '在岩浆里关掉保命，等于把唯一会把你拖出去的东西关掉。',
-            '先离开岩浆（placeHere 垫脚 / goToCoordinates 往岸上走），活着出来再谈关闭',
         );
     }
     if (facts.submerged) {
         return refuse(
             '你的**头在水里**（正在溺水）',
             '逃出水面的反射是你现在唯一的呼吸来源。',
-            'escapeWater()（先出水），上岸之后再决定要不要关',
         );
     }
     if (facts.belowVoid) {
         return refuse(
             '你正在**往虚空里掉**',
             '掉出去就是死，保命反射是唯一还在救你的东西。',
-            'goToCoordinates 往有方块的方向走 / placeHere 垫一下，先回到实地上',
         );
     }
     // ③ 血少 + 怪近（或血极少，不看周围）。
@@ -249,8 +189,7 @@ export function disableSafeguardsVerdict(facts: OverrideFacts): OverrideVerdict 
             `你只剩 ${Math.round(health * 100) / 100} 血` +
             (hostileNear && meters != null ? `、${meters} 格外有敌对生物` : '') +
             (facts.food != null && facts.food <= 6 ? `、食物 ${Math.round(facts.food)}` : '');
-        const nextCall = facts.food != null && facts.food <= 6 ? 'getFood()（先弄吃的）' : 'consume(item_name="…") 或 goToCoordinates 先离开那只怪 20 格以上';
-        return refuse(why, '先把血回到 8 以上、或者离开危险，再谈关闭保命（挖岩浆边上的矿、满血打怪这些正常用途照样允许）。', nextCall);
+        return refuse(why, '先把血回到 8 以上、或者离开危险，再谈关闭保命（挖岩浆边上的矿、满血打怪这些正常用途照样允许）。');
     }
     // ④ 其余情况照旧允许。
     return {
@@ -262,6 +201,9 @@ export function disableSafeguardsVerdict(facts: OverrideFacts): OverrideVerdict 
 /** 进攻类工具：**重伤时一律拒**（其它动作不许被这条守卫挡住）。 */
 export const OFFENSIVE_TOOL_NAMES: ReadonlySet<string> = new Set(['attack', 'huntFor']);
 
+/** `dangerous_ops.ts` 里注册的授权项：模型显式点头才能带伤开打。 */
+export const COMBAT_OP = 'attack_at_low_health';
+
 export interface CombatFacts {
     health: number | null;
     food: number | null;
@@ -269,8 +211,10 @@ export interface CombatFacts {
     foodItems?: string[] | null;
     /** 最近的敌对生物距离（米）；null = 读不到 / 周围没有。 */
     hostileMeters: number | null;
-    keepInventory: boolean | null;
-    immediateRespawn: boolean | null;
+    /** **这一下要打的目标会不会还手**（猪/牛/羊/鸡 = false）。null = 读不到。 */
+    targetFightsBack?: boolean | null;
+    /** 模型已经用 `allowDangerousOps(…, ops="attack_at_low_health")` 显式授权过这一次。 */
+    authorized?: boolean;
 }
 
 const DISENGAGE_HEALTH = 4;
@@ -285,9 +229,19 @@ const NO_FOOD = 6;
  * `attack(target=357368)`——"attack 成功"的回执让它以为进展顺利，直到被打死。
  * 反射只在挨打之后才接管；**它拦不住"在濒死时主动选择开打"这件事**。
  *
- * 这条守卫只做一件事：**别让模型把命押在一次进攻上**。它**不是锁**：
- * 吃、`getFood`、`moveAway`、垫方块、逃生反射、以及"在这个存档里故意死一次"
- * 全部照旧可用——而且回执要先把这些说出来，别等人类来告诉它。
+ * 这条守卫只做一件事：**别让模型把命押在一次进攻上**。它**不是锁**：吃、`getFood`、
+ * `moveAway`、垫方块、逃生反射全部照旧可用，回执会把这些说出来。
+ *
+ * **例外：目标不会还手时不拦**（2026-10-24 修）。
+ * 真机死锁：血 3、食物 11（<18 ⇒ 不回血）、一头猪在 4 格外，`huntFor` 被这道守卫拒了。
+ * 猪/牛/羊/鸡打不还手，**挨不到一下**——把它和僵尸一起拦，等于把"低血时唯一的回血路"封死，
+ * 而 `huntFor` 内部本来就为无害食物动物开了豁免（`isHarmlessFoodMob`），只是被这道外层守卫盖掉了。
+ * 危险来自"被反击"，不是来自"发起攻击"这个动作本身。
+ *
+ * **这道闸也能显式授权**（2026-10-30 用户裁定）：默认拒绝，但模型可以
+ * `allowDangerousOps(…, ops="attack_at_low_health")` 点头一次。理由和 `departure_guard`
+ * 一致——读数是算术，"这次值不值得赌"仍是模型的判断（比如它只想补最后一刀、或者
+ * 那只怪已经残血）。引擎负责把代价写清楚，不负责替它决定。
  */
 export function combatRefusalVerdict(facts: CombatFacts): { allowed: boolean; text: string } {
     const health = facts.health;
@@ -297,6 +251,10 @@ export function combatRefusalVerdict(facts: CombatFacts): { allowed: boolean; te
     const critical = health <= DISENGAGE_HEALTH;
     const lowAndNoHeal = health <= DISENGAGE_HEALTH_WITHOUT_FOOD && noHeal;
     if (!critical && !lowAndNoHeal) return { allowed: true, text: '' };
+    // **目标不会还手 ⇒ 没有"挨一下就没了"这回事**，放行（读不到目标性质时照旧拦）。
+    if (facts.targetFightsBack === false) return { allowed: true, text: '' };
+    // 显式授权过就放行（`allowDangerousOps` 带次数/时间额度，用完自动回到默认拒绝）。
+    if (facts.authorized === true) return { allowed: true, text: '' };
 
     const healthText = Math.round(health * 100) / 100;
     const foodText = food == null ? '食物读不到' : `食物 ${Math.round(food)}`;
@@ -308,35 +266,16 @@ export function combatRefusalVerdict(facts: CombatFacts): { allowed: boolean; te
             (threat != null ? `、${threat} 格外有敌对生物` : '') +
             `——现在打怪是最快的死法（挨一下就没了，而你没有回血手段）。`,
     );
-    if (threat != null) {
-        parts.push('先脱战：`moveAway(distance=16)` 把距离拉开，再吃食物回血；血回到 8 以上再谈进攻。');
-    } else {
-        parts.push('先回血：吃食物（`consume`）或 `getFood`；血回到 8 以上再谈进攻。');
-    }
     parts.push('**逃跑、吃东西、垫方块、`escapeWater`、保命反射都不受这条限制**——它只拦进攻。');
-    parts.push(deathCostLine(facts));
-    // **"故意死一次"只在真的没得吃时推荐。**
-    // Lead 2026-10-19：把"死亡是合法重置"写进回执是当晚最有效的一次人工干预，
-    // 但它有副作用——如果背包里明明有食物却先去送死，那就是我们**新造**的失败模式。
-    // 所以：有食物 ⇒ 那句话降级成"实在没别的办法时"，并把具体吃哪一样放前面。
+    // **唯一出口**：这次就是想打。写明确切的授权调用（参数名猜错一次就白费一回合）。
+    parts.push('硬要现在打就显式授权这一次：`allowDangerousOps(calls=1, reason="…", ops="attack_at_low_health")`。');
+    // **不再排"下一步"**（2026-10-30 用户裁定）：吃哪样、先脱战还是先吃，是它自己的判断。
+    // 回执只报事实：背包里有什么能吃的。
     const foodItems = (facts.foodItems ?? []).filter((name) => typeof name === 'string' && name !== '');
-    const bestFood = foodItems[0] ?? null;
-    if (bestFood != null) {
-        parts.push(
-            `你背包里有吃的（${foodItems.slice(0, 3).join('、')}）——**先吃它**：\`consume(item_name="${bestFood}")\`；` +
-                '只有真的没食物、也脱不了战的时候，才轮到"故意死一次"这个选项。',
-        );
+    if (foodItems.length > 0) {
+        parts.push(`你背包里有能吃的：${foodItems.slice(0, 3).join('、')}。`);
     } else {
-        parts.push('如果既没有食物也脱不了战，**在这个世界里故意死一次是合法选择**：一次重生、物品和经验都保留、立刻满血。');
+        parts.push('背包里没有能吃的。');
     }
-    parts.push(
-        bestFood != null
-            ? threat != null
-                ? `下一步（照做即可）：\`moveAway(distance=16)\`，然后 \`consume(item_name="${bestFood}")\`。`
-                : `下一步（照做即可）：\`consume(item_name="${bestFood}")\`。`
-            : threat != null
-                ? '下一步（照做即可）：`moveAway(distance=16)`，然后 `consume(item_name="…")` 或 `getFood()`。'
-                : '下一步（照做即可）：`getFood()` 或 `consume(item_name="…")`。',
-    );
     return { allowed: false, text: parts.join('\n    ') };
 }

@@ -75,16 +75,16 @@ async function requestTextFor(pitchDeg: number, trust: { trusted: boolean; reaso
 }
 
 describe('视线行：在**真实请求**里能出现，也能正确地不出现', () => {
-  it('朝天空（pitch −88°）⇒ 最后一条 user 消息里带"朝天空"，且图片也一起发出', async () => {
-    const text = await requestTextFor(-88, null);
+  it('朝天空（pitch +88°）⇒ 最后一条 user 消息里带"朝天空"，且图片也一起发出', async () => {
+    const text = await requestTextFor(88, null);
     expect(text).toContain('当前世界快照');
     expect(text).toContain('Screenshot: screenshot_live.jpg');
     expect(text).toContain('视线：**朝天空**');
     expect(text).toContain('不能用来判断地形');
   });
 
-  it('平视（pitch −10°，正是真机那一帧的量级）⇒ **一个字都不加**（这就是那次"没出现"的原因）', async () => {
-    const text = await requestTextFor(-10, null);
+  it('平视（pitch +10°，正是真机那一帧的量级）⇒ **一个字都不加**（这就是那次"没出现"的原因）', async () => {
+    const text = await requestTextFor(10, null);
     expect(text).toContain('Screenshot: screenshot_live.jpg');
     expect(text).not.toContain('视线：');
     // 但图片照发（不因为不说话就把图吞掉）
@@ -92,7 +92,7 @@ describe('视线行：在**真实请求**里能出现，也能正确地不出现
   });
 
   it('渲染怀疑行在**真实请求**里也能出现（trusted=false 时），且排在视线行之后', async () => {
-    const text = await requestTextFor(-88, { trusted: false, reason: 'version_skew', line: '⚠️ **这张图的渲染不可全信**：测试用行' });
+    const text = await requestTextFor(88, { trusted: false, reason: 'version_skew', line: '⚠️ **这张图的渲染不可全信**：测试用行' });
     const lines = text.split('\n');
     const shot = lines.findIndex((l) => l.startsWith('Screenshot:'));
     expect(shot).toBeGreaterThanOrEqual(0);
@@ -135,13 +135,13 @@ describe('同一帧同源：朝向、文件名、时间戳必须来自**同一�
   it('一次拍摄 = 一条自洽记录：文件名/时间戳/朝向一起进，一起出', async () => {
     const { frameRecordOf } = await import('../src/body/vision/frame_record.js');
     const record = frameRecordOf(
-      { file: 'captured_sky.jpg', view: { pitch: -88 * (Math.PI / 180), yaw: 0 } },
+      { file: 'captured_sky.jpg', view: { pitch: 88 * (Math.PI / 180), yaw: 0 } },
       1_234,
     );
     expect(record).toEqual({
       file: 'captured_sky.jpg',
       takenAt: 1_234,
-      view: { yaw: 0, pitch: -88 * (Math.PI / 180) },
+      view: { yaw: 0, pitch: 88 * (Math.PI / 180) },
       color: null, // 这次没量颜色 ⇒ 明确"没测"，不是"彩色"
     });
   });
@@ -166,7 +166,7 @@ describe('同一帧同源：朝向、文件名、时间戳必须来自**同一�
       bot: stubBot(0, 0), // 当前平视
       vision: {
         lastScreenshot: { file: 'f.jpg', takenAt: Date.now() },
-        lastFrameView: { pitch: -88 * (Math.PI / 180), yaw: 0 }, // 这一帧朝天空
+        lastFrameView: { pitch: 88 * (Math.PI / 180), yaw: 0 }, // 这一帧朝天空
       },
     });
     const text = renderLiveState(state);

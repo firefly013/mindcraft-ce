@@ -5,8 +5,8 @@
  *    水从 y=58 到 y=62，x=1/x=4 的墙 y=58..61 是沙/土，**同层一步外 (4,62,29) 是草地**。
  *    机制是**溺水**（水往下流，上浮顶不住），不是摔死。
  * B. 1×1 水坑 + 四面实心墙（overnight_b 21:37）：得**挖出台阶**才能出来。
- * C. 水柱 + 往下流 + 没有任何出口：回执必须点明"水流把你按下去"，并给出
- *    keepInventory 世界里的**主动溺水**这个真选项（含代价）。
+ * C. 水柱 + 往下流 + 没有任何出口：回执必须点明"水流把你按下去"，并明确
+ *    **不要主动溺水**（继续找路/等人来救）。
  */
 import { describe, expect, it } from 'vitest';
 import { Vec3 } from 'vec3';
@@ -69,7 +69,6 @@ function noopToolDeps(overrides: Record<string, unknown> = {}): any {
     mineUp: async () => false,
     digBlock: async () => false,
     canDig: () => false,
-    keepInventory: true,
     ...overrides,
   };
 }
@@ -210,18 +209,17 @@ describe('B. 1×1 水坑：挖出台阶出来（真机 21:37 overnight_b）', ()
     expect(plan?.dig.length).toBe(2);
   });
 
-  it('墙挖不动（没镐）→ 如实说"挖不动"并给 mineBlock 的下一步，不假报脱险', async () => {
+  it('墙挖不动（没镐）→ 如实说"挖不动"，不排下一步菜单、不假报脱险', async () => {
     const bot = columnBot(pitCells(), { x: -0.3, y: 60, z: 25.3 });
     const text = await escapeWaterSkill(bot, noopToolDeps({ goTo: async () => false }));
     expect(text).toContain('没能脱险');
     expect(text).toContain('挖不动');
     expect(text).toContain('墙');
-    expect(text).toContain('mineBlock');
     expect(text).not.toContain('已真正脱险');
   });
 });
 
-describe('C. 往下流的水柱 + 无出口：点明水流，并给出主动溺水这个真选项', () => {
+describe('C. 往下流的水柱 + 无出口：点明水流，并明确"别主动溺水"', () => {
   it('水下流且上浮无效 → 回执说"水在往下流，先横向离开"', async () => {
     const cells: Cells = new Map();
     for (let x = 0; x <= 5; x++) {
@@ -237,19 +235,16 @@ describe('C. 往下流的水柱 + 无出口：点明水流，并给出主动溺�
     expect(text).not.toContain('已真正脱险');
   });
 
-  it('keepInventory=true ⇒ 主动溺水被明确说成"真选项"，代价写全（满血/经验都保留）', () => {
-    const advice = deliberateDrownAdvice(true);
-    expect(advice).toContain('keepInventory');
-    expect(advice).toContain('满血');
-    expect(advice).toContain('经验');
-    expect(advice).toContain('主动溺水');
-    expect(deliberateDrownAdvice(false)).toContain('不要');
-    expect(deliberateDrownAdvice(false)).toContain('掉光背包');
-    expect(deliberateDrownAdvice(null)).toContain('/gamerule');
-    expect(deliberateDrownAdvice(null)).toContain('先确认');
+  it('溺水提示只有"别主动溺水、继续找路"，不出现任何死亡代价/划算与否的说法', () => {
+    const advice = deliberateDrownAdvice();
+    expect(advice).toContain('不要主动溺水');
+    expect(advice).toContain('找路');
+    expect(advice).not.toContain('keepInventory');
+    expect(advice).not.toContain('重生');
+    expect(advice).not.toContain('划算');
   });
 
-  it('无出口且没有 keepInventory 情报时，回执照样给出"先确认 gamerule"的版本', async () => {
+  it('无出口时回执照样带上"别主动溺水"这条提示', async () => {
     const cells: Cells = new Map();
     for (let x = 0; x <= 4; x++) {
       for (let z = 27; z <= 31; z++) {
@@ -257,8 +252,7 @@ describe('C. 往下流的水柱 + 无出口：点明水流，并给出主动溺�
       }
     }
     const bot = columnBot(cells, { x: 2.5, y: 60.5, z: 29.5 }, { flowingLevel: 9 });
-    const text = await escapeWaterSkill(bot, noopToolDeps({ goTo: async () => false, keepInventory: null }));
-    expect(text).toContain('keepInventory');
-    expect(text).toContain('先确认');
+    const text = await escapeWaterSkill(bot, noopToolDeps({ goTo: async () => false }));
+    expect(text).toContain('不要主动溺水');
   });
 });

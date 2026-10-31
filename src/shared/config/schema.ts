@@ -151,7 +151,9 @@ export const ProfileSchema = Type.Object(
       pattern: PROFILE_NAME_PATTERN,
       description: PROFILE_NAME_DESCRIPTION,
     }),
-    model: ModelReferenceSchema,
+    // 可选：没有 model = **手动模式**（外部 CLI 全权驱动，不跑 LLM 循环）。
+    // 这正是 `cli spawn` 注释里承诺的"木偶"，也是 CLI 当玩家用的唯一正路。
+    model: Type.Optional(ModelReferenceSchema),
     compaction: Type.Optional(CompactionSchema),
     promptSet: Type.Optional(Type.String({ minLength: 1, description: '提示词集名，默认 default。' })),
     prompts: Type.Optional(PromptOverridesSchema),

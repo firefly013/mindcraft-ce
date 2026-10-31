@@ -54,7 +54,7 @@ const TRUNCATE_KEEP_HEAD = 9_000;
 const TRUNCATE_KEEP_TAIL = 9_000;
 
 /**
- * 截断策略是**留头留尾**：头部是"发生了什么"，**尾部那条「下一步（照做即可）」最有用**，
+ * 截断策略是**留头留尾**：头部是"发生了什么"，尾部是**结论/最后一个可核对的事实**，
  * 中间那几百万次重复的失败全部丢掉。截断本身必须**明说**，绝不悄悄吞内容。
  */
 export function clampActionOutput(data: string): string {
@@ -280,15 +280,16 @@ export class ActionRunner {
     // **但"还在跑"本身几乎没用**——真机反馈（2026-10-18 15:16，overnight_b
     // 的原话）：`goToCoordinates 静默卡死 60 秒：坐标/speed 全程不变，只在 60 秒时
     // 回一句「还在跑」`。模型据此无法判断"是在慢慢走"还是"彻底卡住了"。
-    // 所以这条回执必须带**可比较的状态**：坐标、速度、以及"和上一条比动了没有"。
-    // 位置连续两次没变就明说是卡住，并给出下一步（那是模型的决策点，不是噪音）。
+    // 所以这条回执必须带**可比较的状态**：坐标、以及"和上一条比移动了多少格"。
+    // **只给数，不判"卡住"**（2026-10-26）：位移小不等于卡住——钓鱼/睡觉/熔炼
+    // 本来就不动。判断归模型，见下面 movement 那段。
     let lastPingPosition: { x: number; y: number; z: number } | null = null;
     let lastPingAt: number | null = null;
     const progressTimer = setInterval(() => {
       void (async (): Promise<void> => {
       const seconds = Math.round((Date.now() - startedAt) / 1000);
       const now = Date.now();
-      let pos: { x: number; y: number; z: number } | null = null;
+      let pos: { x: number; y: number; z: number } | null;
       try {
         pos = await this.bodyPosition();
       } catch {
@@ -298,18 +299,27 @@ export class ActionRunner {
         pos == null
           ? '读不到坐标'
           : `(${pos.x.toFixed(1)}, ${pos.y.toFixed(1)}, ${pos.z.toFixed(1)})`;
-      let movement = '';
-      if (pos != null && lastPingPosition != null && lastPingAt != null) {
+      let movement: string;
+      if (pos == null) {
+        // 读不到坐标：只说读不到，不编一个位置、也不拿它推"卡没卡"。
+        movement = '';
+      } else if (lastPingPosition == null || lastPingAt == null) {
+        movement = '（第一条进度，还没有可比对的位移。）';
+      } else {
         const moved = Math.hypot(pos.x - lastPingPosition.x, pos.y - lastPingPosition.y, pos.z - lastPingPosition.z);
         const spanSeconds = Math.max(1, Math.round((now - lastPingAt) / 1000));
         const perSecond = moved / spanSeconds;
-        if (moved < 1) {
-          movement =
-            `⚠️ 这 ${spanSeconds} 秒里位置几乎没变（位移 ${moved.toFixed(1)} 格）——**很可能是卡住了**，不是在慢慢走。` +
-            '下一步：Stop 掉它，然后把目标拆成 ≤32 格的中间点、或往侧面挪 2~4 格再试；被方块挡着就先 mineBlock。';
-        } else {
-          movement = `距上一条回执移动了 ${moved.toFixed(1)} 格（约 ${perSecond.toFixed(1)} 格/秒）。`;
-        }
+        // **只报位移，不判"卡住"。**
+        //
+        // 以前这里写成「⚠️ 位置几乎没变——**很可能是卡住了**」外加一句「下一步：Stop 掉它，
+        // 把目标拆成 ≤32 格」。那是在替模型判案：位移小可能是在钓鱼（fish 默认 3 分钟）、
+        // 睡觉（sleepUnderground 12 分钟）、熔炼、打贴身怪——那些动作本来就不移动。
+        // 真机上 fish 每一趟都会在 60 秒时收到这条假警报和一句 Stop。
+        // 现在只给量到的数：**判断归模型**（它知道自己发的是哪个工具、要去哪）。
+        movement =
+          moved < 1
+            ? `这 ${spanSeconds} 秒里位置几乎没变（位移 ${moved.toFixed(1)} 格）。`
+            : `距上一条回执移动了 ${moved.toFixed(1)} 格（约 ${perSecond.toFixed(1)} 格/秒）。`;
       }
       lastPingPosition = pos;
       lastPingAt = now;
@@ -322,8 +332,7 @@ export class ActionRunner {
           status: 'accepted',
           data:
             `[${callId} · generation ${generation}] ${name} 还在跑（已 ${seconds} 秒，尚未返回结果）。` +
-            `现在在 ${where}。${movement}` +
-            (movement === '' ? '如果它在做大范围搜索或长距离移动，可以继续等；如果要改做别的，可以 Stop。' : ''),
+            `现在在 ${where}。${movement}`,
         },
       });
       })();

@@ -111,8 +111,9 @@ export const TOOL_TEXT: Record<string, { description: string; params: Record<str
   },
   consume: {
     description:
-      '吃/喝指定物品。**存粮规则**：背包里能直接吃的只剩 ≤2 份、而你现在并不饿（food ≥ 14）时会**拒绝**并说明——那几份是低血期的救命粮，' +
-      '现在吃掉就是一小时后饿死。真饿（food < 14）时照吃不误。生肉吃成后会提醒"下次先烤"（熟食值约一倍）。',
+      '吃/喝指定物品。背包里能直接吃的只剩 ≤2 份、而你现在并不饿（food ≥ 14）时**照吃**，' +
+      '但回执会写明"这是最后几份、接下来没吃的了"——吃不吃由你决定，工具不拦。' +
+      '生肉吃成后会提醒"下次先烤"（熟食值约一倍）。',
     params: { item_name: '要吃喝的物品名字。' },
   },
   equip: {
@@ -171,8 +172,9 @@ export const TOOL_TEXT: Record<string, { description: string; params: Record<str
     params: {},
   },
   mineBlock: {
-    description: '挖掉指定坐标的那一格。往头顶/斜上方开路、在竖井里挖落脚位用它——collectBlocks 只找最近的、digDown 只会往下。够不着（超过 4.5 格）会明说。',
-    params: { x: '目标 x 坐标。', y: '目标 y 坐标。', z: '目标 z 坐标。' },
+    description: '挖掉指定坐标的那一格。往头顶/斜上方开路、在竖井里挖落脚位用它——collectBlocks 只找最近的、digDown 只会往下。够不着（超过 4.5 格）会明说。' +
+      '**默认是采集**：要有能收获的工具，否则拒绝（挖了也不掉东西，白费时间）；只想把方块挖开就加 `force=true`。',
+    params: { x: '目标 x 坐标。', y: '目标 y 坐标。', z: '目标 z 坐标。', force: '挖穿模式（默认 false = 采集）：true = 不在乎掉落，用最好的工具硬挖开它——开路/逃命/拆挡路的墙，会很慢、没有掉落。默认 false = 我要这一格的掉落物，没有能收获它的工具就拒绝（回执会告诉你可以改 force）。' },
   },
   attack: {
     description: '攻击并杀死一个目标，一直打到它死或跑掉。**type 必填，target 的含义全看它**：' +
@@ -209,14 +211,14 @@ export const TOOL_TEXT: Record<string, { description: string; params: Record<str
     description: '把视角转向某个方位：north/south/east/west 是水平方位，up/down 是抬头/低头。要看向某个具体坐标用 lookAtPosition。',
     params: {
       direction: '方位：north/south/east/west/up/down',
-      pitch: '俯仰角（-90 向上，90 向下，默认 0 平视）',
+      pitch: '俯仰角（度）：**+90 = 正上、-90 = 正下**（抬头为正），默认 0 平视',
     },
   },
   turnView: {
-    description: '在当前视角上转一个增量（度）。角度是 Minecraft 约定：水平 0 朝南、90 朝西、180 朝北、-90 朝东；往右转是正，往左转是负。东西在画面边缘差一点点时用它，比算绝对角度稳。',
+    description: '在当前视角上转一个增量（度）。水平角按 mineflayer 的约定：**0 = 北（−Z）、90 = 西（−X）、180 = 南（+Z）、−90（=270）= 东（+X）**；**正数是往左转（逆时针），负数是往右转**（从北出发：+90 到西、−90 到东）；**俯仰也是正数抬头**：+10 抬高 10°、−10 压低 10°。东西在画面边缘差一点点时用它比算绝对角度稳；要"朝某个方位"直接用 lookDirection 更省心。',
     params: {
-      yaw: '水平转角（度，正数向右）',
-      pitch: '俯仰增量（度，正数向下，默认 0）',
+      yaw: '水平转角（度，正数向左、负数向右）',
+      pitch: '俯仰增量（度，**正数抬头**，默认 0）',
     },
   },
   inspect: {
@@ -228,14 +230,15 @@ export const TOOL_TEXT: Record<string, { description: string; params: Record<str
     params: { x: 'x 坐标', y: 'y 坐标', z: 'z 坐标' },
   },
   digDown: {
-    description: '往下挖指定距离。碰到岩浆、水、或下方掉落 ≥4 格就停。',
-    params: { distance: '往下挖的距离' },
+    description: '往下挖指定距离。碰到岩浆、水、或下方掉落 ≥4 格就停。**默认是采集**——挡路的是石头而你没镐时会拒绝并告诉你可以加 `force=true`。',
+    params: { distance: '往下挖的距离', force: '挖穿模式（默认 false = 采集）：true = 不在乎掉落，用最好的工具硬挖开它——开路/逃命/拆挡路的墙，会很慢、没有掉落。默认 false = 我要这一格的掉落物，没有能收获它的工具就拒绝（回执会告诉你可以改 force）。' },
   },
   stairUp: {
     description:
       '垂直上行（台阶模式）：边挖开头顶/正前方、边跳上高一层的实心格；前方空着会用背包方块垫一步。适合从竖井/矿洞往上爬。' +
-      '水和岩浆会提前停；每步有进度回执，超时/被 Stop/保命打断会返回已完成格数。',
-    params: { distance: '想上升的格数，1~64' },
+      '水和岩浆会提前停；每步有进度回执，超时/被 Stop/保命打断会返回已完成格数。' +
+      '**默认是采集**——头顶是石头而你没镐时会拒绝并告诉你可以加 `force=true`。',
+    params: { distance: '想上升的格数，1~64', force: '挖穿模式（默认 false = 采集）：true = 不在乎掉落，用最好的工具硬挖开它——开路/逃命/拆挡路的墙，会很慢、没有掉落。默认 false = 我要这一格的掉落物，没有能收获它的工具就拒绝（回执会告诉你可以改 force）。' },
   },
   pillarUp: {
     description:
@@ -389,7 +392,8 @@ export const TOOL_TEXT: Record<string, { description: string; params: Record<str
     params: {
       length: '这次往前挖多少格（默认 32，1~256）。长距离反复调用它。',
       height: '隧道高度（默认 2 = 能站着走，1~3）。',
-      direction: '方向 `+x`/`-x`/`+z`/`-z`（也认 east/west/north/south、东南西北）。留空 = 按当前朝向推；回执写明实际方向，续挖照抄。',
+      direction: '方向 `+x`/`-x`/`+z`/`-z`（也认 east/west/north/south/东南西北）。留空 = 按当前朝向推；回执写明实际方向，续挖照抄。',
+      force: '挖穿模式（默认 false = 采集）：true = 不在乎掉落，用最好的工具硬挖——开路/逃命/拆挡路的墙，会很慢、没有掉落。默认 false = 我要方块，没有能收获的工具就拒绝（回执会告诉你可以改 force）。',
       handoff: '交接标记（可选）：照抄上一条回执里的调用就自动带着它。用来堵两个工具互相踢皮球——真出现循环时当场停手并给别的出路。',
     },
   },
@@ -433,7 +437,7 @@ export const MESSAGES = {
   death: (posText: string, dimension: string, msg: string, drops: string): string =>
     `你死在了${dimension}维度 ${posText}。死因（临终消息）：'${msg}'。` +
     `死亡点已存为 'last_death_position'，想回去可以找它。` +
-    (drops === '' ? '身上没带东西，没有掉落。' : `死亡瞬间身上带着（若没开 keepInventory 就是掉落清单，回去捡可得）：${drops}。`) +
+    (drops === '' ? '身上没带东西，没有掉落。' : `死亡瞬间身上带着（掉落清单，回去捡可得）：${drops}。`) +
     `之前的动作已停止，你已重生。`,
   /**
    * 死亡之后把模型叫起来的那一句（L4）。

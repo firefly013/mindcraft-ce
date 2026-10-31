@@ -1,6 +1,6 @@
 /**
  * `pillarUp` 把自己埋住 → 窒息死亡（真机 2026-10-21 overnight_a）：
- * y=51 竖井里 `pillarUp(14)`，方块进了身体，血 19→0，损失 82 件（Hard + keepInventory=false）。
+ * y=51 竖井里 `pillarUp(14)`，方块进了身体，血 19→0，损失 82 件。
  * 两条修复都要求"不用服务器就能测"：
  *  ① 放块前的**占位判定**（方块绝不能和身体 AABB 相交）；
  *  ② **窒息自救**（血在掉 + 脚/头格实心 ⇒ 就地挖开，而不是逃跑）。
@@ -61,8 +61,10 @@ describe('planSuffocationEscape：被埋住就挖开，不逃跑', () => {
     expect(planSuffocationEscape({ healthDropped: true, feetBlock: 'air', headBlock: 'cobblestone' }).action).toBe('break-head');
   });
 
-  it('血没在掉 ⇒ none（不许瞎挖）；都读不到 ⇒ none/unreadable', () => {
-    expect(planSuffocationEscape({ healthDropped: false, feetBlock: 'stone', headBlock: 'stone' }).action).toBe('none');
+  it('**血没在掉但身体嵌在方块里** ⇒ 照样挖（卡住不需要等掉血）', () => {
+    // 2026-10-23 真机：1 格高的缝里服务器不扣血，旧逻辑永远不救 ⇒ 每次动作零位移。
+    expect(planSuffocationEscape({ healthDropped: false, feetBlock: 'stone', headBlock: 'stone' }).action).toBe('break-feet');
+    expect(planSuffocationEscape({ healthDropped: false, feetBlock: 'air', headBlock: 'dirt' }).action).toBe('break-head');
     expect(planSuffocationEscape({ healthDropped: true, feetBlock: null, headBlock: null })).toMatchObject({
       action: 'none',
       reason: 'unreadable',
@@ -74,12 +76,12 @@ describe('planSuffocationEscape：被埋住就挖开，不逃跑', () => {
   });
 });
 
-describe('formatSuffocationReceipt：说清"我在方块里、哪一格、血在掉、在挖"', () => {
-  it('挖开成功 ⇒ 告诉模型血应该会停 + 下一步自检', () => {
+describe('formatSuffocationReceipt：说清"我在方块里、哪一格、在挖"', () => {
+  it('挖开成功 ⇒ 告诉模型已挖开 + 下一步自检', () => {
     const text = formatSuffocationReceipt({ position: { x: 12, y: 51, z: -3 }, which: '头', blockName: 'stone', health: 6, broke: true });
-    expect(text).toContain('我在方块里');
+    expect(text).toContain('卡在方块里');
     expect(text).toContain('头那格是 stone');
-    expect(text).toContain('血在掉');
+    expect(text).toContain('当前血量 6');
     expect(text).toContain('已经把那一格挖开了');
     expect(text).toContain('(12, 51, -3)');
   });
