@@ -58,6 +58,12 @@ const USAGE = `用法：cli --agent <名字> [选项] <命令> [参数...]
 每次调用都会附上"上次以来积攒的事件"——CLI 没法被唤醒，所以这是你唯一能看到
 它不在场时发生了什么的方式。
 
+每次调用还会往**系统临时目录**存一张实时画面（固定文件名，每次覆盖）：
+  <临时目录>/mindcraft-cli/<agent>-live.jpg
+stats 每次调用另存一张留档（不覆盖，多张累积）：
+  <临时目录>/mindcraft-cli/<agent>-stats-<时间戳>-<序号>.jpg
+（纯打印用法的调用——cli / cli -h / cli help——不连机器人，没有画面。）
+
 选项：
   --agent <名字>   机器人名字（必填）
   --port <端口>    MindServer 端口，默认读取 settings.ts 的 mindserver_port

@@ -11,9 +11,6 @@
  *
  * 从旧版搬过来的方法**逐字保留**（含注释）：那边的注释记的都是真机踩出来的坑。
  */
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
 import { BACKGROUND_CONTEXT } from '@earendil-works/chord/context';
 import { defineExtension } from '@earendil-works/pi-durable';
 import { ActionRunner } from './action_runner.js';
@@ -21,6 +18,7 @@ import { buildGameTools, actionChannelInvoker } from './tools/game_tools.js';
 import { createToolCatalog, EMPTY_TOOL_CATALOG, type ToolCatalog } from './tools/catalog.js';
 import type { ToolDeclaration } from '../shared/tools.js';
 import { CliJobTracker } from './cli_jobs.js';
+import { cliScreenshotDir, liveScreenshotPath, saveScreenshot, statsScreenshotPath } from './cli_screenshots.js';
 import { log } from './connection_handler.js';
 import { STOP_WORDS } from '../shared/chat.js';
 import { EVENT_LOG_LIMIT, eventTextFor, renderEventText } from '../shared/event_stream.js';
@@ -627,7 +625,9 @@ export class Agent {
                         // 第二份命令表——所以"身体不支持的命令"根本进不了 schema。
                         declarations: caps.tools,
                         // 只有声明了 withScreenshot 的命令会真的调它（目前只有 !stats）。
-                        captureImage: () => this.captureScreenshot(),
+                        // 图既要给模型，也要留一份到临时目录——模型当时看到了什么，
+                        // 事后得能翻出来看（`captureStatsScreenshot` 的两件事一起做）。
+                        captureImage: async () => (await this.captureStatsScreenshot())?.b64 ?? null,
                     }),
                     // 地点三件套住在大脑侧：它们读写的都是会话里的文档。
                     ...(() => {
@@ -1039,22 +1039,64 @@ export class Agent {
     }
 
     /**
-     * 把这一刻的画面存成临时文件，回执里给路径。
+     * stats 的那张画面：**既要给模型（base64），也要落一份到临时目录**。
+     *
+     * 两个消费者（模型工具回执 / CLI 回执）共用这一条路径，避免"模型调用存了、
+     * CLI 调用没存"这种只在一半路上生效的分叉。存盘失败只少一份留档，base64
+     * 照样交给调用方——视觉是可选能力，不能让临时目录的问题砍掉回执。
+     *
+     * `dir` 是测试注入点；生产一律用系统临时目录。
+     */
+    private async captureStatsScreenshot(
+        dir: string = cliScreenshotDir(),
+    ): Promise<{ b64: string; file: string | null; saveError: string | null } | null> {
+        const b64 = await this.captureScreenshot();
+        if (b64 == null) return null;
+        const file = statsScreenshotPath(this.name, dir);
+        try {
+            saveScreenshot(file, b64);
+            return { b64, file, saveError: null };
+        } catch (err: unknown) {
+            const message = err instanceof Error ? err.message : String(err);
+            this.log.with('vision').warn({ phase: 'stats-save-failed', file, err: message });
+            return { b64, file: null, saveError: message };
+        }
+    }
+
+    /**
+     * 把这一刻的画面存成 stats 留档，回执里给路径。
      *
      * 为什么不直接给 base64：终端显示不了图片，几千个字符只会把有用信息淹没。
-     * 存 Temp 是系统临时目录（`os.tmpdir()`），系统会自己清理，不用我们管生命周期。
+     * 每次 stats **新增一张、不覆盖**——"和上一次比"正是这个工具的语义。
      */
-    private async attachScreenshotFile(text: string): Promise<string> {
+    private async attachScreenshotFile(text: string, dir: string = cliScreenshotDir()): Promise<string> {
+        const shot = await this.captureStatsScreenshot(dir);
+        if (shot == null) return `${text}\n\n（没拍到画面：相机没开，或者还没就绪）`;
+        if (shot.file == null) {
+            return `${text}\n\n（画面存不下来：${shot.saveError ?? '未知原因'}）`;
+        }
+        return `${text}\n\n画面：${shot.file}`;
+    }
+
+    /**
+     * 外部 CLI 每次调用都要的一张"现拍"：**覆盖**同一个临时文件。
+     *
+     * 为什么覆盖而不是每次新增：这条文件是给人（或外部工具）看的稳定入口
+     * ——"机器人现在长什么样"；历史留档归 stats 的多张文件。
+     *
+     * 拍不到返回 null——相机没开、身体没就绪，都不该让 CLI 命令本身失败。
+     * `dir` 是测试注入点；生产一律用系统临时目录。
+     */
+    async saveLiveScreenshot(dir: string = cliScreenshotDir()): Promise<string | null> {
         const b64 = await this.captureScreenshot();
-        if (b64 == null) return `${text}\n\n（没拍到画面：相机没开，或者还没就绪）`;
+        if (b64 == null) return null;
+        const file = liveScreenshotPath(this.name, dir);
         try {
-            const dir = join(tmpdir(), 'mindcraft-cli');
-            mkdirSync(dir, { recursive: true });
-            const file = join(dir, `${this.name}-${Date.now()}.jpg`);
-            writeFileSync(file, Buffer.from(b64, 'base64'));
-            return `${text}\n\n画面：${file}`;
+            saveScreenshot(file, b64);
+            return file;
         } catch (err: unknown) {
-            return `${text}\n\n（画面存不下来：${err instanceof Error ? err.message : String(err)}）`;
+            this.log.with('vision').warn({ phase: 'live-save-failed', file, err: String(err) });
+            return null;
         }
     }
 

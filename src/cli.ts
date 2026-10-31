@@ -36,6 +36,7 @@ import { io } from 'socket.io-client';
 import { readFileSync, writeFileSync } from 'node:fs';
 import settings from '../settings.js';
 import { parseCliArgs } from './cli/args.js';
+import { requestLiveScreenshot } from './cli/live_screenshot.js';
 import type { ToolDeclaration } from './shared/tools.js';
 
 /**
@@ -98,6 +99,8 @@ interface CliResult {
   events?: CliEvent[];
   /** `op: 'tools'` 的应答：身体握手报上来的工具声明。 */
   tools?: ToolDeclaration[];
+  /** `op: 'screenshot'` 的应答：实时画面文件路径；拍不到是 null/缺省。 */
+  screenshot?: string | null;
 }
 
 function cursorPath(agent: string): string {
@@ -188,99 +191,115 @@ async function main(): Promise<void> {
       });
     });
 
-  /**
-   * 工具目录只有**在线的大脑**手上有（声明的真源在身体侧，靠握手带上来）。
-   * 只有 `help <命令>` 和"这条命令要不要异步"需要它——查询类 op 不为它多跑一趟。
-   */
-  const needsCatalogue = opts.command === 'help' || opts.help || opts.op === 'run';
-  const catalogue: readonly ToolDeclaration[] = needsCatalogue
-    ? await (async () => {
-        const res = await send({ op: 'tools' }, 15_000);
-        return res.ok && Array.isArray(res.tools) ? res.tools : [];
-      })()
-    : [];
+  // **每次调用都存一张实时画面**，覆盖临时目录里同一个文件。放在命令之前拍：
+  // 这张图回答的是"我调它的时候，它在看什么"。拍不到（相机没开、机器人还没
+  // 准备好）只少一张图——调试旁路，不能影响命令本身。
+  const liveScreenshot = await requestLiveScreenshot(send);
 
-  if (opts.command === 'help' || opts.help) {
-    process.stdout.write(`${describeCommand(helpTarget ?? '', catalogue)}\n`);
-    socket.close();
-    return;
-  }
+  try {
+    /**
+     * 工具目录只有**在线的大脑**手上有（声明的真源在身体侧，靠握手带上来）。
+     * 只有 `help <命令>` 和"这条命令要不要异步"需要它——查询类 op 不为它多跑一趟。
+     */
+    const needsCatalogue = opts.command === 'help' || opts.help || opts.op === 'run';
+    const catalogue: readonly ToolDeclaration[] = needsCatalogue
+      ? await (async () => {
+          const res = await send({ op: 'tools' }, 15_000);
+          return res.ok && Array.isArray(res.tools) ? res.tools : [];
+        })()
+      : [];
 
-  let result: CliResult;
-
-  if (opts.op !== 'run') {
-    // 任务控制类：不产生新任务，只查询/干预。
-    result = await send({ op: opts.op, id: opts.jobId, waitMs: opts.timeoutMs }, opts.timeoutMs + 5000);
-  } else {
-    // **分流**：长命令强制异步（--wait 才等），其余强制同步。
-    // 不用人去记哪个该异步 —— 记不住，而且记错了就是"终端说失败、机器人还在走"。
-    const longRunning = isLongRunning(opts.command, catalogue);
-    const shouldWait = !longRunning || opts.wait;
-
-    const started = await send(
-      {
-        op: 'start',
-        name: opts.command,
-        args: opts.args,
-        force: opts.force,
-        since: opts.all ? 0 : readCursor(opts.agent),
-      },
-      15_000,
-    );
-    if (!started.ok || started.jobId == null) {
-      result = started;
-    } else if (!shouldWait) {
-      // 长命令、没加 --wait：拿 id 就走，命令继续跑。
-      result = started;
-    } else {
-      const waited = await send(
-        { op: 'wait', id: started.jobId, waitMs: opts.timeoutMs },
-        opts.timeoutMs + 5000,
-      );
-      result = { ...waited, jobId: started.jobId, events: dedupe([...(started.events ?? []), ...(waited.events ?? [])]) };
-    }
-
-    // 短命令上指定 --async 是无效操作，说一句，免得用户以为生效了。
-    if (!longRunning && opts.async) {
-      process.stdout.write(`（${opts.command} 是同步命令，--async 无效）\n`);
-    }
-  }
-
-  if (!result.ok) {
-    // 超时不是失败：任务还在跑，说清楚而不是吓唬人。
-    if (result.timeout === true) {
-      process.stdout.write(`（还在跑，没等到结果）${result.error ?? ''}\n`);
-    } else {
-      process.stdout.write(`${result.error ?? '命令失败'}\n`);
-      socket.close();
-      process.exitCode = 1;
+    if (opts.command === 'help' || opts.help) {
+      process.stdout.write(`${describeCommand(helpTarget ?? '', catalogue)}\n`);
       return;
     }
-  } else if (result.jobs != null) {
-    process.stdout.write(`${renderJobs(result.jobs)}\n`);
-  } else if (result.job != null) {
-    process.stdout.write(`${renderJob(result.job, result.jobId ?? opts.jobId ?? '?')}\n`);
-  } else if (result.cancelled != null) {
-    process.stdout.write(
-      result.cancelled
-        ? `任务 #${opts.jobId} 已请求取消。\n`
-        : `任务 #${opts.jobId} 取消不了（已经结束或不存在）。\n`,
-    );
-  } else if (result.jobId != null) {
-    process.stdout.write(
-      `任务 #${result.jobId} 已提交（${opts.command}）。\n` +
-        `用 wait ${result.jobId} 等它、status ${result.jobId} 看状态、cancel ${result.jobId} 停掉。\n`,
-    );
-  }
 
-  const events = result.events ?? [];
-  if (events.length > 0) {
-    process.stdout.write(`${renderEvents(events)}\n`);
-    // 用**最后一条事件的时间**推进，不是"现在"——否则同毫秒到达的两条会漏掉一条。
-    writeCursor(opts.agent, Math.max(...events.map((e) => e.at)));
-  }
+    let result: CliResult;
 
-  socket.close();
+    if (opts.op !== 'run') {
+      // 任务控制类：不产生新任务，只查询/干预。
+      result = await send({ op: opts.op, id: opts.jobId, waitMs: opts.timeoutMs }, opts.timeoutMs + 5000);
+    } else {
+      // **分流**：长命令强制异步（--wait 才等），其余强制同步。
+      // 不用人去记哪个该异步 —— 记不住，而且记错了就是"终端说失败、机器人还在走"。
+      const longRunning = isLongRunning(opts.command, catalogue);
+      const shouldWait = !longRunning || opts.wait;
+
+      const started = await send(
+        {
+          op: 'start',
+          name: opts.command,
+          args: opts.args,
+          force: opts.force,
+          since: opts.all ? 0 : readCursor(opts.agent),
+        },
+        15_000,
+      );
+      if (!started.ok || started.jobId == null) {
+        result = started;
+      } else if (!shouldWait) {
+        // 长命令、没加 --wait：拿 id 就走，命令继续跑。
+        result = started;
+      } else {
+        const waited = await send(
+          { op: 'wait', id: started.jobId, waitMs: opts.timeoutMs },
+          opts.timeoutMs + 5000,
+        );
+        result = {
+          ...waited,
+          jobId: started.jobId,
+          events: dedupe([...(started.events ?? []), ...(waited.events ?? [])]),
+        };
+      }
+
+      // 短命令上指定 --async 是无效操作，说一句，免得用户以为生效了。
+      if (!longRunning && opts.async) {
+        process.stdout.write(`（${opts.command} 是同步命令，--async 无效）\n`);
+      }
+    }
+
+    if (!result.ok) {
+      // 超时不是失败：任务还在跑，说清楚而不是吓唬人。
+      if (result.timeout === true) {
+        process.stdout.write(`（还在跑，没等到结果）${result.error ?? ''}\n`);
+      } else {
+        process.stdout.write(`${result.error ?? '命令失败'}\n`);
+        process.exitCode = 1;
+        return;
+      }
+    } else if (result.jobs != null) {
+      process.stdout.write(`${renderJobs(result.jobs)}\n`);
+    } else if (result.job != null) {
+      process.stdout.write(`${renderJob(result.job, result.jobId ?? opts.jobId ?? '?')}\n`);
+    } else if (result.cancelled != null) {
+      process.stdout.write(
+        result.cancelled
+          ? `任务 #${opts.jobId} 已请求取消。\n`
+          : `任务 #${opts.jobId} 取消不了（已经结束或不存在）。\n`,
+      );
+    } else if (result.jobId != null) {
+      process.stdout.write(
+        `任务 #${result.jobId} 已提交（${opts.command}）。\n` +
+          `用 wait ${result.jobId} 等它、status ${result.jobId} 看状态、cancel ${result.jobId} 停掉。\n`,
+      );
+    }
+
+    const events = result.events ?? [];
+    if (events.length > 0) {
+      process.stdout.write(`${renderEvents(events)}\n`);
+      // 用**最后一条事件的时间**推进，不是"现在"——否则同毫秒到达的两条会漏掉一条。
+      writeCursor(opts.agent, Math.max(...events.map((e) => e.at)));
+    }
+  } finally {
+    // 不管这次调用干了什么（包括报错、异常），都把实时画面的落点说清楚：
+    // 文件是固定名字，人不用去猜系统临时目录在哪儿。
+    process.stdout.write(
+      liveScreenshot != null
+        ? `实时画面：${liveScreenshot}\n`
+        : '（实时画面没存成：相机没开、还没就绪，或者临时目录写不进去）\n',
+    );
+    socket.close();
+  }
 }
 
 /** 合并两次请求的事件（wait 那次没传 since，会重复）。 */

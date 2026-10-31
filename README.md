@@ -42,6 +42,18 @@ npm run cli -- --agent deepseek --port 8080 stats
 npm run cli -- --agent deepseek --port 8080 --wait mineBlock --x 10 --y 64 --z 20
 ```
 
+CLI 每次调用都会截图，放在系统临时目录的 `mindcraft-cli/` 下：
+
+- `<agent>-live.jpg`：实时画面。**每次调用覆盖同一个文件**，不管这次跑的是 stats、
+  goToCoordinates，还是 status / wait / jobs / help <命令>——命令执行前拍，代表
+  "调它的那一刻机器人在看什么"。
+- `<agent>-stats-<时间戳>-<序号>.jpg`：stats 的留档。**每次 stats 被调用新增一张，
+  不覆盖**（模型自己调用 stats 时也存），方便和上一次的状态比对。
+
+纯打印用法的调用（`cli`、`cli -h`、`cli help`）不连机器人，因此没有画面。
+拍不到（`allow_vision: false`、相机没起来、临时目录写不进去）只会在输出末尾说一句，
+不影响命令本身。
+
 > 本仓库代码完全由 AI 生成，纯属垃圾一坨。为保护各位开发者的眼睛和大脑，建议各位大概让 AI 讲讲，就不必捏着鼻子完整阅读了。
 
 ## 一些莫名其妙的 FAQ

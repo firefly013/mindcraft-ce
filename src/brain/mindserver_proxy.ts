@@ -140,6 +140,12 @@ class MindServerProxy {
                 const cancelled = await agent.cliCancelJob(String(data?.id ?? ''));
                 return { ok: true, cancelled, events: events() };
             }
+            // **实时画面**：CLI 每次调用（不管后面跑什么 op）都会先要这一张，
+            // 覆盖同一个临时文件。拍不到也回 `ok: true` + `screenshot: null`——
+            // 截图是调试旁路，不能把"相机没开"变成命令失败。
+            case 'screenshot': {
+                return { ok: true, screenshot: await agent.saveLiveScreenshot() };
+            }
             // **工具声明**：CLI 的 `help` 与"这条命令要不要异步"都靠它。
             // 真源在身体侧（握手报上来），所以只有在线的大脑答得出来。
             case 'tools': {
