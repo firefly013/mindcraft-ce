@@ -15,6 +15,8 @@
  * 本文件是纯数据/纯函数，不许 import 身体或大脑的实现。
  */
 
+import type { ResumePolicy } from './resume.js';
+
 /** 工具种类：查询类只读不占身体通道，动作类要认领身体通道。 */
 export type ToolKind = 'query' | 'action';
 
@@ -46,6 +48,13 @@ export interface ToolDeclaration {
      * **不写死清单**：清单会漏、会过期。CLI 据此强制异步。
      */
     longRunning?: boolean;
+    /**
+     * 被反射（保命/战斗）打断后能不能**机械续做**。缺省 = `manual`（不自动重放）。
+     *
+     * 这是身体在握手里交给大脑的声明：大脑只按它做"原样重发"或"按进度折算参数"，
+     * 不判断"该不该继续"——那是模型的事（见 `shared/resume.ts` 顶部的约束）。
+     */
+    resume?: ResumePolicy;
     kind: ToolKind;
 }
 

@@ -147,13 +147,18 @@ export class Scheduler {
    *
    * **锁的时候顺带把正在跑的动作作废**——它多半就是"正在水里往下挖"那种
    * 把机器人送进险境的动作，让保命反射和它抢身体没有意义。
+   *
+   * 返回被作废的那次调用（没在跑就 null）：反射结束后要不要**机械续做**
+   * 由调用方（ActionRunner）按声明决定，这里只如实交出"作废了什么"。
    */
-  beginEmergency(): void {
-    if (this.emergency) return;
+  beginEmergency(): CurrentAction | null {
+    if (this.emergency) return null;
     this.emergency = true;
+    const interrupted = this.action == null ? null : { ...this.action };
     this.action = null;
     this.generation++;
     this.invalidationReason = 'emergency';
+    return interrupted;
   }
 
   /** 紧急锁解除：最后一个反射报告完成。没有锁的时候是空操作。 */

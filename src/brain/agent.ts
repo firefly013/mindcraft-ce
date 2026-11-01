@@ -692,6 +692,22 @@ export class Agent {
                     return null;
                 }
             },
+            // 续做（checkpoint）用的背包计数：由 `inventory.changed` 事件维护的缓存。
+            // 读不到（缓存还没同步）就返回 null——续做那边会如实说"进度读不到"。
+            inventoryCounts: (): Record<string, number> | null => {
+                const slots = this.slotsCache;
+                if (!Array.isArray(slots)) return null;
+                const counts: Record<string, number> = {};
+                for (const slot of slots) {
+                    if (slot == null || typeof slot.name !== 'string' || slot.name === '') continue;
+                    counts[slot.name] = (counts[slot.name] ?? 0) + (Number(slot.count) || 1);
+                }
+                return counts;
+            },
+            // 续做回执：只记录、不唤醒（L2）。模型下一轮自然看到"已替你续做"。
+            resumeNotice: (payload): void => {
+                this.notify('action.resumed', KIND.TOOL, LEVEL.STATE, payload);
+            },
         });
         // 异步装配（要开 SQLite）。`bootstrap` 会等它——工具的 schema 依赖
         // 身体能力表，而 schema 定下来之后再补工具是补不进去的。
@@ -773,8 +789,16 @@ export class Agent {
                 // 自己声明，模型的处理是默认。
                 handlers: this.buildEventHandlers(),
                 // 动作通道锁：L5 的反射开始跑就锁上，最后一个报告完成才解开。
-                beginEmergency: () => this.scheduler.beginEmergency(),
-                endEmergency: () => this.scheduler.endEmergency(),
+                // 上锁的同时**交出被作废的那次调用**：反射结束后按声明机械续做
+                // （见 `ActionRunner.resumeInterrupted`；决策权仍在模型手上）。
+                beginEmergency: () => {
+                    const interrupted = this.scheduler.beginEmergency();
+                    this.actionRunner?.captureInterruption(interrupted);
+                },
+                endEmergency: () => {
+                    this.scheduler.endEmergency();
+                    this.actionRunner?.resumeInterrupted();
+                },
                 // 空转护栏：**必须留痕**。它是"模型不调工具时替它踩一脚油门"，
                 // 夜里复盘时唯一能回答"bot 是真在干活还是被护栏拖着走"的证据。
                 stallGuard: {
@@ -1002,6 +1026,8 @@ export class Agent {
         // 拒（真机 Feedback #55/#56：快照 idle，但 makeObsidian/useOn/stay 全被拒，
         // Stop 也不放行）。先释放大脑通道，再让身体收手。
         const stopped = this.scheduler?.stopAll();
+        // Stop 是模型明确要回身体：放弃"反射结束后自动续做"（它已经决定不做了）。
+        this.actionRunner?.clearInterruption('stop');
         try {
             this.log.with('action').info({
                 event: 'full-stop',

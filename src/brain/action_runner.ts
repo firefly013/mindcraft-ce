@@ -16,10 +16,12 @@
  */
 
 import { Scheduler } from './scheduler.js';
+import type { CurrentAction } from './scheduler.js';
 import { MESSAGES } from '../shared/prompts.js';
 import type { ToolCatalog } from './tools/catalog.js';
 import { isActionTool, validateToolCall } from './tools/validate.js';
 import type { ToolOutcome } from './tools/tools.js';
+import { describeResumeArgs, resumeItemForBlock, type ResumePolicy } from '../shared/resume.js';
 
 /**
  * 身体通道上发生的事，供观测（日志 / 测试）。
@@ -33,7 +35,38 @@ export type ActionTrace =
   | { kind: 'busy_same'; name: string; actionId: string }
   | { kind: 'busy_other'; name: string; running: string; runningSeconds: number }
   | { kind: 'done'; name: string; actionId: string }
-  | { kind: 'stale_discarded'; name: string };
+  | { kind: 'stale_discarded'; name: string }
+  | { kind: 'resumed'; name: string; callId: string; generation: number }
+  | { kind: 'resume_dropped'; name: string; reason: string };
+
+/**
+ * 续做基线：认领动作时抓一份进度，被打断后据此折算"还剩多少"。
+ *
+ * 只有 `checkpoint` 类的动作需要它；`auto` 原样重发即可，`manual` 不续做。
+ */
+export type ResumeBaseline = { kind: 'count'; item: string; target: number; start: number } | null;
+
+/** 被反射打断、等着续做的那一次调用。 */
+export interface InterruptedAction {
+  name: string;
+  args: Record<string, unknown>;
+  callId: string | null;
+  generation: number;
+  policy: ResumePolicy;
+  baseline: ResumeBaseline;
+}
+
+/** 续做事件（`action.resumed`）：只记录、不唤醒，模型下一轮自然会看到。 */
+export interface ResumeNotice {
+  call: string;
+  action_id: string;
+  call_id: string | null;
+  /** 是否真的重新发起了一次调用。 */
+  resumed: boolean;
+  /** 续做用的参数（没续做时 null）。 */
+  args: Record<string, unknown> | null;
+  detail: string;
+}
 
 /**
  * **任何工具回执的硬上限。这是最后一道防线，不是装饰。**
@@ -140,6 +173,13 @@ export interface ActionRunnerDeps {
    * 回执退回原来的措辞（不编造位置）。
    */
   bodyPosition?: () => Promise<{ x: number; y: number; z: number } | null>;
+  /**
+   * 可选：读一份背包计数（`{ 物品名: 数量 }`）。**只给 checkpoint 续做算剩余量用**；
+   * 读不到返回 null（那就如实说"进度读不到、没有续做"，不猜）。
+   */
+  inventoryCounts?: () => Record<string, number> | null;
+  /** 可选：写一条续做事件（`action.resumed`，只记录、不唤醒）。 */
+  resumeNotice?: (payload: ResumeNotice) => void;
 }
 
 export class ActionRunner {
@@ -151,11 +191,17 @@ export class ActionRunner {
   private notify: (payload: ActionNotice) => void;
   private trace: (event: ActionTrace) => void;
   private bodyPosition: () => Promise<{ x: number; y: number; z: number } | null>;
+  private inventoryCounts: () => Record<string, number> | null;
+  private resumeNotice: (payload: ResumeNotice) => void;
   /** 只用于生成 `call_id`；不参与调度，也不影响 generation 的失效语义。 */
   private callSeq = 0;
   /** 当前认领通道的那次调用的标识；用于同动作幂等回执。 */
   private activeCallId: string | null = null;
   private activeGeneration = 0;
+  /** 当前动作的续做基线（checkpoint 用；认领时抓，被打断后折算剩余量）。 */
+  private activeBaseline: ResumeBaseline = null;
+  /** 被反射打断、等着续做的那一次调用。同一时刻最多一个。 */
+  private pendingInterruption: InterruptedAction | null = null;
 
   constructor(deps: ActionRunnerDeps) {
     this.scheduler = deps.scheduler;
@@ -165,7 +211,9 @@ export class ActionRunner {
     this.execute = deps.execute;
     this.notify = deps.notify;
     this.trace = deps.trace ?? ((): void => {});
-    this.bodyPosition = deps.bodyPosition ?? (async (): Promise<null> => null);
+    this.bodyPosition = deps.bodyPosition ?? ((): Promise<null> => Promise.resolve(null));
+    this.inventoryCounts = deps.inventoryCounts ?? ((): null => null);
+    this.resumeNotice = deps.resumeNotice ?? ((): void => {});
   }
 
   /** 跑一个工具调用：动作类即时回 accepted，查询类阻塞回内容。 */
@@ -245,6 +293,10 @@ export class ActionRunner {
     const callId = `${name}#${++this.callSeq}`;
     this.activeCallId = callId;
     this.activeGeneration = generation;
+    // 模型明确发起了新动作：被打断那件事的"续做意图"就此作废（决策权在模型）。
+    this.pendingInterruption = null;
+    // checkpoint 类动作在这里抓进度基线（被打断后算"还剩多少"用）。
+    this.activeBaseline = this.baselineFor(name, args as Record<string, unknown>);
     this.trace({ kind: 'claim', name, actionId: claim.actionId ?? name, generation });
     this.speak(MESSAGES.usedMarker(name));
     // 后台跑，不等：这一轮的推理到此结束，结果以后报。
@@ -379,6 +431,8 @@ export class ActionRunner {
       // 而且保命反射有时只是在旁边响了，身体其实已经把搜索跑完了——这种情况下
       // 把结果丢掉等于让普通动作被无关急停误伤。保命原因 + 有结果时保留结果并注明。
       if (why === 'emergency' && data.trim() !== '') {
+        // 身体其实把活干完了：这次不需要续做（否则会重复做一遍）。
+        this.cancelPendingFor(callId);
         await this.record(data, name, args);
         this.notify({
           call: name,
@@ -400,6 +454,17 @@ export class ActionRunner {
           : why === 'stop'
             ? 'Stop 停掉了它'
             : 'generation 失效（可能被 Stop/急停/新动作作废）';
+      // 续做承诺：**先说清楚，再去做**——模型看到这条回执时，反射可能还在跑。
+      // 如果声明允许续做，就在反射结束后按声明机械续上（见 `resumeInterrupted`），
+      // 模型不需要重发；不续做的（manual / Stop）也如实说明。
+      const policy = this.resumePolicyOf(name);
+      const willResume = why === 'emergency' && policy !== 'manual';
+      // 兜底捕获（正常路径在 `beginEmergency` 时就抓过了）。**只抓"仍然是当前那次"**：
+      // 如果反射结束得比身体返回还快，续做已经发了新调用，这里不能再排一次，
+      // 否则同一个动作会被续做两遍。
+      if (willResume && this.pendingInterruption == null && this.activeCallId === callId) {
+        this.pendingInterruption = { name, args, callId, generation, policy, baseline: this.activeBaseline };
+      }
       this.notify({
         call: name,
         action_id: name,
@@ -408,7 +473,11 @@ export class ActionRunner {
         result: {
           status: 'completed',
           data: `动作 ${name}（${callId}）被中断：${reasonText}，没有结果。` +
-            '通道已经释放，可以开始下一个动作。',
+            (willResume
+              ? '这条动作会在反射结束后按声明**自动续做**（不需要你重发）；要改主意就直接 Stop 再发新动作。'
+              : policy === 'manual'
+                ? '它不会自动续做（有副作用/没法机械重放），需要你重新发起。'
+                : '它不会自动续做。'),
         },
       });
       return;
@@ -416,6 +485,7 @@ export class ActionRunner {
     const text = this.completionText(name, callId, generation, data);
     await this.record(text, name, args);
     this.scheduler.releaseAction();
+    this.cancelPendingFor(callId);
     this.clearActiveCall(callId);
     this.trace({ kind: 'done', name, actionId: name });
     this.notify({
@@ -425,6 +495,166 @@ export class ActionRunner {
       generation,
       result: { status: 'completed', data: text },
     });
+  }
+
+  // ── 续做：反射抢走身体之后，把模型原来那条指令机械接上 ─────────────────────
+  //
+  // 边界（用户 2026-10-31 定的）：
+  //   - 引擎只做**机械延续**：同一条指令、原样或按进度折算参数，不判断"该不该继续"；
+  //   - 不设次数上限：被打断几次就续几次，不因为"次数多"把决定权推回模型；
+  //   - 续做只是"把身体恢复到被打断前的状态"，不额外限制模型——模型要改主意，
+  //     照常 Stop 再发新动作（和它平时打断一个长动作完全一样）。
+
+  /** 反射抢走身体时调用：记下被作废的那次调用，等反射结束再机械续做。 */
+  captureInterruption(action: CurrentAction | null): void {
+    if (action == null) return;
+    const policy = this.resumePolicyOf(action.id);
+    if (policy === 'manual') return;
+    const args = action.args != null && typeof action.args === 'object'
+      ? (action.args as Record<string, unknown>)
+      : {};
+    this.pendingInterruption = {
+      name: action.id,
+      args,
+      callId: this.activeCallId,
+      generation: action.generation,
+      policy,
+      baseline: this.activeBaseline,
+    };
+  }
+
+  /** 所有反射结束（紧急锁解除）：按声明机械续做被打断的那一次。 */
+  resumeInterrupted(): void {
+    const pending = this.pendingInterruption;
+    this.pendingInterruption = null;
+    if (pending == null) return;
+    // Stop 是模型明确要回身体：它已经决定不做了，不续。
+    if (this.scheduler.lastInvalidationReason() === 'stop') {
+      this.trace({ kind: 'resume_dropped', name: pending.name, reason: 'stop' });
+      return;
+    }
+    if (this.scheduler.locked) {
+      // 还有反射没结束（正常不会发生：解锁后才调这里）。留到下次。
+      this.pendingInterruption = pending;
+      return;
+    }
+    let args = pending.args;
+    if (pending.policy === 'checkpoint') {
+      const adjusted = this.adjustCheckpointArgs(pending);
+      if (adjusted == null) {
+        this.emitResumeNotice({
+          call: pending.name,
+          action_id: pending.name,
+          call_id: null,
+          resumed: false,
+          args: null,
+          detail: `${pending.name} 被打断；进度读不到（背包还没同步），没有自动续做。`,
+        });
+        return;
+      }
+      if (adjusted.done) {
+        this.emitResumeNotice({
+          call: pending.name,
+          action_id: pending.name,
+          call_id: null,
+          resumed: false,
+          args: null,
+          detail:
+            `${pending.name} 被打断，但目标已经完成（${adjusted.doneCount}/${adjusted.target}），不再续做。`,
+        });
+        return;
+      }
+      args = adjusted.args;
+    }
+    this.dispatchResumed(pending, args);
+  }
+
+  /** Stop / 模型要回身体：放弃这次续做。 */
+  clearInterruption(reason: string): void {
+    const pending = this.pendingInterruption;
+    if (pending == null) return;
+    this.pendingInterruption = null;
+    this.trace({ kind: 'resume_dropped', name: pending.name, reason });
+  }
+
+  private dispatchResumed(pending: InterruptedAction, args: Record<string, unknown>): void {
+    const claim = this.scheduler.startAction(pending.name, args);
+    if (!claim.accepted) {
+      // 模型已经抢先发了别的动作：不抢，如实记录（决策权在模型手上）。
+      this.trace({ kind: 'resume_dropped', name: pending.name, reason: claim.code ?? 'busy' });
+      this.emitResumeNotice({
+        call: pending.name,
+        action_id: pending.name,
+        call_id: null,
+        resumed: false,
+        args: null,
+        detail:
+          `${pending.name} 被打断后想续做，但通道已经被别的动作占用（${claim.code ?? 'busy'}），没有抢。`,
+      });
+      return;
+    }
+    const generation = claim.generation ?? 0;
+    const callId = `${pending.name}#${++this.callSeq}`;
+    this.activeCallId = callId;
+    this.activeGeneration = generation;
+    this.activeBaseline = this.baselineFor(pending.name, args);
+    this.trace({ kind: 'resumed', name: pending.name, callId, generation });
+    this.emitResumeNotice({
+      call: pending.name,
+      action_id: pending.name,
+      call_id: callId,
+      resumed: true,
+      args,
+      detail: `已替你续做 ${pending.name}（${describeResumeArgs(args)}）——想改主意就 Stop 再发新动作。`,
+    });
+    void this.finish(pending.name, args, generation, callId);
+  }
+
+  /** checkpoint：把"已经做完多少"从参数里扣掉。读不到进度返回 null（不猜）。 */
+  private adjustCheckpointArgs(
+    pending: InterruptedAction,
+  ): { args: Record<string, unknown>; done: boolean; doneCount: number; target: number } | null {
+    const baseline = pending.baseline;
+    if (baseline == null || baseline.kind !== 'count') return null;
+    const counts = this.inventoryCounts();
+    if (counts == null) return null;
+    const doneCount = Math.max(0, (counts[baseline.item] ?? 0) - baseline.start);
+    const remaining = baseline.target - doneCount;
+    if (remaining <= 0) return { args: pending.args, done: true, doneCount, target: baseline.target };
+    return { args: { ...pending.args, num: remaining }, done: false, doneCount, target: baseline.target };
+  }
+
+  /** 认领动作时抓进度基线（只有 checkpoint 需要）。 */
+  private baselineFor(name: string, args: Record<string, unknown>): ResumeBaseline {
+    if (this.resumePolicyOf(name) !== 'checkpoint') return null;
+    if (name === 'collectBlocks') {
+      const counts = this.inventoryCounts();
+      if (counts == null) return null;
+      const item = resumeItemForBlock(args['type']);
+      const target = Number(args['num']);
+      if (item === '' || !Number.isFinite(target) || target <= 0) return null;
+      return { kind: 'count', item, target, start: counts[item] ?? 0 };
+    }
+    return null;
+  }
+
+  /** 续做策略来自**身体握手报上来的声明**；没声明 = manual（不自动重放）。 */
+  private resumePolicyOf(name: string): ResumePolicy {
+    return this.catalog.get(name)?.resume ?? 'manual';
+  }
+
+  private cancelPendingFor(callId: string | null): void {
+    if (this.pendingInterruption != null && this.pendingInterruption.callId === callId) {
+      this.pendingInterruption = null;
+    }
+  }
+
+  private emitResumeNotice(payload: ResumeNotice): void {
+    try {
+      this.resumeNotice(payload);
+    } catch {
+      // 回执写不进去不能影响动作本身。
+    }
   }
 
   /** 该次调用已经结束，别再把它当成正在跑的那一次。 */

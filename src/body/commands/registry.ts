@@ -8,6 +8,7 @@
  */
 
 import { stripBang, type ToolDeclaration, type ToolKind } from '../../shared/tools.js';
+import type { ResumePolicy } from '../../shared/resume.js';
 import { actionsList } from './actions.js';
 import type { AgentCommand } from './actions.js';
 import { queryList } from './queries.js';
@@ -40,6 +41,39 @@ export function findCommand(toolName: string): AgentCommand | undefined {
     return commandMap[toolName.startsWith('!') ? toolName : '!' + toolName];
 }
 
+/**
+ * **续做策略表**：被反射打断后，哪些动作可以机械续做。
+ *
+ * 只列 `auto` / `checkpoint`；**没列的一律 `manual`**（fail-safe：有副作用、
+ * 需要窗口/序列状态、或者该由模型重新决定的，都不自动重放）。
+ *
+ * 判定标准只有一条：**原样（或按进度折算）重发一次，是不是就等于"接着做完"？**
+ *   - `auto`：工具自己会重新找目标/重新算路，重发即可（travelTo / goToCoordinates …）；
+ *   - `checkpoint`：重发前要扣掉已经完成的部分，否则会重复做（collectBlocks）；
+ *   - `manual`：craft/smelt/placeBlock/useOn/attack/enterNether/末地系列……
+ *     窗口状态没了、材料可能已经消耗、方块可能已经放下一半——不能盲目重放。
+ *
+ * 这张表是身体侧"声明"的一部分，经握手报给大脑；大脑只按它机械执行。
+ */
+const RESUME_POLICY: Readonly<Record<string, ResumePolicy>> = Object.freeze({
+    travelTo: 'auto',
+    goToCoordinates: 'auto',
+    goToPlayer: 'auto',
+    moveAway: 'auto',
+    exploreFor: 'auto',
+    goToSurface: 'auto',
+    seekShelter: 'auto',
+    sleepUnderground: 'auto',
+    searchForBlock: 'auto',
+    searchForEntity: 'auto',
+    collectBlocks: 'checkpoint',
+});
+
+/** 一条命令的续做策略；没列 = manual。 */
+export function resumePolicyOf(toolName: string): ResumePolicy {
+    return RESUME_POLICY[stripBang(toolName)] ?? 'manual';
+}
+
 function declarationOf(command: AgentCommand, kind: ToolKind): ToolDeclaration {
     const declaration: ToolDeclaration = {
         name: stripBang(command.name),
@@ -49,6 +83,8 @@ function declarationOf(command: AgentCommand, kind: ToolKind): ToolDeclaration {
     if (command.params !== undefined) declaration.params = command.params;
     if (command.withScreenshot === true) declaration.withScreenshot = true;
     if (command.perform.longRunning === true) declaration.longRunning = true;
+    const resume = RESUME_POLICY[stripBang(command.name)];
+    if (resume != null) declaration.resume = resume;
     return declaration;
 }
 
