@@ -50,6 +50,7 @@ import type { SampleContext } from './live_state.js';
 import { nearestThreat, runEmergency, FOOD_VALUE, shouldTriggerEmergency } from './safety/emergency.js';
 import type { EmergencyIntent, EmergencyResult, ThreatEntity } from './safety/emergency.js';
 import {
+    attackEntity,
     closeStaleWindow,
     consume,
     digWithTimeout,
@@ -58,6 +59,16 @@ import {
     stepIntoCell,
     stopPvp,
 } from './library/skills.js';
+import {
+    COMBAT_REFLEX_COOLDOWN_MS,
+    COMBAT_SHADOW_NOTICE_MS,
+    formatCombatDecision,
+    formatCombatResult,
+    planCombatResponse,
+    readCombatEnemies,
+    readCombatPolicy,
+    readSelfFacts,
+} from './safety/combat_reflex.js';
 import { formatShelterReceipt, planShelter } from './safety/shelter.js';
 import { formatSuffocationReceipt, planSuffocationEscape } from './safety/suffocation.js';
 import { isJustPlacedDrop } from './library/placement_guard.js';
@@ -2595,6 +2606,17 @@ export class MineflayerBody {
         const pending = this.reflexQueue?.length ?? 0;
         if (Array.isArray(this.reflexQueue)) this.reflexQueue.length = 0;
         const running = this.reflexRunning === true;
+        // **战斗反射也要能被 Stop/自救打断**：它不在 emergency 队列里（自己抢身体），
+        // 只认 `interrupt_code`——漏掉这一条，模型按 Stop 之后交战还会继续打。
+        const combat = this.combatReflexActive === true;
+        if (combat) {
+            try {
+                (this.bot as any).interrupt_code = true;
+                stopPvp(this.bot);
+            } catch {
+                // 停不了也要继续清队列。
+            }
+        }
         if (running) {
             this.reflexAbortRequested = true;
             try {
@@ -2621,7 +2643,7 @@ export class MineflayerBody {
             }
         }
         this.pickupPreemptReason = running || pending > 0 ? reason : this.pickupPreemptReason;
-        return pending + (running ? 1 : 0);
+        return pending + (running ? 1 : 0) + (combat ? 1 : 0);
     }
 
     /**
@@ -2849,6 +2871,15 @@ export class MineflayerBody {
                 { x: Number(position.x), z: Number(position.z) },
             );
             if (plan.action !== 'block' && plan.action !== 'run' && plan.action !== 'cover') return;
+            // 苦力怕比任何交战都急：先让战斗反射松手（它每秒会看到 interrupt_code）。
+            if (this.combatReflexActive) {
+                try {
+                    (this.bot as any).interrupt_code = true;
+                    stopPvp(this.bot);
+                } catch {
+                    // 收不了也继续跑苦力怕反射。
+                }
+            }
             this.creeperReflexActive = true;
             void this.performCreeperReflex(plan, hasShield)
                 .catch(() => {})
@@ -3042,6 +3073,204 @@ export class MineflayerBody {
             // 记日志失败不影响反射本身。
         }
     }
+    // ===== 战斗反射（用户 2026-10-31 spec）====================================
+
+    /**
+     * **战斗反射**：遇怪不再等模型，身体自己算一次"打还是跑"。
+     *
+     * 和苦力怕反射同一个模式：心跳里采样、只在不打架时评估、一次 episode 只报
+     * 一条回执。它**不是事件源**——世界没变化时不产生任何事件；判决/回执都在
+     * 真正动作之后才发。
+     *
+     * 让位规则：保命反射在跑、苦力怕反射在跑、模型关了保命程序 ⇒ 一律不动。
+     * 苦力怕不归它管（引信 1.5 秒，`creeper_reflex` 先处理）。
+     */
+    maybeCombatReflex(): void {
+        try {
+            if (this.shuttingDown) return;
+            if (this.combatReflexActive) return;
+            const policy = readCombatPolicy(settings.combatPolicy);
+            if (policy.mode === 'off') return;
+            const now = Date.now();
+            if (now < this.combatCooldownUntil) return;
+            const bot = this.bot as any;
+            if (bot?.entity?.position == null) return;
+            if (typeof bot.health === 'number' && bot.health <= 0) return;
+            const self = readSelfFacts(bot);
+            const enemies = readCombatEnemies(bot, policy.scanRadius, this.combatLastAttackerName);
+            const plan = planCombatResponse({
+                self,
+                enemies,
+                policy,
+                now,
+                engaged: false,
+                engagedSince: null,
+                cooldownUntil: this.combatCooldownUntil,
+                otherReflexActive:
+                    this.reflexRunning === true ||
+                    (this.reflexQueue?.length ?? 0) > 0 ||
+                    this.suffocationRunning === true ||
+                    this.respawnEscapeRunning === true,
+                creeperReflexActive: this.creeperReflexActive,
+                safeguardsSuppressed: safeguards.isSuppressed(now),
+            });
+            if (plan.action !== 'engage' && plan.action !== 'flee') return;
+            if (policy.mode === 'shadow') {
+                // 只算只报，不动身体：用来在真机上标定阈值。
+                if (now - this.combatShadowAt < COMBAT_SHADOW_NOTICE_MS) return;
+                this.combatShadowAt = now;
+                this.notify('combat.shadow', KIND.WORLD, LEVEL.STATE, {
+                    reflex: 'combat',
+                    outcome: 'shadow',
+                    detail: formatCombatDecision(plan),
+                    ms: 0,
+                });
+                return;
+            }
+            if (plan.action === 'flee') {
+                this.emergency('combat.flee', { detail: formatCombatDecision(plan) }, 'escape', 'flee');
+                return;
+            }
+            if (plan.targetId == null) return;
+            this.combatReflexActive = true;
+            void this.performCombatEngage(plan.targetId, formatCombatDecision(plan))
+                .catch(() => {
+                    // 反射失败不能拖垮心跳；回执由 perform 内部尽力发。
+                })
+                .finally(() => {
+                    this.combatReflexActive = false;
+                    this.combatCooldownUntil = Date.now() + COMBAT_REFLEX_COOLDOWN_MS;
+                });
+        } catch {
+            // 反射坏了不许拖垮 tick。
+        }
+    }
+
+    /**
+     * 执行一次交战 episode：抢身体 → custom-pvp 打到死 → 报一条事实回执。
+     *
+     * 每 1 秒按最新世界重算一次（掉血、怪变多、苦力怕逼近）；判成"跑"就中断
+     * pvp 并把身体交给 escape。**不无限打**：`maxEngageMs` 到点交还身体。
+     */
+    private async performCombatEngage(targetId: number, decision: string): Promise<void> {
+        const bot = this.bot as any;
+        const started = Date.now();
+        const healthBefore = typeof bot?.health === 'number' ? bot.health : null;
+        const entity = bot?.entities?.[targetId];
+        // 目标在判决和执行之间消失了：什么都不用做（调用方会进冷却）。
+        if (entity == null) return;
+        const targetName = String(entity?.name ?? 'target');
+        const policy = readCombatPolicy(settings.combatPolicy);
+        // **抢身体**：和保命反射同一条路——先硬中断模型动作，再声明"身体归我"。
+        if (this.bot != null && this.bot.__interruptReason == null) {
+            this.bot.__interruptReason = `战斗反射 combat 接管（combat.engage：${targetName}）`;
+        }
+        forceStopBody(this);
+        this.modelActionRequested = false;
+        try {
+            if (this.bot != null) this.bot.interrupt_code = false;
+        } catch {
+            // 清不掉也要继续打（最坏是这一刀立刻返回 aborted）。
+        }
+        this.currentReflexName = 'combat';
+        this.currentReflexIntent = null;
+        this.currentReflexStartedAt = started;
+        this.reflexCompletionSent = false;
+        this.notify(
+            'combat.engage',
+            KIND.WORLD,
+            LEVEL.EMERGENCY,
+            { detail: `${decision}｜目标：${targetName}` },
+            { reflex: 'combat' },
+        );
+        let abortedByReassess = false;
+        // 每秒重算：这是反射自己的控制回路，不是"制造事件"（不发任何事件）。
+        const guard = setInterval(() => {
+            try {
+                const live = this.bot as any;
+                if (live == null) return;
+                const now = Date.now();
+                if (
+                    this.creeperReflexActive ||
+                    this.suffocationRunning ||
+                    this.respawnEscapeRunning ||
+                    now - started > policy.maxEngageMs
+                ) {
+                    live.interrupt_code = true;
+                    return;
+                }
+                const plan = planCombatResponse({
+                    self: readSelfFacts(live),
+                    enemies: readCombatEnemies(live, policy.scanRadius, this.combatLastAttackerName),
+                    policy,
+                    now,
+                    engaged: true,
+                    engagedSince: started,
+                    cooldownUntil: 0,
+                    otherReflexActive: this.reflexRunning === true,
+                    creeperReflexActive: this.creeperReflexActive,
+                    safeguardsSuppressed: safeguards.isSuppressed(now),
+                });
+                if (plan.action === 'flee') {
+                    abortedByReassess = true;
+                    live.interrupt_code = true;
+                }
+            } catch {
+                // 一次评估失败不该打断这一刀。
+            }
+        }, 1000);
+        let killed = false;
+        let outcome: 'killed' | 'aborted' | 'timeout' | 'target-gone';
+        try {
+            killed = (await attackEntity(bot, entity, true, { budgetMs: policy.maxEngageMs })) === true;
+            outcome = killed ? 'killed' : 'aborted';
+        } catch {
+            outcome = 'aborted';
+        } finally {
+            clearInterval(guard);
+            try {
+                stopPvp(bot);
+            } catch {
+                // 收不了也无所谓：身体马上交还。
+            }
+        }
+        const elapsed = Date.now() - started;
+        if (!killed) {
+            if (bot?.entities?.[targetId] == null) outcome = 'target-gone';
+            else if (elapsed >= policy.maxEngageMs - 100) outcome = 'timeout';
+        }
+        const healthAfter = typeof bot?.health === 'number' ? bot.health : null;
+        this.notify(
+            'reflex.done',
+            KIND.WORLD,
+            LEVEL.STATE,
+            {
+                reflex: 'combat',
+                outcome: killed ? 'ok' : 'partial',
+                detail: formatCombatResult({
+                    targetName,
+                    outcome,
+                    healthBefore,
+                    healthAfter,
+                    ms: elapsed,
+                    detail: abortedByReassess ? '按最新战力改判：不再打下去' : undefined,
+                }),
+                ms: elapsed,
+            },
+            { reflex: 'combat', completes: 'combat' },
+        );
+        // 只清自己：交战中途可能有保命反射接管了身体，它的 currentReflexName
+        // 不能被我们覆盖成空（快照/诊断会读它）。
+        if (this.currentReflexName === 'combat') {
+            this.currentReflexName = null;
+            this.currentReflexIntent = null;
+            this.currentReflexStartedAt = 0;
+        }
+        if (abortedByReassess) {
+            this.emergency('combat.flee', { detail: '交战中按最新战力改判为逃跑' }, 'escape', 'flee');
+        }
+    }
+
     private notify(
         type: string,
         kind: Kind,
@@ -3098,6 +3327,15 @@ export class MineflayerBody {
     private creeperReflexActive = false;
     private creeperCooldownUntil = 0;
     private creeperLastDistance = new Map<string, number>();
+    // ===== 战斗反射（用户 2026-10-31 spec：遇怪不等 VLM，身体自己算打/跑）=====
+    /** 一次交战 episode 是否在跑（含 shadow 以外的真实接管）。 */
+    private combatReflexActive = false;
+    /** 交战结束后的冷却，防止同一只怪立刻再开一场。 */
+    private combatCooldownUntil = 0;
+    /** 最近一次伤害来源（"它正在打我"的判据；命中后由 `bot.health` 处理器写入）。 */
+    private combatLastAttackerName: string | null = null;
+    /** shadow 模式回执节流。 */
+    private combatShadowAt = 0;
     /** 上一个动作结束时的背包快照：用来回答「东西是在哪一步消失的」。 */
     private lastActionInventory: InventoryCounts | null = null;
     private lastActionName = '';
@@ -4282,6 +4520,8 @@ export class MineflayerBody {
                 // 但敌人还贴着脸，必须立刻中断当前动作（Feedback #24）。
                 // （threat 在上面算 bot.hurt 的等级时已经取过一次，这里复用。）
                 const threatDamage = Math.max(0, Math.round((prev_health - this.bot.health) * 100) / 100);
+                // 记住"谁在打我"：战斗反射用它区分"中立怪路过"和"这怪正在攻击我"。
+                if (threat != null && threatDamage > 0) this.combatLastAttackerName = threat.name;
                 if (
                     shouldThreatEmergency({
                         threat,
@@ -4478,6 +4718,9 @@ export class MineflayerBody {
         this.maybeSuffocationEscape();
         // 苦力怕反射：逼近 ≤6 格 ⇒ 有盾举盾 / 没盾跑（让位给更高优先级反射）。
         this.maybeCreeperReflex();
+        // 战斗反射：遇怪自己算打/跑（打 = custom-pvp，跑 = 复用 escape）。
+        // 放在苦力怕之后：引信只有 1.5 秒，苦力怕永远先处理。
+        this.maybeCombatReflex();
         // 重生循环：窗口内死过 ≥2 次 ⇒ **不等模型回合**，直接跑/挖洞封顶。
         this.maybeBreakRespawnLoop();
         this.pollEdges();

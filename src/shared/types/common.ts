@@ -110,6 +110,17 @@ export interface Settings {
   only_chat_with: string[];
   chat_ingame: boolean;
   allow_vision: boolean;
+  /**
+   * 战斗反射策略：遇怪时身体自己算"打还是跑"（见 `body/safety/combat_reflex.ts`）。
+   * 缺省 = `{ mode: 'on', margin: 1.6, exitMargin: 1.0, scanRadius: 24, maxEngageMs: 20000 }`。
+   */
+  combatPolicy?: {
+    mode?: 'off' | 'shadow' | 'on';
+    margin?: number;
+    exitMargin?: number;
+    scanRadius?: number;
+    maxEngageMs?: number;
+  };
   blocked_actions: string[];
   cheat: boolean;
   spawn_timeout: number;

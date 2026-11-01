@@ -51,6 +51,17 @@
         "description": "Whether to allow vision capabilities",
         "default": false
     },
+    "combatPolicy": {
+        "type": "object",
+        "description": "战斗反射策略（遇怪时身体自己算打/跑）：mode=off/shadow/on，margin=进入交战的战力余量，exitMargin=已在打时改判逃跑的余量，scanRadius=评估半径（格），maxEngageMs=单次交战上限（毫秒）。",
+        "default": {
+            "mode": "on",
+            "margin": 1.6,
+            "exitMargin": 1.0,
+            "scanRadius": 24,
+            "maxEngageMs": 20000
+        }
+    },
     "blocked_actions": {
         "type": "array",
         "description": "List of actions that are blocked",
