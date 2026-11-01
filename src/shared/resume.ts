@@ -88,4 +88,51 @@ export function describeResumeArgs(args: unknown): string {
     return body.length > 120 ? `${body.slice(0, 120)}…` : body;
 }
 
-export default { BLOCK_DROPS, normalizeItemName, resumeItemForBlock, describeResumeArgs };
+/** 隧道方向：与身体侧 `progression.ts` 的 `DIRECTION_TABLE` 同一套词表/坐标约定。 */
+export interface TunnelDirection {
+    axis: 'x' | 'z';
+    sign: 1 | -1;
+}
+
+/**
+ * 解析 `mineTunnel(direction=…)` 的显式方向。
+ *
+ * 只认**明确的方向词**（±x / ±z / east / west / north / south / 东南西北）；
+ * "forward / 朝前"这类依赖 yaw 的词在这里返回 null —— 大脑读不到 yaw，
+ * 续做时会改用**实际位移**推断方向（见 `ActionRunner.adjustCheckpointArgs`）。
+ */
+const TUNNEL_DIRECTIONS: Readonly<Record<string, TunnelDirection>> = Object.freeze({
+    '+x': { axis: 'x', sign: 1 },
+    'x+': { axis: 'x', sign: 1 },
+    x: { axis: 'x', sign: 1 },
+    east: { axis: 'x', sign: 1 },
+    东: { axis: 'x', sign: 1 },
+    '-x': { axis: 'x', sign: -1 },
+    'x-': { axis: 'x', sign: -1 },
+    west: { axis: 'x', sign: -1 },
+    西: { axis: 'x', sign: -1 },
+    '+z': { axis: 'z', sign: 1 },
+    'z+': { axis: 'z', sign: 1 },
+    z: { axis: 'z', sign: 1 },
+    south: { axis: 'z', sign: 1 },
+    南: { axis: 'z', sign: 1 },
+    '-z': { axis: 'z', sign: -1 },
+    'z-': { axis: 'z', sign: -1 },
+    north: { axis: 'z', sign: -1 },
+    北: { axis: 'z', sign: -1 },
+});
+
+/** 显式方向 → `{axis, sign}`；认不出来（含 forward/朝前/空）返回 null。 */
+export function parseTunnelDirection(raw: unknown): TunnelDirection | null {
+    const key = typeof raw === 'string' ? raw.trim().toLowerCase() : '';
+    if (key === '') return null;
+    return TUNNEL_DIRECTIONS[key] ?? null;
+}
+
+export default {
+    BLOCK_DROPS,
+    normalizeItemName,
+    resumeItemForBlock,
+    describeResumeArgs,
+    parseTunnelDirection,
+};

@@ -797,7 +797,9 @@ export class Agent {
                 },
                 endEmergency: () => {
                     this.scheduler.endEmergency();
-                    this.actionRunner?.resumeInterrupted();
+                    // 位置类 checkpoint 要采样身体坐标，续做是 async 的；失败不能
+                    // 把异常抛回事件泵（那会打断后面的事件处理）。
+                    void this.actionRunner?.resumeInterrupted().catch(() => undefined);
                 },
                 // 空转护栏：**必须留痕**。它是"模型不调工具时替它踩一脚油门"，
                 // 夜里复盘时唯一能回答"bot 是真在干活还是被护栏拖着走"的证据。

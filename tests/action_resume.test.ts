@@ -18,7 +18,7 @@ import type { ToolOutcome } from '../src/brain/tools/tools.js';
 import { resumePolicyOf, toolDeclarations } from '../src/body/commands/registry.js';
 import { LEVEL } from '../src/shared/events.js';
 import type { Kind } from '../src/shared/events.js';
-import { resumeItemForBlock } from '../src/shared/resume.js';
+import { parseTunnelDirection, resumeItemForBlock } from '../src/shared/resume.js';
 
 const CATALOG = createToolCatalog(toolDeclarations());
 const agentSource = readFileSync(resolve(process.cwd(), 'src/brain/agent.ts'), 'utf8');
@@ -29,7 +29,10 @@ interface Call {
   resolve: (value: string) => void;
 }
 
-function makeHarness(counts?: () => Record<string, number> | null) {
+function makeHarness(
+  counts?: () => Record<string, number> | null,
+  position?: () => { x: number; y: number; z: number } | null,
+) {
   const scheduler = new Scheduler();
   const calls: Call[] = [];
   const notices: Array<{ call: string; result: ToolOutcome }> = [];
@@ -47,6 +50,9 @@ function makeHarness(counts?: () => Record<string, number> | null) {
       notices.push(payload);
     },
     inventoryCounts: counts ?? (() => ({})),
+    // 位置类 checkpoint（digDown/mineTunnel…）的坐标来源；默认站在 (0,64,0)。
+    bodyPosition: (): Promise<{ x: number; y: number; z: number } | null> =>
+      Promise.resolve(position == null ? { x: 0, y: 64, z: 0 } : position()),
     resumeNotice: (payload) => {
       resumeNotices.push(payload);
     },
@@ -83,6 +89,11 @@ describe('声明表：哪些动作可以续做', () => {
 
   it('checkpoint：需要按进度折算参数', () => {
     expect(byName.get('collectBlocks')?.resume).toBe('checkpoint');
+    // 距离型动作同样按"原始终点"续做（位置从身体读）。
+    expect(byName.get('digDown')?.resume).toBe('checkpoint');
+    expect(byName.get('stairUp')?.resume).toBe('checkpoint');
+    expect(byName.get('pillarUp')?.resume).toBe('checkpoint');
+    expect(byName.get('mineTunnel')?.resume).toBe('checkpoint');
   });
 
   it('没声明的动作一律 manual（fail-safe）', () => {
@@ -124,7 +135,7 @@ describe('auto：原样重发', () => {
     await interrupt(h);
 
     h.scheduler.endEmergency();
-    h.runner.resumeInterrupted();
+    await h.runner.resumeInterrupted();
 
     expect(h.calls).toHaveLength(2);
     expect(h.calls[1].name).toBe('travelTo');
@@ -141,13 +152,13 @@ describe('auto：原样重发', () => {
     await start(h, 'travelTo', { x: 1, y: 64, z: 1 });
     await interrupt(h);
     h.scheduler.endEmergency();
-    h.runner.resumeInterrupted();
+    await h.runner.resumeInterrupted();
     expect(h.calls).toHaveLength(2);
 
     // 第二次被打断
     await interrupt(h);
     h.scheduler.endEmergency();
-    h.runner.resumeInterrupted();
+    await h.runner.resumeInterrupted();
     expect(h.calls).toHaveLength(3);
   });
 });
@@ -161,7 +172,7 @@ describe('checkpoint：按进度折算参数', () => {
     counts = { oak_log: 5 }; // 战斗中又砍了 3 个
     await interrupt(h);
     h.scheduler.endEmergency();
-    h.runner.resumeInterrupted();
+    await h.runner.resumeInterrupted();
 
     expect(h.calls).toHaveLength(2);
     expect(h.calls[1].args).toEqual({ type: 'oak_log', num: 5 });
@@ -176,7 +187,7 @@ describe('checkpoint：按进度折算参数', () => {
     counts = { oak_log: 8 };
     await interrupt(h);
     h.scheduler.endEmergency();
-    h.runner.resumeInterrupted();
+    await h.runner.resumeInterrupted();
 
     expect(h.calls).toHaveLength(1);
     const notice = h.resumeNotices.find((n) => !n.resumed);
@@ -189,7 +200,7 @@ describe('checkpoint：按进度折算参数', () => {
     await start(h, 'collectBlocks', { type: 'oak_log', num: 8 });
     await interrupt(h);
     h.scheduler.endEmergency();
-    h.runner.resumeInterrupted();
+    await h.runner.resumeInterrupted();
 
     expect(h.calls).toHaveLength(1);
     expect(h.resumeNotices.find((n) => !n.resumed)?.detail).toContain('进度读不到');
@@ -202,8 +213,105 @@ describe('checkpoint：按进度折算参数', () => {
     counts = { cobblestone: 4 };
     await interrupt(h);
     h.scheduler.endEmergency();
-    h.runner.resumeInterrupted();
+    await h.runner.resumeInterrupted();
     expect(h.calls[1].args).toEqual({ type: 'stone', num: 6 });
+  });
+});
+
+describe('checkpoint：距离型动作按"原始终点"续做', () => {
+  it('digDown 已挖 6/10 → 续做 distance=4', async () => {
+    let pos = { x: 0, y: 64, z: 0 };
+    const h = makeHarness(undefined, () => pos);
+    await start(h, 'digDown', { distance: 10, force: false });
+    pos = { x: 0, y: 58, z: 0 };
+    await interrupt(h);
+    h.scheduler.endEmergency();
+    await h.runner.resumeInterrupted();
+    expect(h.calls).toHaveLength(2);
+    expect(h.calls[1].args).toEqual({ distance: 4, force: false });
+  });
+
+  it('digDown 已经到达目标深度 → 不续做', async () => {
+    let pos = { x: 0, y: 64, z: 0 };
+    const h = makeHarness(undefined, () => pos);
+    await start(h, 'digDown', { distance: 10, force: false });
+    pos = { x: 0, y: 54.2, z: 0 };
+    await interrupt(h);
+    h.scheduler.endEmergency();
+    await h.runner.resumeInterrupted();
+    expect(h.calls).toHaveLength(1);
+    expect(h.resumeNotices.find((n) => !n.resumed)?.detail).toContain('目标深度');
+  });
+
+  it('digDown 被逼回上面 4 格 → 续做的是"到原始终点"，不是"再挖 10 格"', async () => {
+    let pos = { x: 0, y: 64, z: 0 };
+    const h = makeHarness(undefined, () => pos);
+    await start(h, 'digDown', { distance: 10, force: false });
+    pos = { x: 0, y: 60, z: 0 };
+    await interrupt(h);
+    h.scheduler.endEmergency();
+    await h.runner.resumeInterrupted();
+    expect(h.calls[1].args).toEqual({ distance: 6, force: false });
+  });
+
+  it('stairUp 按向上目标续做', async () => {
+    let pos = { x: 0, y: 64, z: 0 };
+    const h = makeHarness(undefined, () => pos);
+    await start(h, 'stairUp', { distance: 8, force: false });
+    pos = { x: 3, y: 69, z: 0 };
+    await interrupt(h);
+    h.scheduler.endEmergency();
+    await h.runner.resumeInterrupted();
+    expect(h.calls[1].args).toEqual({ distance: 3, force: false });
+  });
+
+  it('mineTunnel 显式方向：续做剩余长度，方向保留', async () => {
+    let pos = { x: 0, y: 64, z: 0 };
+    const h = makeHarness(undefined, () => pos);
+    await start(h, 'mineTunnel', { length: 32, direction: 'east', force: false, handoff: '' });
+    pos = { x: 10, y: 64, z: 0 };
+    await interrupt(h);
+    h.scheduler.endEmergency();
+    await h.runner.resumeInterrupted();
+    expect(h.calls[1].args).toEqual({ length: 22, direction: 'east', force: false, handoff: '' });
+  });
+
+  it('mineTunnel 没给方向：用实际位移推断，并写成显式方向', async () => {
+    let pos = { x: 0, y: 64, z: 0 };
+    const h = makeHarness(undefined, () => pos);
+    await start(h, 'mineTunnel', { length: 32, force: false, handoff: '' });
+    pos = { x: -8, y: 64, z: 1 };
+    await interrupt(h);
+    h.scheduler.endEmergency();
+    await h.runner.resumeInterrupted();
+    expect(h.calls[1].args).toEqual({ length: 24, direction: '-x', force: false, handoff: '' });
+  });
+
+  it('mineTunnel 完全没动：按原参数重发（等价 auto）', async () => {
+    const h = makeHarness(undefined, () => ({ x: 0, y: 64, z: 0 }));
+    await start(h, 'mineTunnel', { length: 32, force: false, handoff: '' });
+    await interrupt(h);
+    h.scheduler.endEmergency();
+    await h.runner.resumeInterrupted();
+    expect(h.calls[1].args).toEqual({ length: 32, force: false, handoff: '' });
+  });
+
+  it('坐标读不到 → 不猜、不续做', async () => {
+    const h = makeHarness(undefined, () => null);
+    await start(h, 'digDown', { distance: 10, force: false });
+    await interrupt(h);
+    h.scheduler.endEmergency();
+    await h.runner.resumeInterrupted();
+    expect(h.calls).toHaveLength(1);
+    expect(h.resumeNotices.find((n) => !n.resumed)?.detail).toContain('进度读不到');
+  });
+
+  it('方向词表与身体侧一致（east=+x / north=-z / forward 认不出来）', () => {
+    expect(parseTunnelDirection('east')).toEqual({ axis: 'x', sign: 1 });
+    expect(parseTunnelDirection('-z')).toEqual({ axis: 'z', sign: -1 });
+    expect(parseTunnelDirection('north')).toEqual({ axis: 'z', sign: -1 });
+    expect(parseTunnelDirection('forward')).toBeNull();
+    expect(parseTunnelDirection('')).toBeNull();
   });
 });
 
@@ -213,7 +321,7 @@ describe('不续做的情形', () => {
     await start(h, 'jump', {});
     await interrupt(h);
     h.scheduler.endEmergency();
-    h.runner.resumeInterrupted();
+    await h.runner.resumeInterrupted();
     expect(h.calls).toHaveLength(1);
     // 中断回执如实说明"不会自动续做"
     expect(String(h.notices.at(-1)?.result.data ?? '')).toContain('不会自动续做');
@@ -225,7 +333,7 @@ describe('不续做的情形', () => {
     await interrupt(h);
     h.scheduler.stopAll();
     h.scheduler.endEmergency();
-    h.runner.resumeInterrupted();
+    await h.runner.resumeInterrupted();
     expect(h.calls).toHaveLength(1);
   });
 
@@ -237,7 +345,7 @@ describe('不续做的情形', () => {
     h.calls[0].resolve('已经到达目的地');
     await flush();
     h.scheduler.endEmergency();
-    h.runner.resumeInterrupted();
+    await h.runner.resumeInterrupted();
     expect(h.calls).toHaveLength(1);
   });
 
@@ -247,7 +355,7 @@ describe('不续做的情形', () => {
     await interrupt(h);
     h.scheduler.endEmergency();
     expect(h.scheduler.startAction('jump', {}).accepted).toBe(true);
-    h.runner.resumeInterrupted();
+    await h.runner.resumeInterrupted();
     expect(h.calls).toHaveLength(1);
     expect(h.resumeNotices.find((n) => !n.resumed)?.detail).toContain('通道已经被别的动作占用');
   });
@@ -261,16 +369,16 @@ describe('不续做的情形', () => {
     // 反射结束后、续做之前，模型自己发了一个新动作
     const outcome = await h.runner.run('goToPlayer', { player_name: 'x', closeness: 2 });
     expect(outcome.status).toBe('accepted');
-    h.runner.resumeInterrupted();
+    await h.runner.resumeInterrupted();
     // 只多了 goToPlayer 这一次，没有额外的 travelTo 续做
     expect(h.calls.map((c) => c.name)).toEqual(['travelTo', 'goToPlayer']);
   });
 
-  it('captureInterruption(null) 是空操作', () => {
+  it('captureInterruption(null) 是空操作', async () => {
     const h = makeHarness();
     h.runner.captureInterruption(null);
     h.scheduler.endEmergency();
-    h.runner.resumeInterrupted();
+    await h.runner.resumeInterrupted();
     expect(h.calls).toHaveLength(0);
   });
 });
@@ -311,7 +419,8 @@ describe('事件链路：L5 反射 → 作废 → 完成 → 续做', () => {
       },
       endEmergency: () => {
         h.scheduler.endEmergency();
-        h.runner.resumeInterrupted();
+        // 与 agent.ts 一致：续做是 async 的（位置类要采样），不阻塞事件泵。
+        void h.runner.resumeInterrupted();
       },
     });
 

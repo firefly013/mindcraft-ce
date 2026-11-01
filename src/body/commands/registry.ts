@@ -49,7 +49,10 @@ export function findCommand(toolName: string): AgentCommand | undefined {
  *
  * 判定标准只有一条：**原样（或按进度折算）重发一次，是不是就等于"接着做完"？**
  *   - `auto`：工具自己会重新找目标/重新算路，重发即可（travelTo / goToCoordinates …）；
- *   - `checkpoint`：重发前要扣掉已经完成的部分，否则会重复做（collectBlocks）；
+ *   - `checkpoint`：重发前要扣掉已经完成的部分，否则会重复做。两种进度形态：
+ *       · 计数型：collectBlocks 按背包里的掉落物数；
+ *       · 距离型：digDown/stairUp/pillarUp/mineTunnel 按**原始终点**折算
+ *         （位置由大脑采样身体坐标，被打断期间被推走也能接着走到原始终点）；
  *   - `manual`：craft/smelt/placeBlock/useOn/attack/enterNether/末地系列……
  *     窗口状态没了、材料可能已经消耗、方块可能已经放下一半——不能盲目重放。
  *
@@ -66,7 +69,12 @@ const RESUME_POLICY: Readonly<Record<string, ResumePolicy>> = Object.freeze({
     sleepUnderground: 'auto',
     searchForBlock: 'auto',
     searchForEntity: 'auto',
+    // 按进度折算参数：距离型动作按"原始终点"续做（位置从身体读，见 ActionRunner）。
     collectBlocks: 'checkpoint',
+    digDown: 'checkpoint',
+    stairUp: 'checkpoint',
+    pillarUp: 'checkpoint',
+    mineTunnel: 'checkpoint',
 });
 
 /** 一条命令的续做策略；没列 = manual。 */

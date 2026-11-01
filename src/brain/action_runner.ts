@@ -21,7 +21,7 @@ import { MESSAGES } from '../shared/prompts.js';
 import type { ToolCatalog } from './tools/catalog.js';
 import { isActionTool, validateToolCall } from './tools/validate.js';
 import type { ToolOutcome } from './tools/tools.js';
-import { describeResumeArgs, resumeItemForBlock, type ResumePolicy } from '../shared/resume.js';
+import { describeResumeArgs, parseTunnelDirection, resumeItemForBlock, type ResumePolicy } from '../shared/resume.js';
 
 /**
  * 身体通道上发生的事，供观测（日志 / 测试）。
@@ -43,8 +43,20 @@ export type ActionTrace =
  * 续做基线：认领动作时抓一份进度，被打断后据此折算"还剩多少"。
  *
  * 只有 `checkpoint` 类的动作需要它；`auto` 原样重发即可，`manual` 不续做。
+ *
+ * 三种"进度"形态：
+ *   - `count`  ：按背包计数（collectBlocks 挖的是掉落物）；
+ *   - `depth`  ：按**原始终点**的 Y 坐标（digDown 向下 / stairUp / pillarUp 向上）；
+ *   - `tunnel` ：按**原始终点**的水平坐标（mineTunnel；方向没给时用实际位移推断）。
+ *
+ * 位置类基线是**异步抓的**（身体在另一个进程，只能 `bodyPosition()` 采样），
+ * 所以这里存的是 Promise，续做时再 await。
  */
-export type ResumeBaseline = { kind: 'count'; item: string; target: number; start: number } | null;
+export type ResumeBaseline =
+  | { kind: 'count'; item: string; target: number; start: number }
+  | { kind: 'depth'; sign: 1 | -1; targetY: number }
+  | { kind: 'tunnel'; start: { x: number; z: number }; length: number; axis: 'x' | 'z' | null; sign: 1 | -1 | 0 }
+  | null;
 
 /** 被反射打断、等着续做的那一次调用。 */
 export interface InterruptedAction {
@@ -53,7 +65,8 @@ export interface InterruptedAction {
   callId: string | null;
   generation: number;
   policy: ResumePolicy;
-  baseline: ResumeBaseline;
+  /** 进度基线（位置类要等身体采样，所以是 Promise）。 */
+  baseline: Promise<ResumeBaseline>;
 }
 
 /** 续做事件（`action.resumed`）：只记录、不唤醒，模型下一轮自然会看到。 */
@@ -67,6 +80,18 @@ export interface ResumeNotice {
   args: Record<string, unknown> | null;
   detail: string;
 }
+
+/**
+ * 距离型动作 → 续做基线怎么算。
+ *
+ * `sign = -1` 向下（digDown），`+1` 向上（stairUp / pillarUp）；
+ * 目标点 = 认领时的位置 + sign × 原距离，续做时按"还差多少到目标点"折算。
+ */
+const DEPTH_RESUME_SPECS: Readonly<Record<string, { arg: string; sign: 1 | -1 }>> = Object.freeze({
+  digDown: { arg: 'distance', sign: -1 },
+  stairUp: { arg: 'distance', sign: 1 },
+  pillarUp: { arg: 'distance', sign: 1 },
+});
 
 /**
  * **任何工具回执的硬上限。这是最后一道防线，不是装饰。**
@@ -199,7 +224,7 @@ export class ActionRunner {
   private activeCallId: string | null = null;
   private activeGeneration = 0;
   /** 当前动作的续做基线（checkpoint 用；认领时抓，被打断后折算剩余量）。 */
-  private activeBaseline: ResumeBaseline = null;
+  private activeBaseline: Promise<ResumeBaseline> | null = null;
   /** 被反射打断、等着续做的那一次调用。同一时刻最多一个。 */
   private pendingInterruption: InterruptedAction | null = null;
 
@@ -296,7 +321,7 @@ export class ActionRunner {
     // 模型明确发起了新动作：被打断那件事的"续做意图"就此作废（决策权在模型）。
     this.pendingInterruption = null;
     // checkpoint 类动作在这里抓进度基线（被打断后算"还剩多少"用）。
-    this.activeBaseline = this.baselineFor(name, args as Record<string, unknown>);
+    this.activeBaseline = this.captureBaseline(name, args as Record<string, unknown>);
     this.trace({ kind: 'claim', name, actionId: claim.actionId ?? name, generation });
     this.speak(MESSAGES.usedMarker(name));
     // 后台跑，不等：这一轮的推理到此结束，结果以后报。
@@ -463,7 +488,14 @@ export class ActionRunner {
       // 如果反射结束得比身体返回还快，续做已经发了新调用，这里不能再排一次，
       // 否则同一个动作会被续做两遍。
       if (willResume && this.pendingInterruption == null && this.activeCallId === callId) {
-        this.pendingInterruption = { name, args, callId, generation, policy, baseline: this.activeBaseline };
+        this.pendingInterruption = {
+          name,
+          args,
+          callId,
+          generation,
+          policy,
+          baseline: this.activeBaseline ?? Promise.resolve(null),
+        };
       }
       this.notify({
         call: name,
@@ -519,12 +551,17 @@ export class ActionRunner {
       callId: this.activeCallId,
       generation: action.generation,
       policy,
-      baseline: this.activeBaseline,
+      baseline: this.activeBaseline ?? Promise.resolve(null),
     };
   }
 
-  /** 所有反射结束（紧急锁解除）：按声明机械续做被打断的那一次。 */
-  resumeInterrupted(): void {
+  /**
+   * 所有反射结束（紧急锁解除）：按声明机械续做被打断的那一次。
+   *
+   * 位置类 checkpoint（digDown / stairUp / pillarUp / mineTunnel）要等身体
+   * 采样坐标，所以是 async；`auto` 和按背包计数的 checkpoint 在同一拍完成。
+   */
+  async resumeInterrupted(): Promise<void> {
     const pending = this.pendingInterruption;
     this.pendingInterruption = null;
     if (pending == null) return;
@@ -540,7 +577,12 @@ export class ActionRunner {
     }
     let args = pending.args;
     if (pending.policy === 'checkpoint') {
-      const adjusted = this.adjustCheckpointArgs(pending);
+      const adjusted = await this.adjustCheckpointArgs(pending);
+      // 采样期间世界可能变了：模型按了 Stop → 不续（决策权在模型）。
+      if (this.scheduler.lastInvalidationReason() === 'stop') {
+        this.trace({ kind: 'resume_dropped', name: pending.name, reason: 'stop-after-sample' });
+        return;
+      }
       if (adjusted == null) {
         this.emitResumeNotice({
           call: pending.name,
@@ -548,7 +590,7 @@ export class ActionRunner {
           call_id: null,
           resumed: false,
           args: null,
-          detail: `${pending.name} 被打断；进度读不到（背包还没同步），没有自动续做。`,
+          detail: `${pending.name} 被打断；进度读不到（背包/坐标还没同步），没有自动续做。`,
         });
         return;
       }
@@ -559,8 +601,7 @@ export class ActionRunner {
           call_id: null,
           resumed: false,
           args: null,
-          detail:
-            `${pending.name} 被打断，但目标已经完成（${adjusted.doneCount}/${adjusted.target}），不再续做。`,
+          detail: `${pending.name} 被打断，但${adjusted.note}，不再续做。`,
         });
         return;
       }
@@ -597,7 +638,7 @@ export class ActionRunner {
     const callId = `${pending.name}#${++this.callSeq}`;
     this.activeCallId = callId;
     this.activeGeneration = generation;
-    this.activeBaseline = this.baselineFor(pending.name, args);
+    this.activeBaseline = this.captureBaseline(pending.name, args);
     this.trace({ kind: 'resumed', name: pending.name, callId, generation });
     this.emitResumeNotice({
       call: pending.name,
@@ -610,32 +651,155 @@ export class ActionRunner {
     void this.finish(pending.name, args, generation, callId);
   }
 
-  /** checkpoint：把"已经做完多少"从参数里扣掉。读不到进度返回 null（不猜）。 */
-  private adjustCheckpointArgs(
+  /**
+   * checkpoint：把"已经做完多少"从参数里扣掉。读不到进度返回 null（不猜）。
+   *
+   * 语义统一成**"原始终点没变"**：
+   *   - count：收满 `num` 为止（按掉落物数）；
+   *   - depth：挖到/垫到原来的目标 Y 为止；
+   *   - tunnel：挖到原来的目标水平坐标为止。
+   * 这样被打断期间即使被怪推走/逃开，续做也是"接着走到原始终点"，不是"再走一遍"。
+   */
+  private async adjustCheckpointArgs(
     pending: InterruptedAction,
-  ): { args: Record<string, unknown>; done: boolean; doneCount: number; target: number } | null {
-    const baseline = pending.baseline;
-    if (baseline == null || baseline.kind !== 'count') return null;
-    const counts = this.inventoryCounts();
-    if (counts == null) return null;
-    const doneCount = Math.max(0, (counts[baseline.item] ?? 0) - baseline.start);
-    const remaining = baseline.target - doneCount;
-    if (remaining <= 0) return { args: pending.args, done: true, doneCount, target: baseline.target };
-    return { args: { ...pending.args, num: remaining }, done: false, doneCount, target: baseline.target };
-  }
+  ): Promise<{ args: Record<string, unknown>; done: boolean; note: string } | null> {
+    let baseline: ResumeBaseline;
+    try {
+      baseline = await pending.baseline;
+    } catch {
+      return null;
+    }
+    if (baseline == null) return null;
 
-  /** 认领动作时抓进度基线（只有 checkpoint 需要）。 */
-  private baselineFor(name: string, args: Record<string, unknown>): ResumeBaseline {
-    if (this.resumePolicyOf(name) !== 'checkpoint') return null;
-    if (name === 'collectBlocks') {
+    if (baseline.kind === 'count') {
       const counts = this.inventoryCounts();
       if (counts == null) return null;
+      const doneCount = Math.max(0, (counts[baseline.item] ?? 0) - baseline.start);
+      const remaining = baseline.target - doneCount;
+      if (remaining <= 0) {
+        return { args: pending.args, done: true, note: `目标已经完成（${doneCount}/${baseline.target}）` };
+      }
+      return { args: { ...pending.args, num: remaining }, done: false, note: '' };
+    }
+
+    const pos = await this.readPosition();
+    if (pos == null) return null;
+
+    if (baseline.kind === 'depth') {
+      const remaining = baseline.sign === -1 ? pos.y - baseline.targetY : baseline.targetY - pos.y;
+      if (remaining <= 0.5) return { args: pending.args, done: true, note: '已经到达目标深度' };
+      const argName = 'distance';
+      return {
+        args: { ...pending.args, [argName]: this.clampToParam(pending.name, argName, Math.ceil(remaining)) },
+        done: false,
+        note: '',
+      };
+    }
+
+    // tunnel：方向没给（按朝向/forward）时，用实际位移推断它当初往哪挖。
+    let axis = baseline.axis;
+    let sign: 1 | -1 = baseline.sign === 0 ? 1 : baseline.sign;
+    if (axis == null) {
+      const dx = pos.x - baseline.start.x;
+      const dz = pos.z - baseline.start.z;
+      if (Math.max(Math.abs(dx), Math.abs(dz)) < 1) {
+        // 完全没动、方向又是"按朝向"给的：按原参数重发（等价 auto）。
+        return { args: pending.args, done: false, note: '' };
+      }
+      axis = Math.abs(dx) >= Math.abs(dz) ? 'x' : 'z';
+      sign = ((axis === 'x' ? dx : dz) >= 0 ? 1 : -1) as 1 | -1;
+    }
+    const startAxis = axis === 'x' ? baseline.start.x : baseline.start.z;
+    const currentAxis = axis === 'x' ? pos.x : pos.z;
+    const targetAxis = startAxis + sign * baseline.length;
+    const remaining = sign * (targetAxis - currentAxis);
+    if (remaining <= 0.5) return { args: pending.args, done: true, note: '已经挖到目标位置' };
+    const args: Record<string, unknown> = {
+      ...pending.args,
+      length: this.clampToParam(pending.name, 'length', Math.ceil(remaining)),
+    };
+    // 方向是推断出来的：写成显式方向，免得身体按"当前朝向"重新解析、挖反。
+    if (baseline.axis == null) args['direction'] = `${sign > 0 ? '+' : '-'}${axis}`;
+    return { args, done: false, note: '' };
+  }
+
+  /**
+   * 认领动作时抓进度基线（只有 checkpoint 需要）。
+   *
+   * 位置类基线是异步的（身体在另一个进程），Promise 在这里存下来，
+   * 被打断后由 `adjustCheckpointArgs` await。
+   */
+  private captureBaseline(name: string, args: Record<string, unknown>): Promise<ResumeBaseline> {
+    if (this.resumePolicyOf(name) !== 'checkpoint') return Promise.resolve(null);
+
+    if (name === 'collectBlocks') {
+      const counts = this.inventoryCounts();
+      if (counts == null) return Promise.resolve(null);
       const item = resumeItemForBlock(args['type']);
       const target = Number(args['num']);
-      if (item === '' || !Number.isFinite(target) || target <= 0) return null;
-      return { kind: 'count', item, target, start: counts[item] ?? 0 };
+      if (item === '' || !Number.isFinite(target) || target <= 0) return Promise.resolve(null);
+      return Promise.resolve({ kind: 'count', item, target, start: counts[item] ?? 0 });
     }
-    return null;
+
+    const depthSpec = DEPTH_RESUME_SPECS[name];
+    if (depthSpec != null) {
+      const distance = Number(args[depthSpec.arg]);
+      if (!Number.isFinite(distance) || distance <= 0) return Promise.resolve(null);
+      return this.readPosition().then((pos) =>
+        pos == null
+          ? null
+          : { kind: 'depth' as const, sign: depthSpec.sign, targetY: pos.y + depthSpec.sign * distance },
+      );
+    }
+
+    if (name === 'mineTunnel') {
+      const rawLength = Number(args['length'] ?? this.paramDefault(name, 'length') ?? Number.NaN);
+      if (!Number.isFinite(rawLength) || rawLength <= 0) return Promise.resolve(null);
+      const direction = parseTunnelDirection(args['direction']);
+      return this.readPosition().then((pos) =>
+        pos == null
+          ? null
+          : {
+              kind: 'tunnel' as const,
+              start: { x: pos.x, z: pos.z },
+              length: rawLength,
+              axis: direction?.axis ?? null,
+              sign: direction?.sign ?? 0,
+            },
+      );
+    }
+
+    return Promise.resolve(null);
+  }
+
+  /** 读一次身体坐标；读不到/抛错都返回 null（不猜）。 */
+  private async readPosition(): Promise<{ x: number; y: number; z: number } | null> {
+    try {
+      return await this.bodyPosition();
+    } catch {
+      return null;
+    }
+  }
+
+  /** 工具声明里某个参数的默认值（mineTunnel 的 length 有默认值）。 */
+  private paramDefault(name: string, param: string): number | null {
+    const value = this.catalog.get(name)?.params?.[param]?.default;
+    const n = Number(value);
+    return Number.isFinite(n) ? n : null;
+  }
+
+  /** 把续做参数夹回声明的 domain 里（不同工具的最大距离不一样）。 */
+  private clampToParam(name: string, param: string, value: number): number {
+    const domain = this.catalog.get(name)?.params?.[param]?.domain;
+    let min = 1;
+    let max = Number.POSITIVE_INFINITY;
+    if (Array.isArray(domain)) {
+      const lo = Number(domain[0]);
+      const hi = Number(domain[1]);
+      if (Number.isFinite(lo)) min = lo;
+      if (Number.isFinite(hi)) max = hi;
+    }
+    return Math.max(min, Math.min(max, Math.round(value)));
   }
 
   /** 续做策略来自**身体握手报上来的声明**；没声明 = manual（不自动重放）。 */
