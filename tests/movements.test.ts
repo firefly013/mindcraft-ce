@@ -14,6 +14,7 @@ import { join, relative } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import minecraftData from 'minecraft-data';
 import { MAX_DROP_DOWN, applyWaterPolicy, deepWaterAllowed, movementsFor, waterBlockId } from '../src/body/safety/movements.js';
+import { applyDigToolPolicy, canAutoDigBlock } from '../src/body/safety/movements.js';
 
 const SRC = join(process.cwd(), 'src');
 const MC_VERSION = '1.20.4';
@@ -183,6 +184,86 @@ describe('搭塔的垫脚方块来自背包（用户 2026-10-18："默认应该�
     const registry: any = minecraftData(MC_VERSION);
     expect(() => movementsFor({ registry, version: MC_VERSION })).not.toThrow();
   });
+
+describe('附魔工具保护：寻路不许规划"只能用保护工具挖"的方块（用户 2026-11-01）', () => {
+  /** 石头的替身：两种镐（type 1/2）都能收获，空手不能。 */
+  const stone: any = {
+    name: 'stone',
+    type: 1,
+    position: { x: 0, y: 64, z: 0 },
+    canHarvest: (type: number | null) => type === 1 || type === 2,
+  };
+  /** 泥土：任何工具都不能"收获"（空手也能挖开，不耗耐久）。 */
+  const dirt: any = { name: 'dirt', type: 3, position: { x: 0, y: 64, z: 0 }, canHarvest: () => false };
+  /** 附魔铁镐：剩 11 次 ⇒ 到保护线。 */
+  const enchantedLow = {
+    name: 'iron_pickaxe',
+    type: 1,
+    count: 1,
+    maxDurability: 251,
+    durabilityUsed: 240,
+    enchants: [{ name: 'efficiency', lvl: 3 }],
+  };
+  const plainPick = { name: 'stone_pickaxe', type: 2, count: 1, maxDurability: 131, durabilityUsed: 0 };
+  const bot = (items: any[]): any => ({ inventory: { items: () => items } });
+
+  it('只有保护线上的附魔镐 ⇒ 禁止规划挖石头（A* 会绕路或 NoPath，而不是卡住）', () => {
+    expect(canAutoDigBlock(bot([enchantedLow]), stone)).toBe(false);
+  });
+
+  it('有未保护的石镐 ⇒ 允许（执行层会换到那把）', () => {
+    expect(canAutoDigBlock(bot([enchantedLow, plainPick]), stone)).toBe(true);
+  });
+
+  it('一件能收获它的工具都没有 ⇒ 允许（pathfinder 空手挖：慢，但不耗耐久）', () => {
+    expect(canAutoDigBlock(bot([]), stone)).toBe(true);
+    expect(canAutoDigBlock(bot([]), dirt)).toBe(true);
+  });
+
+  it('读不到背包/方块 ⇒ 放行（不能因为读不到把寻路封死）', () => {
+    expect(canAutoDigBlock(null, stone)).toBe(true);
+    expect(canAutoDigBlock(bot([enchantedLow]), null)).toBe(true);
+    expect(canAutoDigBlock({ inventory: { items: () => { throw new Error('x'); } } }, stone)).toBe(true);
+  });
+
+  it('applyDigToolPolicy 包住 safeToBreak，并保留"只看安全"的原始入口', () => {
+    const movements: any = { safeToBreak: () => true };
+    applyDigToolPolicy(bot([enchantedLow]), movements);
+    expect(movements.safeToBreak(stone)).toBe(false);
+    expect(movements.safeToBreak(dirt)).toBe(true);
+    // 采集过滤器用原始语义（安全判断），不受工具保护影响
+    expect(movements.safeToBreakSafetyOnly(stone)).toBe(true);
+  });
+
+  it('原始 safeToBreak 拒绝的方块仍然拒绝', () => {
+    const movements: any = { safeToBreak: () => false };
+    applyDigToolPolicy(bot([plainPick]), movements);
+    expect(movements.safeToBreak(stone)).toBe(false);
+  });
+
+  it('movementsFor 出来的实例真的带这层策略', () => {
+    const registry: any = minecraftData(MC_VERSION);
+    const fakeBot = (items: any[]): any => ({
+      registry,
+      version: MC_VERSION,
+      inventory: { items: () => items },
+      // 库的 safeToBreak 会读相邻方块（水/下落方块）：给个"什么都没有"的世界。
+      blockAt: () => ({ type: 0, liquid: false, canFall: false }),
+      entity: { position: { x: 0, y: 64, z: 0 } },
+    });
+    const m = movementsFor(fakeBot([enchantedLow]));
+    // 跳过"相邻水/下落方块"检查（那两条要读完整世界数据），只测工具保护这一层。
+    m.dontCreateFlow = false;
+    m.dontMineUnderFallingBlock = false;
+    expect(typeof m.safeToBreakSafetyOnly).toBe('function');
+    expect(m.safeToBreak(stone)).toBe(false);
+    // 空背包的实例：允许（空手挖）
+    const bare = movementsFor(fakeBot([]));
+    bare.dontCreateFlow = false;
+    bare.dontMineUnderFallingBlock = false;
+    expect(bare.safeToBreak(stone)).toBe(true);
+  });
+});
 
   it('徒手软方块在寻路里算得出代价（不会因为"没工具"被当成走不通）', () => {
     const registry: any = minecraftData(MC_VERSION);

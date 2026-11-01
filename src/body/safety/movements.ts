@@ -30,6 +30,7 @@
 import pf from 'mineflayer-pathfinder';
 import Vec3 from 'vec3';
 import * as mc from '../data/mcdata.js';
+import { isToolProtected, type ToolCandidate } from '../library/tool_choice.js';
 import { deepWaterAllowed } from './permits.js';
 
 /** 判据的出处在 `permits.ts`（那里只有纯逻辑，不拖重依赖），这里原样转出。 */
@@ -140,6 +141,74 @@ function blockIdsBotIsInside(bot: unknown): Set<number> {
 }
 
 /**
+ * 附魔工具保护：**寻路不许规划**"只有保护线上的附魔工具能挖"的方块（用户 2026-11-01）。
+ *
+ * 为什么必须做在**路径层**：pathfinder 的 A* 只有在 `safeToBreak(block)` 为真时
+ * 才会把"挖开这块"算进路线（`movements.js:321` 返回 100 = 此路不通）。如果不拦，
+ * A* 会规划一条要挖的路线；到执行时我们的 dig 闸拒绝下镐，pathfinder 收不到
+ * `diggingAborted/Completed`（它自己的 `digging` 标志只在真挖过才复位），于是
+ * **卡在原地**——既不是"干净地失败"，也不是"换一条不挖的路"，只能等动作超时。
+ *
+ * 拦在这里，A* 只有两种结果，都可解释：
+ *   - 找到一条**不挖**的绕路（保护工具一点耐久不花）——这就是"换一条不挖的路"；
+ *   - `NoPath`（目标必须挖才能到）——动作层如实报失败，模型再决定怎么办。
+ *
+ * 判据（只读背包，不换手）：**这块方块，寻路会不会被迫用保护线上的工具？**
+ *   - 有**未到保护线**的工具能收获它 ⇒ 允许（执行层会换到那把）；
+ *   - 一件能收获它的工具都没有 ⇒ 允许（pathfinder 会空手挖：慢，但不耗耐久）；
+ *   - 只有保护线上的附魔工具能收获它 ⇒ 禁止规划（执行层必然拒绝，规划了也是死路）。
+ *
+ * `safeToBreakSafetyOnly` 保留原始语义：`collectBlocks` 的扫描过滤器只要"安全"
+ * 判断，工具可用性它自己判（否则会把方块静默滤掉，回执变成"附近没有 X"）。
+ */
+export function applyDigToolPolicy(bot: unknown, movements: unknown): void {
+  const m = movements as
+    | {
+        safeToBreak?: (block: unknown) => boolean;
+        safeToBreakSafetyOnly?: (block: unknown) => boolean;
+      }
+    | null;
+  if (m == null || typeof m.safeToBreak !== 'function' || m.safeToBreakSafetyOnly != null) return;
+  const original = m.safeToBreak.bind(m);
+  m.safeToBreakSafetyOnly = original;
+  m.safeToBreak = (block: unknown): boolean => {
+    if (!original(block)) return false;
+    return canAutoDigBlock(bot, block);
+  };
+}
+
+/**
+ * 这块方块，寻路能不能**不使用保护线上的附魔工具**挖开。
+ *
+ * 读不到背包/方块数据 ⇒ true（不能因为读不到就把寻路封死）。
+ */
+export function canAutoDigBlock(bot: unknown, block: unknown): boolean {
+  const b = block as { canHarvest?: (type: number | null) => boolean } | null | undefined;
+  try {
+    let protectedCanHarvest = false;
+    const items = (((bot as { inventory?: { items?: () => Array<{ type?: unknown }> } } | null | undefined)?.inventory?.items?.() ??
+      []) as Array<{ type?: unknown }>);
+    for (const item of items) {
+      const type = typeof item?.type === 'number' ? item.type : null;
+      if (type == null) continue;
+      let harvests: boolean;
+      try {
+        harvests = b?.canHarvest?.(type) === true;
+      } catch {
+        continue; // 单件读不到不影响其他候选。
+      }
+      if (!harvests) continue;
+      if (!isToolProtected(item as ToolCandidate)) return true; // 有未保护的可用工具
+      protectedCanHarvest = true;
+    }
+    // 没有工具能收获它（空手挖，不耗耐久）⇒ 允许；只有保护工具 ⇒ 禁止。
+    return !protectedCanHarvest;
+  } catch {
+    return true;
+  }
+}
+
+/**
  * 应用全部安全基线。调用方在**之后**再覆盖自己的偏好（digCost / canDig /
  * allow1by1towers 之类），这样安全项永远不会被业务偏好盖掉。
  *
@@ -211,7 +280,7 @@ export function applyScaffoldingBlocks(bot: unknown, movements: unknown): void {
   try {
     items = b?.inventory?.items?.() ?? [];
   } catch {
-    items = [];
+    // 读不到背包就按空处理（沿用库默认垫脚方块）。
   }
   const blocks = b?.registry?.blocksByName ?? {};
   const itemDefs = b?.registry?.itemsByName ?? {};
@@ -242,6 +311,8 @@ export function movementsFor(bot: unknown, options?: { allowWater?: boolean }): 
   const m = new (pf as any).Movements(bot);
   applySafety(bot, m, options);
   applyScaffoldingBlocks(bot, m);
+  // 附魔工具保护：A* 不许规划"只有保护线上的附魔工具能挖"的方块（见函数注释）。
+  applyDigToolPolicy(bot, m);
   return m;
 }
 

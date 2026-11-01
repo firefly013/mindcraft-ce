@@ -1704,7 +1704,14 @@ export async function collectBlock(bot: any, blockType: string, num: number = 1,
                 return block.metadata === 0;
             }
 
-            return movements.safeToBreak(block) || unsafeBlocks.includes(block.name);
+            // **扫描过滤只看"安全"**（水边/悬空等），不看"工具保护"——工具可用性
+            // 由 `ensureHarvestTool` 和保护闸在执行层判；这里若也过滤，会把
+            // "只有保护工具能挖"的方块静默滤掉，回执变成"附近没有 X"。
+            const safe =
+                typeof movements.safeToBreakSafetyOnly === 'function'
+                    ? movements.safeToBreakSafetyOnly(block)
+                    : movements.safeToBreak(block);
+            return safe || unsafeBlocks.includes(block.name);
         }, 64, 1);
 
         // 每轮先报进度（8 秒一次，有界内容：第几块/已用/还剩/离目标多远）。

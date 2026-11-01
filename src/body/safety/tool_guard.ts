@@ -55,6 +55,25 @@ function installDigGuard(bot: any): void {
             bot.__toolGuardDigNotice = notice;
             log(bot, notice);
         }
+        // **让 pathfinder 干净地停下**：它规划时以为能挖（或挖到一半工具跌破
+        // 保护线），现在拒绝下镐——不主动停，它会卡在 digging=true 原地等动作超时。
+        try {
+            if (bot.pathfinder?.isMoving?.() === true || bot.pathfinder?.isMining?.() === true) {
+                bot.pathfinder.stop?.();
+            }
+        } catch {
+            // 停不下来也照样拒绝这一镐。
+        }
+        // pathfinder 的 `digging` 标志只在真正的 diggingAborted/Completed 事件里
+        // 复位；我们没真挖过，它收不到事件，下一次寻路会永远以为"还在挖"。
+        // 下一拍补一个 aborted：那时它的 resetPath 已经挂上监听，收到就复位。
+        setTimeout(() => {
+            try {
+                bot.emit?.('diggingAborted', block);
+            } catch {
+                // 没有监听也无害。
+            }
+        }, 0);
         const error: any = new Error('protected_tool: 附魔工具到保护线，拒绝用它挖掘');
         error.code = 'PROTECTED_TOOL';
         throw error;

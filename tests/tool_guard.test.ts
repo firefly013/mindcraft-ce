@@ -90,6 +90,18 @@ function makeBot(items: FakeItem[], heldName: string | null): any {
       return Promise.resolve('dug');
     },
     stopDigging: (): void => {},
+    // pathfinder：挖不动时要干净地停下（而不是卡在 digging=true 等超时）。
+    pathfinder: {
+      isMoving: (): boolean => true,
+      isMining: (): boolean => true,
+      stop: (): void => {
+        bot.__pathStopped = true;
+      },
+    },
+    // 最小事件总线：复位 pathfinder 的 digging 标志靠 diggingAborted。
+    emit: (name: string, arg?: unknown): void => {
+      (bot.__emitted ??= []).push({ name, arg });
+    },
     // custom-pvp 的自动换武器：找背包里第一把名字含 weapon 的。
     swordpvp: {
       checkForWeapon: (weapon?: string): FakeItem | null =>
@@ -119,6 +131,16 @@ describe('installToolGuard：bot.dig 闸（pathfinder 裸挖）', () => {
     const first = bot.output;
     await expect(bot.dig(STONE_BLOCK, true)).rejects.toMatchObject({ code: 'PROTECTED_TOOL' });
     expect(bot.output).toBe(first);
+  });
+
+  it('拒绝时让 pathfinder 干净停下，并补一个 diggingAborted 复位它的 digging 标志', async () => {
+    const bot = makeBot([PROTECTED_PICK], 'iron_pickaxe');
+    installToolGuard(bot);
+    await expect(bot.dig(STONE_BLOCK, true)).rejects.toMatchObject({ code: 'PROTECTED_TOOL' });
+    expect(bot.__pathStopped).toBe(true);
+    // 补事件在下一拍（那时 pathfinder 的 resetPath 已经挂上监听）。
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect((bot.__emitted ?? []).map((e: { name: string }) => e.name)).toContain('diggingAborted');
   });
 
   it('手里不是保护工具 ⇒ 直接放行（不换手、不拦）', async () => {
