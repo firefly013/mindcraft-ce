@@ -32,6 +32,13 @@ import { deepWaterAllowed } from "../safety/permits.js";
 import { assessStandingSpot, chooseSafeFleeTarget } from "../safety/flee.js";
 import { safeguards } from "../safety/safeguards.js";
 import { cookedCounterpartOf, difficultyOf, foodValueOf, normalizeFoodName, starvationNote } from "../safety/emergency.js";
+import {
+    ENCHANTED_RESERVE_FRACTION,
+    ENCHANTED_RESERVE_USES,
+    isToolProtected,
+    toolRemainingUses,
+    type ToolCandidate,
+} from './tool_choice.js';
 
 /**
  * `bot.output` 的硬上限（字符）。
@@ -421,9 +428,12 @@ export function toolBreakNotice(before: HeldToolState, bot: any): string | null 
  * 真机 Feedback（2026-10-18 12:47，overnight_b）：`goToCoordinates` 的破坏性
  * 寻路一分钟烧光木镐 60 耐久（40+ 格），全程无提示，人又被锁在下界。
  * 这条线的作用就是"在这把工具被烧光之前，先别拿它挖路"。
+ *
+ * **2026-11-01 起与附魔工具保护线是同一条**（`tool_choice.ts`）：未附魔工具到线
+ * 只提醒，附魔工具到线**自动禁用**——别再各写一份数字，改一处就够。
  */
-export const LOW_DURABILITY_USES = 20;
-export const LOW_DURABILITY_FRACTION = 0.15;
+export const LOW_DURABILITY_USES = ENCHANTED_RESERVE_USES;
+export const LOW_DURABILITY_FRACTION = ENCHANTED_RESERVE_FRACTION;
 
 export interface ToolDurabilityGuard {
     name: string | null;
@@ -1666,6 +1676,13 @@ export async function collectBlock(bot: any, blockType: string, num: number = 1,
         }
         const block: any = blocks[0];
         await ensureHarvestTool(bot, block);
+        // **附魔工具保护**：换不到别的工具时，不拿保护线上的附魔工具继续采集
+        // （否则会在同一个方块上空转到超时，且每一镐都在烧它的耐久）。
+        if (isHeldToolProtected(bot)) {
+            log(bot, protectedToolNotice(bot, block?.name ?? null));
+            reportToolBreak();
+            return false;
+        }
         if (isLiquid) {
             const bucket: any = bot.inventory.findInventoryItem('bucket');
             if (!bucket) {
@@ -1904,7 +1921,15 @@ export async function digWithTimeout(bot: any, block: any, where: string): Promi
     // 耐久是**每挖完一块扣 1**，所以上一块把镐用碎之后，这里就是换下一把的地方；
     // 手里已经能收获时 `ensureHarvestTool` 立刻返回（一次 canHarvest 查询），不换手。
     // 换不出来也不拦——照挖（该没掉落就没掉落，回执会说清）。
-    if (bot?.game?.gameMode !== 'creative') await ensureHarvestTool(bot, block);
+    if (bot?.game?.gameMode !== 'creative') {
+        const toolReady = await ensureHarvestTool(bot, block);
+        // **附魔工具保护**：换不到别的工具时，绝不拿保护线上的附魔工具下镐。
+        // （能收获 ≠ 可以继续用；见 `ensureHarvestTool`。）
+        if (!toolReady && isHeldToolProtected(bot)) {
+            log(bot, protectedToolNotice(bot, block?.name ?? null));
+            return false;
+        }
+    }
     // **工具坏掉要留一句话。** bot.dig 不会因为镐子耐久耗尽而报错——它只是
     // 让那件东西从背包里消失，模型下一轮才发现"手上空了"（Feedback #40）。
     // 统一在这里对账：挖之前/之后同名物品数变少且手持换了人，就是坏了。
@@ -2062,12 +2087,64 @@ async function digOnce(bot: any, block: any, where: string): Promise<boolean> {
 }
 
 /**
+ * 手持的附魔工具是否**已到保护线**（到线就不许再拿它挖/砍）。
+ *
+ * 与"能不能收获"是两个独立判断：能收获 ≠ 可以继续用——附魔工具是资产，
+ * 到线就停手、换别的工具（用户 2026-11-01）。
+ */
+export function isHeldToolProtected(bot: any): boolean {
+    try {
+        return isToolProtected((bot?.heldItem ?? null) as ToolCandidate);
+    } catch {
+        return false;
+    }
+}
+
+/** 背包（含手上）里某件物品的对象；读不到返回 null（调用方按"没附魔"处理）。 */
+function inventoryItemObject(bot: any, name: string): any | null {
+    try {
+        if (bot?.heldItem?.name === name) return bot.heldItem;
+        const slots = bot?.inventory?.slots;
+        if (Array.isArray(slots)) {
+            const found = slots.find((slot: any) => slot != null && slot.name === name);
+            if (found != null) return found;
+        }
+        const items = bot?.inventory?.items?.();
+        if (Array.isArray(items)) {
+            const found = items.find((item: any) => item != null && item.name === name);
+            if (found != null) return found;
+        }
+        return null;
+    } catch {
+        return null;
+    }
+}
+
+/** 受保护附魔工具的回执：说清哪把、还剩多少、为什么不用它。 */
+export function protectedToolNotice(bot: any, targetName: string | null): string {
+    const held = bot?.heldItem ?? null;
+    const name = typeof held?.name === 'string' ? held.name : '附魔工具';
+    const remaining = toolRemainingUses((held ?? {}) as ToolCandidate);
+    const left = remaining == null ? '耐久读不到' : `只剩 ${remaining} 次耐久`;
+    const what = targetName == null ? '' : `，不用它挖 ${targetName}`;
+    return (
+        `⚠ ${name} 是附魔工具，${left}（保护线 ${ENCHANTED_RESERVE_USES} 次 / ` +
+        `${Math.round(ENCHANTED_RESERVE_FRACTION * 100)}% 耐久）${what}——已保护，不会自动用到爆；` +
+        '换一把未附魔工具，或手动 equip 决定要不要用它。'
+    );
+}
+
+/**
  * **确保手上拿着能挖这块方块的工具**（换手，不换目标）。
  *
  * mineflayer 的 `equipForBlock` 对某些方块（深层变种、模组方块）会**原地不动**，
  * 于是一把躺在背包里的镐被当成"没有工具"——真机 2026-10-23：
  * `deepslate_diamond_ore` 连续三次报"手持 wooden_axe"，而包里有石镐，钻石就在眼前。
  * 这里在它之后再补一条：按工具品质从高到低试，能 harvest 就停。
+ *
+ * **附魔工具保护（用户 2026-11-01）**：能收获 ≠ 可以继续用。附魔工具到保护线就
+ * 不参与自动换手；换不到未附魔工具时如实返回 false（`digWithTimeout` 会拦下，
+ * 不许拿它下镐）。不需要工具的方块则把手上的保护工具放下、空手挖。
  *
  * 为什么这不算"替模型做决定"：目标方块是模型选的，这里只解决"手没举起来"。
  */
@@ -2079,37 +2156,55 @@ export async function ensureHarvestTool(bot: any, block: any): Promise<boolean> 
             return false;
         }
     };
-    if (harvests()) return true;
+    // 能收获 **且** 手上不是"已到保护线的附魔工具"才算就绪。
+    const ready = (): boolean => harvests() && !isHeldToolProtected(bot);
+    if (ready()) return true;
     // **需要工具的方块：按 `harvestTools` 认（和 planDig 同一个判据），不交给
     // `equipForBlock`。** 真机 2026-10-23：`deepslate_diamond_ore` 被它换成了
     // `wooden_axe`，然后整条链路判"没有工具"——包里有镐、钻石在眼前，硬是挖不了。
     if (requiresHarvestTool(block)) {
         for (const candidate of harvestToolsFor(bot, block)) {
+            // 附魔工具到保护线：不选它，继续试下一把（自动切换仍然有效）。
+            if (isToolProtected(inventoryItemObject(bot, candidate.name) ?? { name: candidate.name })) continue;
             try {
                 await equip(bot, candidate.name);
             } catch {
                 continue;
             }
-            if (harvests()) return true;
+            if (ready()) return true;
         }
         return false;
     }
     // 不需要工具（泥土/沙/原木…）：这一步只为**快**，挑错也无所谓；换不上就算了。
-    try {
-        await bot.tool.equipForBlock(block);
-    } catch {
-        // 换不上就按下面的候选兜底。
+    // 手上已经是受保护的附魔工具时跳过 equipForBlock——它会照着"最快"挑，
+    // 很可能又把这把附魔工具举起来。
+    if (!isHeldToolProtected(bot)) {
+        try {
+            await bot.tool.equipForBlock(block);
+        } catch {
+            // 换不上就按下面的候选兜底。
+        }
+        if (ready()) return true;
     }
-    if (harvests()) return true;
     for (const candidate of harvestToolCandidates(bot)) {
+        if (isToolProtected(inventoryItemObject(bot, candidate) ?? { name: candidate })) continue;
         try {
             await equip(bot, candidate);
         } catch {
             continue;
         }
-        if (harvests()) return true;
+        if (ready()) return true;
     }
-    return harvests();
+    // 全是受保护的附魔工具（或都换不上）：这个方块空手也能收获，就把保护工具放下，
+    // 用手挖——保护的是工具，不是"这一格必须用工具挖"。
+    if (isHeldToolProtected(bot)) {
+        try {
+            await equip(bot, 'hand');
+        } catch {
+            // 放不下就保持现状；digWithTimeout 会拒绝拿它下镐。
+        }
+    }
+    return ready();
 }
 
 export async function breakBlockAt(bot: any, x: number, y: number, z: number, force: boolean = false): Promise<boolean> {

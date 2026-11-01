@@ -3160,6 +3160,9 @@ export async function mineTunnelSkill(
 /** 背包里当前该用的那把镐（有镐才能继续挖；换镐提示要能直接照抄）。 */
 // **便宜优先**（用户 2026-10-28）：快断的镐先用，**断了再换下一把**——耐久不参与筛选，
 // 拿"这活要几次耐久"去挡等于替模型判断值不值得冒险。排除名单照旧（避免结构性震荡）。
+// **附魔保护**（用户 2026-11-01）：到保护线的附魔镐不参与自动选择；只有它可用时
+// 如实说"是保护了，不是没有镐"，别让上层回执说成"没工具"。
+let _protectedPickaxeNotice: string | null = null;
 export function bestPickaxeInInventory(bot: any, exclude?: string | null, excluded?: string[]): string | null {
     let items: unknown[];
     try {
@@ -3171,6 +3174,12 @@ export function bestPickaxeInInventory(bot: any, exclude?: string | null, exclud
     const excludedNames = [...(excluded ?? [])];
     if (typeof exclude === 'string' && exclude !== '') excludedNames.push(exclude);
     const choice = chooseToolForJob({ tools: items as ToolCandidate[], kind: 'pickaxe', minimumTier: 'wooden', excluded: excludedNames });
+    if (choice.name == null && choice.failure === 'reserve-protected' && choice.message !== _protectedPickaxeNotice) {
+        _protectedPickaxeNotice = choice.message;
+        skills.log(bot, choice.message);
+    } else if (choice.name != null) {
+        _protectedPickaxeNotice = null;
+    }
     return choice.name;
 }
 

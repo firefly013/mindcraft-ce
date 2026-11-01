@@ -8,9 +8,20 @@
  * 规则：candidates = 档位达标；choice = 最便宜（档位最低 → 剩余耐久最少）。
  */
 import { describe, expect, it } from 'vitest';
-import { chooseToolForJob, toolRemainingUses } from '../src/body/library/tool_choice.js';
+import {
+  chooseToolForJob,
+  ENCHANTED_RESERVE_USES,
+  hasEnchantment,
+  isToolProtected,
+  toolRemainingUses,
+} from '../src/body/library/tool_choice.js';
 
 const pick = (name: string, remaining: number) => ({ name, count: 1, maxDurability: 251, durabilityUsed: 251 - remaining });
+/** 附魔工具：`enchants` 是 prismarine-item 的 getter 形状（`{name,lvl}[]`）。 */
+const enchanted = (name: string, remaining: number) => ({
+  ...pick(name, remaining),
+  enchants: [{ name: 'efficiency', lvl: 3 }],
+});
 
 describe('便宜优先（先用快断的那把）', () => {
   it('3 把铁镐含剩 4 次的 ⇒ 选剩 4 次那把，回执说清"断了再换"', () => {
@@ -77,5 +88,67 @@ describe('读不到耐久', () => {
     const choice = chooseToolForJob({ tools: [{ name: 'iron_pickaxe', count: 1 }] });
     expect(choice.failure).toBeNull();
     expect(choice.name).toBe('iron_pickaxe');
+  });
+});
+
+describe('附魔工具保护（用户 2026-11-01）', () => {
+  it('附魔工具到保护线（剩 11 次）⇒ 不参与自动选择，自动换未附魔工具', () => {
+    const choice = chooseToolForJob({
+      tools: [enchanted('iron_pickaxe', 11), pick('stone_pickaxe', 131)],
+    });
+    expect(choice.failure).toBeNull();
+    expect(choice.name).toBe('stone_pickaxe');
+  });
+
+  it('附魔工具健康（剩 200 次）⇒ 照常参与选择（便宜优先不变）', () => {
+    const choice = chooseToolForJob({ tools: [enchanted('iron_pickaxe', 200), pick('stone_pickaxe', 131)] });
+    // 便宜优先：档位低的石镐先选（附魔不是"更贵"的判据，耐久才是）。
+    expect(choice.name).toBe('stone_pickaxe');
+    const only = chooseToolForJob({ tools: [enchanted('iron_pickaxe', 200)] });
+    expect(only.name).toBe('iron_pickaxe');
+    expect(only.message).toContain('附魔工具');
+  });
+
+  it('只有到保护线的附魔工具 ⇒ reserve-protected，明说保护线、不自动用', () => {
+    const choice = chooseToolForJob({ tools: [enchanted('diamond_pickaxe', 5)] });
+    expect(choice.name).toBeNull();
+    expect(choice.failure).toBe('reserve-protected');
+    expect(choice.message).toContain('保护线');
+    expect(choice.message).toContain(`≤ ${ENCHANTED_RESERVE_USES}`);
+  });
+
+  it('未附魔工具照旧用到爆：剩 1 次也照选', () => {
+    const choice = chooseToolForJob({ tools: [pick('iron_pickaxe', 1)] });
+    expect(choice.failure).toBeNull();
+    expect(choice.name).toBe('iron_pickaxe');
+  });
+
+  it('读不到耐久不保护（不能因为测不出就锁死工具）', () => {
+    const unknown: any = { name: 'iron_pickaxe', count: 1, enchants: [{ name: 'efficiency', lvl: 1 }] };
+    expect(isToolProtected(unknown)).toBe(false);
+    expect(chooseToolForJob({ tools: [unknown] }).name).toBe('iron_pickaxe');
+  });
+
+  it('附魔检测：getter 抛异常 / 空数组 / 非数组 ⇒ 都当"没附魔"', () => {
+    expect(hasEnchantment({ name: 'iron_pickaxe', count: 1 })).toBe(false);
+    expect(hasEnchantment({ name: 'iron_pickaxe', count: 1, enchants: [] })).toBe(false);
+    const throwing: any = {
+      name: 'iron_pickaxe',
+      count: 1,
+      get enchants(): unknown {
+        throw new Error("Don't know how to get the enchants from an item on this mc version");
+      },
+    };
+    expect(hasEnchantment(throwing)).toBe(false);
+    expect(isToolProtected(throwing)).toBe(false);
+  });
+
+  it('保护线用比例也生效：剩 20% 但 > 20 次的大工具（钻石镐剩 300/1561）', () => {
+    const big = { name: 'diamond_pickaxe', count: 1, maxDurability: 1561, durabilityUsed: 1261, enchants: [{ name: 'fortune', lvl: 3 }] };
+    // 剩 300 次 > 20，但 300/1561 ≈ 19% > 15% ⇒ 不保护
+    expect(isToolProtected(big)).toBe(false);
+    const low = { name: 'diamond_pickaxe', count: 1, maxDurability: 1561, durabilityUsed: 1400, enchants: [{ name: 'fortune', lvl: 3 }] };
+    // 剩 161 次，161/1561 ≈ 10.3% < 15% ⇒ 保护
+    expect(isToolProtected(low)).toBe(true);
   });
 });
