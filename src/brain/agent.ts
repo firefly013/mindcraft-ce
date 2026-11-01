@@ -11,12 +11,12 @@
  *
  * 从旧版搬过来的方法**逐字保留**（含注释）：那边的注释记的都是真机踩出来的坑。
  */
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { BACKGROUND_CONTEXT } from '@earendil-works/chord/context';
 import { defineExtension } from '@earendil-works/pi-durable';
-import { ActionRunner } from './action_runner.js';
+import { ACTION_MAX_MS, ActionRunner } from './action_runner.js';
 import { buildGameTools, actionChannelInvoker } from './tools/game_tools.js';
 import { createToolCatalog, EMPTY_TOOL_CATALOG, type ToolCatalog } from './tools/catalog.js';
 import type { ToolDeclaration } from '../shared/tools.js';
@@ -48,7 +48,8 @@ import {
 } from './tools/control_tools.js';
 import { longRangeNudge, type ReceiptHint } from './tools/long_range_hint.js';
 import { EventIntake } from './runtime/events.js';
-import type { GameEvent } from './runtime/events.js';
+import type { EventAction, GameEvent } from './runtime/events.js';
+import { createHarnessIntakeDeps } from './runtime/harness.js';
 import type { EventHandler } from './runtime/handlers.js';
 import { compactionLogHook, providerLogHook } from './runtime/log_hooks.js';
 import { migrateLegacyState, readLegacySave } from './runtime/legacy.js';
@@ -167,6 +168,13 @@ export class Agent {
     private readonly intake = new EventIntake();
     /** 动作通道：占身体的动作走它（E1–E4 的契约住在这里）。 */
     private actionRunner: ActionRunner | null = null;
+    /**
+     * **测试台模式**：手动模式（profile 没有 model）下也把事件系统接上，
+     * 只是不叫模型（见 `runtime/harness.ts`）。续做/锁/事件投递因此可测。
+     */
+    private harnessActive = false;
+    /** CLI 走动作通道的任务在等「工具结果」：`call_id` → 落定函数。 */
+    private toolWaiters = new Map<string, (text: string) => void>();
     /** profile 原文：供应商、上下文压缩参数、提示词集都从它读。 */
     private profile: Record<string, unknown> | null = null;
     /**
@@ -423,6 +431,81 @@ export class Agent {
     }
 
     /**
+     * **测试台运行时**（手动模式专用）：把事件系统接上，但不叫模型。
+     *
+     * 线上路径里 `beginEmergency`/`endEmergency` 由 `openBotWiring` 接线；手动模式
+     * 没有 wiring，所以这里接一份**同样语义**的：L5 反射开始 → 锁动作通道 +
+     * 捕获被作废的动作；最后一个反射完成 → 解锁 + 机械续做。
+     *
+     * 事件只记录（`onRuntimeEvent`），不产生模型请求。
+     */
+    private attachHarnessRuntime(): void {
+        if (this.intake.attached) return;
+        const inventoryHandler: EventHandler = {
+            types: ['inventory.changed'],
+            executor: 'reflex',
+            note: '测试台：只更新背包缓存（没有模型，不需要任务复查）',
+            run: (event) => {
+                this.updateInventoryCache(event);
+                return Promise.resolve();
+            },
+        };
+        const lookup = (type: string): EventHandler | undefined =>
+            type === 'inventory.changed' ? inventoryHandler : undefined;
+        this.intake.attach(
+            createHarnessIntakeDeps({
+                onEvent: (event, action) => this.onRuntimeEvent(event, action),
+                beginEmergency: () => {
+                    const interrupted = this.scheduler?.beginEmergency() ?? null;
+                    this.actionRunner?.captureInterruption(interrupted);
+                },
+                endEmergency: () => {
+                    this.scheduler?.endEmergency();
+                    void this.actionRunner?.resumeInterrupted().catch(() => undefined);
+                },
+                lookup,
+                onError: (error) => this.log.with('event').warn({ phase: 'harness-error', err: String(error) }),
+            }),
+        );
+        this.harnessActive = true;
+        this.log.with('lifecycle').info({ event: 'harness-attached', bot: this.name });
+    }
+
+    /**
+     * 运行时事件落点（模型模式与测试台共用）：写 CLI 事件流（+ 测试台 JSONL），
+     * 并让"走动作通道"的 CLI 任务在拿到工具结果时落定。
+     */
+    private onRuntimeEvent(event: GameEvent, action: EventAction): void {
+        this.log.with('event').info({ phase: 'delivered', level: event.level, action, text: event.text });
+        this.cliEvents.push({ at: Date.now(), level: event.level as number, action, text: event.text });
+        if (this.cliEvents.length > CLI_EVENT_LOG_LIMIT) {
+            this.cliEvents.splice(0, this.cliEvents.length - CLI_EVENT_LOG_LIMIT);
+        }
+        if (this.harnessActive) this.appendHarnessEvent(event, action);
+        if (event.type === 'tool.action.done') {
+            const payload = event.payload as { call_id?: unknown; result?: { data?: unknown } } | null;
+            const callId = typeof payload?.call_id === 'string' ? payload.call_id : null;
+            if (callId == null) return;
+            const waiter = this.toolWaiters.get(callId);
+            if (waiter != null) waiter(String(payload?.result?.data ?? ''));
+        }
+    }
+
+    /** 测试台事件落盘：`bots/<name>/logs/harness-events.jsonl`（外部断言用）。 */
+    private appendHarnessEvent(event: GameEvent, action: EventAction): void {
+        try {
+            const dir = join(`./bots/${this.name}`, 'logs');
+            mkdirSync(dir, { recursive: true });
+            appendFileSync(
+                join(dir, 'harness-events.jsonl'),
+                `${JSON.stringify({ at: Date.now(), level: event.level, action, type: event.type, text: event.text })}\n`,
+            );
+        } catch {
+            // 落盘失败不能影响事件处理。
+        }
+    }
+
+    /**
      * `inventory.changed` 的处理：更新计数缓存，然后复查任务是否完成。
      *
      * 载荷带的是**新的完整槽位表**（身体在变化的那一刻采的），所以这里既不需要
@@ -432,10 +515,20 @@ export class Agent {
      * （`checkTaskDone` 会发），再写一条"我更新了缓存"是纯噪音。
      */
     private reflexInventoryChanged(event: GameEvent): Promise<void> {
-        const payload = event.payload as { slots?: ({ name: string; count: number } | null)[] } | null;
-        if (payload?.slots != null) this.slotsCache = payload.slots;
+        this.updateInventoryCache(event);
         this.checkTaskDone();
         return Promise.resolve();
+    }
+
+    /**
+     * 背包缓存更新（模型模式与测试台共用）。
+     *
+     * 抽出来是因为手动模式没有会话/任务，`checkTaskDone()` 不该跑；但续做的
+     * checkpoint 进度（collectBlocks 收了多少）要靠这份缓存，所以测试台也要更新。
+     */
+    private updateInventoryCache(event: GameEvent): void {
+        const payload = event.payload as { slots?: ({ name: string; count: number } | null)[] } | null;
+        if (payload?.slots != null) this.slotsCache = payload.slots;
     }
 
     /** `Task` 数物品用。由 `inventory.changed` 事件维护。 */
@@ -724,6 +817,10 @@ export class Agent {
         if (profile['model'] == null) {
             this.log.with('lifecycle').info({ event: 'manual-mode', bot: this.name });
             console.log(`${this.name} 手动模式：profile 没有 model，只接受 CLI 命令。`);
+            // **手动模式也要有半层运行时**：事件投递 / 动作通道 / 续做照常，
+            // 只是没有模型可叫。没有它，CLI 既看不到事件，动作也绕开通道——
+            // 续做（resume）根本不可达（见 `runtime/harness.ts`）。
+            this.attachHarnessRuntime();
             return;
         }
         const baseDir = `./bots/${this.name}`;
@@ -824,18 +921,8 @@ export class Agent {
                     }),
                 ],
                 // 事件落点：write / steer / preempt / emergency。
-                onEvent: (event, action): void => {
-                    this.log.with('event').info({
-                        phase: 'delivered',
-                        level: event.level,
-                        action,
-                        text: event.text,
-                    });
-                    this.cliEvents.push({ at: Date.now(), level: event.level as number, action, text: event.text });
-                    if (this.cliEvents.length > CLI_EVENT_LOG_LIMIT) {
-                        this.cliEvents.splice(0, this.cliEvents.length - CLI_EVENT_LOG_LIMIT);
-                    }
-                },
+                // 与测试台共用同一个落点（CLI 事件流 + 等结果的 runner 任务）。
+                onEvent: (event, action): void => this.onRuntimeEvent(event, action),
             });
             this.wiring = wiring;
 
@@ -1134,9 +1221,19 @@ export class Agent {
         },
     });
 
-    /** 提交一个任务，**立即返回 id**，命令在后台跑（详见 `CliJobTracker`）。 */
-    startCliJob(name: string, args: Record<string, unknown>, force: boolean): { id: string } {
-        return this.cliJobs.start(name, () => this.runOneCommand(name, args, force));
+    /**
+     * 提交一个任务，**立即返回 id**，命令在后台跑（详见 `CliJobTracker`）。
+     *
+     * `via='runner'`：动作类命令走 `ActionRunner`（认领通道 / generation / 中断 /
+     * 续做），与模型走同一条身体通道契约——外部测试续做就靠它。
+     */
+    startCliJob(
+        name: string,
+        args: Record<string, unknown>,
+        force: boolean,
+        via: 'body' | 'runner' = 'body',
+    ): { id: string } {
+        return this.cliJobs.start(name, () => this.runOneCommand(name, args, force, via));
     }
 
     /** 单个任务状态；没有就是 `unknown`（可能已被挤出表）。 */
@@ -1234,18 +1331,28 @@ export class Agent {
     async runCliCommand(
         name: string,
         args: Record<string, unknown> = {},
-        opts: { since?: number; force?: boolean } = {},
+        opts: { since?: number; force?: boolean; via?: 'body' | 'runner' } = {},
     ): Promise<{ output: string; events: CliEvent[] }> {
         const since = typeof opts.since === 'number' ? opts.since : 0;
         const events = this.cliEvents.filter((e) => e.at > since);
         return {
-            output: await this.runOneCommand(name, args, opts.force === true),
+            output: await this.runOneCommand(name, args, opts.force === true, opts.via === 'runner' ? 'runner' : 'body'),
             events,
         };
     }
 
-    /** 跑一条命令（工具或内置命令）。`force` = 先把身体抢过来再跑。 */
-    private async runOneCommand(name: string, args: Record<string, unknown>, force: boolean): Promise<string> {
+    /**
+     * 跑一条命令（工具或内置命令）。`force` = 先把身体抢过来再跑。
+     *
+     * `via='runner'`：动作类命令走 `ActionRunner`（认领通道、幂等、中断、续做），
+     * 与模型同一条契约。**这是外部测试续做的入口**：不经过模型，但动作在通道里。
+     */
+    private async runOneCommand(
+        name: string,
+        args: Record<string, unknown>,
+        force: boolean,
+        via: 'body' | 'runner' = 'body',
+    ): Promise<string> {
         // 内置命令（不是游戏工具）：这些得在大脑进程里跑，因为要碰会话数据库。
         // 它们**也拍照**（覆盖写 latest）——"CLI 被调用就留一张现场"，不分命令种类。
         if (name === 'tools') return await this.attachScreenshotFile(this.cliListTools(), false);
@@ -1257,13 +1364,6 @@ export class Agent {
             return await this.attachScreenshotFile(this.cliRecentEvents(Number(args.limit ?? 30) || 30), false);
         }
 
-        if (force) {
-            try {
-                await this.body?.stop();
-            } catch {
-                // 停不掉就硬着头皮跑，回执里会体现冲突。
-            }
-        }
         const found = this.catalog.get(name);
         if (found == null) return `没有这条命令：${name}。用 tools 看看有哪些。`;
         // **参数名写错必须当场报错**（真机 2026-10-23：`cli equip --type stone_pickaxe`
@@ -1277,6 +1377,28 @@ export class Agent {
             const valid = declared.size > 0 ? [...declared].join(', ') : '(这条命令没有参数)';
             return `参数名不认识：${unknown.map((key) => `--${key}`).join('、')}。${name} 的参数是：${valid}。`;
         }
+
+        // **走动作通道**（CLI `--via runner`）：认领/幂等/中断/续做与模型同一条路径。
+        // 身体侧还是同一个 `execute`，区别只在于"谁仲裁"——现在是 Scheduler。
+        if (via === 'runner' && this.catalog.isAction(name) && this.actionRunner != null) {
+            if (force) {
+                try {
+                    await this.fullStop();
+                } catch {
+                    // 停不掉就硬着头皮跑，回执里会体现冲突。
+                }
+            }
+            const text = await this.runActionViaChannel(name, args);
+            return await this.attachScreenshotFile(text, found.withScreenshot === true);
+        }
+
+        if (force) {
+            try {
+                await this.body?.stop();
+            } catch {
+                // 停不掉就硬着头皮跑，回执里会体现冲突。
+            }
+        }
         // **不在大脑里执行 `perform`**：那些实现全是 mineflayer 调用。走协议到
         // 身体上去跑，由那边 `executeToolCall` 按同样的具名参数展开——语义一致。
         const result = await this.bodyAct(name, args);
@@ -1286,6 +1408,51 @@ export class Agent {
         // 存成临时文件，回执给路径，人自己打开看。
         // 每条命令都存：stats 每次一张独立文件，其余覆盖写 latest（见 attachScreenshotFile）。
         return await this.attachScreenshotFile(text, found.withScreenshot === true);
+    }
+
+    /**
+     * 让一条动作走**动作通道**（`ActionRunner`），并等到它的工具结果。
+     *
+     * 模型模式下这条路径本来就存在（模型调工具 → `invokeTool` → runner）；这里只是
+     * 给 CLI 开一个同样的入口，让无模型测试也能触发"动作被反射打断 → 续做"。
+     */
+    private async runActionViaChannel(name: string, args: Record<string, unknown>): Promise<string> {
+        const runner = this.actionRunner;
+        if (runner == null) return '动作通道还没装配好（大脑运行时未就绪）。';
+        const outcome = await runner.run(name, args);
+        if (outcome.status === 'rejected') {
+            return `${name} 没有开始：${outcome.reason ?? outcome.code ?? '被拒绝'}`;
+        }
+        if (outcome.status !== 'accepted') {
+            return `${name} 返回了意料之外的状态：${String((outcome as { status?: unknown }).status ?? '')}`;
+        }
+        const data = outcome.data as { call_id?: unknown } | undefined;
+        const callId = typeof data?.call_id === 'string' ? data.call_id : null;
+        if (callId == null) return `${name} 已开始，但没拿到 call_id，没法等结果。`;
+        return await this.waitForToolResult(callId);
+    }
+
+    /** 等一个动作通道任务的「工具结果」（`tool.action.done` 事件，带同一个 `call_id`）。 */
+    private waitForToolResult(callId: string, timeoutMs: number = ACTION_MAX_MS): Promise<string> {
+        return new Promise<string>((resolve) => {
+            let timer: ReturnType<typeof setTimeout> | null = null;
+            const settle = (text: string): void => {
+                if (timer != null) clearTimeout(timer);
+                this.toolWaiters.delete(callId);
+                resolve(text);
+            };
+            timer = setTimeout(() => {
+                settle(
+                    `动作 ${callId} 超过 ${Math.round(timeoutMs / 60000)} 分钟没有回报结果（可能还在跑；` +
+                        '用 Stop 或 status 核对）。',
+                );
+            }, timeoutMs);
+            // Node 的定时器不该拖住进程退出。
+            if (typeof (timer as { unref?: () => void }).unref === 'function') {
+                (timer as { unref: () => void }).unref();
+            }
+            this.toolWaiters.set(callId, settle);
+        });
     }
 
     /**

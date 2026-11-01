@@ -123,7 +123,9 @@ class MindServerProxy {
 
         switch (op) {
             case 'start': {
-                const { id } = await agent.startCliJob(String(data?.name ?? ''), args, data?.force === true);
+                // `via: 'runner'`：动作类命令走动作通道（认领/中断/续做），外部测试用。
+                const via = data?.via === 'runner' ? 'runner' : 'body';
+                const { id } = await agent.startCliJob(String(data?.name ?? ''), args, data?.force === true, via);
                 return { ok: true, jobId: id, events: events() };
             }
             case 'wait': {

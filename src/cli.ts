@@ -297,6 +297,8 @@ async function main(): Promise<void> {
         name: opts.command,
         args: opts.args,
         force: opts.force,
+        // 动作通道（认领/中断/续做）——外部测试用，默认直连身体。
+        via: opts.via,
         since: opts.all ? 0 : readCursor(opts.agent),
       },
       15_000,

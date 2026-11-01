@@ -26,6 +26,12 @@ export interface CliOptions {
   async: boolean;
   /** 先抢占身体再跑（别被模型正在做的动作挡住）。 */
   force: boolean;
+  /**
+   * 动作类命令走哪条路：
+   *   - `body`（默认）：直连身体，不占动作通道（旧的 CLI 行为）；
+   *   - `runner`：走大脑的动作通道（认领/幂等/中断/续做），与模型同一条契约。
+   */
+  via: 'body' | 'runner';
   /** 忽略 cursor，把缓冲里的事件全打出来。 */
   all: boolean;
   timeoutMs: number;
@@ -63,6 +69,8 @@ const USAGE = `用法：cli --agent <名字> [选项] <命令> [参数...]
   --port <端口>    MindServer 端口，默认读取 settings.ts 的 mindserver_port
   --wait           长命令提交后顺带等到结束（省得再跑一次 wait）
   --force          先停掉机器人正在做的动作再跑这条命令
+  --via runner     动作类命令走**大脑的动作通道**（认领/幂等/中断/续做，和模型同一条
+                   契约；外部测试续做/中断用）。默认直连身体（旧行为）
   --all            忽略本地进度，把积攒的事件全部打印
   --timeout <毫秒> 等待上限，默认 120000
   -h, --help       看这个
@@ -91,6 +99,7 @@ export function parseCliArgs(argv: readonly string[], defaultPort = 8080): CliOp
   let asyncMode = false;
   let waitMode = false;
   let force = false;
+  let via: 'body' | 'runner' = 'body';
   let all = false;
   let help = false;
   let timeoutMs = 120_000;
@@ -140,6 +149,9 @@ export function parseCliArgs(argv: readonly string[], defaultPort = 8080): CliOp
         case 'timeout':
           timeoutMs = Number(value) || timeoutMs;
           break;
+        case 'via':
+          via = value === 'runner' ? 'runner' : 'body';
+          break;
         default:
           // 数字就给数字：工具的 params 多半是 int/float，给字符串过去会判不过。
           args[key] = value !== '' && Number.isFinite(Number(value)) ? Number(value) : value;
@@ -174,6 +186,7 @@ export function parseCliArgs(argv: readonly string[], defaultPort = 8080): CliOp
     wait: waitMode,
     async: asyncMode,
     force,
+    via,
     all,
     timeoutMs,
     help,
