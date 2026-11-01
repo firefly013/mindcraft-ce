@@ -29,6 +29,7 @@ import {
     type CombatVerdict,
     type WeaponProfile,
 } from './combat_power.js';
+import { isToolProtected } from '../library/tool_choice.js';
 
 /** 战斗策略配置（`settings.combatPolicy`）。 */
 export interface CombatPolicy {
@@ -153,6 +154,10 @@ function bestWeaponFrom(items: any[]): WeaponProfile | null {
     for (const item of items) {
         const name = String(item?.name ?? '');
         if (name === '') continue;
+        // **附魔武器保护**（用户 2026-11-01）：到保护线的不参与战力估算——
+        // 实际换手（equipHighestAttack）也不会用它，两边必须同一套判据，
+        // 否则会"按附魔剑的 DPS 决定打，打起来却是空手"。
+        if (isToolProtected(item)) continue;
         if (!isKnownWeapon(name)) continue; // 面包/圆石不是武器，别按"铁剑估值"混进来
         const profile = weaponProfileOf(name, sharpnessLevelOf(item));
         if (profile.kind === 'bow' || profile.kind === 'crossbow') continue; // 反射里不用远程

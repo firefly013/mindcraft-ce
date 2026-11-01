@@ -49,6 +49,7 @@ import { renderLiveState } from '../shared/live_state.js';
 import type { SampleContext } from './live_state.js';
 import { nearestThreat, runEmergency, FOOD_VALUE, shouldTriggerEmergency } from './safety/emergency.js';
 import type { EmergencyIntent, EmergencyResult, ThreatEntity } from './safety/emergency.js';
+import { installToolGuard } from './safety/tool_guard.js';
 import {
     attackEntity,
     closeStaleWindow,
@@ -887,6 +888,9 @@ export class MineflayerBody {
 
         console.log(this.name, 'logging into minecraft...');
         this.bot = initBot(this.name);
+        // **附魔工具保护的最后一道闸**（用户 2026-11-01）：pathfinder 寻路挖路和
+        // custom-pvp 换武器都会绕过 skills 的换手判断，这里在 bot 实例上兜住。
+        installToolGuard(this.bot);
         // 容器包转储入口：skills 侧只认这两个方法名，不 import 身体内部实现。
         (this.bot as { __armContainerPacketDump?: unknown }).__armContainerPacketDump = (reason: string): void =>
             this.armContainerPacketDump(reason);

@@ -755,16 +755,64 @@ async function autoLight(bot: any): Promise<boolean> {
     return false;
 }
 
+/** 受保护附魔武器的回执（模块级去重：同一句话不反复写）。 */
+let _protectedWeaponNotice: string | null = null;
+
+/**
+ * 受保护附魔武器的回执：说清哪些、还剩多少、为什么不用。
+ *
+ * 与 `protectedToolNotice` 分开：那个读"手持"，这个读"背包里被保护的那些"。
+ */
+export function protectedWeaponNotice(items: any[]): string | null {
+    const protectedItems = (items ?? []).filter((item) => isToolProtected(item));
+    if (protectedItems.length === 0) return null;
+    const list = protectedItems
+        .map((item) => {
+            const remaining = toolRemainingUses(item as ToolCandidate);
+            return `${String(item?.name ?? '武器')}（${remaining == null ? '耐久读不到' : `剩 ${remaining} 次`}）`;
+        })
+        .join('、');
+    return (
+        `⚠ 附魔武器到了保护线：${list}——不会自动拿它们打（留一点耐久，别用到爆）；` +
+        '换一把未附魔武器，或手动 equip 决定要不要用。'
+    );
+}
+
 async function equipHighestAttack(bot: any): Promise<void> {
-    let weapons: any[] = bot.inventory.items().filter((item: any) => item.name.includes('sword') || (item.name.includes('axe') && !item.name.includes('pickaxe')));
-    if (weapons.length === 0)
-        weapons = bot.inventory.items().filter((item: any) => item.name.includes('pickaxe') || item.name.includes('shovel'));
-    if (weapons.length === 0)
+    let items: any[] = [];
+    try {
+        items = (bot?.inventory?.items?.() ?? []) as any[];
+    } catch {
+        // 读不到背包就按空处理（不装武器，也不误报保护）。
+    }
+    // **附魔武器保护**（用户 2026-11-01）：到保护线的不参与自动选择，换下一把。
+    // 和 `ensureHarvestTool` 同一条规则：能打 ≠ 可以继续用。
+    const usable = items.filter((item) => !isToolProtected(item));
+    const named = (item: any): string => String(item?.name ?? '');
+    let weapons: any[] = usable.filter(
+        (item) => named(item).includes('sword') || (named(item).includes('axe') && !named(item).includes('pickaxe')),
+    );
+    if (weapons.length === 0) weapons = usable.filter((item) => named(item).includes('pickaxe') || named(item).includes('shovel'));
+    if (weapons.length === 0) {
+        // 没有可用武器（可能全被保护了）：别把保护线上的附魔武器举在手里打。
+        const notice = protectedWeaponNotice(items);
+        if (notice != null && notice !== _protectedWeaponNotice) {
+            _protectedWeaponNotice = notice;
+            log(bot, notice);
+        }
+        if (isHeldToolProtected(bot)) {
+            try {
+                await equip(bot, 'hand');
+            } catch {
+                // 放不下就保持现状（攻击入口另有保护判断）。
+            }
+        }
         return;
+    }
+    _protectedWeaponNotice = null;
     weapons.sort((a: any, b: any) => b.attackDamage - a.attackDamage);
     const weapon: any = weapons[0];
-    if (weapon)
-        await bot.equip(weapon, 'hand');
+    if (weapon) await bot.equip(weapon, 'hand');
 }
 
 /**
@@ -775,8 +823,10 @@ export function bestWeaponInInventory(bot: any): string | null {
     try {
         const items = (bot?.inventory?.items?.() ?? []) as Array<{ name?: unknown; attackDamage?: unknown }>;
         if (!Array.isArray(items)) return null;
+        // **附魔武器保护**：建议里也不出现保护线上的武器（和实际换手保持一致）。
+        const usable = items.filter((item) => !isToolProtected(item as ToolCandidate));
         const byName = (predicate: (name: string) => boolean): Array<{ name: string; attackDamage: number }> =>
-            items
+            usable
                 .filter((item) => typeof item?.name === 'string' && predicate(item.name))
                 .map((item) => ({
                     name: String(item.name),
@@ -1490,6 +1540,9 @@ export async function attackEntity(
                 stopPvp(bot);
                 return false;
             }
+            // **附魔武器保护**（用户 2026-11-01）：打着打着武器跌破保护线 → 立刻换手
+            // （换不到就放下、空手打），不用到爆。只在真的到线时扫背包。
+            if (isHeldToolProtected(bot)) await equipHighestAttack(bot);
             if (now() - startedAt >= budgetMs) {
                 log(
                     bot,
