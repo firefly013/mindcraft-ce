@@ -33,7 +33,8 @@ describe('formatEventEntry', () => {
 
   it('truncates long payloads and says how much was cut', () => {
     const line = formatEventEntry({ seq: 1, kind: 'Tool', level: 2, payload: { blob: 'x'.repeat(ENTRY_LIMIT * 2) } });
-    expect(line).toContain('[truncated');
+    expect(line).toContain('#1 Tool/L2 {"blob":"xxxxxxxxxxxxxxxxx');
+    expect(line).toContain('原文');
     expect(line.length).toBeLessThan(ENTRY_LIMIT + 200);
   });
 
@@ -59,6 +60,7 @@ describe('renderEvents', () => {
     const lines = block.split('\n');
     expect(lines[0]).toBe('## 本轮新事件');
     expect(lines[1]).toBe('#1 #2');
+    expect(lines).toHaveLength(2); // 不再追加"按序号找/不用重复叙述"这类旁白
     // 关键：正文不再重发（否则同一条消息会在一个请求里出现两次）。
     expect(block).not.toContain('"type":"a"');
   });

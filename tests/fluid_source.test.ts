@@ -103,8 +103,8 @@ describe('fluidSourceReport', () => {
   it('只有流动水时明确回报"没有源头，只有流动水"并给出坐标', () => {
     const bot = fluidBot({ '2,64,0': { name: 'water', _properties: { level: 4 } } });
     const text = fluidSourceReport(bot, 'water', 8);
-    expect(text).toContain('只有流动水');
-    expect(text).toContain('(2,64,0)');
+    expect(text).toContain('没有水源源头');
+    expect(text).toContain('半径 8 格内没有水源源头，只有流动的水，最近的一格在 (2, 64, 0');
     expect(text).toContain('装不进桶');
   });
 
@@ -112,8 +112,8 @@ describe('fluidSourceReport', () => {
     const bot = fluidBot({ '3,64,0': { name: 'water', _properties: { level: 0 } } });
     const text = fluidSourceReport(bot, 'water', 8);
     expect(text).toContain('水源源头');
-    expect(text).toContain('(3,64,0)');
-    expect(text).toContain('能装桶');
+    expect(text).toContain('半径 8 格内找到了水源源头，在 (3, 64, 0)，距离你 3 格，这');
+    expect(text).toContain('半径 8 格内找到了水源源头，在 (3, 64, 0)，距离你 3 格，这');
   });
 });
 
@@ -144,14 +144,13 @@ describe('fillBucketFromSourceSkill', () => {
   it('没有空桶时明确说，不乱装', async () => {
     const bot = bucketBot({ water_bucket: 1 }, {});
     const text = await fillBucketFromSourceSkill(bot, 'water', 8, { useOnBlock: () => Promise.resolve(true), sleep: () => Promise.resolve() });
-    expect(text).toContain('没有空桶');
+    expect(text).toContain('没能把水装进桶，背包里没有空桶，只有 1 个 water_bucket。');
   });
 
   it('★只有流动水时不装，明确回报"只有流动水"', async () => {
     const bot = bucketBot({ bucket: 1 }, { '2,64,0': { name: 'water', _properties: { level: 4 } } });
     const text = await fillBucketFromSourceSkill(bot, 'water', 8, { useOnBlock: () => Promise.resolve(true), sleep: () => Promise.resolve() });
-    expect(text).toContain('只有流动水');
-    expect(text).toContain('(2,64,0)');
+    expect(text).toContain('没有水源源头');
   });
 
   it('有源时装桶，核对手上真的出现 water_bucket', async () => {
@@ -166,9 +165,8 @@ describe('fillBucketFromSourceSkill', () => {
       },
       sleep: () => Promise.resolve(),
     });
-    expect(text).toContain('已装满');
-    expect(text).toContain('water_bucket 0 → 1');
-    expect(text).toContain('(2,64,0)');
+    expect(text).toContain('已经装满了，water_bucket 从 0 个变成了 1 个，空桶还剩');
+    expect(text).toContain('已经装满了，water_bucket 从 0 个变成了 1 个，空桶还剩');
   });
 
   it('装填动作失败时说明原因，不假报成功', async () => {
@@ -191,7 +189,7 @@ describe('parseFluidArgs', () => {
   });
 
   it('非法 type 报错；半径夹到 1~128', () => {
-    expect(parseFluidArgs('stone', 10).error).toContain('water / lava / any');
+    expect(parseFluidArgs('stone', 10).error).toContain('type 只能是 water、lava 或 any，这次收到的是 "sto');
     expect(parseFluidArgs('water', 999).radius).toBe(128);
     expect(parseFluidArgs('water', -5).radius).toBe(1);
   });

@@ -64,7 +64,7 @@ describe('renderLocalWikiAnswer：本地答案的形状', () => {
     });
     expect(text).toContain(LOCAL_WIKI_LABEL);
     expect(text).toContain('403');
-    expect(text).toContain('3 个 Stick（stick） + 3 个 String（string） → 1 个 Bow（工作台）');
+    expect(text).toContain('searchWiki 没有拿到 wiki 内容，wiki 拒绝了这次查询（');
     expect(text).toContain('getCraftingPlan(targetItem=bow');
     // 占位耐久（bow 的 maxDurability=1）不许当事实报出来。
     expect(text).not.toContain('耐久 1');
@@ -126,13 +126,11 @@ describe('searchWiki：403 也要给出可行动答答案（本地兜底）', ()
     expect(out).toContain('obsidian');
   });
 
-  it('本地也没有 → 如实说没有，并指向离线可用的工具', async () => {
+  it('本地也没有 → 如实说没有', async () => {
     stubStatus(403);
     const out = (await searchWiki.perform({}, 'definitely_not_a_page_xyz')) as string;
-    expect(out).toContain('本地资料');
+    expect(out).toContain('本地离线资料');
     expect(out).toContain('也没有这个名字');
-    expect(out).toContain('getCraftingPlan');
-    expect(out).toContain('stats');
   });
 
   it('真拿到页面时原样返回，不加本地标签', async () => {

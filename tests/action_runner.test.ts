@@ -121,8 +121,7 @@ describe('ActionRunner 进度回执（带位置，能判断卡没卡）', () => 
       const text = h.notices.map((n) => String((n.result as { data?: unknown }).data)).join('\n');
       expect(text).toContain('还在跑');
       expect(text).toContain('(1.0, 64.0, 2.0)');
-      expect(text).toContain('位置几乎没变');
-      expect(text).toContain('位移 0.0 格');
+      expect(text).toContain('只移动了 0.0 格');
       // 位移小 ≠ 卡住：钓鱼/睡觉/熔炼本来就不动。判断归模型。
       expect(text).not.toContain('卡住了');
       expect(text).not.toContain('Stop');
@@ -141,7 +140,7 @@ describe('ActionRunner 进度回执（带位置，能判断卡没卡）', () => 
       await vi.advanceTimersByTimeAsync(ACTION_PROGRESS_NOTICE_MS * 2 + 50);
       const text = h.notices.map((n) => String((n.result as { data?: unknown }).data)).join('\n');
       expect(text).toContain('现在在 (5.0, 63.0, 5.0)');
-      expect(text).toContain('位移 0.0 格');
+      expect(text).toContain('只移动了 0.0 格');
       expect(text).not.toContain('卡住了');
       h.gate.resolve('done');
     } finally {
@@ -159,8 +158,8 @@ describe('ActionRunner 进度回执（带位置，能判断卡没卡）', () => 
       await h.runner.run('goToCoordinates', { x: 100, y: 64, z: 0, closeness: 3 });
       await vi.advanceTimersByTimeAsync(ACTION_PROGRESS_NOTICE_MS * 2 + 50);
       const text = h.notices.map((n) => String((n.result as { data?: unknown }).data)).join('\n');
-      expect(text).toContain('移动了');
-      expect(text).toContain('格/秒');
+      expect(text).toContain('移动');
+      expect(text).toContain('大约每秒');
       expect(text).not.toContain('卡住了');
       h.gate.resolve('done');
     } finally {
@@ -175,9 +174,9 @@ describe('ActionRunner 进度回执（带位置，能判断卡没卡）', () => 
       await h.runner.run('goToCoordinates', { x: 100, y: 64, z: 0, closeness: 3 });
       await vi.advanceTimersByTimeAsync(ACTION_PROGRESS_NOTICE_MS + 50);
       const text = h.notices.map((n) => String((n.result as { data?: unknown }).data)).join('\n');
-      expect(text).toContain('读不到坐标');
+      expect(text).toContain('读不到当前坐标');
       expect(text).not.toContain('卡住了');
-      expect(text).not.toContain('位移'); // 读不到坐标就不许编位移
+      expect(text).not.toContain('移动'); // 读不到坐标就不许编位移
       h.gate.resolve('done');
     } finally {
       vi.useRealTimers();
@@ -201,10 +200,12 @@ describe('ActionRunner', () => {
     h.hold = true;
     const res = await h.runner.run('goToPlayer', { player_name: 's', closeness: 2 });
     expect(res.status).toBe('accepted');
-    const accepted = res.data as { action_id: string; call_id: string; generation: number };
-    // action_id 仍是工具名（旧观测依赖它）；call_id 才是这一次调用的唯一标识。
+    const accepted = res.data as { action_id: string; call_id: string };
+    // accepted 只给标识；generation/note 这类内部字段不进回执。
     expect(accepted.action_id).toBe('goToPlayer');
     expect(accepted.call_id).toMatch(/^goToPlayer#\d+$/);
+    expect(accepted).not.toHaveProperty('generation');
+    expect(accepted).not.toHaveProperty('note');
     expect(h.executed).toEqual(['goToPlayer']);
     expect(h.records).toEqual([]);
     expect(h.notices).toEqual([]);
@@ -220,9 +221,8 @@ describe('ActionRunner', () => {
     expect(h.notices).toHaveLength(1);
     expect(h.notices[0]?.call).toBe('goToPlayer');
     expect(h.notices[0]?.result.status).toBe('completed');
-    const notice = h.notices[0] as unknown as { call_id: string; generation: number };
+    const notice = h.notices[0] as unknown as { call_id: string };
     expect(notice.call_id).toBe(accepted.call_id);
-    expect(notice.generation).toBe(accepted.generation);
     expect(String(h.notices[0]?.result.data)).toContain(accepted.call_id);
   });
 
@@ -241,12 +241,12 @@ describe('ActionRunner', () => {
     expect(h.notices).toHaveLength(1);
     expect(h.notices[0]?.call).toBe('goToPlayer');
     const text = String((h.notices[0]?.result as { data?: unknown }).data);
-    expect(text).toContain('被中断');
-    expect(text).toContain('Stop 停掉了它');
+    expect(text).toContain('动作被中断了');
+    expect(text).toContain('Stop 把它打断了');
     expect(text).not.toContain('保命反射');
   });
 
-  it('保命反射打断时明确写保命，不把锅扣给 Stop；如果身体仍返回结果就保留', async () => {
+  it('保命反射打断时明确写保命；如果身体仍返回结果就保留结果', async () => {
     const h = makeHarness();
     h.hold = true;
     await h.runner.run('searchForBlock', { type: 'lava', search_range: 512 });
@@ -257,8 +257,7 @@ describe('ActionRunner', () => {
     expect(h.notices).toHaveLength(1);
     const text = String((h.notices[0]?.result as { data?: unknown }).data);
     expect(text).toContain('保命反射');
-    expect(text).toContain('不是你调用的 Stop');
-    expect(text).toContain('供参考');
+    expect(text).not.toContain('不是你调用的 Stop');
     expect(text).toContain('Found lava at (10, 20, 30).');
     expect(h.records.some((line) => line.includes('Found lava'))).toBe(true);
   });
@@ -273,7 +272,8 @@ describe('ActionRunner', () => {
     await tick();
     expect(h.notices).toHaveLength(1);
     const text = String((h.notices[0]?.result as { data?: unknown }).data);
-    expect(text).toContain('保命反射/急停抢走了身体');
+    expect(text).toContain('动作被中断了');
+    expect(text).toContain('保命反射抢走了身体');
     expect(text).not.toContain('Stop 停掉了它');
   });
 
@@ -293,11 +293,10 @@ describe('ActionRunner', () => {
     const busy = await h.runner.run('collectBlocks', { type: 'oak_log', num: 4 });
     expect(busy.status).toBe('rejected');
     expect(busy.reason).toContain('goToPlayer');
-    // busy 回执要带占用者/时长/generation，模型才知道谁卡着。
-    expect(busy.reason).toContain('generation');
+    // 只报占用者与已运行多久；generation/要不要 Stop 由模型自己判断。
+    expect(busy.reason).not.toContain('generation');
     expect(busy.reason).toContain('秒');
-    // 拒绝文案不再命令模型先 Stop：要不要打断由模型自己判断。
-    expect(busy.reason).toContain('确实要改做别的事');
+    expect(busy.reason).not.toContain('Stop');
     expect(h.executed).toEqual(['goToPlayer']);
 
     h.resolveExecute('arrived');
@@ -316,12 +315,12 @@ describe('ActionRunner', () => {
     await h.runner.run('collectBlocks', { type: 'oak_log', num: 6 });
     const again = await h.runner.run('collectBlocks', { type: 'oak_log', num: 4 });
     expect(again.status).toBe('accepted');
-    expect(again.data).toMatchObject({ already_running: true, action_id: 'collectBlocks' });
+    expect(String(again.data)).toContain('collectBlocks 还在跑');
     // 没有真的再跑一次，也没占第二份通道。
     expect(h.executed).toEqual(['collectBlocks']);
     expect(h.scheduler.describe().actionId).toBe('collectBlocks');
     // 记账里说明了"已经在做了"，而不是"rejected"。
-    expect(h.records.at(-1)).toContain('already running');
+    expect(h.records.at(-1)).toContain('还在跑');
     expect(h.records.at(-1)).not.toContain('rejected');
 
     h.resolveExecute('done');
@@ -368,7 +367,7 @@ describe('ActionRunner', () => {
     ]);
   });
 
-  it('身体返回空串时也给出可行动的回执，不落下 (no output)', async () => {
+  it('身体返回空串时也给出可核对的事实回执，不落下 (no output)', async () => {
     const h = makeHarness();
     h.hold = true;
     await h.runner.run('searchForBlock', { type: 'oak_log', search_range: 64 });
@@ -379,11 +378,10 @@ describe('ActionRunner', () => {
     const text = String(h.notices[0]?.result.data);
     expect(text).toMatch(/searchForBlock#\d+/);
     expect(text).not.toBe('(no output)');
-    expect(text).toContain('searchForBlock');
-    expect(text).toContain('stats');
+    expect(text).toContain('searchForBlock 已经结束了，但身体没有返回结果');
   });
 
-  it('完成回执的 payload 带 action_id / call_id / generation', async () => {
+  it('完成回执的 payload 带 action_id / call_id（generation 不进事件）', async () => {
     const h = makeHarness();
     await h.runner.run('collectBlocks', { type: 'oak_log', num: 1 });
     await tick();
@@ -391,11 +389,11 @@ describe('ActionRunner', () => {
     const notice = h.notices[0] as unknown as {
       action_id: string;
       call_id: string;
-      generation: number;
+      generation?: number;
     };
     expect(notice.action_id).toBe('collectBlocks');
     expect(notice.call_id).toMatch(/^collectBlocks#\d+$/);
-    expect(typeof notice.generation).toBe('number');
+    expect(notice.generation).toBeUndefined();
   });
 
   it('长时间没有结果时主动发一条仍在跑的进度回执', async () => {
@@ -472,13 +470,13 @@ describe('紧急锁下：自救开关仍然可达，普通动作仍然被拦', (
  */
 describe('回执长度上限：留头留尾，截断必须明说', () => {
   it('短回执原样通过（不做任何加工）', () => {
-    const s = 'goToCoordinates：到了 (-81, 63, 68) 附近，还差 3 格。\n下一步（照做即可）：mineTunnel(length=32)';
+    const s = 'goToCoordinates：到了 (-81, 63, 68) 附近，还差 3 格。';
     expect(clampActionOutput(s)).toBe(s);
   });
 
   it('刚好到上限不截断，超一个字符就截断', () => {
     expect(clampActionOutput('x'.repeat(MAX_ACTION_OUTPUT_CHARS))).toHaveLength(MAX_ACTION_OUTPUT_CHARS);
-    expect(clampActionOutput('x'.repeat(MAX_ACTION_OUTPUT_CHARS + 1))).toContain('回执过长已截断');
+    expect(clampActionOutput('x'.repeat(MAX_ACTION_OUTPUT_CHARS + 1))).toContain('中间截掉了');
   });
 
   it('1.35 亿字符那种回执被压到有界，且**头尾都留**、中间省略量如实报出', () => {
@@ -486,13 +484,13 @@ describe('回执长度上限：留头留尾，截断必须明说', () => {
     const line = 'type 必填，且只认id / player / mob（收到 "entity"）。\n';
     // 中间放一个**只此一处**的标记：它必须消失，才能证明"中间真的被丢了"。
     const spam = line.repeat(1_700_000) + 'MIDDLE_ONLY_MARKER_9F3A\n' + line.repeat(1_700_000);
-    const tail = '下一步（照做即可）：huntFor(entity="salmon", want=2)\n';
+    const tail = 'huntFor 已结束，没有返回结果\n';
     const out = clampActionOutput(head + spam + tail);
     expect(out.length).toBeLessThan(MAX_ACTION_OUTPUT_CHARS + 800); // 有界
     expect(out).toContain('开始刷 salmon'); // 头留着
-    expect(out).toContain('下一步（照做即可）'); // 尾——最有用的一句必须活下来
-    expect(out).toContain('回执过长已截断');
-    expect(out).toContain('别把"下一步"里那个同样的调用原样再发一次');
+    expect(out).toContain('huntFor 已结束，没有返回结果'); // 尾留着
+    expect(out).toContain('中间截掉了');
+    expect(out).toContain('原文一共');
     expect(out).not.toContain('MIDDLE_ONLY_MARKER_9F3A'); // 中间那 1.5 亿字符没了
   });
 });

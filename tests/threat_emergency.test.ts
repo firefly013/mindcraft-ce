@@ -83,7 +83,7 @@ describe('威胁中断长寻路', () => {
   it('goToNearestBlock 在 interrupt_code 已置位时不进同步扫描，直接回执保命打断', async () => {
     const bot = { output: '', interrupt_code: true };
     await expect(goToNearestBlock(bot, 'oak_log', 4, 64)).resolves.toBe(false);
-    expect(bot.output).toContain('保命打断');
+    expect(bot.output).toContain('搜索被 Stop 或保命反射打断了。');
   });
 });
 

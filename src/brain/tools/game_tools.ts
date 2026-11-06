@@ -80,7 +80,7 @@ export function actionChannelInvoker(
 ): (name: string, args: Record<string, unknown>) => Promise<string> {
   return async (name, args) => {
     const result = await channel.run(name, args);
-    const text = loopResultText(name, args, result);
+    const text = loopResultText(name, result);
     if (options.hint == null) return text;
     try {
       const hint = await options.hint(name, args, text);

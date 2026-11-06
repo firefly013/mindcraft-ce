@@ -22,13 +22,12 @@ import {
     bedDamageVsDragon,
     bedsNeeded,
     blastRadius,
-    choosePotionToDrink,
-    compassBearing,
-    countBedsIn,
+    compassBearing,    countBedsIn,
     describeEyeDirection,
     explosionDamage,
     explosionDamageToPlayer,
     findNegativeEffect,
+    findPotionById,
     findPotionItem,
     formatEndgameReport,
     hasActiveEffect,
@@ -38,15 +37,14 @@ import {
     planCrystalAssault,
     planPillarCover,
     planRecovery,
+    potionInventorySummary,
     potionKindOf,
     potionStock,
     trackEyeFlight,
     vec,
     type BreathCloud,
-    type EffectInfo,
     type EndCrystalInfo,
     type EyeSample,
-    type PotionStock,
 } from '../src/body/library/endgame.js';
 
 describe('爆炸伤害公式（照 Wiki 原式手算）', () => {
@@ -360,8 +358,8 @@ describe('进末地装备清单', () => {
     it('没床没 TNT 没弓没方块 → 硬缺口，明确说别进去', () => {
         const report = assessEndGear({ inventory: { bedrock: 64 } });
         expect(report.ok).toBe(false);
-        expect(report.fatal.join()).toContain('没有任何能伤龙的手段');
-        expect(report.message).toContain('先别进末地');
+        expect(report.fatal.join()).toContain('没有能伤龙的手段');
+        expect(report.message).toContain('还差');
     });
 
     it('清单齐全 → ok，并且没带缓降药水一定给警告', () => {
@@ -437,7 +435,7 @@ describe('死亡回收', () => {
         });
         expect(plan.secondsLeft).toBeNull();
         expect(plan.itemOutlook).toBe('high');
-        expect(plan.message).toContain('不倒计时');
+        expect(plan.message).toContain('未计时');
     });
 
     it('有记录的主世界传送门就顺着它回去；没设重生点要提醒', () => {
@@ -451,7 +449,7 @@ describe('死亡回收', () => {
         expect(plan.steps.join()).toContain('一直亮着');
 
         const plan2 = planRecovery({ deathDimension: 'the_end', deathPosition: vec(12, 64, 3), secondsSinceDeath: 5 });
-        expect(plan2.steps.join()).toContain('没有设重生点');
+        expect(plan2.steps.join()).toContain('重生点未设置');
     });
 });
 
@@ -489,8 +487,8 @@ describe('阶段状态机', () => {
         const assessment = assessEndGear({ inventory: { bedrock: 1 } });
         const report = formatEndgameReport(assessment, nextEndgameStep({}));
         expect(report).toContain('末地通关');
-        expect(report).toContain('原因：');
-        expect(report).toContain('缺口：');
+        expect(report).toContain('缺口');
+        expect(report).toContain('缺口有 ');
     });
 });
 
@@ -619,12 +617,12 @@ describe('装备清单：笼中水晶的工具缺口不许悄悄漏掉', () => {
         const report = assessEndGear({ inventory: { white_bed: 4, obsidian: 64 } });
         expect(report.ok).toBe(true);
         expect(report.fatal).toHaveLength(0);
-        expect(report.warnings.join()).toContain('既没有 TNT 也没有镐');
+        expect(report.warnings.join()).toContain('TNT 0、镐 0');
     });
 
     it('有镐就不再警告 TNT 缺口', () => {
         const report = assessEndGear({ inventory: { white_bed: 4, obsidian: 64, iron_pickaxe: 1 } });
-        expect(report.warnings.join()).not.toContain('既没有 TNT 也没有镐');
+        expect(report.warnings.join()).not.toContain('TNT 0、镐 0');
     });
 
     it('硬缺口仍然只有设计稿写的那两条', () => {
@@ -632,39 +630,32 @@ describe('装备清单：笼中水晶的工具缺口不许悄悄漏掉', () => {
     });
 });
 
-describe('牛奶：只在负面效果时喝，且不牺牲自己的好 Buff', () => {
-    const emptyStock: PotionStock = {
-        slow_falling: 0,
-        resistance: 0,
-        regeneration: 0,
-        healing: 0,
-        strength: 0,
-        fire_resistance: 0,
-        swiftness: 0,
-        other: 0,
-        milk: 0,
-    };
-    const stock = (overrides: Partial<PotionStock>): PotionStock => ({ ...emptyStock, ...overrides });
+describe('按完整药水 id 找药：普通/延长/强化必须分得开', () => {
+    const potion = (id: string) => ({ name: 'potion', nbt: { value: { Potion: `minecraft:${id}` } } });
 
-    it('中毒 + 没有好 Buff + 有牛奶 → 喝牛奶', () => {
-        const decision = choosePotionToDrink({
-            stock: stock({ milk: 1 }),
-            effects: [{ name: 'poison', seconds: 20, amplifier: 0 }],
-            health: 20,
-            inEnd: false,
-        });
-        expect(decision.kind).toBe('milk');
-        expect(decision.reason).toContain('poison');
+    it('只认完整 id，不做 long_/strong_ 前缀或效果名折算', () => {
+        const base = potion('healing');
+        const strong = potion('strong_healing');
+        expect(findPotionById([base, strong], 'healing')).toBe(base);
+        expect(findPotionById([base, strong], 'strong_healing')).toBe(strong);
+        expect(findPotionById([base, strong], 'instant_health')).toBeNull();
+        expect(findPotionById([potion('long_slow_falling')], 'slow_falling')).toBeNull();
+        expect(findPotionById([potion('long_slow_falling')], 'long_slow_falling')).not.toBeNull();
     });
 
-    it('中毒但身上有缓降 → 不喝（牛奶会把缓降一起清掉，等于把命交给下坠）', () => {
-        const effects: EffectInfo[] = [
-            { name: 'poison', seconds: 20, amplifier: 0 },
-            { name: 'slow_falling', seconds: 120, amplifier: 0 },
-        ];
-        const decision = choosePotionToDrink({ stock: stock({ milk: 1 }), effects, health: 20, inEnd: false });
-        expect(decision.kind).toBeNull();
-        expect(decision.considered.join()).toContain('一起清掉');
+    it('喷溅/滞留药水不能喝，不收', () => {
+        const splash = { name: 'splash_potion', nbt: { value: { Potion: 'minecraft:slow_falling' } } };
+        expect(findPotionById([splash], 'slow_falling')).toBeNull();
+    });
+
+    it('清单按完整药水 id 汇总，普通/延长/强化分得开', () => {
+        expect(
+            potionInventorySummary([
+                { name: 'potion', count: 2, nbt: { value: { Potion: 'minecraft:long_slow_falling' } } },
+                { name: 'potion', count: 1, nbt: { value: { Potion: 'minecraft:regeneration' } } },
+                { name: 'milk_bucket', count: 1 },
+            ]),
+        ).toBe('long_slow_falling×2、regeneration×1');
     });
 
     it('findNegativeEffect 认得中毒/缓慢，不把缓降当负面', () => {

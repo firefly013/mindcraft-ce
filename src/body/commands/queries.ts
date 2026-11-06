@@ -42,7 +42,7 @@ function localWikiLookup(query: string, why: string | null): string | null {
     const item = items[name] ?? null;
     const block = blocks[name] ?? null;
     if (item == null && block == null) return null;
-    let recipes: Array<[Record<string, number>, { craftedCount: number }]> | null = null;
+    let recipes: Array<[Record<string, number>, { craftedCount: number }]> | null;
     try {
         recipes = mc.normalizeRecipes(data, name);
     } catch {
@@ -96,50 +96,13 @@ function blocksExtras(bot: any): string {
         for (const block of world.getNearestBlocks(bot) as Array<{ name?: string }>) {
             if (block?.name != null) names.add(block.name);
         }
-        lines.push(`ALL_TYPES (8 格内，不区分坐标): ${[...names].join(', ') || 'none'}`);
+        lines.push(`附近 8 格以内出现过的方块类型有这些，${[...names].join('、') || '没有'}。`);
         lines.push(...world.getSurroundingBlocks(bot).map((s: string) => `- ${s}`));
-        lines.push(`- First Solid Block Above Head: ${world.getFirstBlockAboveHead(bot, null, 32)}`);
+        lines.push(`头顶上方 32 格以内第一块实心方块是 ${world.getFirstBlockAboveHead(bot, null, 32)}。`);
     } catch (error: unknown) {
-        lines.push(`方块采样失败：${error instanceof Error ? error.message : String(error)}`);
+        lines.push(`采样方块的时候失败了，错误是${error instanceof Error ? error.message : String(error)}。`);
     }
     return lines.join('\n');
-}
-
-/**
- * `stats` 的"这一段和上次一模一样"收尾提示。
- *
- * 真机：overnight_b 15 分钟里调了 **26 次** `stats`、overnight_a 15 次——模型在
- * 轮询而不是行动，每一次都烧掉一整轮请求。这里只在**渲染后的整段文本逐字相同**
- * 时追加一句"没变化，去做个动作"，其余情况（含任何异常、读不到）一律照旧发全量：
- * **失败开放**，绝不因为"以为没变"而扣掉状态。
- */
-// **2026-10-24：只留事实，不替模型决定这一轮该干什么**（Lead 定原则）。工具清单、
-// 「只查不做等于原地停摆」这类处方删掉了——快照没变是客观事实，模型看完自己决定下一步。
-const STATS_REPEAT_HINT =
-    '（这一段和上次调用完全相同：坐标/血量/背包都没有变化。）';
-
-/**
- * 每个 agent、每种 `type` 上一次发出的段落文本。
- *
- * 用 `WeakMap` 挂在 agent 上、且只活在身体进程里：**bot 重启即清空**，
- * 不会拿上一个进程的快照来判"没变化"。
- */
-const lastStatsText = new WeakMap<object, Map<string, string>>();
-
-function withRepeatHint(agent: any, key: string, text: string): string {
-    try {
-        let perAgent = lastStatsText.get(agent);
-        if (perAgent == null) {
-            perAgent = new Map<string, string>();
-            lastStatsText.set(agent, perAgent);
-        }
-        const previous = perAgent.get(key);
-        perAgent.set(key, text);
-        return previous != null && previous === text ? `${text}\n${STATS_REPEAT_HINT}` : text;
-    } catch {
-        // 缓存出任何问题都照旧把状态给出去（失败开放）。
-        return text;
-    }
 }
 
 /** 拍一张状态照片。type 选要看哪一方面；不给就是整份（等同 Live State 那份）。 */
@@ -147,27 +110,21 @@ function runStats(agent: any, rawType: unknown): string {
     const given = typeof rawType === 'string' && rawType.trim() !== '' ? rawType.trim().toLowerCase() : 'all';
     const type = (STATS_TYPES as readonly string[]).includes(given) ? (given as StatsType) : null;
     if (type == null) {
-        return pad(`stats 的 type 只认这些：${STATS_TYPES.join(' / ')}（收到 "${String(rawType)}"）。不给就是 all。`);
+        return pad(`stats 的 type 只能是 all、body、inventory、entities 或 blocks，这次收到的是 "${String(rawType)}"。`);
     }
     if (type === 'all') {
-        const text = `SNAPSHOT (留在上下文里，可和上一次对比)\n${agent.liveStateText()}`;
-        return pad(withRepeatHint(agent, 'all', text));
+        return pad(`SNAPSHOT\n${agent.liveStateText()}`);
     }
     const snapshot = sampleLiveState(agent.sampleContext());
     const sections = STATS_SECTIONS[type];
     if (sections != null) {
         let out = renderSections(snapshot, sections);
         if (type === 'blocks') out += `\n${blocksExtras(agent.bot)}`;
-        // 创造模式这句劝告是行为指引，不进快照（快照只陈述事实 gamemode）。
-        if (type === 'inventory' && agent.bot?.game?.gameMode === 'creative') {
-            out += '\n(You have infinite items in creative mode. You do not need to gather resources!!)';
-        }
-        return pad(withRepeatHint(agent, type, out));
+        return pad(out);
     }
     // `places` 的真源在**大脑侧会话**里（身体这份只装死亡位置那类瞬时信息），
-    // 所以这里读不到——如实指过去，别返回一个永远是空的清单（那是 Feedback #6
-    // "存了却列不出来"的老毛病换个地方复发）。
-    return pad('列地名请用 getPlaces：记住的地方存在会话里，身体这边看不到。');
+    // 所以这里读不到——如实指过去，别返回一个永远是空的清单。
+    return pad('要列地名请用 getPlaces。');
 }
 
 // queries are commands that just return strings and don't affect anything in the world
@@ -217,7 +174,7 @@ export const queryList: AgentCommand[] = [
             let prefixMessage = '';
             if (existingCount > 0) {
                 curr_inventory[target_item] -= existingCount;
-                prefixMessage = `You already have ${existingCount} ${target_item} in your inventory. If you need to craft more,\n`;
+                prefixMessage = `You already have ${existingCount} ${target_item}.\n`;
             }
 
             // Generate crafting plan
@@ -247,37 +204,37 @@ export const queryList: AgentCommand[] = [
                 try {
                     const found: unknown = await injected(query);
                     if (typeof found === 'string' && found.trim() !== '') return found;
-                    return `No wiki entry found for "${query}".`;
+                    return `wiki 上没有找到关于 "${query}" 的条目。`;
                 } catch (error: unknown) {
                     console.error('Injected wiki search failed:', error);
-                    return `Wiki lookup for "${query}" failed. Treat this as no information, not as an answer.`;
+                    return `查询 wiki 的 "${query}" 失败了。`;
                 }
             }
             // ── 网络这条路（真机上**基本注定失败**）─────────────────────
             // 这台机器访问 `https://minecraft.wiki/w/Bow` 是 **HTTP 403**（带正常
             // 浏览器 UA/Accept 也一样），example.com 却是 200——站点把我们挡了。
             // 所以 403/超时/空正文都不是"没有这个条目"，必须换本地资料回答。
-            let why: string | null = null;
+            let why: string | null;
             try {
                 const response = await fetchWikiPage(query);
                 if (response.status === 404) {
-                    why = 'wiki 上没有这个页面（HTTP 404）';
+                    why = 'wiki 上没有这个页面，服务器返回 404。';
                 } else if (!response.ok) {
                     // 非 404 的失败（403/429/5xx）**绝不能**接着解析错误页：
                     // 那个页面上的文字会被当成知识回给模型，等于把故障当事实。
-                    why = `wiki 拒绝了这次查询（HTTP ${response.status}${response.status === 403 ? '，这台机器被挡了' : ''}）`;
+                    why = `wiki 拒绝了这次查询，服务器返回 ${response.status}。`;
                 } else {
                     const html = await response.text();
                     const $ = load(html);
                     const parserOutput = $('div.mw-parser-output');
                     parserOutput.find('table.navbox').remove();
                     const text = parserOutput.text().trim();
-                    if (text === '') why = 'wiki 页面没有可读正文';
+                    if (text === '') why = '这个 wiki 页面上没有可以读的正文。';
                     else return text; // 真拿到了：原样返回（不是兜底）
                 }
             } catch (error: unknown) {
                 const message = error instanceof Error ? error.message : String(error);
-                why = `wiki 查询失败（网络/超时/解析：${message}）`;
+                why = `查询 wiki 的时候出错了，错误是${message}。`;
                 console.error('Error fetching or parsing HTML:', error);
             }
 
@@ -285,12 +242,9 @@ export const queryList: AgentCommand[] = [
             const local = localWikiLookup(query, why);
             if (local != null) return local;
 
-            // ── 两边都没有：如实说没有，并指向能离线用的工具 ──────────
+            // ── 两边都没有：如实说没有 ──────────────────────────────
             return (
-                `searchWiki 拿不到「${query}」：${why}；本地资料（minecraft-data 离线兜底）里也没有这个名字。\n` +
-                '这不是"你搜错了"，是这台机器访问不了 wiki。别再换关键词重试了，改用能离线工作的工具：\n' +
-                '① 配方/材料数量：getCraftingPlan(targetItem=<名字>, quantity=<数量>)；\n' +
-                '② 准确名字看 stats 里的背包/附近方块（都是 snake_case，例如 bow、oak_planks、crafting_table）。'
+                `没能从 wiki 查到「${query}」，${why}本地离线资料里也没有这个名字。`
             );
         }
     },

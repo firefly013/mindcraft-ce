@@ -211,14 +211,7 @@ function runProgressionAction(
             { timeout: timeoutMinutes },
         );
         if (result.interrupted && !result.timedout) return;
-        if (result.timedout) {
-            const why = typeof skills.describeStuck === 'function' ? skills.describeStuck(agent.bot) : '';
-            return (
-                `${label}：**超时**（${timeoutMinutes} 分钟没做完），已释放身体通道。` +
-                `注意：${label} 自己有更短的时间预算，正常会先收手并给出完整回执——走到这里说明某一腿/某一次攻击卡住了。` +
-                `${why === '' ? '' : `\n卡住时：${why}`}`
-            );
-        }
+        if (result.timedout) return `${label} 超时了，${timeoutMinutes} 分钟没有跑完。`;
         return result.message;
     };
     (wrapped as CommandPerform).longRunning = true;

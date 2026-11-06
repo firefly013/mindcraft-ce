@@ -10,7 +10,7 @@
  *
  * 这里测的是**真实代码路径**，不是复制一份决策逻辑：
  *   `MineflayerBody.rescue('flee')` → `runEmergency` 的逃跑循环 → `fleeTo` 闭包
- *   （先刹车 / 没有安全落点就原地不动 / `GoalNear` 带上已验证的 y）
+ *   （先刹车 / 没有安全落点就原地没有动 / `GoalNear` 带上已验证的 y）
  *   → 真 pathfinder 的 `goals.GoalNear`、`Movements`。
  *
  * 假 bot 的规矩（这个仓库已经为"松假体"付过两次生产事故的学费）：
@@ -387,7 +387,7 @@ afterEach(() => {
 // ── (a) 末地小岛 ───────────────────────────────────────────────────────────
 
 describe('(a) 末地小岛：逃生不许朝虚空迈步', () => {
-  it('(a1) 5×5 岛 + 贴脸威胁：附近没有任何能站住的落点 ⇒ 一步都没迈，回执说明原地不动', async () => {
+  it('(a1) 5×5 岛 + 贴脸威胁：附近没有任何能站住的落点 ⇒ 一步都没迈，回执说明原地没有动', async () => {
     const cells = islandCells(5);
     let threatReads = 0;
     const { bot, calls } = makeFakeBot({
@@ -405,7 +405,7 @@ describe('(a) 末地小岛：逃生不许朝虚空迈步', () => {
     // 5×5 岛上"最远 8 格"的候选全在虚空里：正确的动作是**一步都不迈**。
     expect(goalsOf(calls)).toEqual([]);
     expect(movementCalls(calls)).toEqual([]);
-    const stay = receipts(events).filter((e) => String(e.payload.detail).includes('原地不动'));
+    const stay = receipts(events).filter((e) => String(e.payload.detail).includes('原地没有动'));
     expect(stay).toHaveLength(1);
     expect(stay[0].payload.outcome).toBe('in_progress');
     expect(String(stay[0].payload.detail)).toContain('找不到能站住的落点');
@@ -516,8 +516,8 @@ describe('(c) 已经在往下掉、脚下没有实心：只刹车，零横向平
     const brake = receipts(events).filter((e) => String(e.payload.detail).includes('刹车'));
     expect(brake).toHaveLength(1);
     expect(brake[0].payload.outcome).toBe('in_progress');
-    expect(String(brake[0].payload.detail)).toContain('下坠');
-    expect(String(brake[0].payload.detail)).toContain('横向');
+    expect(String(brake[0].payload.detail)).toContain('逃生刹车：我正在往下掉，下方是虚空，背包里也没有能垫的方块，所以只刹车。（');
+    expect(String(brake[0].payload.detail)).toContain('只刹车');
     expect(String(brake[0].payload.detail)).not.toContain('脱离');
   });
 
@@ -544,9 +544,9 @@ describe('(c) 已经在往下掉、脚下没有实心：只刹车，零横向平
   });
 });
 
-// ── (d) 没有安全落点 ⇒ 原地不动 + 如实回执 ────────────────────────────────
+// ── (d) 没有安全落点 ⇒ 原地没有动 + 如实回执 ────────────────────────────────
 
-describe('(d) 找不到能站住的落点：原地不动，并且**说清楚**（不是静默 return）', () => {
+describe('(d) 找不到能站住的落点：原地没有动，并且**说清楚**（不是静默 return）', () => {
   it('1×1 石柱四周虚空：不发 goal、不改 movements、回执写明原因', async () => {
     const cells = pillarCells();
     let threatReads = 0;
@@ -566,11 +566,11 @@ describe('(d) 找不到能站住的落点：原地不动，并且**说清楚**�
     expect(calls.some((c) => c.op === 'setMovements')).toBe(false);
     expect(calls.some((c) => c.op === 'pathfinder.stop')).toBe(true);
 
-    const stay = receipts(events).filter((e) => String(e.payload.detail).includes('原地不动'));
+    const stay = receipts(events).filter((e) => String(e.payload.detail).includes('原地没有动'));
     expect(stay).toHaveLength(1);
     expect(stay[0].payload.outcome).toBe('in_progress');
     expect(String(stay[0].payload.detail)).toContain('找不到能站住的落点');
-    expect(String(stay[0].payload.detail)).toContain('虚空');
+    expect(String(stay[0].payload.detail)).toContain('找不到能站住的落点');
   });
 });
 
@@ -732,9 +732,9 @@ describe('(f) 回归：开阔地上有威胁，逃生照旧工作（修过头比
     expect(result.escaped).toBe(true);
     expect(result.reason).toBe('safe');
 
-    // 既没刹车也没"原地不动"：有实心地面时不许把逃跑关掉。
+    // 既没刹车也没"原地没有动"：有实心地面时不许把逃跑关掉。
     const allDetails = events.map((e) => String(e.payload?.detail ?? ''));
     expect(allDetails.some((d) => d.includes('刹车'))).toBe(false);
-    expect(allDetails.some((d) => d.includes('原地不动'))).toBe(false);
+    expect(allDetails.some((d) => d.includes('原地没有动'))).toBe(false);
   });
 });

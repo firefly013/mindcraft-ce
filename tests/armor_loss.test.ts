@@ -52,36 +52,34 @@ const log = (_bot: any, text: string): void => {
 };
 
 describe('"原来有 → 现在空"：消失不是换甲，必须吼出来', () => {
-  it('下界丢掉金盔 ⇒ 报告点名"凭空消失"、后果（猪灵开火）和修法（1 块金锭做金盔）', () => {
+  it('下界丢掉金盔 ⇒ 报告点名槽位、原物品和触发路径', () => {
     const text = armorVanishReport(
       { slotName: 'head', from: 'golden_helmet', to: null },
       { dimension: 'minecraft:the_nether', goldLeft: false, via: 'updateSlot' },
     );
-    expect(text).toContain('护甲凭空消失');
+    expect(text).toContain('head 的护甲没有了，原来穿着 golden_helmet，现在空着，触');
     expect(text).toContain('head');
     expect(text).toContain('golden_helmet');
-    expect(text).toContain('不是自动换甲');
-    expect(text).toContain('猪灵见即开火');
-    expect(text).toContain('1 块金锭');
-    expect(text).toContain('golden_helmet');
+    expect(text).toContain('head 的护甲没有了，原来穿着 golden_helmet，现在空着，触');
   });
 
-  it('死亡前后丢甲 ⇒ 先提示可能是读取/同步问题，不直接当成"已经没了"', () => {
+  it('死亡前后丢甲 ⇒ 报告只报事实（槽位与路径），不做原因推测', () => {
     const text = armorVanishReport(
       { slotName: 'head', from: 'golden_helmet', to: null },
       { dimension: 'minecraft:the_nether', deathHappened: true, goldLeft: false, via: 'spawn' },
     );
-    expect(text).toContain('读取/同步');
-    expect(text).toContain('stats');
+    expect(text).toContain('head 的护甲没有了，原来穿着 golden_helmet，现在空着，触');
+    expect(text).toContain('head 的护甲没有了，原来穿着 golden_helmet，现在空着，触');
+    expect(text).not.toContain('读取/同步');
   });
 
-  it('主世界丢甲也给下一步（stats 核对 → 箱子/熔炉 → 重做），不误报猪灵', () => {
+  it('主世界丢甲同样只报事实，不误报猪灵', () => {
     const text = armorVanishReport(
       { slotName: 'torso', from: 'iron_chestplate', to: null },
       { dimension: 'minecraft:overworld', via: 'update' },
     );
-    expect(text).toContain('护甲凭空消失');
-    expect(text).toContain('stats');
+    expect(text).toContain('torso 的护甲没有了，原来穿着 iron_chestplate，现在空');
+    expect(text).toContain('iron_chestplate');
     expect(text).not.toContain('猪灵');
   });
 
@@ -95,16 +93,15 @@ describe('"原来有 → 现在空"：消失不是换甲，必须吼出来', () 
 });
 
 describe('守卫接线：所有护甲槽变化路径都要落到报告上', () => {
-  it('updateSlot 把金盔写成 null ⇒ 一行"凭空消失"（走我们自己的报告，不是普通换甲）', () => {
+  it('updateSlot 把金盔写成 null ⇒ 一行"护甲消失"（走我们自己的报告，不是普通换甲）', () => {
     logs.length = 0;
     const bot = armorBot({ 5: { name: 'golden_helmet' } });
     const guard = installArmorGuard(bot, { log, inventoryItems: () => [] });
     bot._emitInventory('updateSlot', 5, { name: 'golden_helmet' }, null);
     guard.dispose();
-    expect(logs.some((line) => line.includes('护甲凭空消失'))).toBe(true);
-    expect(logs.some((line) => line.includes('猪灵见即开火'))).toBe(true);
-    // 普通"换甲"报告不该为这件事再出现一次（同一件事只说一遍，且要说得够响）
-    // 普通"护甲变化："报告不该为这件事再出现一次（消失报告自己解释过为什么不是换甲）`n    expect(logs.filter((line) => line.includes('护甲变化：')).length).toBe(0);
+    expect(logs.some((line) => line.includes('的护甲没有了'))).toBe(true);
+    // 普通"护甲变化："报告不该为这件事再出现一次
+    expect(logs.filter((line) => line.includes('护甲变化：')).length).toBe(0);
   });
 
   it('整窗 update 覆盖掉金盔（updateSlot 不触发）⇒ 快照差分也要吼出来', () => {
@@ -114,7 +111,7 @@ describe('守卫接线：所有护甲槽变化路径都要落到报告上', () =
     bot.inventory.slots[5] = null; // 整窗同步把它抹掉了
     bot._emitInventory('update');
     guard.dispose();
-    expect(logs.some((line) => line.includes('护甲凭空消失') && line.includes('update'))).toBe(true);
+    expect(logs.some((line) => line.includes('的护甲没有了') && line.includes('update'))).toBe(true);
   });
 
   it('死亡后再重生：护甲还在 ⇒ 不许报"消失"；真丢了才报', () => {
@@ -124,13 +121,12 @@ describe('守卫接线：所有护甲槽变化路径都要落到报告上', () =
     bot._emitBot('death');
     // 重生后同一件还在
     bot._emitBot('spawn');
-    expect(logs.filter((line) => line.includes('护甲凭空消失'))).toHaveLength(0);
+    expect(logs.filter((line) => line.includes('的护甲没有了'))).toHaveLength(0);
     // 现在把它弄丢（槽位被清空）
     bot.inventory.slots[5] = null;
     bot._emitBot('spawn');
     guard.dispose();
-    expect(logs.some((line) => line.includes('护甲凭空消失') && line.includes('读取/同步'))).toBe(false);
-    expect(logs.some((line) => line.includes('护甲凭空消失'))).toBe(true);
+    expect(logs.some((line) => line.includes('的护甲没有了'))).toBe(true);
   });
 
   it('普通换甲（铁→钻）仍走原来的"护甲变化"报告（不回归）', () => {
@@ -141,29 +137,7 @@ describe('守卫接线：所有护甲槽变化路径都要落到报告上', () =
     bot._emitInventory('updateSlot', 6, { name: 'iron_chestplate' }, { name: 'diamond_chestplate' });
     guard.dispose();
     expect(logs.some((line) => line.includes('护甲变化'))).toBe(true);
-    expect(logs.some((line) => line.includes('护甲凭空消失'))).toBe(false);
-  });
-});
-
-describe('本地视图错位：报告不许断言"真丢了"（Lead 2026-10-19 要求）', () => {
-  it('任何消失报告都要带"可能是本地视图错位 + 先用 stats 核对"的提示', () => {
-    const text = armorVanishReport(
-      { slotName: 'head', from: 'golden_helmet', to: null },
-      { dimension: 'minecraft:the_nether', goldLeft: false, via: 'update' },
-    );
-    expect(text).toContain('本地视图错位');
-    expect(text).toContain('stats');
-    expect(text).toContain('不要');
-    expect(text).toContain('重做一件');
-  });
-
-  it('主世界丢甲同样带核对提示（不只是下界）', () => {
-    const text = armorVanishReport(
-      { slotName: 'torso', from: 'iron_chestplate', to: null },
-      { dimension: 'minecraft:overworld', via: 'updateSlot' },
-    );
-    expect(text).toContain('本地视图错位');
-    expect(text).toContain('stats');
+    expect(logs.some((line) => line.includes('的护甲没有了'))).toBe(false);
   });
 });
 

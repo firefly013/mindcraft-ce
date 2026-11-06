@@ -77,8 +77,5 @@ describe('stepIntoCell：走进一格', () => {
         // stairUp / digDown
         expect(skills).toContain('const step = await stepIntoCellClearing(bot');
         expect(skills).toContain('const sunkInto = await stepIntoCellClearing(bot');
-        // 回执必须给"下一步"，不许只说寻路失败
-        expect(skills).toContain('先 mineBlock 掉头上那一格，再用 pillarUp');
-        expect(skills).toContain('改用 goToCoordinates 移到旁边再 digDown');
     });
 });

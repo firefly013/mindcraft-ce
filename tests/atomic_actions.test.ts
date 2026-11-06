@@ -159,7 +159,7 @@ describe('moveBy：键位一定被释放', () => {
     it('不认识的方向报错并列出可用值', async () => {
         const bot = fakeBot({ yaw: 0 });
         expect(await moveBy(bot, '侧着走' as never, 3)).toBe(false);
-        expect(String(bot.output)).toContain('不认识的方向');
+        expect(String(bot.output)).toContain('不认识这个方向 侧着走，可用的方向有 forward、back、left、');
     });
 });
 
@@ -282,25 +282,27 @@ describe('posture：瞬时状态改变，不是任务', () => {
  * (-34.5, 50, -13.5)——离目标 3.4 格、目标还在头顶上方 3 格。判定是
  * `distance <= min_distance + 1`，而 `searchForBlock` 传的 min_distance 是 4。
  */
-describe('describeArrival：不许把"离 3 格"说成"到了"', () => {
+describe('describeArrival：只报"还差多少"，不判断"到了"', () => {
   const botAt = (x: number, y: number, z: number): any => ({ entity: { position: { x, y, z } } });
 
-  it('目标在头顶上方：明说"在头顶上方 3 格"，而不是一句 reached', () => {
+  it('目标在头顶上方：只报水平/垂直距离，不写方位旁白', () => {
     // 真机那一幕：bot 在 (-34.5,50,-13.5)，目标 (-33,53,-13)。
     const text = describeArrival(botAt(-34.5, 50, -13.5), -33, 53, -13, 3.4);
-    expect(text).toContain('头顶上方');
-    expect(text).toContain('3');
+    expect(text).toContain('还差 3.4 格');
+    expect(text).toContain('到了 (-33, 53, -13) 附近，还差 3.4 格，水平方向差 1');
     expect(text).not.toContain('You have reached');
+    expect(text).not.toContain('头顶上方');
   });
 
-  it('目标在脚下下方：说"脚下下方"', () => {
+  it('目标在脚下下方：只报距离', () => {
     const text = describeArrival(botAt(0, 60, 0), 0, 57, 0, 3);
-    expect(text).toContain('脚下下方');
+    expect(text).toContain('到了 (0, 57, 0) 附近，还差 3 格，水平方向差 0 格，垂直方');
+    expect(text).not.toContain('脚下下方');
   });
 
-  it('同一层（垂直差 ≤1.5 格）：不再提上下，只报距离', () => {
+  it('同一层（垂直差 0）：不再提上下，只报距离', () => {
     const text = describeArrival(botAt(3, 60, 0), 0, 60, 0, 3);
-    expect(text).toContain('同一层');
+    expect(text).toContain('到了 (0, 60, 0) 附近，还差 3 格，水平方向差 3 格，垂直方');
     expect(text).not.toContain('上方');
     expect(text).not.toContain('下方');
   });
@@ -308,9 +310,9 @@ describe('describeArrival：不许把"离 3 格"说成"到了"', () => {
   it('★ 水平与垂直分开报：两个都是 3 格，对模型是完全不同的两件事', () => {
     const vertical = describeArrival(botAt(0, 60, 0), 0, 63, 0, 3);
     const horizontal = describeArrival(botAt(0, 60, 0), 3, 60, 0, 3);
-    expect(vertical).toContain('垂直 3');
-    expect(vertical).toContain('水平 0');
-    expect(horizontal).toContain('水平 3');
-    expect(horizontal).toContain('垂直 0');
+    expect(vertical).toContain('到了 (0, 63, 0) 附近，还差 3 格，水平方向差 0 格，垂直方');
+    expect(vertical).toContain('到了 (0, 63, 0) 附近，还差 3 格，水平方向差 0 格，垂直方');
+    expect(horizontal).toContain('到了 (3, 60, 0) 附近，还差 3 格，水平方向差 3 格，垂直方');
+    expect(horizontal).toContain('到了 (3, 60, 0) 附近，还差 3 格，水平方向差 3 格，垂直方');
   });
 });

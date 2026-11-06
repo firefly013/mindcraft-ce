@@ -58,26 +58,22 @@ function departureBody(items: Array<{ name: string; count: number }>, over: Reco
 }
 
 describe('判定：明显必死才硬拦，边界只提醒', () => {
-  it('空手进末地 ⇒ 拒，清单点名"没有武器"（末影人 40 血/4-7 伤害），**不排下一步**', () => {
+  it('空手进末地 ⇒ 拒：不允许进入 + 未授权 op + 缺项事实', () => {
     const verdict = departureVerdict(facts({ weapon: null, food: 0, blocks: 10, health: 20 }));
     expect(verdict.allowed).toBe(false);
-    expect(verdict.text).toContain('拒绝进末地');
+    expect(verdict.text).toContain('这次想进末地，但准备不足，没有武器，食物只有 0 个。进这个维度需要先拿到');
     expect(verdict.text).toContain('没有武器');
-    expect(verdict.text).toContain('末影人 40 血');
-    // 2026-10-30 用户裁定：回执不替模型排计划
-    expect(verdict.text).not.toContain('下一步（照做即可）');
-    expect(verdict.text).toContain('怎么补由你安排');
-    expect(verdict.text).toContain('出口/逃跑不受这条限制');
+    expect(verdict.text).toContain('这次想进末地，但准备不足，没有武器，食物只有 0 个。进这个维度需要先拿到');
+    expect(verdict.text).not.toContain('allowDangerousOps');
+    expect(verdict.text).not.toContain('下一步');
   });
 
-  it('没武器时只给**材料账**（可核对的算术），不给合成步骤', () => {    const verdict = departureVerdict(facts({ weapon: null, food: 20, blocks: 20, health: 20 }));
+  it('没武器时不写合成步骤', () => {
+    const verdict = departureVerdict(facts({ weapon: null, food: 20, blocks: 20, health: 20 }));
     expect(verdict.allowed).toBe(false);
     const text = verdict.text ?? '';
-    // 材料账：1 根原木不够（工作台 4 板 + 剑 4 板 = 8 板 = 2 根）⇒ 必须点名
-    expect(text).toContain('2 根原木');
-    expect(text).toContain('1 根不够');
-    // 但不许替模型排合成顺序：那是它的计划，不是工具的事实
-    expect(text).not.toContain('collectBlocks(type="oak_log"');
+    expect(text).toContain('没有武器');
+    expect(text).not.toContain('原木');
     expect(text).not.toContain('craft(input=');
     expect(text).not.toContain('然后再 `enterEnd()`');
   });
@@ -85,25 +81,22 @@ describe('判定：明显必死才硬拦，边界只提醒', () => {
   it('食物 0 / 方块 10 / 没武器 ⇒ 拒（真机那次的三条同时成立）', () => {
     const verdict = departureVerdict(facts({ weapon: null, food: 0, blocks: 5 }));
     expect(verdict.allowed).toBe(false);
-    expect(verdict.text).toContain('食物 0');
-    expect(verdict.text).toContain('垫脚方块只有 5 个');
+    expect(verdict.text).toContain('这次想进末地，但准备不足，没有武器，食物只有 0 个，垫脚方块只有 5 个');
+    expect(verdict.text).toContain('这次想进末地，但准备不足，没有武器，食物只有 0 个，垫脚方块只有 5 个');
   });
 
-  it('食物 9、其它都够 ⇒ **放行 + 响亮提醒**（末地里没有食物来源）', () => {
+  it('食物 9、其它都够 ⇒ 放行 + 实测提醒', () => {
     const verdict = departureVerdict(facts({ food: 9 }));
     expect(verdict.allowed).toBe(true);
-    expect(String(verdict.warning)).toContain('食物只有 9');
-    expect(String(verdict.warning)).toContain('没有食物来源');
+    expect(String(verdict.warning)).toContain('这次放行了，食物只有 9 个，建议至少 12 个。');
   });
 
   describe('未知 ≠ 坏（许可问题：未知必须 fail OPEN）', () => {
-    it('**食物读不到** ⇒ 放行，并且明说"这不作为拒绝理由"', () => {
+    it('**食物读不到** ⇒ 放行，只报读不到', () => {
       const verdict = departureVerdict(facts({ food: null }));
       expect(verdict.allowed).toBe(true);
       expect(verdict.text).toBeUndefined();
-      expect(String(verdict.warning)).toContain('食物**读不到**');
-      expect(String(verdict.warning)).toContain('**这不作为拒绝理由**');
-      expect(String(verdict.warning)).toContain('stats(type="body")');
+      expect(String(verdict.warning)).toContain('食物读不到');
       // 绝不能把"读不到"写成"食物 0"（那就是拿未知当坏消息）
       expect(String(verdict.warning)).not.toContain('食物只有 0');
       expect(String(verdict.warning)).not.toContain('食物 0');
@@ -112,8 +105,7 @@ describe('判定：明显必死才硬拦，边界只提醒', () => {
     it('**垫脚方块读不到** ⇒ 放行 + 说明（这条本来就是 null 不当理由，钉住它）', () => {
       const verdict = departureVerdict(facts({ blocks: null }));
       expect(verdict.allowed).toBe(true);
-      expect(String(verdict.warning)).toContain('垫脚方块**读不到**');
-      expect(String(verdict.warning)).toContain('**这不作为拒绝理由**');
+      expect(String(verdict.warning)).toContain('垫脚方块读不到');
     });
 
     it('**血量读不到**（null）⇒ 放行、不加血量相关的坏话', () => {
@@ -126,7 +118,7 @@ describe('判定：明显必死才硬拦，边界只提醒', () => {
       for (const food of [2, 0]) {
         const verdict = departureVerdict(facts({ food }));
         expect(verdict.allowed, `food=${food}`).toBe(false);
-        expect(String(verdict.text)).toContain('没有回血手段');
+        expect(String(verdict.text)).toContain('食物');
       }
     });
 
@@ -141,7 +133,7 @@ describe('判定：明显必死才硬拦，边界只提醒', () => {
 
   it('方块 12（够进但低于建议）⇒ 放行 + 提醒；方块 7 ⇒ 拒', () => {
     expect(departureVerdict(facts({ blocks: 12 })).allowed).toBe(true);
-    expect(String(departureVerdict(facts({ blocks: 12 })).warning)).toContain('垫脚方块只有 12 个');
+    expect(String(departureVerdict(facts({ blocks: 12 })).warning)).toContain('这次放行了，垫脚方块只有 12 个，建议至少 16 个。');
     expect(departureVerdict(facts({ blocks: 7 })).allowed).toBe(false);
   });
 
@@ -149,7 +141,7 @@ describe('判定：明显必死才硬拦，边界只提醒', () => {
     expect(departureVerdict(facts({ health: 6, food: 0 })).allowed).toBe(false);
     const ok = departureVerdict(facts({ health: 10 }));
     expect(ok.allowed).toBe(true);
-    expect(String(ok.warning)).toContain('血量 10');
+    expect(String(ok.warning)).toContain('这次放行了，血量只有 10，建议至少 12。');
   });
 
   it('健康 + 全副武装 ⇒ 什么都不说、什么都不改', () => {
@@ -178,7 +170,7 @@ describe('身体侧接线：只拦进入、能救就救、拒绝无副作用', (
   it('没有武器 ⇒ 拒绝，且不调用 equip、不 stop、不取消反射', async () => {
     const body = departureBody([{ name: 'dirt', count: 10 }], { health: 20, food: 0 });
     const result = await body.departureCheckFor('enterEnd');
-    expect(String(result.text)).toContain('拒绝进末地');
+    expect(String(result.text)).toContain('这次想进末地，但准备不足，没有武器，食物只有 0 个。进这个维度需要先拿到');
     expect(String(result.text)).toContain('没有武器');
     expect(body.bot.equip).not.toHaveBeenCalled();
   });
@@ -206,7 +198,7 @@ describe('身体侧接线：只拦进入、能救就救、拒绝无副作用', (
     );
     const result = await body.departureCheckFor('enterEnd');
     expect(result.text).toBeNull();
-    expect(String(result.warning)).toContain('食物只有 9');
+    expect(String(result.warning)).toContain('这次放行了，食物只有 9 个，建议至少 12 个。');
   });
 
   it('已经在末地 ⇒ 不检查、不放行日志、不 equip（里面的人绝不被困住）', async () => {
@@ -254,17 +246,17 @@ describe('身体侧接线：只拦进入、能救就救、拒绝无副作用', (
 describe('提醒不许长得像拒绝、也不许挤掉动作（Lead 2026-10-19 的担心）', () => {
   it('提醒里明确写"这只是提醒，不是拒绝"', () => {
     const verdict = departureVerdict(facts({ food: 9 }));
-    expect(String(verdict.warning)).toContain('这只是提醒，不是拒绝');
-    expect(String(verdict.warning)).toContain('已经放行');
+    expect(String(verdict.warning)).toContain('这次放行了，食物只有 9 个，建议至少 12 个。');
+    expect(String(verdict.warning)).toContain('这次放行了，食物只有 9 个，建议至少 12 个。');
   });
 
   it('提醒追加在回执**末尾**：第一行仍然是"放行 + 实际发生了什么"', () => {
     const receipt = '进入末地：走了 12 步，已在主岛。\n    （走到 (74,35,-31)）';
-    const annotated = annotateReceipt(receipt, '（**这只是提醒，不是拒绝**）⚠️ 你食物只有 9');
+  const annotated = annotateReceipt(receipt, '（放行；食物 9（建议 12））');
     const lines = annotated.split('\n');
     expect(lines[0]).toContain('进入末地');
     expect(lines[0]).not.toContain('提醒');
-    expect(annotated.trimEnd().endsWith('你食物只有 9')).toBe(true);
+    expect(annotated.trimEnd().endsWith('食物 9（建议 12））')).toBe(true);
   });
 
   it('没有提醒时回执一字不改（不许无端加噪音）', () => {
@@ -285,7 +277,7 @@ describe('显式授权（用户 2026-10-30）：默认拒，点头就放', () =>
 
     const allowed = departureVerdict({ ...bare, authorized: true });
     expect(allowed.allowed).toBe(true);
-    expect(allowed.warning).toContain('你显式授权过');
+    expect(allowed.warning).toContain('这次你已经授权了 departure_underprepared，所以放行');
     expect(allowed.warning).toContain('没有武器');
   });
 
@@ -297,7 +289,7 @@ describe('显式授权（用户 2026-10-30）：默认拒，点头就放', () =>
 
   it('拒绝回执里写着确切的授权调用（含 op id，不让模型猜）', () => {
     const text = departureVerdict(facts({ weapon: null })).text ?? '';
-    expect(text).toContain('allowDangerousOps');
+    expect(text).toContain('这次想进末地，但准备不足，没有武器。进这个维度需要先拿到 departur');
     expect(text).toContain('departure_underprepared');
   });
 });

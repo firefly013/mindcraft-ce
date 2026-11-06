@@ -142,43 +142,25 @@ export function collectOverrideFacts(agent: any): OverrideFacts {
  * 能不能关保命。**拒绝时绝不改动 safeguards**（调用方拿到 allowed=false 就直接返回文本）。
  */
 export function disableSafeguardsVerdict(facts: OverrideFacts): OverrideVerdict {
-    // **只有"身体被保命反射占着"这一条给下一步**（2026-10-30 用户裁定）：
-    // 那是这一步失败的唯一出口（不先 Stop 就拿不回身体），不是策略选择。
-    // 其余拒绝只陈述原因——怎么绕开是模型的事。
-    const refuse = (why: string, advice: string, nextCall?: string): OverrideVerdict => ({
+    const refuse = (why: string): OverrideVerdict => ({
         allowed: false,
-        text:
-            `**拒绝**：${why}，现在关掉保命等于自杀。${advice}` +
-            (nextCall == null || nextCall === '' ? '' : `\n    下一步（照做即可）：${nextCall}`),
+        text: `现在不能关闭保命，因为${why}。`,
     });
 
     // ① 正在跑保命反射：中途静音就是 F-23 那个洞的另一扇门。
     if (facts.reflex != null && LIFE_SAVING_REFLEXES.has(facts.reflex)) {
         const seconds = Math.max(0, Math.round(facts.reflexMs / 1000));
-        return refuse(
-            `你的保命反射「${facts.reflex}」正在跑（已 ${seconds} 秒）`,
-            '它跑完会自己交还身体（连续占用超过 45 秒会主动让位 25 秒）；真急着要用身体就先 Stop，而不是把保命关掉。',
-            'stop()（先把保命停下来、身体给你），然后再决定要不要关',
-        );
+        return refuse(`保命反射 ${facts.reflex} 正在跑，已经 ${seconds} 秒`);
     }
     // ② 致命介质：岩浆 / 溺水 / 虚空——没有商量余地。
     if (facts.inLava) {
-        return refuse(
-            '你**在岩浆里**',
-            '在岩浆里关掉保命，等于把唯一会把你拖出去的东西关掉。',
-        );
+        return refuse('你正在岩浆里');
     }
     if (facts.submerged) {
-        return refuse(
-            '你的**头在水里**（正在溺水）',
-            '逃出水面的反射是你现在唯一的呼吸来源。',
-        );
+        return refuse('你的头在水里');
     }
     if (facts.belowVoid) {
-        return refuse(
-            '你正在**往虚空里掉**',
-            '掉出去就是死，保命反射是唯一还在救你的东西。',
-        );
+        return refuse('你正在往虚空里掉');
     }
     // ③ 血少 + 怪近（或血极少，不看周围）。
     const health = facts.health;
@@ -186,15 +168,15 @@ export function disableSafeguardsVerdict(facts: OverrideFacts): OverrideVerdict 
     if (health != null && (health <= CRITICAL_HEALTH || (health <= LOW_HEALTH && hostileNear))) {
         const meters = facts.hostileMeters == null ? null : Math.round(facts.hostileMeters * 10) / 10;
         const why =
-            `你只剩 ${Math.round(health * 100) / 100} 血` +
-            (hostileNear && meters != null ? `、${meters} 格外有敌对生物` : '') +
-            (facts.food != null && facts.food <= 6 ? `、食物 ${Math.round(facts.food)}` : '');
-        return refuse(why, '先把血回到 8 以上、或者离开危险，再谈关闭保命（挖岩浆边上的矿、满血打怪这些正常用途照样允许）。');
+            `你的血量只有 ${Math.round(health * 100) / 100}` +
+            (hostileNear && meters != null ? `，${meters} 格外还有敌对生物` : '') +
+            (facts.food != null && facts.food <= 6 ? `，食物只有 ${Math.round(facts.food)}` : '');
+        return refuse(why);
     }
     // ④ 其余情况照旧允许。
     return {
         allowed: true,
-        text: `保命程序已关闭`,
+        text: '保命程序已经关闭。',
     };
 }
 
@@ -257,25 +239,14 @@ export function combatRefusalVerdict(facts: CombatFacts): { allowed: boolean; te
     if (facts.authorized === true) return { allowed: true, text: '' };
 
     const healthText = Math.round(health * 100) / 100;
-    const foodText = food == null ? '食物读不到' : `食物 ${Math.round(food)}`;
+    const foodText = food == null ? '食物读不到' : `食物只有 ${Math.round(food)}`;
     const threat =
         facts.hostileMeters == null ? null : Math.round(facts.hostileMeters * 10) / 10;
-    const parts: string[] = [];
-    parts.push(
-        `**拒绝**：你只剩 ${healthText} 血、${foodText}` +
-            (threat != null ? `、${threat} 格外有敌对生物` : '') +
-            `——现在打怪是最快的死法（挨一下就没了，而你没有回血手段）。`,
-    );
-    parts.push('**逃跑、吃东西、垫方块、`escapeWater`、保命反射都不受这条限制**——它只拦进攻。');
-    // **唯一出口**：这次就是想打。写明确切的授权调用（参数名猜错一次就白费一回合）。
-    parts.push('硬要现在打就显式授权这一次：`allowDangerousOps(calls=1, reason="…", ops="attack_at_low_health")`。');
-    // **不再排"下一步"**（2026-10-30 用户裁定）：吃哪样、先脱战还是先吃，是它自己的判断。
-    // 回执只报事实：背包里有什么能吃的。
-    const foodItems = (facts.foodItems ?? []).filter((name) => typeof name === 'string' && name !== '');
-    if (foodItems.length > 0) {
-        parts.push(`你背包里有能吃的：${foodItems.slice(0, 3).join('、')}。`);
-    } else {
-        parts.push('背包里没有能吃的。');
-    }
-    return { allowed: false, text: parts.join('\n    ') };
+    return {
+        allowed: false,
+        text:
+            `这次不能进攻，因为你的血量只有 ${healthText}，${foodText}` +
+            (threat != null ? `，${threat} 格外还有敌对生物` : '') +
+            `。这一步需要先拿到 ${COMBAT_OP} 授权，现在没有授权，所以没有打。`,
+    };
 }

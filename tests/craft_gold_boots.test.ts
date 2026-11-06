@@ -65,7 +65,7 @@ describe('craftSmartDetailed：别名接线与失败回执', () => {
     const bot = fakeBot();
     const res = await craftSmartDetailed(bot, 'not_a_real_item', 1);
     expect(res.ok).toBe(false);
-    expect(res.detail).toContain('没有');
+    expect(res.detail).toContain('物品名不合法');
     // 「金装备注册名是 golden_*」这句曾经无条件拼在回执末尾，与请求无关、纯噪音；
     // 现在只在请求名本身像 gold_* 时才作为别名提示出现（见本文件另一条测试）。
     expect(res.detail).not.toContain('golden_*');

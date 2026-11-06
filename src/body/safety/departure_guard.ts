@@ -26,8 +26,6 @@
  * 拒绝回执会直接写出授权写法，所以这道闸也不会变成"拒绝 + 无法执行的出路"。
  */
 
-import { findOp, refuseText } from './dangerous_ops.js';
-
 /** 进维度类工具：只有这些会被检查。 */
 export const DEPARTURE_TOOLS: ReadonlySet<string> = new Set(['enterEnd', 'enterNether']);
 
@@ -119,84 +117,47 @@ export function departureVerdict(facts: DepartureFacts): DepartureVerdict {
     if (blocks == null) unread.push('垫脚方块');
 
     const missing: string[] = [];
-    if (!hasWeapon) {
-        missing.push(
-            facts.tool === 'enterEnd'
-                ? '**没有武器**（末影人 40 血、每下 4-7 伤害，空手必死）'
-                : '**没有武器**（下界的猪灵/猪灵蛮兵/烈焰人都会主动打你）',
-        );
-    }
-    if (food != null && food <= MIN_FOOD_HARD) missing.push(`**食物 ${Math.round(food)}**（进去就没有回血手段）`);
+    if (!hasWeapon) missing.push('没有武器');
+    if (food != null && food <= MIN_FOOD_HARD) missing.push(`食物只有 ${Math.round(food)} 个`);
     if (blocks != null && blocks < MIN_BLOCKS_HARD) {
-        missing.push(`**垫脚方块只有 ${blocks} 个**（末地虚空桥/下界跨岩浆都要垫，至少 ${MIN_BLOCKS_HARD} 个）`);
+        missing.push(`垫脚方块只有 ${blocks} 个，至少要 ${MIN_BLOCKS_HARD} 个`);
     }
     if (health != null && health < MIN_HEALTH_SUGGESTED && missing.length > 0) {
-        missing.push(`血量 ${Math.round(health * 10) / 10}（低于建议的 ${MIN_HEALTH_SUGGESTED}）`);
+        missing.push(`血量只有 ${Math.round(health * 10) / 10}`);
     }
 
     // **已知的坏**才硬拦；**未知**一律不拦（`null` 当"没读到"）。
     const hardRefuse = !hasWeapon || (food != null && food <= MIN_FOOD_HARD) || (blocks != null && blocks < MIN_BLOCKS_HARD);
     if (hardRefuse && facts.authorized === true) {
-        // 授权过就放行，但把"你赌的是什么"留在回执里——出事时这一行就是证据。
         return {
             allowed: true,
-            warning:
-                `（**这次是你显式授权过的**：${missing.length > 0 ? missing.join('、') : '准备不足'}。` +
-                '授权只覆盖一次/一段时间，到了那边自己看着办。）',
+            warning: `这次你已经授权了 ${DEPARTURE_OP}，所以放行，还缺的部分是${missing.length > 0 ? missing.join('，') : '准备不足'}。`,
         };
     }
     if (hardRefuse) {
         return {
             allowed: false,
             text:
-                `**拒绝进${place}**：` +
-                (missing.length > 0 ? missing.join('、') : '准备不足') +
-                `。补齐这些再来 \`${facts.tool}()\`——怎么补由你安排。\n    ` +
-                // **不给四步合成链**（2026-10-30 用户裁定）：那是替模型排计划。
-                // 只留一条**算术事实**——空手做剑要多少料，是可核对的，不是选择。
-                (hasWeapon
-                    ? ''
-                    : '（材料账：木剑 = 2 木板 + 1 木棍，工作台 = 4 木板，合计 8 木板 = **2 根原木**；1 根不够。）\n    ') +
-                // **唯一出口**：这次就想去。写清确切的调用，别让它去猜参数名。
-                `硬要现在进就显式授权这一次：${
-                    (() => {
-                        const op = findOp(DEPARTURE_OP);
-                        return op != null
-                            ? refuseText(op, 5)
-                            : `\`allowDangerousOps(5, "原因", "${DEPARTURE_OP}")\``;
-                    })()
-                }\n    ` +
-                '**出口/逃跑不受这条限制**：`returnFromEnd` 之类、保命反射都随时可用——已经在里面的人不会被它困住。',
+                `这次想进${place}，但准备不足，${missing.length > 0 ? missing.join('，') : '东西没带够'}。` +
+                `进这个维度需要先拿到 ${DEPARTURE_OP} 授权，现在没有授权，所以没有进。`,
         };
     }
 
-    // 放行：低于建议值就给一句响亮提醒（不拦）。
+    // 放行：低于建议值时只报实测读数。
     const warnings: string[] = [];
     if (food !== null && food < MIN_FOOD_SUGGESTED) {
-        warnings.push(`你食物只有 ${Math.round(food)}，${place}里**没有食物来源**——进去之前最好补到 ${MIN_FOOD_SUGGESTED}。`);
+        warnings.push(`食物只有 ${Math.round(food)} 个，建议至少 ${MIN_FOOD_SUGGESTED} 个`);
     }
     if (blocks != null && blocks < MIN_BLOCKS_SUGGESTED) {
-        warnings.push(`垫脚方块只有 ${blocks} 个（建议 ≥${MIN_BLOCKS_SUGGESTED}）：虚空桥/跨岩浆一旦不够就会卡在中间。`);
+        warnings.push(`垫脚方块只有 ${blocks} 个，建议至少 ${MIN_BLOCKS_SUGGESTED} 个`);
     }
     if (health != null && health < MIN_HEALTH_SUGGESTED) {
-        warnings.push(`血量 ${Math.round(health * 10) / 10} 低于建议的 ${MIN_HEALTH_SUGGESTED}，挨一下就危险。`);
+        warnings.push(`血量只有 ${Math.round(health * 10) / 10}，建议至少 ${MIN_HEALTH_SUGGESTED}`);
     }
-    // **读不到的读数**：明确说"这不作为拒绝理由"，并且告诉它自己去看一眼
-    // （否则模型会把"读不到"读成"被拦了"，或者干脆不知道食物是未知的）。
     if (unread.length > 0) {
-        warnings.push(
-            `${unread.join('、')}**读不到**（读数不可用）——**这不作为拒绝理由**：已经放行；` +
-                '进去之前自己 `stats(type="body")` 看一眼真实数值再决定。',
-        );
+        warnings.push(`${unread.join('和')}读不到`);
     }
-    return warnings.length > 0
-        ? {
-              allowed: true,
-              // **必须是"补充说明"，不能长得像拒绝**（Lead 2026-10-19 的担心：
-              // 模型把提醒当成拒绝，或者提醒把真正的动作挤没了）。
-              warning: `（**这只是提醒，不是拒绝**——已经放行，该做的事照做。）⚠️ ${warnings.join(' ')}`,
-          }
-        : { allowed: true };
+    return warnings.length > 0 ? { allowed: true, warning: `这次放行了，${warnings.join('，')}。` } : { allowed: true };
 }
 
 /**

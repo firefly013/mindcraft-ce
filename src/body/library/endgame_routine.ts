@@ -32,11 +32,10 @@ import {
     assessEndGear,
     blastRadius,
     blazePowderAvailable,
-    choosePotionToDrink,
     compassBearing,
     describeEyeDirection,
     distance as vecDistance,
-    findPotionItem,
+    findPotionById,
     formatEndgameReport,
     horizontalDirection,
     horizontalDistance,
@@ -48,8 +47,8 @@ import {
     planDragonReviveSpots,
     parseReviveSpotOverride,
     planRecovery,
-    potionKindOf,
-    potionStock,
+    potionIdOf,
+    potionInventorySummary,
     trackEyeFlight,
     vec,
     type BreathCloud,
@@ -59,7 +58,6 @@ import {
     type EndgamePhase,
     type EyeFlightTrack,
     type EyeSample,
-    type PotionKind,
     type Vec3,
 } from './endgame.js';
 
@@ -147,14 +145,12 @@ export const endgameToolSpecs: EndgameToolSpec[] = [
         name: 'drinkPotion',
         kind: 'action',
         description:
-            '按**效果**喝药，而不是按物品名：kind=slow_falling / resistance / regeneration / healing / strength / milk。' +
-            '现有的 consume 只认物品名，而所有药水都叫 "potion" —— 模型没法说"喝缓降"，所以这条是补的硬缺口。' +
-            'kind=milk 会用牛奶桶清掉**全部** Buff（包括你自己刚喝的好 Buff），悠着用。',
+            '喝一瓶指定 id 的药水（`healing` / `strong_healing` / `long_slow_falling` 这类）。背包里所有药水的物品名都是 potion，id 才能精确到等级和时长；没有这瓶时返回背包里现有的药水 id 清单。',
         params: {
-            kind: { type: 'string', description: '要喝哪一类：slow_falling / resistance / regeneration / healing / strength / fire_resistance / milk。' },
+            potion: { type: 'string', description: '完整药水 id，例如 healing / strong_healing / long_slow_falling / fire_resistance。' },
         },
         timeoutMinutes: 2,
-        backing: '新增动作命令；equip + consume，逻辑照抄 survival.ts 的 drinkFireResistancePotion 但按大类找。',
+        backing: 'equip + consume；按 NBT/组件里的 potion id 对齐状态效果名。',
     },
     {
         name: 'recoverAfterDeath',
@@ -170,11 +166,10 @@ export const endgameToolSpecs: EndgameToolSpec[] = [
         name: 'drinkMilk',
         kind: 'action',
         description:
-            '喝牛奶桶：立刻清掉自己身上的**全部**状态效果。**会连自己刚喝的缓降/再生/抗性一起清掉**，' +
-            '所以只在中了负面效果（中毒/虚弱/缓慢…）时用，别当疗伤药；也**不能灭火**。',
+            '喝牛奶桶：立刻清掉自己身上的**全部**状态效果（包括你自己刚喝的好 Buff）。不能灭火。',
         params: {},
         timeoutMinutes: 2,
-        backing: '调用 endgame_routine.drinkPotionByKind(bot, "milk")（equip + consume）。',
+        backing: '调用 endgame_routine.drinkMilk（equip + consume + 数量核对）。',
     },
     {
         name: 'throwHeld',
@@ -461,62 +456,78 @@ export function readBreathClouds(bot: any): BreathCloud[] {
 
 // ============================ 三、可执行动作（能落地的部分） ============================
 
-/** 背包里某一类药水/牛奶一共几瓶（按效果大类数，不是按物品名——它们全叫 potion）。 */
-export function countPotionsOfKind(bot: any, kind: PotionKind | 'milk' | string): number {
-    const wanted = normalizeName(kind);
+/** 背包里某个**完整药水 id** 的药水一共有几瓶（能区分普通/延长/强化版本）。 */
+export function countPotionsById(bot: any, potionId: unknown): number {
+    const wanted = normalizeName(potionId);
+    if (wanted === '') return 0;
     let total = 0;
     for (const item of safeInventoryItems(bot)) {
-        if (potionKindOf(item) !== wanted) continue;
+        if (normalizeName(item?.name) !== 'potion') continue;
+        if (normalizeName(potionIdOf(item)) !== wanted) continue;
         total += typeof item?.count === 'number' && Number.isFinite(item.count) ? Math.max(0, item.count) : 1;
     }
     return total;
 }
 
 /**
- * 按**效果**喝药。这是 `drinkPotion` 命令的实现体，逻辑同 survival.ts 的
- * `drinkFireResistancePotion`，只是按大类找而不是写死抗火。
+ * 喝一瓶**指定 id** 的药水（`healing` / `strong_healing` / `long_slow_falling` 这类）。
  *
- * **不许假成功**（和 `throwHeld` 同一条规矩）：`bot.consume()` 只保证"包发出去了"，
- * 所以喝之前/之后各数一遍这类药水的数量，数量没减少就如实报"没喝下去"并返回 false。
- * 它直接关系到"没带缓降会不会摔死"，报成功必须有证据。
+ * 只返回结果：没有这瓶时列出背包里现有的；喝了报喝了哪一瓶、还剩几瓶；
+ * 包发出去了但数量没变就如实说"不能确认喝下"。不写"下一步""再调一次"。
  */
-export async function drinkPotionByKind(bot: any, kind: PotionKind | 'milk' | string): Promise<boolean> {
-    const wanted = normalizeName(kind) as PotionKind | 'milk';
+export async function drinkPotionById(bot: any, potionId: unknown): Promise<string> {
+    const wanted = normalizeName(potionId);
+    if (wanted === '') return 'drinkPotion：没有给 potion id。';
     const items = safeInventoryItems(bot);
-    const potion = findPotionItem(items, wanted);
+    const potion = findPotionById(items, wanted);
     if (potion == null) {
-        skills.log(bot, `背包里没有 ${wanted} 这一类药水。`);
-        return false;
+        const have = potionInventorySummary(items);
+        return have === ''
+            ? `背包里没有 '${String(potionId)}' 药水，也没有可饮用的药水。`
+            : `背包里没有 '${String(potionId)}' 药水。现有：${have}。`;
     }
-    const before = countPotionsOfKind(bot, wanted);
+    const before = countPotionsById(bot, wanted);
     try {
         await bot.equip(potion, 'hand');
         await bot.consume();
     } catch (error) {
-        skills.log(bot, `喝 ${wanted} 失败：${(error as Error)?.message ?? String(error)}`);
-        return false;
+        return `喝 ${wanted} 没有成功，错误是 ${(error as Error)?.message ?? String(error)}。`;
     }
     // 服务端扣物品要过一两个 tick；给它三次机会再判定。
-    let after = countPotionsOfKind(bot, wanted);
+    let after = countPotionsById(bot, wanted);
     for (let attempt = 0; attempt < 2 && after >= before; attempt++) {
         await skills.wait(bot, 250);
-        after = countPotionsOfKind(bot, wanted);
+        after = countPotionsById(bot, wanted);
     }
     if (after >= before) {
-        skills.log(
-            bot,
-            `发了"使用物品"包，但背包里 ${wanted} 的数量没变（${before} → ${after}）：可能没真的喝下去（手里是空的？被别的动作打断？）。` +
-                '**别当成功**——再调一次这个工具，或者用 equip + consume 手动确认。',
-        );
-        return false;
+        return `使用包已经发出去了，但是 ${wanted} 的数量从 ${before} 个变成 ${after} 个，没有变化，所以不能确认已经喝下。`;
     }
-    skills.log(bot, `喝下了 ${wanted}（还剩 ${after} 瓶）${wanted === 'milk' ? '，全部 Buff 会被清掉' : ''}。`);
-    return true;
+    return `喝下 ${wanted}（剩 ${after} 瓶）。`;
 }
 
-/** 喝牛奶 = 清掉所有状态效果。**会连自己刚喝的好 Buff 一起清**，只在中毒/虚弱等时候用。 */
-export function drinkMilk(bot: any): Promise<boolean> {
-    return drinkPotionByKind(bot, 'milk');
+/** 喝牛奶：清掉全部状态效果。同样只返回结果。 */
+export async function drinkMilk(bot: any): Promise<string> {
+    const items = safeInventoryItems(bot);
+    const milk = items.find((item) => normalizeName(item?.name) === 'milk_bucket') ?? null;
+    if (milk == null) return '没有喝到牛奶：背包里没有 milk_bucket。';
+    const countMilk = (): number =>
+        safeInventoryItems(bot)
+            .filter((item) => normalizeName(item?.name) === 'milk_bucket')
+            .reduce((n, item) => n + (typeof item?.count === 'number' ? Math.max(0, item.count) : 1), 0);
+    const before = countMilk();
+    try {
+        await bot.equip(milk, 'hand');
+        await bot.consume();
+    } catch (error) {
+        return `喝牛奶没有成功，错误是 ${(error as Error)?.message ?? String(error)}。`;
+    }
+    let after = countMilk();
+    for (let attempt = 0; attempt < 2 && after >= before; attempt++) {
+        await skills.wait(bot, 250);
+        after = countMilk();
+    }
+    if (after >= before) return `使用包已经发出去了，但是牛奶的数量从 ${before} 个变成 ${after} 个，没有减少，所以不能确认已经喝下。`;
+    return `喝下牛奶（剩 ${after} 桶），全部状态效果被清空。`;
 }
 
 // ============================ 三·B、床炸的选址与掩体（都从真实世界读） ============================
@@ -851,7 +862,7 @@ export async function bedBombDragon(bot: any, options: { dryRun?: boolean } = {}
     const headPosition = toVec(dragon?.position);
     if (headPosition == null) {
         return signals.dragonAlive
-            ? '看见了末影龙但读不到它的位置，先别放床。'
+            ? '看见了末影龙但读不到它的位置。'
             : '看不见末影龙（它可能已经死了）：先调 endFightStatus 确认，别在空地上放床。';
     }
     if (!signals.dragonPerched) return '龙没低头停在传送门上——床炸打不到它，等它停。';
@@ -863,11 +874,11 @@ export async function bedBombDragon(bot: any, options: { dryRun?: boolean } = {}
     const health = typeof bot?.health === 'number' && Number.isFinite(bot.health) ? bot.health : null;
     if (health == null) return '读不到自己的血量，不做危险动作（床炸前必须先知道还剩几条命）。';
     if (health < MIN_BED_BOMB_HEALTH) {
-        return `血量 ${health.toFixed(1)}/20 太低（床炸保险线 ${MIN_BED_BOMB_HEALTH}）：先喝再生/吃金苹果/吃东西回血，再点床。`;
+        return `血量只有 ${health.toFixed(1)}/20，低于床炸要求的 ${MIN_BED_BOMB_HEALTH}，现在不能点床。`;
     }
     const food = typeof bot?.food === 'number' && Number.isFinite(bot.food) ? bot.food : null;
     if (food != null && food < MIN_BED_BOMB_FOOD) {
-        return `饥饿值 ${food}/20 太低（低于 ${MIN_BED_BOMB_FOOD}）：先吃东西。受伤后要靠饥饿回血，空着肚子点床等于没有第二次机会。`;
+        return `饥饿值只有 ${food}/20，低于床炸要求的 ${MIN_BED_BOMB_FOOD}，现在不能点床。`;
     }
 
     const bedItem = pickBedItemName(bot);
@@ -879,7 +890,7 @@ export async function bedBombDragon(bot: any, options: { dryRun?: boolean } = {}
         self: position,
         probe: (p) => blockObjectAt(bot, p),
     });
-    if (!siteResult.ok || siteResult.site == null) return `没有执行床炸：${siteResult.reason}`;
+    if (!siteResult.ok || siteResult.site == null) return `没做到 bedBombDragon，${siteResult.reason}。`;
     const site = siteResult.site;
 
     const trench = detectPodiumTrench(bot, site.standCell);
@@ -897,7 +908,7 @@ export async function bedBombDragon(bot: any, options: { dryRun?: boolean } = {}
     });
 
     if (!plan.ok) {
-        return endgameReceipt('没有执行床炸（安全闸门拒绝，一个方块都没放）。', [
+        return endgameReceipt('没做到 bedBombDragon：安全闸门拒绝，未放方块。', [
             plan.reason,
             siteResult.reason,
             cover.reason,
@@ -905,17 +916,13 @@ export async function bedBombDragon(bot: any, options: { dryRun?: boolean } = {}
         ]);
     }
     if (options.dryRun === true) {
-        return endgameReceipt('演练（没有放任何方块）：床炸闸门通过。', [plan.reason, siteResult.reason]);
+        return endgameReceipt('床炸闸门通过（dryRun，未放方块）。', [plan.reason, siteResult.reason]);
     }
 
     // 末地点床 = 尝试睡觉 = 爆炸。**先把闸门问清楚：没授权就一个方块都不放。**
     const verdict = permits.isAllowed('sleep_in_bed', opContextFor(bot), Date.now());
     if (!verdict.allowed) {
-        return endgameReceipt('床炸没授权，中止（**没有放任何方块**）。', [
-            `缺的授权项：sleep_in_bed（${verdict.op?.what ?? '上床睡觉'}）——${verdict.op?.why ?? '下界和末地的床会炸'}。`,
-            '先调 allowDangerousOps(ops="sleep_in_bed", calls=1)（一张床 = 一次），再调 bedBombDragon。',
-            plan.reason,
-        ]);
+        return endgameReceipt('不允许：sleep_in_bed 未授权，未放方块。', [plan.reason]);
     }
 
     const details: string[] = [siteResult.reason, plan.reason];
@@ -923,10 +930,7 @@ export async function bedBombDragon(bot: any, options: { dryRun?: boolean } = {}
     const placed = await skills.placeBlock(bot, bedItem, bedCell.x, bedCell.y, bedCell.z);
     const bedBlock = blockObjectAt(bot, bedCell);
     if (!placed || bedBlock == null || !String(bedBlock.name ?? '').includes('bed')) {
-        return endgameReceipt('床没放下去，中止（没点火）。', [
-            ...details,
-            '床是两格方块，`placeBlock` 对它的支持还没在真机验证过：换一格更平的地方，或者用 placeHere 手动放床之后再调这个工具。',
-        ]);
+        return endgameReceipt('没做到 bedBombDragon：床没放下去，未点火。', details);
     }
     details.push(`床已放下（${bedItem}）。`);
 
@@ -935,7 +939,7 @@ export async function bedBombDragon(bot: any, options: { dryRun?: boolean } = {}
     const coverNow = assessBedCover(bot, site);
     if (!coverNow.alreadySolid) {
         if (coverNow.coverItem == null) {
-            return endgameReceipt('床放好了但**没有完整方块可以做掩体**，没敢点（床还在原地，可以用 placeHere 补一块再点）。', [
+            return endgameReceipt('没做到 bedBombDragon：床已放，无完整方块做掩体，未点火。', [
                 ...details,
                 coverNow.reason,
             ]);
@@ -943,11 +947,11 @@ export async function bedBombDragon(bot: any, options: { dryRun?: boolean } = {}
         const coverPlaced = await skills.placeBlock(bot, coverNow.coverItem, site.coverCell.x, site.coverCell.y, site.coverCell.z);
         const coverBlockAfter = blockObjectAt(bot, site.coverCell);
         if (!coverPlaced || !isFullCoverBlock(coverBlockAfter)) {
-            return endgameReceipt('掩体没放成（那一格不是完整方块），没敢点床（床还在原地）。', [
+            return endgameReceipt('没做到 bedBombDragon：掩体未放成，未点火。', [
                 ...details,
-                `掩体本该放在 ${describeCell(site.coverCell)}（用 ${coverNow.coverItem}），现在读到的是 ${
+                `掩体格 ${describeCell(site.coverCell)} 现在是 ${
                     typeof coverBlockAfter?.name === 'string' ? coverBlockAfter.name : '读不到'
-                }（还可能是火把/栅栏这类挡不住爆风的东西）。`,
+                }，不是完整方块。`,
             ]);
         }
         details.push(`掩体已放好（${coverNow.coverItem} @ ${describeCell(site.coverCell)}，完整方块）。`);
@@ -963,13 +967,13 @@ export async function bedBombDragon(bot: any, options: { dryRun?: boolean } = {}
     const bedStillThere = blockObjectAt(bot, bedCell);
     const healthNow = typeof bot?.health === 'number' && Number.isFinite(bot.health) ? bot.health : null;
     if (!stillPerched) {
-        return endgameReceipt('龙已经抬头飞走了，没点那张床（床留在原地，等它再停下来再点）。', details);
+        return endgameReceipt('没做到 bedBombDragon：龙已不在传送门上，未点火。', details);
     }
     if (bedStillThere == null || !String(bedStillThere.name ?? '').includes('bed')) {
-        return endgameReceipt('床不见了（被龙撞掉/被别人拿走），没点。', details);
+        return endgameReceipt('没做到 bedBombDragon：床已不在，未点火。', details);
     }
     if (healthNow != null && healthNow < MIN_BED_BOMB_HEALTH) {
-        return endgameReceipt(`血量掉到 ${healthNow.toFixed(1)}/20，没点这张床——先回血。`, details);
+        return endgameReceipt(`没做到 bedBombDragon：血量 ${healthNow.toFixed(1)}/20 低于 ${MIN_BED_BOMB_HEALTH}，未点火。`, details);
     }
 
     const healthBefore = healthNow;
@@ -993,9 +997,7 @@ export async function bedBombDragon(bot: any, options: { dryRun?: boolean } = {}
     const hurtText =
         hurt == null
             ? '自伤读不到'
-            : hurt > 6
-                ? `自伤 ${hurt.toFixed(1)} 点偏高——下次先把掩体补好或退得更远`
-                : `自伤 ${hurt.toFixed(1)} 点`;
+            : `自伤 ${hurt.toFixed(1)} 点`;
 
     const dragonAliveNow = findDragonEntity(bot) != null;
     const dragonHealthNow = readDragonHealth(bot);
@@ -1004,13 +1006,11 @@ export async function bedBombDragon(bot: any, options: { dryRun?: boolean } = {}
     const clearedEnd = !dragonAliveNow || dragonHealthNow === 0;
 
     details.push(`龙血：${dragonHealthNow == null ? (dragonAliveNow ? '读不到' : '龙实体已消失') : `${dragonHealthNow.toFixed(0)}/${DRAGON_MAX_HEALTH}`}`);
-    details.push(`还剩 ${bedsLeft} 张床；预计这一张打掉 ${plan.expectedDragonDamage.toFixed(0)} HP，最多要 ${plan.bedsNeeded} 张。`);
-    if (crystalsLeft > 0) details.push(`**还有 ${crystalsLeft} 颗水晶活着**：龙会回血，先把水晶拆完再来炸。`);
+    details.push(`还剩 ${bedsLeft} 张床；预计伤害 ${plan.expectedDragonDamage.toFixed(0)} HP，需 ${plan.bedsNeeded} 张。`);
+    if (crystalsLeft > 0) details.push(`水晶 ${crystalsLeft} 颗存活。`);
 
     return endgameReceipt(
-        clearedEnd
-            ? `床炸完了（${hurtText}）：龙已经死了，去 (0,64,0) 的出口传送门。`
-            : `床炸完了（${hurtText}）。龙没掉血说明它没停在床上方；要再来一张就再调一次（一张床 = 一次授权）。`,
+        clearedEnd ? `床炸完成：${hurtText}，龙已死亡。` : `床炸完成：${hurtText}。`,
         details,
     );
 }
@@ -1078,28 +1078,28 @@ export function endgameStatusReport(bot: any, agent?: any): string {
         : signals.dragonHealth != null
             ? `${signals.dragonHealth.toFixed(0)}/${DRAGON_MAX_HEALTH}`
             : signals.dragonAlive
-                ? '血量读不到（boss bar 没出来），但实体在视野里'
-                : '血量读不到、实体也不在视野里（要么打完了，要么没加载——用 boss bar/治疗光束复核）';
+                ? '血量读不到，实体在视野里'
+                : '血量读不到，实体不在视野里';
     lines.push(
         `【现状】维度 ${signals.dimension ?? '未知'}｜水晶 ${signals.crystals.length} 颗｜龙 ${dragonText}｜${
-            signals.dragonPerched ? '正低头停在传送门上（可以床炸）' : '在飞'
+            signals.dragonPerched ? '停在传送门上' : '飞行中'
         }`
     );
     if (signals.position != null) {
         const { x, y, z } = signals.position;
         lines.push(`【位置】(${Math.round(x)},${Math.round(y)},${Math.round(z)})`);
         if (signals.inEnd) {
-            lines.push(`【离出口传送门】${horizontalDistance(signals.position, END_PODIUM).toFixed(1)} 格（≥20 格龙息喷不到你）`);
+            lines.push(`【离出口传送门】${horizontalDistance(signals.position, END_PODIUM).toFixed(1)} 格`);
         }
     }
     if (signals.crystalsAlive > 0 && signals.position != null) {
         const kit = crystalToolKit(bot);
         const cageKit =
             kit.tnt > 0
-                ? `笼中的两颗：TNT×${kit.tnt}（笼顶放一个点燃后撤）`
+                ? `笼中水晶：TNT×${kit.tnt}`
                 : kit.pickaxe
-                    ? '笼中的两颗：没 TNT，只能带缓降上柱子拆栏杆（危险）'
-                    : '笼中的两颗：**既没 TNT 也没镐，拆不掉**——龙会一直回血';
+                    ? '笼中水晶：TNT 0、镐 1'
+                    : '笼中水晶：TNT 0、镐 0';
         lines.push(`【拆水晶】${planCrystalAssault({ crystals: signals.crystals, self: signals.position }).message}${cageKit}`);
     }
     if (signals.position != null && (signals.breath.length > 0 || signals.dragonPerched)) {
@@ -1115,13 +1115,13 @@ export function endgameStatusReport(bot: any, agent?: any): string {
     if (signals.inEnd && !signals.dragonAlive && signals.dragonHealth == null) {
         const portal = findExitPortalForRevive(bot, undefined);
         if (portal == null) {
-            lines.push('【复活龙】找不到返回门（64 格内没有 end_portal / dragon_egg）：先走到末地主岛中心的基座附近。');
+            lines.push('【复活龙】找不到返回门（64 格内没有 end_portal / dragon_egg）');
         } else {
             const spots = planDragonReviveSpots({ center: portal.center, probe: (p) => blockNameAt(bot, p) });
             const shapeText = spots.ok
                 ? spots.standardCount >= DRAGON_REVIVE_CRYSTALS
                     ? '门上有 4 个标准位置可用'
-                    : '只能按兜底规则凑 4 格（这个门不是课本形状）'
+                    : '按兜底规则凑 4 格'
                 : spots.standardCount > 0 && spots.blocked.length > 0
                   ? '标准位置被占了'
                   : '推不出四个格子';
@@ -1129,16 +1129,8 @@ export function endgameStatusReport(bot: any, agent?: any): string {
                 `【复活龙】${shapeText}（中心来源：${portal.reason}）｜末影水晶 ${signals.endCrystals}/${DRAGON_REVIVE_CRYSTALS}`
             );
             lines.push(`  ${spots.reason}`);
-            if (!spots.ok) {
-                lines.push(
-                    '  这个门推不出格子时：用 reviveDragon(spots="x,y,z;x,y,z;x,y,z;x,y,z") 显式指定四个绝对坐标（不用改代码），' +
-                        '或者找开发者确认这一版的门结构。'
-                );
-            }
             if (signals.endCrystals < DRAGON_REVIVE_CRYSTALS) {
-                lines.push(`  还差 ${DRAGON_REVIVE_CRYSTALS - signals.endCrystals} 颗：${END_CRYSTAL_SHOPPING_LIST.join('；')}`);
-            } else if (spots.ok) {
-                lines.push('  够材料了：调 reviveDragon 就能把龙叫回来（柱子上的 10 颗水晶也会一起回来）。');
+                lines.push(`  还差 ${DRAGON_REVIVE_CRYSTALS - signals.endCrystals} 颗末影水晶`);
             }
         }
     }
@@ -1152,7 +1144,7 @@ export function endgameStatusReport(bot: any, agent?: any): string {
         });
         const health = typeof bot?.health === 'number' && Number.isFinite(bot.health) ? bot.health : null;
         if (!site.ok || site.site == null) {
-            lines.push(`【床炸闸门】现在不能炸：${site.reason}`);
+            lines.push(`床炸现在不能进行，${site.reason}。`);
         } else {
             // 和真正炸的时候**同一段判定**，免得"报告说能炸、真炸被拒"或反过来。
             const cover = assessBedCover(bot, site.site);
@@ -1165,9 +1157,9 @@ export function endgameStatusReport(bot: any, agent?: any): string {
                 health: health ?? undefined,
                 dragonHealth: signals.dragonHealth,
             });
-            lines.push(`【床炸闸门】${plan.ok ? '现在可以炸：' : '现在不能炸：'}${plan.reason}`);
-            lines.push(`  掩体：${cover.reason}`);
-            if (plan.ok) lines.push(`  站位：${site.reason}`);
+            lines.push(`床炸现在${plan.ok ? '可以进行' : '不能进行'}，${plan.reason}。`);
+            lines.push(`  掩体方面，${cover.reason}。`);
+            if (plan.ok) lines.push(`  站位方面，${site.reason}。`);
         }
     }
     return lines.join('\n');
@@ -1242,34 +1234,13 @@ export async function shootAtEntity(bot: any, entity: any, chargeMs = 1000): Pro
         await bot.deactivateItem();
         await skills.wait(bot, 300);
     } catch (err) {
-        return `射箭时出错：${err instanceof Error ? err.message : String(err)}`;
+        return `射箭时出错了，错误是 ${err instanceof Error ? err.message : String(err)}。`;
     }
     const arrowsAfter = crystalToolKit(bot).arrows;
     if (arrowsAfter >= arrowsBefore) {
-        return `拉了弓但箭没射出去（箭数 ${arrowsBefore} → ${arrowsAfter} 没变）：可能手滑/被打断/没箭了。别当射中了。`;
+        return `没做到 shootAtEntity，箭的数量从 ${arrowsBefore} 支变成 ${arrowsAfter} 支，没有变化。`;
     }
-    return `朝 ${entity?.name ?? '目标'} 放了一箭（拉弓 ${chargeMs}ms，箭 ${arrowsBefore} → ${arrowsAfter}）。如果没打中，先看准星是不是被方块挡住了。`;
-}
-
-/** 按优先级喝药。**决策是纯函数**（`choosePotionToDrink`），这里只负责找药、喝、回报。 */
-export async function drinkPotionsByPriority(bot: any): Promise<string> {
-    const signals = readEndSignals(bot);
-    const stock = potionStock(safeInventoryItems(bot));
-    const health = typeof bot?.health === 'number' ? bot.health : null;
-    const airborne = bot?.entity?.onGround === false;
-    const decision = choosePotionToDrink({
-        effects: signals.effects,
-        stock,
-        health,
-        inEnd: signals.inEnd,
-        airborne,
-    });
-    if (decision.kind == null) return decision.reason;
-    const drank = await drinkPotionByKind(bot, decision.kind);
-    if (!drank) {
-        return `想喝 ${decision.kind}（${decision.reason}），但**没喝成**：要么背包里没有这一类药水，要么包发出去了但数量没变（别当作已经喝到）。`;
-    }
-    return `喝了 ${decision.kind}：${decision.reason}`;
+    return `射出了一箭，方向朝 ${entity?.name ?? '目标'}，拉弓 ${chargeMs} 毫秒，箭从 ${arrowsBefore} 支变成 ${arrowsAfter} 支。`;
 }
 
 /** 被掀飞/高空坠落时的自保：往脚下扔一颗末影珍珠。不适用时返回 null。 */
@@ -1300,7 +1271,7 @@ export async function dodgeDragonBreathSkill(bot: any): Promise<string> {
     if (rescue != null) return rescue;
 
     const start = toVec(bot?.entity?.position);
-    if (start == null) return '读不到自己的坐标，先别乱跑。';
+    if (start == null) return '没做到：读不到自己的坐标。';
     const first = planBreathEscape({
         self: start,
         clouds: readBreathClouds(bot),
@@ -1396,7 +1367,7 @@ export async function throwEyeAndTrack(
             threw: false,
             track: null,
             samples: 0,
-            message: '末影之眼没扔出去（手里数量没变）：别当作扔了，先确认手上有 ender_eye，再调一次。',
+            message: '没有扔出末影之眼，手里的数量没有变化。',
         };
     }
 
@@ -1456,7 +1427,7 @@ export async function throwEyeAndTrack(
 export async function throwHeldSkill(bot: any, agent?: any): Promise<string> {
     const held: any = bot?.heldItem;
     if (held == null || typeof held.name !== 'string') {
-        return '手上是空的：先用 equip 把要扔的东西拿到手上（ender_eye 末影之眼 / ender_pearl 末影珍珠），再调这个工具。';
+        return '没做到 throwHeld：手上是空的。';
     }
     const name = normalizeName(held.name);
 
@@ -1480,10 +1451,10 @@ export async function throwHeldSkill(bot: any, agent?: any): Promise<string> {
     const aim = falling && position != null ? vec(position.x, position.y - 8, position.z) : null;
     const threw = await throwHeld(bot, aim);
     if (!threw) {
-        return `没有把 ${name} 扔出去（手里数量没变）：可能服务端没采纳，或者手里这个不是投掷物。`;
+        return `没做到 throwHeld，${name} 没有扔出去。`;
     }
     if (name.includes('ender_pearl')) {
-        return falling ? '下坠中往脚下扔了一颗末影珍珠，摔落伤害基本免掉。' : '末影珍珠扔出去了。';
+        return falling ? '下坠中往脚下扔了一颗末影珍珠。' : '扔出了末影珍珠。';
     }
     return `扔出了 ${name}。`;
 }
@@ -1565,7 +1536,7 @@ export async function enterEndSkill(bot: any, agent?: any): Promise<string> {
         if (eyes <= 0) {
             details.push('而且背包里没有末影之眼（ender_eye）。');
             details.push('末影之眼 = 末影珍珠 + 烈焰粉：打末影人拿珍珠、打烈焰人拿粉，合成 12 颗以上再来（每次扔还有 20% 概率碎）。');
-            return endgameReceipt('没有框架、也没有末影之眼，先备眼。', details);
+            return endgameReceipt('没做到 enterEnd：框架 0、末影之眼 0。', details);
         }
         const equipped = await skills.equip(bot, 'ender_eye');
         if (!equipped) {
@@ -1645,7 +1616,7 @@ async function tntTheCage(bot: any, crystal: EndCrystalInfo, details: string[]):
             `缺的授权项：ignite（${verdict.op?.what ?? '主动点火'}）——${verdict.op?.why ?? '火会烧掉基地和自己'}。` +
                 '先 allowDangerousOps(ops="ignite", calls=1)。**这次没有放任何东西**。',
         );
-        return endgameReceipt('点火没授权，中止。', details);
+        return endgameReceipt('不允许：ignite 未授权。', details);
     }
     const top = vec(crystal.position.x, crystal.position.y + 1, crystal.position.z);
     const placed = await skills.placeBlock(bot, 'tnt', top.x, top.y, top.z);
@@ -1691,10 +1662,10 @@ async function tntTheCage(bot: any, crystal: EndCrystalInfo, details: string[]):
  */
 export async function clearEndCrystalsSkill(bot: any): Promise<string> {
     const position = toVec(bot?.entity?.position);
-    if (position == null) return '读不到自己的坐标，先别碰水晶。';
+    if (position == null) return '没做到 clearEndCrystals：读不到自己的坐标。';
     const crystals = readEndCrystals(bot);
     if (crystals.length === 0) {
-        return '视野里没有末地水晶了。如果还能看见治疗光束，说明区块外还有没拆的；否则可以直接打龙。';
+        return '视野里没有末地水晶。';
     }
     const kit = crystalToolKit(bot);
     const plan = planCrystalAssault({
@@ -1729,7 +1700,7 @@ export async function clearEndCrystalsSkill(bot: any): Promise<string> {
                 : `后退没走成（路被堵？），现在离水晶 ${nowDistance.toFixed(1)} 格`,
         );
         if (nowDistance < plan.safeShootDistance) {
-            return endgameReceipt('没退到安全距离，**没有放箭**（一个方块/一支箭都没动）。', [
+            return endgameReceipt('没做到 shootAtEntity：未退到安全距离，未放箭。', [
                 ...details,
                 `现在离水晶 ${nowDistance.toFixed(1)} 格 < ${plan.safeShootDistance} 格：在这个距离把它打爆，威力 6 的爆炸会连伤害带击退一起吃到（水挡不住伤害）。`,
                 `用 moveBy/goToCoordinates 退到 ${plan.safeShootDistance + 1} 格外，再调一次 clearEndCrystals。`,
@@ -1763,7 +1734,7 @@ export async function clearEndCrystalsSkill(bot: any): Promise<string> {
             : `水晶还是 ${after.length} 颗（没掉）：这一箭多半没打中/被挡住了。`,
     );
     if (after.length === 0) {
-        return endgameReceipt('水晶全拆完了，可以去打龙了（龙不再回血）。', details);
+        return endgameReceipt('水晶 0 颗存活。', details);
     }
     return endgameReceipt(
         killed ? '拆掉一颗水晶。' : '这一箭没拆掉水晶，再来一次（或者换个角度/换打法）。',
@@ -1917,9 +1888,9 @@ export async function reviveDragon(
     } = {}
 ): Promise<string> {
     const signals = readEndSignals(bot);
-    if (!signals.inEnd) return '你现在不在末地：复活仪式要在返回门旁边做，先 enterEnd。';
+    if (!signals.inEnd) return '没做到 reviveDragon：不在末地。';
     if (signals.dragonAlive || readDragonHealth(bot) != null) {
-        return '末影龙还活着（实体或 boss bar 都在），不用复活——直接走 clearEndCrystals / bedBombDragon。';
+        return '没做到 reviveDragon：末影龙还活着。';
     }
 
     const have = countOf(bot, (name) => name === 'end_crystal');
@@ -2100,7 +2071,7 @@ export async function recoverAfterDeathSkill(agent: any): Promise<string> {
     const y = Number(recalled[1]);
     const z = Number(recalled[2]);
     if (![x, y, z].every((n) => Number.isFinite(n))) {
-        return `死亡点记录坏了（${recalled.join(',')}）：读不出坐标，只能按"重新备战"走。`;
+        return `死亡点记录坏了，字段 ${recalled.join('、')} 读不出坐标，所以只能按重新备战处理。`;
     }
     const current = readDimension(bot);
     const deathPosition = vec(x, y, z);
@@ -2186,7 +2157,7 @@ export async function recoverAfterDeathSkill(agent: any): Promise<string> {
 export async function throwHeld(bot: any, aim: Vec3 | null = null): Promise<boolean> {
     const held: any = bot?.heldItem;
     if (held == null || typeof held.name !== 'string') {
-        skills.log(bot, '手上是空的：先用 equip 要扔的东西拿到手上（ender_eye 末影之眼 / ender_pearl 末影珍珠），再投掷。');
+        skills.log(bot, '手上是空的，没有拿着 ender_eye 或 ender_pearl。');
         return false;
     }
     const before: number = typeof held.count === 'number' ? held.count : 1;
@@ -2200,7 +2171,7 @@ export async function throwHeld(bot: any, aim: Vec3 | null = null): Promise<bool
     try {
         await bot.activateItem();
     } catch (err: unknown) {
-        skills.log(bot, `投掷失败：${err instanceof Error ? err.message : String(err)}`);
+        skills.log(bot, `投掷没有成功，错误是 ${err instanceof Error ? err.message : String(err)}。`);
         return false;
     }
     // 服务端要过一两个 tick 才会扣掉手里的数量；等一小会儿再核对。

@@ -41,7 +41,7 @@ describe('刚放下的方块被原版拾取（playerCollect 路径）也要拦�
     const code = body();
     expect(code).toContain('placed-drop-collected');
     expect(code).toContain('isJustPlacedDrop(expectedItem, dropPos)');
-    expect(code).toContain('已自动放回原位');
+    expect(code).toContain('已放回原位');
     expect(code).toContain('放回失败');
   });
 });

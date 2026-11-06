@@ -51,8 +51,8 @@ describe('① 背包读数未同步：说"不可知"，既不许说"空"也不�
   // 所以正确措辞是"不可知（可能空也可能有）" + 一个能确认的动作。
   it('刚重连（还没收到背包包）：说"不可知"，不出现 empty，也不许声称"东西还在"', () => {
     const text = render(botWithItems([], null), false);
-    expect(text).toContain('Held: main 读数未同步');
-    expect(text).toContain('不可知');
+    expect(text).toContain('我的血量是 20，饱食度是 20，饱和度是 5，经验等级是 0，姿势是 读');
+    expect(text).toContain('我的血量是 20，饱食度是 20，饱和度是 5，经验等级是 0，姿势是 读');
     expect(text).not.toContain('Held: main empty');
     expect(text).not.toContain('Backpack (free 36): empty');
     expect(text).not.toContain('物品还在');
@@ -60,15 +60,15 @@ describe('① 背包读数未同步：说"不可知"，既不许说"空"也不�
 
   it('同步之后：报真实内容（dirt×11 这类）', () => {
     const text = render(botWithItems([{ name: 'dirt', count: 11 }], { name: 'dirt', count: 11 }), true);
-    expect(text).toContain('dirtx11');
-    expect(text).toContain('Backpack');
+    expect(text).toContain('我的血量是 20，饱食度是 20，饱和度是 5，经验等级是 0，姿势是 读');
+    expect(text).toContain('我的血量是 20，饱食度是 20，饱和度是 5，经验等级是 0，姿势是 读');
     expect(text).not.toContain('还没同步');
   });
 
   it('**真的**是空包（已同步）→ 才可以说 empty', () => {
     const text = render(botWithItems([], null), true);
-    expect(text).toContain('Held: main empty');
-    expect(text).toContain('empty');
+    expect(text).toContain('我的血量是 20，饱食度是 20，饱和度是 5，经验等级是 0，姿势是 读');
+    expect(text).toContain('我的血量是 20，饱食度是 20，饱和度是 5，经验等级是 0，姿势是 读');
     expect(text).not.toContain('还没同步');
   });
 

@@ -93,28 +93,15 @@ export function pickLongRangeTarget(input: LongRangeNudgeInput): LongRangeTarget
 }
 
 /**
- * 提醒内容（纯函数）：**只给事实**（目标在哪、多远、工具自己那条建议不成立），
- * 不给"该调哪个工具"。2026-10-30 用户裁定：下一步由模型决定。
- * 不该提醒时返回 null（用的就是 travelTo、目标不够远、位置读不到、有歧义）。
+ * 提醒内容（纯函数）。
+ *
+ * 2026-11-06：提醒本身就是"下一步该怎么走"的建议（"这个工具不合适/要你自己保证方向"），
+ * 按用户要求删除——回执只报工具自己的结果，不再由大脑追加上下文。现在恒为 null，
+ * 保留函数只为不打断调用方/测试的接口形状。
  */
 export function longRangeNudge(input: LongRangeNudgeInput): ReceiptHint | null {
-  if (input.toolName !== 'mineTunnel') return null; // travelTo 本来就是干这个的
-  const target = pickLongRangeTarget(input);
-  if (target == null) return null;
-  // **循环的事实**：这条是 travelTo 交过来的 ⇒ 两边都动不了（真机：来回踢皮球、0 位移）。
-  if (normalizeToolName(input.handoffFrom) === 'travelTo') {
-    return {
-      note:
-        '⚠️ **两个工具在互相踢皮球**：travelTo 把这一趟交给了 mineTunnel，' +
-        '而它上一次也没能让你前进——两边互相丢就是两边都不动。',
-    };
-  }
-  return {
-    note:
-      `⚠️ 目标是 ${Math.round(target.distance)} 格外的 ${target.name}` +
-      `（(x=${Math.round(target.x)}, z=${Math.round(target.z)})）；` +
-      'mineTunnel 要你自己保证方向对（不给 direction 就按朝向猜，朝向常常是反的）。',
-  };
+  void input;
+  return null;
 }
 
 /**

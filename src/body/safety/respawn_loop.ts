@@ -59,9 +59,10 @@ export function respawnLoopVerdict(input: {
         input.now - previous.at <= RESPAWN_LOOP_WINDOW_MS * 10 &&
         Math.hypot(last.x - pos.x, last.z - pos.z) <= RESPAWN_LOOP_RADIUS &&
         Math.hypot(previous.x - pos.x, previous.z - pos.z) <= RESPAWN_LOOP_RADIUS;
+    const lastDeath = recent.length >= 1 ? recent[recent.length - 1] : null;
+    const previousDeath = recent.length >= 2 ? recent[recent.length - 2] : null;
     const sameWindow =
-        recent.length >= 2 &&
-        recent[recent.length - 1]!.at - recent[recent.length - 2]!.at <= RESPAWN_LOOP_WINDOW_MS;
+        lastDeath != null && previousDeath != null && lastDeath.at - previousDeath.at <= RESPAWN_LOOP_WINDOW_MS;
     if (sameWindow || nearSamePoint) {
         return {
             inLoop: true,
@@ -135,16 +136,11 @@ export function formatRespawnEscapeReceipt(input: {
     const pos = `(${Math.floor(input.position.x)}, ${Math.floor(input.position.y)}, ${Math.floor(input.position.z)})`;
     if (input.action === 'give-up') {
         return (
-            `**我在重生循环里，无法自救**（原因：${input.gaveUpReason ?? '未知'}）。` +
-            `刚才 ${input.deaths} 次死亡都发生在这个点附近；我已经尽力跑到 ${pos}。` +
-            '请用 Stop 接管，或明确告诉我往哪个方向走/挖哪一格——**别在原地等下一箭**。'
+            `我在重生循环里，自己救不了自己，原因是${input.gaveUpReason ?? '未知'}。` +
+            `最近 ${input.deaths} 次死亡都发生在这个点附近，我现在在 ${pos}。`
         );
     }
-    const how = input.action === 'dig-seal' ? '直下挖了个洞并封住顶上' : '往远离攻击者的方向跑开了';
-    const threat =
-        input.nearestThreatDistance == null ? '' : `，最近敌对生物 ${Math.round(input.nearestThreatDistance)} 格`;
-    return (
-        `你刚才在 90 秒内连着死了 ${input.deaths} 次——我**没有等你下令**，直接${how}，现在在 ${pos}${threat}。` +
-        '**别马上回去**：先确认周围没怪、天黑就躲；要回去也换个方向绕过去。'
-    );
+    const how = input.action === 'dig-seal' ? '直接往下挖了个洞并把顶上封住了' : '朝远离攻击者的方向跑开了';
+    const threat = input.nearestThreatDistance == null ? '' : `，最近的敌对生物在 ${Math.round(input.nearestThreatDistance)} 格外`;
+    return `我在 90 秒里连着死了 ${input.deaths} 次，所以${how}，现在在 ${pos}${threat}。`;
 }

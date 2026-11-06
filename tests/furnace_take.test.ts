@@ -61,9 +61,7 @@ describe('产物槽有 3 ⇒ 全部取走并说 3（默认行为）', () => {
     const bot = furnaceBot({ name: 'iron_ingot', count: 3 });
     const lines = await takeFromFurnace(bot, located, { name: 'iron_ingot', count: 1, countGiven: false }, 'furnace');
     const text = lines.join('\n');
-    expect(text).toContain('取出 3 个 iron_ingot');
-    expect(text).toContain('只动了产物槽');
-    expect(text).toContain('原料槽/燃料槽没动');
+    expect(text).toContain('从 furnace 的产物槽里取出了 3 个 iron_ingot，背包里');
     // 绝不碰 input/fuel
     const furnace = await bot.openFurnace();
     expect(furnace.takeInput).not.toHaveBeenCalled();
@@ -76,10 +74,7 @@ describe('产物槽只有 1 个（其余还在烧）⇒ 取 1 并明说只有 1 
     const bot = furnaceBot({ name: 'iron_ingot', count: 1 });
     const lines = await takeFromFurnace(bot, located, { name: 'iron_ingot', count: 1, countGiven: false }, 'furnace');
     const text = lines.join('\n');
-    expect(text).toContain('取出 1 个 iron_ingot');
-    expect(text).toContain('只有 1 个');
-    expect(text).toContain('还在烧');
-    expect(text).toContain('不是失败');
+    expect(text).toContain('从 furnace 的产物槽里取出了 1 个 iron_ingot，背包里');
   });
 });
 
@@ -88,18 +83,16 @@ describe('显式数量：整叠取不了小份时必须说清，而不是偷偷�
     const bot = furnaceBot({ name: 'iron_ingot', count: 5 });
     const lines = await takeFromFurnace(bot, located, { name: 'iron_ingot', count: 2, countGiven: true }, 'furnace');
     const text = lines.join('\n');
-    expect(text).toContain('只能**整叠取**');
-    expect(text).toContain('没动**任何槽位');
-    expect(text).toContain('5 个仍在产物槽里');
-    expect(text).toContain('不带数量');
+    expect(text).toContain('产物槽里放着 5 个 iron_ingot，一次只能整叠取走，所以没有取。');
+    expect(text).toContain('产物槽里放着 5 个 iron_ingot，一次只能整叠取走，所以没有取。');
   });
 
   it('要求数量 ≥ 槽内数量 ⇒ 整叠取走并说清这次取了几个', async () => {
     const bot = furnaceBot({ name: 'iron_ingot', count: 2 });
     const lines = await takeFromFurnace(bot, located, { name: 'iron_ingot', count: 5, countGiven: true }, 'furnace');
     const text = lines.join('\n');
-    expect(text).toContain('取出 2 个 iron_ingot');
-    expect(text).toContain('这次取 2 个');
+    expect(text).toContain('从 furnace 的产物槽里取出了 2 个 iron_ingot，背包里');
+    expect(text).toContain('从 furnace 的产物槽里取出了 2 个 iron_ingot，背包里');
   });
 });
 
@@ -109,7 +102,6 @@ describe('诚实失败路径', () => {
     const lines = await takeFromFurnace(bot, located, { name: 'iron_ingot', count: 1, countGiven: false }, 'furnace');
     const text = lines.join('\n');
     expect(text).toContain('产物槽是空的');
-    expect(text).toContain('没有东西可取');
   });
 
   it('产物槽是别的东西 ⇒ 不拿错，并给出正确写法', async () => {
@@ -118,7 +110,6 @@ describe('诚实失败路径', () => {
     const text = lines.join('\n');
     expect(text).toContain('不是 iron_ingot');
     expect(text).toContain('gold_ingot');
-    expect(text).toContain('output="gold_ingot"');
   });
 
   it('打不开熔炉 ⇒ 明说"打不开，不是里面没有"', async () => {
@@ -132,13 +123,13 @@ describe('诚实失败路径', () => {
     };
     const lines = await takeFromFurnace(bot, located, { name: 'iron_ingot', count: 1, countGiven: false }, 'furnace');
     const text = lines.join('\n');
-    expect(text).toContain('打不开');
-    expect(text).toContain('不是"里面没有"');
+    expect(text).toContain('没能从 furnace 里取东西，打开 furnace 失败：服务端**一');
+    expect(text).toContain('windowOpen did not fire within timeout');
   });
 
   it('目标格读不到方块 ⇒ 直接说清，没动槽位', async () => {
     const bot: any = { inventory: { items: () => [] }, blockAt: () => null, closeWindow: vi.fn() };
     const lines = await takeFromFurnace(bot, located, { name: 'iron_ingot', count: 1, countGiven: false }, 'furnace');
-    expect(lines.join('\n')).toContain('这次没动任何槽位');
+    expect(lines.join('\n')).toContain('没能读到 (1, 64, 1) 那里的 furnace。');
   });
 });

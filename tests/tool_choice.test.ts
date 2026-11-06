@@ -24,12 +24,12 @@ const enchanted = (name: string, remaining: number) => ({
 });
 
 describe('便宜优先（先用快断的那把）', () => {
-  it('3 把铁镐含剩 4 次的 ⇒ 选剩 4 次那把，回执说清"断了再换"', () => {
+  it('3 把铁镐含剩 4 次的 ⇒ 选剩 4 次那把，只报选择的工具与耐久', () => {
     const choice = chooseToolForJob({ tools: [pick('iron_pickaxe', 250), pick('iron_pickaxe', 4), pick('iron_pickaxe', 251)] });
     expect(choice.name).toBe('iron_pickaxe');
     expect(choice.remaining).toBe(4);
     expect(choice.message).toContain('耐久 4');
-    expect(choice.message).toContain('断了再换');
+    expect(choice.message).not.toContain('断了再换');
   });
 
   it('**活再大也不因为"会断"拒绝**：同档位只剩 4 次也照选', () => {
@@ -56,12 +56,13 @@ describe('便宜优先（先用快断的那把）', () => {
   });
 });
 
-describe('没有候选时：只剩"没有工具"和"档位不够"', () => {
-  it('连档位都不够 ⇒ tier-too-low，明说这格需要什么档位', () => {
+describe('没有候选时：只报"没有可用的"与原因', () => {
+  it('连档位都不够 ⇒ tier-too-low，点名需要的档位', () => {
     const choice = chooseToolForJob({ tools: [pick('wooden_pickaxe', 60)], minimumTier: 'iron' });
     expect(choice.name).toBeNull();
     expect(choice.failure).toBe('tier-too-low');
-    expect(choice.message).toContain('档位不够');
+    expect(choice.message).toContain('没有可用的 pickaxe');
+    expect(choice.message).toContain('iron');
   });
 
   it('完全没有镐 ⇒ no-tool', () => {
@@ -70,15 +71,14 @@ describe('没有候选时：只剩"没有工具"和"档位不够"', () => {
 });
 
 describe('循环守卫：被拒绝的工具本动作内不许再选回', () => {
-  it('唯一能用的那把被排除 ⇒ 明说"在互相让位"，而不是选回同一把', () => {
+  it('唯一能用的那把被排除 ⇒ 报"被排除过"，不选回同一把', () => {
     const tools = [pick('iron_pickaxe', 250), pick('iron_pickaxe', 4)];
     const first = chooseToolForJob({ tools });
     expect(first.remaining).toBe(4);
     const second = chooseToolForJob({ tools, excluded: ['iron_pickaxe'] });
-    // 同名工具排除后没有候选：必须明说"在互相让位"，而不是选回同一把
     expect(second.name).toBeNull();
     expect(second.failure).toBe('excluded-oscillation');
-    expect(second.message).toContain('互相让位');
+    expect(second.message).toContain('排除过');
   });
 });
 
@@ -106,7 +106,7 @@ describe('附魔工具保护（用户 2026-11-01）', () => {
     expect(choice.name).toBe('stone_pickaxe');
     const only = chooseToolForJob({ tools: [enchanted('iron_pickaxe', 200)] });
     expect(only.name).toBe('iron_pickaxe');
-    expect(only.message).toContain('附魔工具');
+    expect(only.message).toContain('耐久 200');
   });
 
   it('只有到保护线的附魔工具 ⇒ reserve-protected，明说保护线、不自动用', () => {

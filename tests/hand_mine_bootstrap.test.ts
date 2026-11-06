@@ -59,12 +59,12 @@ describe('空手 bootstrap：第一步必须走得通', () => {
 
   // 回归：**下界岩要镐**（原版 harvestTools 有 6 种镐）。空手能把它挖开，
   // 但一个也不掉——所以采集意图下必须拒绝，让模型加 force 或先弄镐。
-  it('下界岩：要镐 ⇒ 空手拒绝 + force；包里有镐就放行', () => {
+  it('下界岩：要镐 ⇒ 空手拒绝；包里有镐就放行', () => {
     const netherrack = block('netherrack', 0.4, { [PICK.type]: true });
     expect(requiresHarvestTool(netherrack)).toBe(true);
     const plan = planDig(bare(), netherrack);
     expect(plan.ok).toBe(false);
-    expect(plan.note).toContain('force=true');
+    expect(plan.note).toContain('没有能挖 netherrack 的工具');
     expect(planDig(bare([PICK]), netherrack).ok).toBe(true);
   });
 
@@ -76,7 +76,7 @@ describe('空手 bootstrap：第一步必须走得通', () => {
       const b = block(name, hardness, { [PICK.type]: true });
       const plan = planDig(bare(), b);
       expect(plan.ok).toBe(false);
-      expect(plan.note).toContain('force=true');
+      expect(plan.note).toContain('没有能挖');
       // 背包里有镐就立刻放行（同一条规则的另一半）
       expect(planDig(bare([PICK]), b).ok).toBe(true);
     }

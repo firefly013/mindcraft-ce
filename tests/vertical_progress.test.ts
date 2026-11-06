@@ -1,6 +1,7 @@
 /**
- * 垂直动作也必须"边做边说"（Lead 2026-10-21 真机：digDown 88 秒、y 没动、日志无信息）。
- * 复用 progress.ts 的**同一格式**：模型只该学一种进度格式。
+ * 回执清理（CLEAN-BRIEF）：垂直/采集动作不再往回执里写"每轮进度播报"。
+ * 进度仍记录在 `recordActionProgress`（喂卡死判定），只是不写进模型看到的文本。
+ * 纯函数 `formatProgressLine` / `formatTimeoutSummary` 仍被其它工具使用，行为不变。
  */
 import { describe, expect, it } from 'vitest';
 import { readFileSync } from 'node:fs';
@@ -9,42 +10,39 @@ import { formatProgressLine, formatTimeoutSummary, PROGRESS_INTERVAL_MS } from '
 
 const skills = (): string => readFileSync(join(process.cwd(), 'src', 'body', 'library', 'skills.ts'), 'utf8');
 
-describe('digDown / mineBlock 接上统一进度', () => {
-  it('digDown：每轮 emit dig-progress{fromY,toY,done,total,elapsedMs} + 硬上限', () => {
+describe('digDown / mineBlock 不再输出逐格进度播报', () => {
+  it('digDown 不写 dig-progress 机器行、不再调用 formatTimeoutSummary', () => {
     const code = skills();
-    expect(code).toContain('dig-progress{');
-    expect(code).toContain('fromY: Math.round(digStartY * 10) / 10');
-    expect(code).toContain('toY: Math.round(nowY * 10) / 10');
-    expect(code).toContain('const digStartedAt = Date.now();');
-    expect(code).toContain('formatTimeoutSummary({ label: \'向下挖\'');
+    expect(code).not.toContain('dig-progress{');
+    expect(code).not.toContain("formatTimeoutSummary({ label: '向下挖'");
   });
 
-  it('mineBlock：emit mine-progress{block,x,y,z,elapsedMs} + 硬上限', () => {
+  it('mineBlock 不写 mine-progress 机器行', () => {
     const code = skills();
-    expect(code).toContain('mine-progress{');
-    expect(code).toContain('block: target.name');
-    expect(code).toContain('formatTimeoutSummary({ label: \'挖方块\'');
+    expect(code).not.toContain('mine-progress{');
   });
 
-  it('两个动作都用同一个 helper（不是四套文案）', () => {
+  it('进度仍然记给卡死判定（recordActionProgress 还在）', () => {
     const code = skills();
-    const progressUses = code.split('formatProgressLine(').length - 1;
-    expect(progressUses).toBeGreaterThanOrEqual(3); // collectBlock + digDown + mineBlock
-    expect(code).toContain('shouldEmitProgress(digLastProgressAt');
-    expect(code).toContain('shouldEmitProgress(mineLastProgressAt');
+    expect(code).toContain('recordActionProgress(bot, { label: \'向下挖\'');
+    expect(code).toContain('recordActionProgress(bot, { label: \'挖方块\'');
+    expect(code).toContain('recordActionProgress(bot, { label: \'挖矿\'');
   });
 
-  it('文案里不出现 卡住/stuck（到上限说的是"到时间上限"）', () => {
+  it('超时只说事实（已完成 X/Y），不再套用长文案', () => {
+    const code = skills();
+    expect(code).not.toContain('采集超时：已完成');
+    expect(code).toContain('向下挖超时了');
+  });
+
+  it('formatTimeoutSummary 纯函数行为不变（其它工具仍在用）', () => {
     const summary = formatTimeoutSummary({ label: '向下挖', done: 3, total: 10, elapsedMs: 150_000, remaining: 7 });
     expect(summary).not.toMatch(/卡住|stuck/i);
-    expect(summary).toContain('已完成 3/10');
+    expect(summary).toContain('向下挖这次到了 150 秒的时间上限，已经完成 3 个，一共 10 个，还');
     expect(summary).toContain('还剩 7');
     expect(PROGRESS_INTERVAL_MS).toBeLessThanOrEqual(10_000);
-  });
-
-  it('进度行内容有界：第 N/M、已用 T 秒（digDown 的 fromY→toY 在机器行里）', () => {
     const line = formatProgressLine({ label: '向下挖', done: 2, total: 10, elapsedMs: 17_000 });
-    expect(line).toContain('向下挖第 2/10 个');
-    expect(line).toContain('已用 17 秒');
+    expect(line).toContain('向下挖已经完成 2 个，一共 10 个，已经用了 17 秒。');
+    expect(line).toContain('向下挖已经完成 2 个，一共 10 个，已经用了 17 秒。');
   });
 });

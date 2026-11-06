@@ -201,13 +201,13 @@ export function starvationNote(difficulty: number | null | undefined): string {
   if (difficulty == null || !Number.isFinite(difficulty)) return '';
   switch (Math.round(difficulty)) {
     case 0:
-      return '和平难度不会饿：饱食度根本不掉。';
+      return '这是和平难度，饱食度不会掉。';
     case 1:
-      return '另外：**Easy 难度饿不死人**（饿到 5 点血就不再掉），但饿着不能回血、也扛不住任何一击——别慌着把存粮一次吃光。';
+      return '这是简单难度，饿到 5 点血就不会再掉。';
     case 2:
-      return '另外：Normal 难度饿不死人（饿到半颗心就停），但那点血挨一下就没了——别慌着清空存粮。';
+      return '这是普通难度，饿到半颗心就不会再掉。';
     case 3:
-      return '另外：**Hard 难度会真的饿死**（掉到 0），别拖。';
+      return '这是困难难度，会真的饿到 0。';
     default:
       return '';
   }

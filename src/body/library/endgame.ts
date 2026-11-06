@@ -875,6 +875,68 @@ export function normalizeName(raw: unknown): string {
 }
 
 /**
+ * 1.20.5+ 的药水在组件里是**数字注册表 id**，不是名字。
+ *
+ * 这里按原版 `minecraft:potion` 注册表的顺序换算（1.21.x，含风弹/织网/渗浆/寄生
+ * 四种新药水）。换版本或加模组药水时认不出的 id 会显示成 `potion#N`——如实报，
+ * 不猜成某一种。
+ */
+const POTION_ID_BY_REGISTRY: readonly string[] = Object.freeze([
+    'water', 'mundane', 'thick', 'awkward',
+    'night_vision', 'long_night_vision', 'invisibility', 'long_invisibility',
+    'leaping', 'long_leaping', 'strong_leaping',
+    'fire_resistance', 'long_fire_resistance',
+    'swiftness', 'long_swiftness', 'strong_swiftness',
+    'slowness', 'long_slowness', 'strong_slowness',
+    'turtle_master', 'long_turtle_master', 'strong_turtle_master',
+    'water_breathing', 'long_water_breathing',
+    'healing', 'strong_healing', 'harming', 'strong_harming',
+    'poison', 'long_poison', 'strong_poison',
+    'regeneration', 'long_regeneration', 'strong_regeneration',
+    'strength', 'long_strength', 'strong_strength',
+    'slow_falling', 'long_slow_falling',
+    'wind_charged', 'weaving', 'oozing', 'infested',
+]);
+
+function potionNameFromRegistryId(id: number): string {
+    return POTION_ID_BY_REGISTRY[id] ?? `potion#${id}`;
+}
+
+/** 从组件值里读药水名（字符串 id、数字注册表 id、或 `{potion|potionId}` 包一层都认）。 */
+function potionNameFromComponentValue(value: unknown): string | null {
+    if (typeof value === 'string') return normalizeName(value);
+    if (typeof value === 'number') return potionNameFromRegistryId(value);
+    if (value == null || typeof value !== 'object') return null;
+    const data = value as Record<string, unknown>;
+    if (typeof data['potion'] === 'string') return normalizeName(data['potion']);
+    const raw = data['potionId'] ?? data['potion_id'] ?? data['id'];
+    if (typeof raw === 'string') return normalizeName(raw);
+    if (typeof raw === 'number') return potionNameFromRegistryId(raw);
+    return null;
+}
+
+/** 读 `potion_contents` 组件的数据（兼容 componentMap / components 数组 / 对象）。 */
+function potionComponentDataOf(item: any): unknown {
+    const map = item?.componentMap;
+    if (map != null && typeof map.get === 'function') {
+        const component = map.get('potion_contents');
+        if (component != null) return component.data ?? component;
+    }
+    const components = item?.components;
+    if (Array.isArray(components)) {
+        for (const component of components) {
+            if (component?.type === 'potion_contents') return component.data ?? component;
+        }
+        return null;
+    }
+    if (components != null && typeof components === 'object') {
+        const component = (components as Record<string, any>).potion_contents;
+        if (component != null) return component.data ?? component;
+    }
+    return null;
+}
+
+/**
  * 从多种 NBT/组件形状里挖出药水 id。
  * 兼容：1.20.4 及以前的 `nbt.value.Potion`、1.20.5+ 的 `potion_contents` 组件、
  * 以及 prismarine-item 直接摊平的 `item.potion`。
@@ -887,16 +949,8 @@ export function potionIdOf(item: any): string | null {
     if (typeof nbtPotion === 'string') return normalizeName(nbtPotion);
     if (typeof nbtPotion?.value === 'string') return normalizeName(nbtPotion.value);
 
-    const componentPotion = item.components?.potion_contents?.potion;
-    if (typeof componentPotion === 'string') return normalizeName(componentPotion);
-
-    if (Array.isArray(item.components)) {
-        for (const component of item.components) {
-            if (component?.type === 'potion_contents' && typeof component?.data?.potion === 'string') {
-                return normalizeName(component.data.potion);
-            }
-        }
-    }
+    const fromComponent = potionNameFromComponentValue(potionComponentDataOf(item));
+    if (fromComponent != null) return fromComponent;
     return null;
 }
 
@@ -1156,30 +1210,27 @@ export function assessEndGear(input: EndGearInput): EndGearAssessment {
     const warnings: string[] = [];
 
     const canDamageDragon = beds > 0 || tnt > 0 || (bows > 0 && arrows > 0);
-    if (!canDamageDragon) fatal.push('没有任何能伤龙的手段（没床、没 TNT、也没有弓+箭）。');
-    if (blocks <= 0) fatal.push('一个方块都没有：连落点/掩体都搭不出来。');
+    if (!canDamageDragon) fatal.push('没有能伤龙的手段（床 0、TNT 0、弓+箭 0）。');
+    if (blocks <= 0) fatal.push('方块 0 个。');
 
     if (!checkOk('slow_falling')) {
-        warnings.push(
-            `没带够缓降药水（有 ${slowFallingHave}，建议 ${req.slowFalling}）：龙的翅膀会把你掀到几十格高空，` +
-                '没有缓降时摔死是末地最常见死法。'
-        );
+        warnings.push(`缓降药水 ${slowFallingHave}/${req.slowFalling}。`);
     }
-    if (!checkOk('resistance')) warnings.push('没有抗性提升药水：爆炸和撞伤都按满额吃。');
-    if (!checkOk('regeneration')) warnings.push('没有再生药水：龙息间隙回不满血，容易被连招带走。');
-    if (!checkOk('milk')) warnings.push('没有牛奶桶：中了负面效果只能等它自己过期。');
+    if (!checkOk('resistance')) warnings.push(`抗性药水 ${stock.resistance}。`);
+    if (!checkOk('regeneration')) warnings.push(`再生药水 ${stock.regeneration}。`);
+    if (!checkOk('milk')) warnings.push(`牛奶桶 ${stock.milk}。`);
     if (!checkOk('cage_kit')) {
-        warnings.push('既没有 TNT 也没有镐：笼中那 2 颗水晶拆不掉（从地面射栏杆基本无效），只要还剩一颗龙就持续回血。带 TNT 去笼顶掏，或带镐上柱子拆栏杆（必须先喝缓降）。');
+        warnings.push('TNT 0、镐 0：笼中 2 颗水晶拆不掉。');
     }
-    if (totems > 0) warnings.push(`带了 ${totems} 个不死图腾——记得拿在手上/副手，触发后立刻换第二个。`);
+    if (totems > 0) warnings.push(`不死图腾 ${totems} 个。`);
     if (input.armorPoints != null && input.armorPoints < 15) {
-        warnings.push(`护甲只有 ${input.armorPoints} 点（钻石套是 20），爆炸里很吃亏。`);
+        warnings.push(`护甲 ${input.armorPoints} 点。`);
     }
 
     const ok = fatal.length === 0;
     const message = ok
-        ? `进末地前的清单没有硬缺口（缺 ${checks.filter((c) => !c.ok).length} 项建议装备，看 warnings）。`
-        : `还差关键装备，**先别进末地**：${fatal.join('')}`;
+        ? `装备检查：硬缺口 0 项，缺 ${checks.filter((c) => !c.ok).length} 项。`
+        : `装备检查：还差 ${fatal.join('')}`;
 
     return { ok, fatal, warnings, checks, message };
 }
@@ -1220,7 +1271,7 @@ export function planRecovery(input: RecoveryInput): RecoveryPlan {
     const dimension = normalizeName(input.deathDimension);
 
     if (input.fellOutOfWorld === true) {
-        steps.push('死因是掉进虚空：东西跟着你一起没了，别去捡，直接按下面的步骤重新备战。');
+        steps.push('死因：掉进虚空（Y<-60），掉落物当场消失。');
     }
 
     const secondsLeft = input.chunkLoadedSinceDeath === true ? Math.max(0, ITEM_DESPAWN_SECONDS - input.secondsSinceDeath) : null;
@@ -1232,32 +1283,32 @@ export function planRecovery(input: RecoveryInput): RecoveryPlan {
     else itemOutlook = 'high';
 
     if (itemOutlook === 'lost') {
-        steps.push('掉落物已经超时消失（或被虚空吞了）：优先去仓库补一套装备，再去末地。');
+        steps.push('掉落物已超时消失。');
     } else {
         steps.push(`尸体在 ${dimension === 'the_end' ? '末地' : dimension} (${Math.round(input.deathPosition.x)},${Math.round(input.deathPosition.y)},${Math.round(input.deathPosition.z)})，掉落物还有 ${secondsLeft == null ? '不确定（区块没加载就不倒计时，基本等于不会消失）' : `${secondsLeft}s`}。`);
         if (dimension === 'the_end') {
             steps.push(
                 input.overworldPortal != null
-                    ? `顺着记下来的主世界传送门 (${Math.round(input.overworldPortal.x)},${Math.round(input.overworldPortal.y)},${Math.round(input.overworldPortal.z)}) 再进末地——末地传送门只要激活过就一直亮着。`
-                    : '回主世界要塞的末地传送门（激活后一直亮着）再进末地；找不到就用末影之眼重找要塞。'
+                    ? `主世界传送门 (${Math.round(input.overworldPortal.x)},${Math.round(input.overworldPortal.y)},${Math.round(input.overworldPortal.z)})，激活过就一直亮着。`
+                    : '主世界要塞的末地传送门（激活后一直亮着）。'
             );
-            steps.push('进末地先别急着打龙：龙还在、水晶可能掉了几颗，但**别去捡它头顶上的东西**，先确认附近没有龙再捡。');
+            steps.push('进末地时龙还在、水晶可能掉了；龙头顶下方的掉落物在龙低头时捡不到。');
         } else {
-            steps.push('原地走过去捡；路上别打没必要的架。');
+            steps.push('掉落物在原地。');
         }
-        steps.push('捡完再决定要不要继续打——如果床/方块/药水掉了，先回去补，不要硬打。');
+        steps.push('捡回的物品清单以背包实测为准。');
     }
 
     if (input.respawnPoint == null) {
-        steps.push('**没有设重生点**：这次重生会回到世界出生点，路会很长——下次进末地前先在传送门附近放张床睡一觉。');
+        steps.push('重生点未设置：重生落在世界出生点。');
     } else {
         steps.push(`重生点在 (${Math.round(input.respawnPoint.x)},${Math.round(input.respawnPoint.y)},${Math.round(input.respawnPoint.z)})，从这里出发。`);
     }
 
     const message =
         itemOutlook === 'lost'
-            ? '掉落物不在了，按"重新备战"走。'
-            : `掉落物${itemOutlook === 'high' ? '基本还在' : '快消失了'}，${secondsLeft == null ? '先别慌，区块没加载不倒计时' : `剩 ${secondsLeft}s，抓紧`}。`;
+            ? '掉落物已消失。'
+            : `掉落物${itemOutlook === 'high' ? '还在' : '快消失'}，${secondsLeft == null ? '区块未加载，未计时' : `剩 ${secondsLeft}s`}。`;
 
     return { itemOutlook, secondsLeft, steps, message };
 }
@@ -1883,14 +1934,14 @@ export function nextEndgameStep(state: EndgameState): EndgameStepAdvice {
     };
 }
 
-/** 把状态机建议 + 装备检查拼成一段给模型看的报告。 */
+/** 把状态机阶段 + 装备检查拼成一段给模型看的报告（只陈述事实）。 */
 export function formatEndgameReport(assessment: EndGearAssessment, advice: EndgameStepAdvice): string {
-    const lines = [`【末地通关·当前阶段】${advice.phase}`, advice.action, `——原因：${advice.reason}`];
+    const lines = [`【末地通关·当前阶段】${advice.phase}`];
     lines.push(`【装备】${assessment.message}`);
-    for (const warning of assessment.warnings) lines.push(`⚠ ${warning}`);
+    for (const warning of assessment.warnings) lines.push(`- ${warning}`);
     const missing = assessment.checks.filter((c) => !c.ok);
     if (missing.length > 0) {
-        lines.push(`缺口：${missing.map((c) => `${c.label} ${c.have}/${c.need}`).join('；')}`);
+        lines.push(`缺口有 ${missing.map((c) => `${c.label} 已有 ${c.have} 个，需要 ${c.need} 个`).join('，')}。`);
     }
     return lines.join('\n');
 }
@@ -1925,104 +1976,28 @@ export function findNegativeEffect(effects: EffectInfo[] | undefined): string | 
     return null;
 }
 
-export interface DrinkDecisionInput {
-    effects?: EffectInfo[];
-    stock: PotionStock;
-    /** 当前血量 0~20；读不到给 null。 */
-    health?: number | null;
-    /** 在末地：摔落风险和龙息风险都拉满。 */
-    inEnd?: boolean;
-    /** 现在在空中/正在下坠。 */
-    airborne?: boolean;
-    /** 缓降剩多少秒算"快没了"，默认 30。 */
-    refreshBelowSeconds?: number;
+/** 按**完整药水 id** 在背包里找一瓶能喝的药水（喷溅/滞留药水不收）。 */
+export function findPotionById(items: any[], potionId: unknown): any | null {
+    if (!Array.isArray(items)) return null;
+    const wanted = normalizeName(potionId);
+    if (wanted === '') return null;
+    for (const item of items) {
+        if (normalizeName(item?.name) !== 'potion') continue;
+        if (normalizeName(potionIdOf(item)) === wanted) return item;
+    }
+    return null;
 }
 
-export interface DrinkDecision {
-    /** 该喝哪一类；null = 现在不需要喝。 */
-    kind: PotionKind | 'milk' | null;
-    reason: string;
-    /** 逐项诊断（没喝时告诉模型背包里都有什么）。 */
-    considered: string[];
-}
-
-/**
- * 末地喝药的优先级。做成纯函数是为了能离线测：**决策和"怎么喝"是两件事**。
- *
- * 为什么需要它：所有药水在背包里都叫 `potion`，现有 `consume(item_name)` 按物品名找，
- * 模型没法表达"喝缓降"。这里替模型把顺序定死（并写在工具描述里，不是隐藏规则）：
- *
- * 1. **缓降**：在末地/空中，且没 Buff 或剩余 < 30s → 立刻补。摔死是末地头号死法。
- * 2. **再生 / 治疗**：血量 ≤ 10（半血）时先回血。
- * 3. **抗性提升**：在末地且没有抗性 Buff → 顶一个（爆炸和撞击都能减）。
- * 4. **牛奶（只在中毒/虚弱这类负面效果时）**：且身上**没有**缓降/再生/抗性时才喝
- *    —— 牛奶清的是全部效果，为解一个中毒把刚喝的缓降清掉是拿命换。
- * 5. 都不满足 → 不喝，回执里列出背包还有哪些药。
- */
-export function choosePotionToDrink(input: DrinkDecisionInput): DrinkDecision {
-    const stock = input.stock;
-    const refresh = input.refreshBelowSeconds ?? 30;
-    const considered: string[] = [];
-    const fallRisk = input.inEnd === true || input.airborne === true;
-    const slowFallingLeft = activeEffectSeconds(input.effects, 'slow_falling');
-
-    if (stock.slow_falling > 0 && fallRisk && (slowFallingLeft == null || slowFallingLeft < refresh)) {
-        return {
-            kind: 'slow_falling',
-            reason:
-                slowFallingLeft == null
-                    ? `没有缓降 Buff，而${input.airborne === true ? '你现在在空中' : '你在末地'}——龙的翅膀能把你掀到几十格高空，先补缓降。`
-                    : `缓降只剩 ${slowFallingLeft}s（少于 ${refresh}s），被掀飞前先续上。`,
-            considered,
-        };
+/** 背包里可饮用药水的清单（按**完整药水 id** 计数），没有就是空串。 */
+export function potionInventorySummary(items: any[]): string {
+    if (!Array.isArray(items)) return '';
+    const counts = new Map<string, number>();
+    for (const item of items) {
+        if (normalizeName(item?.name) !== 'potion') continue;
+        const id = normalizeName(potionIdOf(item));
+        const label = id === '' ? 'unknown' : id;
+        const n = typeof item?.count === 'number' && Number.isFinite(item.count) ? Math.max(1, item.count) : 1;
+        counts.set(label, (counts.get(label) ?? 0) + n);
     }
-    considered.push(`缓降：库存 ${stock.slow_falling} 瓶，Buff ${slowFallingLeft == null ? '无' : `${slowFallingLeft}s`}`);
-
-    const health = input.health ?? null;
-    if (health != null && health <= 10) {
-        if (stock.regeneration > 0) {
-            return { kind: 'regeneration', reason: `血量只剩 ${health}/20：先喝再生，把血线拉回来。`, considered };
-        }
-        if (stock.healing > 0) {
-            return { kind: 'healing', reason: `血量只剩 ${health}/20：没有再生，先用治疗顶一口。`, considered };
-        }
-        considered.push('再生/治疗：低血但库存为 0');
-    } else {
-        considered.push(`再生/治疗：血量 ${health == null ? '读不到' : `${health}/20`}，还没到半血`);
-    }
-
-    if (input.inEnd === true && !hasActiveEffect(input.effects, 'resistance') && stock.resistance > 0) {
-        return { kind: 'resistance', reason: '在末地且没有抗性提升：先顶一瓶，爆炸和撞击都按这个减。', considered };
-    }
-    considered.push(`抗性：库存 ${stock.resistance} 瓶，Buff ${hasActiveEffect(input.effects, 'resistance') ? '有' : '无'}`);
-
-    // 牛奶：**只在中了负面效果时**喝。而且身上有好 Buff（缓降/再生/抗性）时不喝——
-    // 牛奶清的是"全部"效果，为解一个中毒把刚喝的缓降一起清掉，等于把命交给下坠。
-    const negative = findNegativeEffect(input.effects);
-    if (negative != null) {
-        const sacrificial = ['slow_falling', 'regeneration', 'resistance'].filter((kind) =>
-            hasActiveEffect(input.effects, kind)
-        );
-        if (stock.milk > 0 && sacrificial.length === 0) {
-            return {
-                kind: 'milk',
-                reason: `身上有 ${negative}：喝牛奶立刻清掉全部负面效果（现在没有会被一起清掉的好 Buff）。牛奶不能灭火。`,
-                considered,
-            };
-        }
-        considered.push(
-            stock.milk > 0
-                ? `中了 ${negative}，但身上还有 ${sacrificial.join('/')}：喝奶会一起清掉，先不喝（等它们过期或确认值得换）。`
-                : `中了 ${negative}，但没有牛奶桶。`,
-        );
-    }
-
-    const stockText = POTION_KINDS.filter((kind) => kind !== 'other' && stock[kind] > 0)
-        .map((kind) => `${kind}×${stock[kind]}`)
-        .join('、');
-    return {
-        kind: null,
-        reason: `按末地优先级现在不需要喝药。背包里的药水：${stockText === '' ? '（一瓶都没有）' : stockText}。`,
-        considered,
-    };
+    return [...counts.entries()].map(([name, n]) => `${name}×${n}`).join('、');
 }

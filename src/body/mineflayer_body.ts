@@ -713,8 +713,11 @@ function summarizeInboundWindowPacket(name: string, data: unknown): string {
  * 只有明确失败才不放宽保命——判错方向要偏保守（当成失败 = 保命继续待命）。
  */
 export function toolResultLooksFailed(text: unknown): boolean {
-    const first = String(text ?? '').trim().split('\n')[0] ?? '';
-    return /^(Tool\s+\S+\s+failed:|Unknown tool:|Unknown tool\b)/i.test(first);
+    const trimmed = String(text ?? '').trim();
+    if (trimmed === '') return false;
+    const first = trimmed.split('\n')[0] ?? '';
+    if (/执行失败了|Tool\s+\S+\s+failed:|Unknown tool\b/i.test(first)) return true;
+    return /^(没做到|被中断|这次动作超时了|不允许|没有进入)/i.test(first);
 }
 
 /** 低血静止诊断：只在 lifecycle 里每 30 秒一行，**不产生模型事件、不是门、不改行为**。 */
@@ -1898,7 +1901,7 @@ export class MineflayerBody {
                 } catch {
                     // 日志失败不影响拒绝。
                 }
-                return { text: verdict.text ?? `**拒绝进${tool === 'enterEnd' ? '末地' : '下界'}**：准备不足。` };
+                return { text: verdict.text ?? `没有进入${tool === 'enterEnd' ? '末地' : '下界'}，因为准备不足。` };
             }
             return { text: null, warning: verdict.warning };
         } catch {
@@ -1996,7 +1999,7 @@ export class MineflayerBody {
                 previousAction: this.lastActionName || null,
                 currentAction,
                 lost: delta.lost.slice(0, 8),
-                detail: `${reason}背包少了 ${delta.lost.join('、')}——先 stats 核对，别在下一步重复采集`,
+                detail: `${reason}背包少了 ${delta.lost.join('、')}。`,
             });
         } catch {
             // 取证失败不报噪音。
@@ -2063,14 +2066,13 @@ export class MineflayerBody {
             } catch {
                 // 日志失败不影响建议。
             }
-            void this.writeAdvice(verdict.advice);
         } catch {
             // 检测自身出错绝不影响身体。
         }
     }
 
-    /** 把一段建议写进 bot.output（模型下一轮就能看到）；不拦任何工具。 */
-    private async writeAdvice(text: string): Promise<void> {
+    /** 把一段状态写进 bot.output（模型下一轮就能看到）；不拦任何工具。 */
+    private writeAdvice(text: string): void {
         try {
             const bot = this.bot as { output?: unknown } | null;
             if (bot == null) return;
@@ -2213,8 +2215,8 @@ export class MineflayerBody {
             if (info.final == null) {
                 const detail =
                     `escape 第 ${info.step} 步 / 已用 ${Math.round(info.ms / 1000)} 秒 / 血 ${Math.round(info.health * 10) / 10} / ` +
-                    (info.safeDestination ? '正在朝验证过的落点撤' : '**还没有验证过安全的落点**（不会盲目横移）') +
-                    '。急的话先 Stop，身体立刻归你。';
+                    (info.safeDestination ? '朝已验证落点撤' : '没有验证过的落点') +
+                    '。';
                 this.notify('reflex.done', KIND.WORLD, LEVEL.STATE, {
                     reflex: this.currentReflexName ?? 'escape',
                     outcome: 'in_progress',
@@ -2224,16 +2226,10 @@ export class MineflayerBody {
                 return;
             }
             const reason = info.final;
-            const next =
-                reason === 'no-safe-destination-and-losing-health'
-                    ? '下一步：`stop()` 确认身体在你手上，然后**挖洞自封**（mineBlock 脚下/侧身一格）或用 `placeHere` 把入口封住；别继续朝开阔地跑。'
-                    : reason.startsWith('yield:empty-after-death')
-                      ? '下一步：你已经死过且身上没东西了，**不要再重试同一条逃生链**；先 respawn 后收装备、再决定去哪。'
-                      : '下一步：`stop()` 接管身体；要么挖洞自封，要么用 placeHere 放方块挡出一条路，再决定往哪跑。';
             this.notify('reflex.done', KIND.WORLD, LEVEL.STATE, {
                 reflex: this.currentReflexName ?? 'escape',
                 outcome: 'in_progress',
-                detail: `**escape 放弃并交还身体**（${Math.round(info.ms / 1000)} 秒 / ${info.step} 步，原因：${reason}）。` + next,
+                detail: `escape 放弃了，把身体交还回来，用了 ${Math.round(info.ms / 1000)} 秒走了 ${info.step} 步，原因是 ${reason}。`,
                 ms: info.ms,
             });
         } catch {
@@ -2710,8 +2706,7 @@ export class MineflayerBody {
                 reflex: name ?? 'reflex',
                 outcome: 'aborted',
                 detail:
-                    `${reason}：保命处理没有在 ${Math.round(REFLEX_STOP_GRACE_MS / 1000)} 秒内收手，` +
-                    '**已把身体通道还给模型**（后台那条会自己收尾）；危险还在的话会重新接管。',
+                    `${reason}：保命处理超过 ${Math.round(REFLEX_STOP_GRACE_MS / 1000)} 秒未收手，身体已交还。`,
                 ms: 0,
             },
             name != null ? { completes: name } : {},
@@ -2978,9 +2973,7 @@ export class MineflayerBody {
                         event: 'cover-sealed',
                         threat: plan.threatClass,
                         distance: plan.distance,
-                        detail:
-                            '掩体反射：周围没有可用的墙，**直接挖进地下 2 格并封顶**（已回读验证封住了）。' +
-                            '远程威胁的箭打不到封闭空间里的人。',
+                        detail: '掩体反射挖进地下 2 格并封顶，已经回读验证。',
                     });
                     return;
                 }
@@ -3184,7 +3177,7 @@ export class MineflayerBody {
             'combat.engage',
             KIND.WORLD,
             LEVEL.EMERGENCY,
-            { detail: `${decision}｜目标：${targetName}` },
+            { detail: `${decision}，目标是 ${targetName}` },
             { reflex: 'combat' },
         );
         let abortedByReassess = false;
@@ -3257,7 +3250,7 @@ export class MineflayerBody {
                     healthBefore,
                     healthAfter,
                     ms: elapsed,
-                    detail: abortedByReassess ? '按最新战力改判：不再打下去' : undefined,
+                    detail: abortedByReassess ? '按最新战力改判，不再打下去。' : undefined,
                 }),
                 ms: elapsed,
             },
@@ -3607,8 +3600,8 @@ export class MineflayerBody {
                         nearestHostile: Number.isFinite(nearest) ? Math.round(nearest) : null,
                         health,
                         detail: sealed
-                            ? '死后自救：附近还有敌对、血也低 ⇒ **直接挖进地下 2 格并封顶**（已回读验证封住了）。先在这里恢复，别马上回空地。'
-                            : '死后自救失败：**没能挖进地下并封顶**（脚下挖不动、或背包里没有能放的方块）。下一步：往远离怪的方向走，捡到方块后再封。',
+                            ? '死后自救：挖进地下 2 格并封顶（已回读验证）。'
+                            : '死后自救失败：没能挖进地下并封顶。',
                     });
                 })
                 .catch(() => {})
@@ -4001,9 +3994,7 @@ export class MineflayerBody {
                 this.notify('reflex.done', KIND.WORLD, LEVEL.STATE, {
                     reflex,
                     outcome: 'muted',
-                    detail:
-                        `保命程序已被你关闭（${safeguards.describe(now)}），这次**不介入**——身体是你的，` +
-                        '自己想办法脱险；要恢复保命就用 disableSafeguards(restore=true) 或 restoreAllSafety。',
+                    detail: `保命程序已被关闭（${safeguards.describe(now)}），这次不介入。`,
                     ms: 0,
                 });
             }
@@ -4046,8 +4037,7 @@ export class MineflayerBody {
                     reflex,
                     outcome: 'deferred',
                     detail:
-                        `保命还在冷却期（还有 ${Math.max(1, Math.round((this.survivalCooldownUntil - now) / 1000))} 秒），` +
-                        '这段时间身体归你（吃药/搭柱/挖开/Stop 都行）；危险还在的话冷却结束会重新接管。',
+                        `保命冷却中，还剩 ${Math.max(1, Math.round((this.survivalCooldownUntil - now) / 1000))} 秒。`,
                     ms: 0,
                 });
                 // **事件本身也要进上下文**：早退路径以前连推都不推，模型根本
@@ -4073,9 +4063,7 @@ export class MineflayerBody {
                 reflex,
                 outcome: 'yielded',
                 detail:
-                    `保命连续占用 ${Math.round(SURVIVAL_BUDGET_MS / 1000)} 秒仍未脱险，` +
-                    `**先交还身体 ${Math.round(SURVIVAL_COOLDOWN_MS / 1000)} 秒让你自救**` +
-                    '（吃药/搭柱/挖开/Stop 都行）；危险还在的话，冷却结束后会重新接管。' +
+                    `保命连续占用 ${Math.round(SURVIVAL_BUDGET_MS / 1000)} 秒仍未脱险，交还身体 ${Math.round(SURVIVAL_COOLDOWN_MS / 1000)} 秒。` +
                     (released > 0 ? '' : '（当前没有正在跑的保命处理。）'),
                 ms: 0,
             });
@@ -4107,9 +4095,7 @@ export class MineflayerBody {
                 this.notify('reflex.done', KIND.WORLD, LEVEL.STATE, {
                     reflex,
                     outcome: 'in_progress',
-                    detail:
-                        `${reflex} 保命处理正在进行中（已 ${Math.round(ms / 1000)} 秒），**不重复触发**；` +
-                        '它跑完会自己报结果。急的话先 Stop（会立刻把身体给你）。',
+                    detail: `${reflex} 保命处理进行中，已 ${Math.round(ms / 1000)} 秒。`,
                     ms,
                 });
             }
@@ -4125,9 +4111,7 @@ export class MineflayerBody {
             this.notify('reflex.done', KIND.WORLD, LEVEL.STATE, {
                 reflex,
                 outcome: 'deferred',
-                detail:
-                    '你有一个动作请求正在处理，这次保命**不抢身体**（先让你的动作跑）；' +
-                    '危险还在的话，下一条事件会再报一次。',
+                detail: '动作请求在途，这次保命不抢身体。',
                 ms: 0,
             });
             this.notify(type, KIND.WORLD, LEVEL.STATE, payload, { reflex });
@@ -4283,9 +4267,7 @@ export class MineflayerBody {
                         this.cancelRunningRescue();
                         outcome = 'muted';
                         detail =
-                            '你把保命程序关掉了：**正在跑的 ' + next.reflex + ' 立刻让位**，身体归你；' +
-                            `接下来 ${Math.round(SURVIVAL_COOLDOWN_MS / 1000)} 秒内保命不会介入` +
-                            '（要恢复就用 disableSafeguards(restore=true) 或 restoreAllSafety）。';
+                            `保命程序关闭：正在跑的 ${next.reflex} 已让位，接下来 ${Math.round(SURVIVAL_COOLDOWN_MS / 1000)} 秒不介入。`;
                     } else if (raced.kind === 'timeout') {
                         // 让它收手（skills 认 interrupt_code），并把通道还给模型。
                         this.reflexAbortRequested = true;
@@ -4299,10 +4281,7 @@ export class MineflayerBody {
                         this.cancelRunningRescue();
                         outcome = 'aborted';
                         detail =
-                            `保命处理跑了 ${Math.round(REFLEX_MAX_MS / 1000)} 秒还没脱险，` +
-                            '已中断并**交还身体通道**（模型可以吃药/逃跑/换方向自救）；' +
-                            '**如果危险还在，保命会在下一条受击事件上重新接管**——' +
-                            '这一段只是先把身体还给你，不是把保命关掉。';
+                            `保命处理跑了 ${Math.round(REFLEX_MAX_MS / 1000)} 秒未脱险，已中断并交还身体。`;
                     } else if (raced.kind === 'done') {
                         const result = raced.r;
                         if (result.reason === 'died') {
@@ -4573,7 +4552,7 @@ export class MineflayerBody {
             // 死着不该继续干活。真机日志里 pia 12:32:38 被骷髅射死，
             // 12:32:39 还在 claim `moveAway` 躲怪——因为死亡只停了身体，
             // 没中断模型那一轮推理。
-            this.requestInterrupt('模型身体死亡：正在跑的动作随之中止（重生/掉落按存档规则处理，用 stats 核对背包）');
+                this.requestInterrupt('模型身体死亡：正在跑的动作随之中止');
             // 中断推理是大脑的事：推一条 L4（PREEMPT），大脑收到会 abort
             // 当前请求。主线在这里还额外直接调了一次 `runtime.abort()`，
             // 那是同进程时代的"belt and braces"，跨进程后由 L4 承担。
@@ -4611,12 +4590,12 @@ export class MineflayerBody {
                     deathKinds === 0
                         ? inventoryWasSynced
                             ? ''
-                            : '（背包读数**未同步**，无法给出清单——这次**不要**据此判断"身上没东西"）'
+                            : '（背包读数未同步，清单不可用）'
                         : deathList.join('、') +
                           `（共 ${deathKinds} 种 ${deathTotal} 件` +
                           (inventoryWasSynced
-                              ? '；来自死亡瞬间的完整背包快照）'
-                              : '；**注意：这份清单读自未同步的背包，可能不完整**）');
+                              ? '；死亡瞬间快照）'
+                              : '；背包读数未同步，可能不完整）');
                 const text = MESSAGES.death(death_pos_text || 'unknown', dimention, message, carried);
                 this.lastDeathAt = Date.now();
                 this.recordRespawnDeath(death_pos ?? null);
@@ -4881,8 +4860,8 @@ export class MineflayerBody {
                             reflex: 'placement',
                             outcome: replaced ? 'ok' : 'failed',
                             detail: replaced
-                                ? `刚放下的 ${expectedItem} 被自己捡回了背包，**已自动放回原位**。`
-                                : `刚放下的 ${expectedItem} 被自己捡回了背包，**放回失败**：那一格现在可能还是空的，施工前先用 stats blocks 核对。`,
+                                ? `刚放下的 ${expectedItem} 被自己捡回，已放回原位。`
+                                : `刚放下的 ${expectedItem} 被自己捡回，放回失败。`,
                         });
                     } catch {
                         // 放回失败不阻断拾取账目。
@@ -4914,8 +4893,8 @@ export class MineflayerBody {
                 const text = formatInventoryGains(gained);
                 const hint =
                     nearbyPlayers.length > 0
-                        ? `自动拾取：捡到了 ${text}。附近有玩家 ${nearbyPlayers.join('、')}，这件可能是队友掉落；需要的话和对方确认。`
-                        : `自动拾取：捡到了 ${text}。如果附近有队友掉落，可能被自动拾取捡走；需要时和队友确认。`;
+                        ? `自动拾取：捡到了 ${text}。附近有玩家 ${nearbyPlayers.join('、')}。`
+                        : `自动拾取：捡到了 ${text}。`;
                 this.notify('inventory.collected', KIND.WORLD, LEVEL.WAKE, {
                     item: text,
                     gained,
@@ -5191,9 +5170,9 @@ export class MineflayerBody {
                 `dist=${metres}m, willAttempt=${reasons.length === 0}, blockedBy=[${reasons.join('、')}]}`;
             void this.writeAdvice(
                 `${marker}\n    【掉落物出现】Item id=${target.id ?? '?'} @(${Number(target.x).toFixed(1)},${Number(target.y).toFixed(1)},${Number(target.z).toFixed(1)})，` +
-                    `距离 ${metres} 格。自动拾取：${reasons.length === 0 ? '**会去踩**' : `**暂时不会去**（${reasons.join('、')}）`}` +
-                    (measurement.length > 0 ? `（注意：${measurement.join('；')}——这只影响读数，不阻止去捡）` : '') +
-                    '。这三句是事实：**实体已经存在**、距离多少、去不去捡——它**不代表**你捡到了，也不代表没有掉落。',
+                    `距离 ${metres} 格。自动拾取：${reasons.length === 0 ? '会去踩' : `暂时不会去（${reasons.join('、')}）`}` +
+                    (measurement.length > 0 ? `（读数：${measurement.join('；')}）` : '') +
+                    '。',
             );
         } catch {
             // 诊断失败不影响拾取。
@@ -5225,7 +5204,7 @@ export class MineflayerBody {
         // 而战利品**只会**在这一瞬间被捡到（Lead 2026-10-19：abort 窗口里掉的战利品
         // 之前永远没人捡——`blockedBy=["已被要求中止","模型动作占用身体"]` 就是这么来的）。
         if (this.reflexRunning === true || (this.reflexQueue?.length ?? 0) > 0) return null;
-        let target: PickupTarget | null = null;
+        let target: PickupTarget | null;
         try {
             target = nearestDropWithin(this.bot, 4);
         } catch {
@@ -5265,7 +5244,7 @@ export class MineflayerBody {
         } catch {
             // 取证失败不影响清扫。
         }
-        let collected = false;
+        let collected: boolean;
         try {
             // 有界：最多 1.5 秒（超时就走人，不拖住回执）。
             const walk = this.walkToPickup(target);
@@ -5299,8 +5278,8 @@ export class MineflayerBody {
         }
         const delta = this.describeInventoryDelta(before, this.readInventoryCounts(), target.name);
         return collected
-            ? `\n    【收尾清扫】动作结束后去捡了 ${target.name}（${ms}ms）：**捡到了**${delta.changed ? `（背包实测：${delta.note}）` : ''}。`
-            : `\n    【收尾清扫】动作结束后试着去捡 ${target.name}（${ms}ms），**这次没进包**（东西可能还在原地或已被别的东西挡住）。`;
+            ? `\n    【收尾清扫】动作结束后捡了 ${target.name}（${ms}ms）：捡到了${delta.changed ? `（背包实测：${delta.note}）` : ''}。`
+            : `\n    【收尾清扫】动作结束后试着捡 ${target.name}（${ms}ms），这次没进包。`;
     }
 
     private async walkToPickup(target: PickupTarget): Promise<boolean> {
@@ -5433,8 +5412,7 @@ export class MineflayerBody {
                         reflex: 'pickup',
                         outcome: 'skipped',
                         detail:
-                            `附近有敌对生物 ${threat.name ?? '?'}（${Math.round(threat.distance ?? 0)} 格），` +
-                            '这次不去捡掉落物——先保命。',
+                            `附近有敌对生物 ${threat.name ?? '?'}（${Math.round(threat.distance ?? 0)} 格），这次不捡。`,
                         ms: 0,
                         failures: this.pickupFailures,
                         backoffMs: 0,
@@ -5574,19 +5552,13 @@ export class MineflayerBody {
                             : preemptReason != null
                                 ? preemptReason
                                 : preempted
-                                    ? '拾取被模型动作抢占，已释放身体通道（模型优先，本次不额外退避）。'
+                                    ? '拾取被模型动作抢占，已释放身体通道。'
                                     : gaveUp
-                                        ? `连续 ${PICKUP_GIVE_UP_ATTEMPTS} 次没走到掉落物，**放弃这次拾取**` +
-                                            `（${Math.round(backoffMs / 1000)} 秒内不再自动捡；地上那件先放着，` +
-                                            '要就拿它当目标自己走过去踩）。'
-                                        : '没走到 ' + target.name + ' 的位置（超时）；' +
-                                            '已释放身体通道，退避 ' + Math.round(backoffMs / 1000) + ' 秒后再试。') +
-                        // **接上"走路期间背包发生了什么"**：没变化 ⇒ "没捡到"不等于"捡了又丢"；
-                        // 有变化 ⇒ 点名变化（含"原有物品减少"这种数据丢失形态），别让模型猜。
+                                        ? `连续 ${PICKUP_GIVE_UP_ATTEMPTS} 次没走到掉落物，放弃这次拾取（${Math.round(backoffMs / 1000)} 秒内不再自动捡）。`
+                                        : '没走到 ' + target.name + '（超时），退避 ' + Math.round(backoffMs / 1000) + ' 秒后再试。') +
                         (walkDiff.changed
                             ? `；走路期间背包变化：${walkDiff.note}`
-                            : '；走路期间背包**没有变化**（没捡到 ≠ 捡了又丢）。') +
-                        // **几何证据**：没走到时把轨迹摘要也带上（有没有真靠近、bot 动没动）。
+                            : '；走路期间背包没有变化。') +
                         (!arrived && pickupTrace.samples > 0 ? `；拾取轨迹：${pickupTrace.note}` : ''),
                     ms: Date.now() - started,
                     failures: arrived ? 0 : this.pickupFailures,
@@ -5801,12 +5773,12 @@ export class MineflayerBody {
                                 placeAgainst: (() => {
                                     try {
                                         const base = { x: Math.floor(p.x), y: Math.floor(p.y), z: Math.floor(p.z) };
-                                        for (const d of [[0, -1, 0], [0, 0, -1], [0, 0, 1], [-1, 0, 0], [1, 0, 0], [0, 1, 0]]) {
-                                            const b = bot.blockAt(new Vec3(base.x + d[0]!, base.y + d[1]!, base.z + d[2]!));
+                                        for (const [dx, dy, dz] of [[0, -1, 0], [0, 0, -1], [0, 0, 1], [-1, 0, 0], [1, 0, 0], [0, 1, 0]] as const) {
+                                            const b = bot.blockAt(new Vec3(base.x + dx, base.y + dy, base.z + dz));
                                             const name = String(b?.name ?? '');
                                             if (name === '' || name === 'air' || name === 'cave_air' || name === 'void_air') continue;
                                             if (name === 'lava' || name === 'flowing_lava' || name === 'water' || name === 'flowing_water') continue;
-                                            return { x: base.x + d[0]!, y: base.y + d[1]!, z: base.z + d[2]! };
+                                            return { x: base.x + dx, y: base.y + dy, z: base.z + dz };
                                         }
                                         return null;
                                     } catch {
@@ -5866,7 +5838,7 @@ export class MineflayerBody {
                                     this.notify('reflex.done', KIND.WORLD, LEVEL.STATE, {
                                         reflex: this.currentReflexName,
                                         outcome: 'in_progress',
-                                        detail: '逃生**下坠恢复（脚下垫方块）**：' + fallPlan.text,
+                                        detail: '逃生下坠恢复用了垫方块，' + fallPlan.text,
                                         ms: this.currentReflexStartedAt > 0 ? Date.now() - this.currentReflexStartedAt : 0,
                                     });
                                 }
@@ -5887,9 +5859,7 @@ export class MineflayerBody {
                                     this.notify('reflex.done', KIND.WORLD, LEVEL.STATE, {
                                         reflex: this.currentReflexName,
                                         outcome: 'in_progress',
-                                        detail:
-                                            '逃生**下坠恢复（横移）**：' + fallPlan.text +
-                                            ' 目标是那里而不是继续朝反方向跑；跑到就立刻站住。',
+                                        detail: '逃生下坠恢复用了横移，' + fallPlan.text,
                                         ms: this.currentReflexStartedAt > 0 ? Date.now() - this.currentReflexStartedAt : 0,
                                     });
                                 }
@@ -5916,7 +5886,7 @@ export class MineflayerBody {
                                     this.notify('reflex.done', KIND.WORLD, LEVEL.STATE, {
                                         reflex: this.currentReflexName,
                                         outcome: 'in_progress',
-                                        detail: '逃生**下坠恢复（水桶落地）**：' + fallPlan.text,
+                                        detail: '逃生下坠恢复用了水桶，' + fallPlan.text,
                                         ms: this.currentReflexStartedAt > 0 ? Date.now() - this.currentReflexStartedAt : 0,
                                     });
                                 }
@@ -5938,8 +5908,8 @@ export class MineflayerBody {
                                     reflex: this.currentReflexName,
                                     outcome: 'in_progress',
                                     detail:
-                                        '逃生**刹车**：' + fallPlan.text +
-                                        ` 请立刻用方块垫脚或往回走上实地。（第 ${this.fallBrakeNotices} 次刹车，已持续 ${Math.round((this.currentReflexStartedAt > 0 ? Date.now() - this.currentReflexStartedAt : 0) / 1000)} 秒）`,
+                                        '逃生刹车：' + fallPlan.text +
+                                        `（第 ${this.fallBrakeNotices} 次，已持续 ${Math.round((this.currentReflexStartedAt > 0 ? Date.now() - this.currentReflexStartedAt : 0) / 1000)} 秒）`,
                                     ms: this.currentReflexStartedAt > 0 ? Date.now() - this.currentReflexStartedAt : 0,
                                 });
                             }
@@ -5958,9 +5928,7 @@ export class MineflayerBody {
                                 this.notify('reflex.done', KIND.WORLD, LEVEL.STATE, {
                                     reflex: this.currentReflexName,
                                     outcome: 'in_progress',
-                                    detail:
-                                        `逃生**原地不动**：找不到能站住的落点（${safe.reason}）。` +
-                                        '站在原地吃/垒方块/等它过来，比走进虚空或岩浆好；请自己选一个方向用方块开路。',
+                                    detail: `逃生时原地没有动，因为找不到能站住的落点，${safe.reason}。`,
                                     ms: this.currentReflexStartedAt > 0 ? Date.now() - this.currentReflexStartedAt : 0,
                                 });
                             }
@@ -6208,8 +6176,7 @@ export class MineflayerBody {
             detail:
                 `你用 ${baseName} 自救：反射已让位` +
                 (preempted > 0 ? `（中断 ${preempted} 条）` : '') +
-                '，但这次**没成功**——保命随时会重新接管（没有静音窗口）。' +
-                '看一眼为什么失败，必要时再发一次或先 Stop。',
+                '，没成功。',
             ms: 0,
         });
     }
@@ -6295,17 +6262,14 @@ export class MineflayerBody {
                         if (hasWindow && !managesWindow) {
                             const closed = closeStaleWindow(this.bot);
                             if (closed) {
-                                residualScreenNote =
-                                    '\n    先关掉了**残留界面**（否则所有动作都会空转）。';
+                                residualScreenNote = '\n    已关闭残留界面。';
                             } else if ((this.bot as any)?.currentWindow != null) {
                                 return {
                                     ok: true,
                                     op: 'action',
                                     result: {
                                         ok: false,
-                                        text:
-                                            '**先失败在门口**：有个残留界面关不掉，继续执行只会空转 60 秒。\n' +
-                                            '    先 `stop()`（Stop 会顺手关界面），再重发这个动作；别反复重试同一个调用。',
+                                        text: `没做到 ${baseName}，因为残留界面关不掉。`,
                                         code: 'REFUSED_RESIDUAL_SCREEN',
                                     },
                                 };
@@ -6381,9 +6345,7 @@ export class MineflayerBody {
                             await new Promise<void>((resolve) => setTimeout(resolve, 100));
                         }
                         if (this.reflexRunning === true) {
-                            reflexYieldNote =
-                                '（注意：保命反射还在跑，这条命令可能把它打断——现在真的在挨打，' +
-                                '**先解决威胁**比推进任务重要。）\n';
+                            reflexYieldNote = '（保命反射仍在运行。）\n';
                         }
                     }
                     try {
@@ -6434,7 +6396,8 @@ export class MineflayerBody {
                         throw err;
                     }
                     if (rescueAttempt) {
-                        this.settleModelRescue(!toolResultLooksFailed(text), baseName, preempted);
+                        const rescueFailed = String(text ?? '').trim() === '' || toolResultLooksFailed(text);
+                        this.settleModelRescue(!rescueFailed, baseName, preempted);
                     }
                     this.consumePermitFor(name);
                     return { ok: true, op: 'action', result: { ok: true, text, code: 'OK' } };
@@ -6448,7 +6411,7 @@ export class MineflayerBody {
                         op: 'action',
                         result: {
                             ok: false,
-                            text: `Tool ${name} failed: ${message}` + (this.actionTailNote ?? ''),
+                            text: `没做到 ${name}，${message}` + (this.actionTailNote ?? ''),
                             code: ERR.BODY_ERROR,
                         },
                     };
@@ -6485,6 +6448,7 @@ export class MineflayerBody {
                     this.pickupSuppressedUntil,
                     Date.now() + PICKUP_SURVIVAL_SUPPRESS_MS,
                 );
+                // eslint-disable-next-line no-case-declarations
                 const abortedReflexes = this.abortReflexes('收到 Stop');
                 // Stop 还意味着"把身体判给模型一段时间"：否则危险还在时反射
                 // 立刻重新接管，Stop 在模型眼里就是没反应（真机 17:15 的原话）。
@@ -6502,11 +6466,11 @@ export class MineflayerBody {
                         reflex: 'stop',
                         outcome: 'aborted',
                         detail:
-                            `Stop 已中断自动拾取和 ${abortedReflexes} 条保命/反射` +
+                            `Stop 已中断 ${abortedReflexes} 条保命/反射` +
                             (this.reflexRunning === true
-                                ? `（正在跑的 ${this.currentReflexName ?? '反射'} 最多再等 ${Math.round(REFLEX_STOP_GRACE_MS / 1000)} 秒收手，之后通道一定还给你）`
-                                : '，通道现在就是你的') +
-                            `；接下来 ${Math.round(SURVIVAL_COOLDOWN_MS / 1000)} 秒内保命不会重新接管（危险还在的话之后会再接管）。`,
+                                ? `，${this.currentReflexName ?? '反射'}最多再 ${Math.round(REFLEX_STOP_GRACE_MS / 1000)} 秒收手`
+                                : '，通道已释放') +
+                            `；${Math.round(SURVIVAL_COOLDOWN_MS / 1000)} 秒内保命不接管。`,
                         ms: 0,
                     });
                 }

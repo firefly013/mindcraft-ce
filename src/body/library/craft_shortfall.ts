@@ -7,7 +7,7 @@ import { getItemCraftingRecipes } from '../data/mcdata.js';
  * 只差一件基础物品，引擎从不说清是哪一件）。模型记不住 40 格背包；引擎能精确算。
  *
  * 原则（用户两次纠正过）：**不是门**。只在失败/询问计划时把算术写进回执，
- * 给"缺什么、差多少、下一步一个动作"，绝不阻止模型行动、不新增"你必须做 X"规则。
+ * 给"缺什么、差多少"，绝不阻止模型行动、不新增"你必须做 X"规则。
  */
 export interface RecipeEntry {
     /** 每个配方的原料：原料名 → 数量。 */
@@ -33,7 +33,7 @@ export interface ShortfallPlan {
 /** 缺的物品（按递归展开后的**基础/中间物品**列出）。 */
     missing: Shortfall[];
 
-/** 一句话结论（含数量与一个下一步动作）；satisfied 时为空串。 */
+/** 一句话结论（含数量）；satisfied 时为空串。 */
     text: string;
 
 /** 无法判断（配方未知）时为 true——**不许猜**。 */
@@ -89,7 +89,6 @@ export function planCraftShortfall(input: {
     const maxDepth = Math.min(6, Math.max(1, input.maxDepth ?? 4));
     const missing: Shortfall[] = [];
     const seen = new Set<string>();
-    let unknown = false;
 
     const addMissing = (item: string, need: number, have: number): void => {
         const existing = missing.find((entry) => entry.item === item);
@@ -117,7 +116,8 @@ export function planCraftShortfall(input: {
             return;
         }
         // 先判断这一层能否直接补齐：原料都够 ⇒ 不算缺口（能现场做出来）。
-        const recipe = recipes[0]!;
+        const recipe = recipes[0];
+        if (recipe == null) return;
         const craftsNeeded = Math.max(1, Math.ceil((need - have) / Math.max(1, recipe.craftedCount)));
         const shortages: Array<{ name: string; need: number }> = [];
         for (const [ingredient, perCraft] of Object.entries(recipe.ingredients ?? {})) {
@@ -172,17 +172,14 @@ export function planCraftShortfall(input: {
     if (deduped.length === 0) {
         return { satisfied: true, missing: [], text: '', unknown: false };
     }
-    if (unknown) {
-        return { satisfied: false, missing: deduped, text: '算不出来：配方数据里没有这个物品的做法。', unknown: true };
-    }
     const parts = deduped.map((entry) => {
         const have = Math.max(0, Math.floor(entry.have));
-        return `${entry.item} 需要 ${entry.need} 个，你有 ${have} 个（差 ${Math.max(0, entry.need - have)}）`;
+        return `${entry.item} 需要 ${entry.need} 个，你现在有 ${have} 个，还差 ${Math.max(0, entry.need - have)} 个`;
     });
     return {
         satisfied: false,
         missing: deduped,
-        text: `差的是：${parts.join('；')}。`,
+        text: `材料还不够，${parts.join('，')}。`,
         unknown: false,
     };
 }
@@ -235,7 +232,7 @@ export function describeCraftShortfallForBot(bot: unknown, itemName: string, cou
             stationAvailable,
         });
         if (plan.satisfied) return '';
-        return `缺什么：${plan.text}`;
+        return plan.text;
     } catch {
         return '';
     }

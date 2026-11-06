@@ -60,7 +60,7 @@ describe('事实回执：不许无证据说"躲过了"', () => {
   it('(a) 举盾且掉血 0 ⇒ 说举盾挡住（掉血 0）', () => {
     const text = formatCreeperReflexReceipt({ action: 'block', outcome: 'blocked', distance: 3.2, healthBefore: 20, healthAfter: 20 });
     expect(text).toContain('举盾挡住');
-    expect(text).toContain('掉血 0');
+    expect(text).toContain('苦力怕在 3.2 格 外扑过来，我举盾挡住了，掉了 0 点血。');
     expect(text).not.toContain('躲过了');
   });
   it('(b) 跑了 N 格 ⇒ 只报实测距离，不说躲过', () => {
@@ -72,7 +72,7 @@ describe('事实回执：不许无证据说"躲过了"', () => {
   it('(g) 吃伤害 ⇒ 回执说被炸/掉血，不说挡住', () => {
     const text = formatCreeperReflexReceipt({ action: 'block', outcome: 'tooLate', distance: 2, healthBefore: 20, healthAfter: 14 });
     expect(text).toContain('被炸了');
-    expect(text).toContain('掉血 6');
+    expect(text).toContain('我没来得及，被炸了，掉了 6 点血。');
     expect(text).not.toContain('挡住');
   });
   it('读不到血量 ⇒ 如实说读不到', () => {
@@ -124,13 +124,13 @@ describe('威胁分类：健康门槛 + 类别触发', () => {
     const safe = formatCreeperReflexReceipt({
       action: 'cover', threatClass: 'skeleton', outcome: 'ran', distance: 11, healthBefore: 12, healthAfter: 12,
     });
-    expect(safe).toContain('骷髅 11.0 格');
-    expect(safe).toContain('这一轮没再中箭');
+    expect(safe).toContain('骷髅在 11.0 格 外，我的血量是 12，我退到了掩体后面，这一轮没有中');
+    expect(safe).toContain('骷髅在 11.0 格 外，我的血量是 12，我退到了掩体后面，这一轮没有中');
     expect(safe).not.toContain('躲过了');
     const hit = formatCreeperReflexReceipt({
       action: 'cover', threatClass: 'skeleton', outcome: 'tookDamage', distance: 11, healthBefore: 12, healthAfter: 7,
     });
-    expect(hit).toContain('中箭掉血 5');
+    expect(hit).toContain('骷髅在 11.0 格 外，我的血量是 7，我退到了掩体后面，中了箭，掉了');
     expect(hit).not.toContain('这一轮没再中箭');
   });
 });

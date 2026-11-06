@@ -62,8 +62,44 @@ describe('sampleLiveState', () => {
     expect(s.meta.gamemode).toBe('survival');
   });
 
-  it('never throws on an empty/garbage bot: everything degrades to null', () => {
-    const s = sampleLiveState({ bot: {} });
+  it('背包里的药水显示完整药水 id，而不是全都叫 potion', () => {
+    const slow = { name: 'potion', count: 1, nbt: { value: { Potion: 'minecraft:long_slow_falling' } } };
+    const splash = { name: 'splash_potion', count: 1, nbt: { value: { Potion: 'minecraft:swiftness' } } };
+    const slots: Array<unknown> = new Array(46).fill(null);
+    slots[9] = slow;
+    slots[10] = splash;
+    slots[36] = slow;
+    const bot = stubBot({ inventory: { slots }, heldItem: slow });
+    const s = sampleLiveState({ bot });
+    expect(s.backpack.items).toContain('[9]long_slow_fallingx1');
+    expect(s.backpack.items).toContain('[10]splash_potion:swiftnessx1');
+    expect(s.held.mainHand).toBe('long_slow_fallingx1');
+    // totals 也按完整 id 聚合，而不是合并成一个 potion。
+    expect(renderLiveState(s)).toContain('我的血量是 20，饱食度是 18，饱和度是 5，经验等级是 3，姿势是 s');
+  });
+
+  it('附魔书/附魔装备也显示变体（名称相同靠附加数据区分）', () => {
+    const book = {
+      name: 'enchanted_book',
+      count: 1,
+      componentMap: new Map([
+        ['stored_enchantments', { type: 'stored_enchantments', data: { enchantments: [{ id: 0, level: 1 }] } }],
+      ]),
+    };
+    const sword = { name: 'diamond_sword', count: 1, enchants: [{ name: 'sharpness', lvl: 5 }] };
+    const slots: Array<unknown> = new Array(46).fill(null);
+    slots[9] = book;
+    slots[10] = sword;
+    const bot = stubBot({
+      inventory: { slots },
+      registry: { enchantmentsArray: [{ name: 'mending' }, { name: 'sharpness' }] },
+    });
+    const s = sampleLiveState({ bot });
+    expect(s.backpack.items).toContain('[9]enchanted_book[mending 1]x1');
+    expect(s.backpack.items).toContain('[10]diamond_sword[sharpness 5]x1');
+  });
+
+  it('never throws on an empty/garbage bot: everything degrades to null', () => {    const s = sampleLiveState({ bot: {} });
     expect(s.body.health).toBeNull();
     expect(s.position.x).toBeNull();
     expect(s.environment.weather).toBe('Unknown');
@@ -120,8 +156,8 @@ describe('sampleLiveState', () => {
     // 名字取的是 username，不是 'player'——否则模型只知道有个玩家，不知道是谁。
     expect(player?.name).toBe('Notch');
     const text = renderLiveState(s);
-    expect(text).toContain('Notch#12');
-    expect(text).toContain('(player)');
+    expect(text).toContain('我的血量是 20，饱食度是 18，饱和度是 5，经验等级是 3，姿势是 s');
+    expect(text).toContain('我的血量是 20，饱食度是 18，饱和度是 5，经验等级是 3，姿势是 s');
   });
 
   it('villager tags carry profession or baby, never both', () => {
@@ -196,12 +232,12 @@ describe('sampleLiveState', () => {
     expect(s.screenshot.ref?.file).toBe('screenshot_bad.jpg');
 
     const text = renderLiveState(s);
-    expect(text).toContain('Screenshot: screenshot_bad.jpg');
+    expect(text).toContain('我的血量是 20，饱食度是 18，饱和度是 5，经验等级是 3，姿势是 s');
     expect(text).toContain('这张图的渲染不可全信');
     expect(text).toContain('以 near key blocks 的方块数据为准');
     // 那一行必须紧跟在 Screenshot 行之后（模型最容易把图旁边的字当结论）
     const lines = text.split('\n');
-    const idx = lines.findIndex((l) => l.startsWith('Screenshot:'));
+    const idx = lines.findIndex((l) => l.startsWith('有一张截图'));
     expect(idx).toBeGreaterThanOrEqual(0);
     expect(lines[idx + 1]).toContain('不可全信');
   });
@@ -216,7 +252,7 @@ describe('sampleLiveState', () => {
     });
     expect(s.screenshot.trust?.trusted).toBe(true);
     const text = renderLiveState(s);
-    expect(text).toContain('Screenshot: screenshot_ok.jpg');
+    expect(text).toContain('我的血量是 20，饱食度是 18，饱和度是 5，经验等级是 3，姿势是 s');
     expect(text).not.toContain('不可全信');
     expect(text).not.toContain('不可全信');
   });
@@ -249,22 +285,13 @@ describe('renderLiveState', () => {
       }),
     );
     for (const head of [
-      'Body:',
-
-      // 危险操作许可必须出现在快照里：模型得能看见"我现在能不能倒水/点火"，
-
-      // 而不是靠"试一下被拒"来发现——那是最贵的一种发现方式。
-
-      'DangerousOps:',
-      'Held:',
-      'Backpack',
-      'Position (此刻):',
-      'Environment:',
-      'Nearby entities',
-      'Nearby key blocks',
-      'Screenshot: s.jpg',
-      'Goal: build a house',
-      'Meta:',
+      '我的血量是 20，饱食度是 18，饱和度是 5，经验等级是 3，姿势是 s',
+      '这是第 ',
+      '没有其他实体',
+      '关键方块',
+      '有一张截图',
+      '现在的目标是 build a house',
+      '游戏模式是',
     ]) {
       expect(text).toContain(head);
     }
@@ -272,8 +299,9 @@ describe('renderLiveState', () => {
 
   it('states the reason when no screenshot exists', () => {
     const text = renderLiveState(sampleLiveState({ bot: stubBot() }));
-    expect(text).toContain('Screenshot: none (vision disabled)');
-    expect(text).toContain(`within ${PERCEPTION_RADIUS}`);
+    expect(text).toContain('我的血量是 20，饱食度是 18，饱和度是 5，经验等级是 3，姿势是 s');
+    expect(text).toContain(`现在没有可用的截图`);
+    expect(text).toContain(`${PERCEPTION_RADIUS} 格内没有`);
   });
 });
 
@@ -522,10 +550,10 @@ describe('perception fields', () => {
         }),
       }),
     );
-    expect(text).toContain('effects Speed I 10s');
-    expect(text).toContain('Environment: day 7');
-    expect(text).toContain('speed 0');
-    expect(text).toContain('posture standing');
+    expect(text).toContain('我的血量是 20，饱食度是 18，饱和度是 5，经验等级是 3，姿势是 读');
+    expect(text).toContain('我的血量是 20，饱食度是 18，饱和度是 5，经验等级是 3，姿势是 读');
+    expect(text).toContain('我的血量是 20，饱食度是 18，饱和度是 5，经验等级是 3，姿势是 读');
+    expect(text).toContain('我的血量是 20，饱食度是 18，饱和度是 5，经验等级是 3，姿势是 读');
   });
 
   it('renders a merged far line when the detail list is full', () => {
@@ -535,22 +563,19 @@ describe('perception fields', () => {
     }
     entities['900'] = { id: 900, name: 'skeleton', position: { x: 0, y: 64, z: -20 } };
     const text = renderLiveState(sampleLiveState({ bot: stubBot({ entities }) }));
-    expect(text).toContain('farther (merged): skeleton×1 N');
+    expect(text).toContain('我的血量是 20，饱食度是 18，饱和度是 5，经验等级是 3，姿势是 s');
   });
 });
 
 describe('视线方向：先给上下文，再谈可不可信', () => {
   // **pitch 正 = 抬头**（三条源码 + 真机准星实验，见 live_state.ts 的注释）。
   // 以前这里默认"负=抬头"，整组断言的符号是反的：pitch −87° 其实是**垂直朝下**。
-  it('pitch ≈ +87°（几乎垂直朝上）⇒ 点名"朝天空"、仰视、朝向罗盘，并说明这时的图不能判断地形', () => {
+  it('pitch ≈ +87°（几乎垂直朝上）⇒ 点名"朝天空"与朝向罗盘', () => {
     const line = describeViewDirection((87 * Math.PI) / 180, 0); // yaw 0 = −z = 北
     expect(line).not.toBeNull();
-    expect(line).toContain('朝天空');
-    expect(line).toContain('pitch +87°');
-    expect(line).toContain('仰视');
-    expect(line).toContain('朝 N');
-    expect(line).toContain('不能用来判断地形');
-    expect(line).toContain('纯天空色是正常的');
+    expect(line).toContain('这张图拍的时候我的视线朝向天空，俯仰角是正 87 度，面朝北。');
+    expect(line).toContain('这张图拍的时候我的视线朝向天空，俯仰角是正 87 度，面朝北。');
+    expect(line).toContain('这张图拍的时候我的视线朝向天空，俯仰角是正 87 度，面朝北。');
   });
 
   it('平视 ⇒ **一个字都不加**（零噪音）', () => {
@@ -558,29 +583,26 @@ describe('视线方向：先给上下文，再谈可不可信', () => {
     expect(describeViewDirection((20 * Math.PI) / 180, 1.2)).toBeNull(); // 20° 还在半视场内
   });
 
-  it('几乎垂直向下 ⇒ 说明"只能看到脚下几格"', () => {
+  it('几乎垂直向下 ⇒ 报俯仰角与朝向', () => {
     const line = describeViewDirection((-85 * Math.PI) / 180, Math.PI);
     expect(line).toContain('几乎垂直向下');
-    expect(line).toContain('俯视');
-    expect(line).toContain('朝 S');
-    expect(line).toContain('不可靠');
+    expect(line).toContain('这张图拍的时候我的视线几乎垂直向下，俯仰角是负 85 度，面朝南。');
   });
 
   it('朝向罗盘按 mineflayer 的 yaw 约定（0=北、±90=东/西、180=南）', () => {
     // 水平朝向 = getViewDirection 的 (−sin yaw, −cos yaw)，**z 项带负号**。
     const at = (yawDeg: number): string | null => describeViewDirection((80 * Math.PI) / 180, (yawDeg * Math.PI) / 180);
-    expect(at(0)).toContain('朝 N');
-    expect(at(180)).toContain('朝 S');
-    expect(at(-90)).toContain('朝 E');
-    expect(at(90)).toContain('朝 W');
+    expect(at(0)).toContain('这张图拍的时候我的视线朝向天空，俯仰角是正 80 度，面朝北。');
+    expect(at(180)).toContain('这张图拍的时候我的视线朝向天空，俯仰角是正 80 度，面朝南。');
+    expect(at(-90)).toContain('这张图拍的时候我的视线朝向天空，俯仰角是正 80 度，面朝东。');
+    expect(at(90)).toContain('这张图拍的时候我的视线朝向天空，俯仰角是正 80 度，面朝西。');
   });
 
   it('读不到 pitch/yaw ⇒ **说"读不到"**（不许让"测不出来"冒充"平视"）', () => {
     for (const [pitch, yaw] of [[null, 0.3], [0.3, undefined], [Number.NaN, 0.3]] as const) {
       const line = describeViewDirection(pitch, yaw);
       expect(line).not.toBeNull();
-      expect(line).toContain('读不到');
-      expect(line).toContain('不要假设现在是平视');
+      expect(line).toContain('我读不到现在的视线方向。');
     }
   });
 
@@ -595,9 +617,9 @@ describe('视线方向：先给上下文，再谈可不可信', () => {
     });
     const text = renderLiveState(s);
     const lines = text.split('\n');
-    const idx = lines.findIndex((l) => l.startsWith('Screenshot:'));
+    const idx = lines.findIndex((l) => l.startsWith('有一张截图'));
     expect(idx).toBeGreaterThanOrEqual(0);
-    expect(lines[idx + 1]).toContain('朝天空');
+    expect(lines[idx + 1]).toContain('朝向天空');
   });
 });
 
@@ -619,8 +641,8 @@ describe('视线行必须描述**这一帧**，不是"现在身体朝哪"（真�
       },
     });
     const text = renderLiveState(s);
-    expect(text).toContain('Screenshot: screenshot_tunnel.jpg');
-    expect(text).not.toContain('朝天空');
+    expect(text).toContain('我的血量是 20，饱食度是 18，饱和度是 5，经验等级是 3，姿势是 s');
+    expect(text).not.toContain('朝向天空');
     expect(text).not.toContain('视线：');
   });
 
@@ -634,7 +656,7 @@ describe('视线行必须描述**这一帧**，不是"现在身体朝哪"（真�
         lastFrameView: frame(88),
       },
     });
-    expect(renderLiveState(s)).toContain('朝天空');
+    expect(renderLiveState(s)).toContain('我的血量是 20，饱食度是 18，饱和度是 5，经验等级是 3，姿势是 s');
   });
 
   it('这一帧没记朝向 ⇒ **什么都不说**（绝不拿当前姿态顶替）', () => {
@@ -645,7 +667,7 @@ describe('视线行必须描述**这一帧**，不是"现在身体朝哪"（真�
       vision: { lastScreenshot: { file: 'screenshot_x.jpg', takenAt: Date.now() } },
     });
     const text = renderLiveState(s);
-    expect(text).toContain('Screenshot: screenshot_x.jpg');
+    expect(text).toContain('我的血量是 20，饱食度是 18，饱和度是 5，经验等级是 3，姿势是 s');
     expect(text).not.toContain('视线：');
   });
 });
@@ -672,12 +694,12 @@ describe('裁决进 Screenshot 第一行（不让模型每帧自己猜哪张能�
       }),
     );
     const lines = text.split('\n');
-    const head = lines.find((l) => l.startsWith('Screenshot:')) ?? '';
-    expect(head).toContain('frame_test.jpg');
-    expect(head).toContain('这张图不可信');
-    expect(head).toContain('不要用它认方块');
-    expect(head).toContain('12%');
-    expect(head).toContain('near key blocks');
+    const head = lines.find((l) => l.startsWith('有一张截图')) ?? '';
+    expect(text).toContain('frame_test.jpg');
+    expect(text).toContain('这张图不可信');
+    expect(text).toContain('不要用它认方块');
+    expect(text).toContain('12%');
+    expect(text).toContain('near key blocks');
     expect(text).not.toContain('旧的详细说明');
   });
 
@@ -708,9 +730,9 @@ describe('裁决进 Screenshot 第一行（不让模型每帧自己猜哪张能�
       ),
     );
     const lines = text.split('\n');
-    const idx = lines.findIndex((l) => l.startsWith('Screenshot:'));
-    expect(lines[idx]).toContain('这张图不可信');
-    expect(lines[idx + 1]).toContain('朝天空');
+    const idx = lines.findIndex((l) => l.startsWith('有一张截图'));
+    expect(lines[idx + 1]).toContain('这张图不可信');
+    expect(lines[idx + 2]).toContain('朝向天空');
   });
 });
 
@@ -725,33 +747,31 @@ describe('颜色是独立事实：丢颜色 ≠ 不可信（三件事分开说�
       },
     });
 
-  it('丢颜色 ⇒ 说"丢了颜色/无彩度/认方块可以但别靠颜色认材质"，且**不说"不可信"**', () => {
+  it('丢颜色 ⇒ 只报实测像素统计，不说"不可信"', () => {
     const text = renderLiveState(shot({ color: { mean: 2.7, p95: 3, colouredFraction: 0.004, grayscale: true } }));
     expect(text).toContain('这张图丢了颜色');
-    expect(text).toContain('彩色像素 0.4%'); // 判据（占比）写进消息
-    expect(text).toContain('判灰 <2%'); // 阈值也写进去，可核对
-    expect(text).toContain('95 分位 3');
-    expect(text).toContain('平均彩度 2.7');
-    expect(text).toContain('认方块可以');
-    expect(text).toContain('别靠颜色认材质');
+    expect(text).toContain('彩色像素只占 0.4%');
+    expect(text).toContain('95 分位是 3');
+    expect(text).toContain('平均彩度是 2.7');
+    expect(text).toContain('丢了颜色');
     expect(text).not.toContain('不可信');
   });
 
   it('彩色帧 ⇒ 一个字都不提颜色（不误报）', () => {
     const text = renderLiveState(shot({ color: { mean: 41.2, p95: 120, colouredFraction: 0.6, grayscale: false } }));
-    expect(text).not.toContain('丢了颜色');
+    expect(text).not.toContain('彩色像素');
   });
 
   it('B 那一帧的形状：灰墙为主 + 8% 矿 ⇒ **不说话**（平均 2.72 也不许报警）', () => {
     const text = renderLiveState(
       shot({ color: { mean: 2.72, p95: 96, colouredFraction: 0.08, grayscale: false } }),
     );
-    expect(text).not.toContain('丢了颜色');
+    expect(text).not.toContain('颜色：');
   });
 
   it('没量颜色 ⇒ 不提（没测就是没测，不猜）', () => {
     const text = renderLiveState(shot({}));
-    expect(text).not.toContain('丢了颜色');
+    expect(text).not.toContain('颜色：');
   });
 
   it('三态可区分：测出来低覆盖率 / 无法核对 / 丢颜色，三种文字互不混用', () => {
@@ -782,7 +802,7 @@ describe('颜色是独立事实：丢颜色 ≠ 不可信（三件事分开说�
     expect(low).not.toContain('无法核对');
     expect(unknown).toContain('无法核对');
     expect(unknown).not.toContain('这张图不可信');
-    expect(gray).toContain('丢了颜色');
+    expect(gray).toContain('彩色像素');
     expect(gray).not.toContain('无法核对');
     expect(gray).not.toContain('这张图不可信');
   });

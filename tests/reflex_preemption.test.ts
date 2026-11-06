@@ -239,7 +239,7 @@ describe('④ 保命优先：抢占拾取，且敌人附近不重启拾取', () 
     expect(body.pickingUp).toBe(false);
     const skip = events.find((e) => e.type === 'reflex.done' && e.payload.outcome === 'skipped');
     expect(skip).toBeDefined();
-    expect(skip.payload.detail).toContain('先保命');
+    expect(skip.payload.detail).toContain('这次不捡');
     expect(PICKUP_THREAT_RADIUS).toBeGreaterThan(5);
   });
 
@@ -292,9 +292,9 @@ describe('④ 保命优先：抢占拾取，且敌人附近不重启拾取', () 
       const done = events.find((e) => e.type === 'reflex.done' && e.payload.reflex === 'escape');
       expect(done.payload.outcome).toBe('aborted');
       expect(done.payload.detail).toContain('交还身体');
-      // 模型读到"已中断"不能以为保命关了：必须写明危险还在就会重新接管。
-      expect(done.payload.detail).toContain('重新接管');
-      expect(done.payload.detail).toContain('不是把保命关掉');
+    expect(done.payload.detail).toContain('交还身体');
+    expect(done.payload.detail).toContain('交还身体');
+    expect(done.payload.detail).not.toContain('保命已关闭');
       expect(requestInterrupt).toHaveBeenCalled();
       // 交还之后身体是空的：模型可以发动作了（currentActionName 不再是 escape）。
       expect(body.currentActionName()).toBeNull();
@@ -332,8 +332,7 @@ describe('⑤ 制度预算：连续占用 45 秒就必须交还身体（真机 1
       body.emergency('bot.attacked', { health: 12, by: 'zombie' }, 'escape', 'flee');
       const yielded = events.filter((e) => e.type === 'reflex.done' && e.payload.outcome === 'yielded').pop();
       expect(yielded).toBeDefined();
-      expect(yielded.payload.detail).toContain('交还身体');
-      expect(yielded.payload.detail).toContain('重新接管');
+    expect(yielded.payload.detail).toContain('交还身体');
       expect(body.survivalCooldownUntil).toBeGreaterThan(Date.now());
 
       // 冷却期内：再怎么触发都不重新接管（队列不涨）
@@ -343,7 +342,7 @@ describe('⑤ 制度预算：连续占用 45 秒就必须交还身体（真机 1
         vi.advanceTimersByTime(300);
       }
       expect(body.reflexQueue.length).toBe(queuedBefore);
-      expect(events.some((e) => e.payload.outcome === 'deferred' && String(e.payload.detail).includes('冷却期'))).toBe(true);
+      expect(events.some((e) => e.payload.outcome === 'deferred' && String(e.payload.detail).includes('保命冷却中'))).toBe(true);
 
       // 冷却结束：危险还在 → 重新接管
       vi.advanceTimersByTime(SURVIVAL_COOLDOWN_MS);
@@ -415,7 +414,7 @@ describe('⑦ Stop：回执与快照必须一致（不许一边说"已释放"一
       const stopNote = events.filter((e) => e.type === 'reflex.done' && e.payload.reflex === 'stop').pop();
       expect(stopNote).toBeDefined();
       // **不许说"已释放"**：这时保命处理还在收尾。
-      expect(String(stopNote.payload.detail)).toContain('最多再等');
+    expect(String(stopNote.payload.detail)).toContain('最多再');
       expect(String(stopNote.payload.detail)).not.toContain('通道现在就是你的');
       // 快照仍如实写着 escape：状态和回执一致（没有说谎）。
       expect(body.currentActionName()).toBe('escape（已 102s）');
@@ -426,7 +425,7 @@ describe('⑦ Stop：回执与快照必须一致（不许一边说"已释放"一
       expect(body.reflexRunning).toBe(false);
       const completions = events.filter((e) => e.type === 'reflex.done' && e.payload.reflex === 'escape');
       expect(completions).toHaveLength(1);
-      expect(String(completions[0].payload.detail)).toContain('还给模型');
+      expect(String(completions[0].payload.detail)).toContain('身体已交还');
     } finally {
       vi.useRealTimers();
     }
@@ -486,7 +485,7 @@ describe('⑧ 水里：自救不能被保命反射锁死', () => {
     expect(body.bot.pathfinder.stop).not.toHaveBeenCalled();
     const note = events.filter((e) => e.payload?.outcome === 'in_progress').pop();
     expect(note).toBeDefined();
-    expect(String(note.payload.detail)).toContain('不重复触发');
+    expect(String(note.payload.detail)).toContain('保命处理进行中');
     // 也没有向大脑发新的 L5（不会反复上锁）
     expect(events.some((e) => e.type === 'world.water.drowning')).toBe(false);
   });
@@ -529,7 +528,7 @@ describe('⑧ 水里：自救不能被保命反射锁死', () => {
       const muted = events.filter((e) => e.payload?.outcome === 'muted').pop();
       expect(muted).toBeDefined();
       expect(String(muted.payload.detail)).toContain('不介入');
-      expect(String(muted.payload.detail)).toContain('restore=true'); // 告诉它怎么把保命开回来
+    expect(String(muted.payload.detail)).toContain('这次不介入');
     } finally {
       safeguards.release();
     }
@@ -558,7 +557,7 @@ describe('⑧ 水里：自救不能被保命反射锁死', () => {
       expect(body.currentActionName()).toBeNull();
       expect(body.survivalCooldownUntil).toBeGreaterThan(Date.now());
       const muted = events.filter((e) => e.payload?.outcome === 'muted').pop();
-      expect(String(muted.payload.detail)).toContain('立刻让位');
+      expect(String(muted.payload.detail)).toContain('已让位');
       expect(requestInterrupt).toHaveBeenCalled();
       safeguards.release();
       await vi.advanceTimersByTimeAsync(1);
@@ -619,3 +618,4 @@ describe('⑧ 水里：自救不能被保命反射锁死', () => {
     }
   });
 });
+

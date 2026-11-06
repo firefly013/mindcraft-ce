@@ -73,7 +73,7 @@ describe('recoverFromContainerSlots：误投进燃料槽/原料槽的东西能�
         };
         const bot = fakeBot([]);
         const text = await recoverFromContainerSlots(bot, furnace, item('stone_pickaxe'), 'furnace');
-        expect(text!).toContain('取不出来');
+        expect(text!).toContain('没能从 furnace 的燃料槽里取出 1 个 stone_pickaxe');
         expect(text!).toContain('destination full');
     });
 });

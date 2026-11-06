@@ -7,10 +7,11 @@ import {
     bedBombDragon,
     clearEndCrystalsSkill,
     countEyesOfEnder,
-    countPotionsOfKind,
+    countPotionsById,
     crystalToolKit,
     detectPodiumTrench,
-    drinkPotionByKind,
+    drinkMilk,
+    drinkPotionById,
     endgameStatusReport,
     endgameToolSpecs,
     enterEndSkill,
@@ -64,7 +65,7 @@ function stack(name: string, count = 1, extra: Record<string, any> = {}) {
 
 /**
  * 假 bot 的"吃东西/喝药"必须**真的从背包里扣掉**。
- * `drinkPotionByKind` 现在会核对数量（数量没变 = 没喝下去），假 bot 不扣就等于
+ * `drinkPotionById` 现在会核对数量（数量没变 = 没喝下去），假 bot 不扣就等于
  * 永远喝不成 —— 那不是被测代码的 bug，是假 bot 不忠实。
  */
 function consumeOne(items: any[], held: any): void {
@@ -235,52 +236,78 @@ describe('读 bot 状态（假 bot）', () => {
     });
 });
 
-describe('drinkPotionByKind（按效果喝药，不是按物品名）', () => {
-    it('按大类找到药水 → equip 到手上再 consume', async () => {
+describe('drinkPotionById（按完整药水 id 喝药，不猜效果、不挑优先级）', () => {
+    it('按 id 找到药水 → equip 到手上再 consume，结果报喝了哪一瓶/还剩几瓶', async () => {
         const slowFalling = stack('potion', 1, { nbt: { value: { Potion: 'minecraft:long_slow_falling' } } });
         const bot = makeFakeBot({ items: [stack('stone', 3), slowFalling] });
-        await expect(drinkPotionByKind(bot, 'slow_falling')).resolves.toBe(true);
+        const receipt = await drinkPotionById(bot, 'long_slow_falling');
+        expect(receipt).toContain('喝下 long_slow_falling');
+        expect(receipt).toContain('剩 0 瓶');
         expect(bot.calls.map((c: any) => c.fn)).toEqual(['equip', 'consume']);
         expect(bot.calls[0].item).toBe(slowFalling);
     });
 
-    it('背包没有这一类 → false，并明确说背包里没有', async () => {
-        const bot = makeFakeBot({ items: [stack('stone', 3)] });
-        await expect(drinkPotionByKind(bot, 'milk')).resolves.toBe(false);
+    it('id 必须精确：给 slow_falling 不会喝 long_slow_falling', async () => {
+        const potion = stack('potion', 1, { nbt: { value: { Potion: 'minecraft:long_slow_falling' } } });
+        const bot = makeFakeBot({ items: [potion] });
+        const receipt = await drinkPotionById(bot, 'slow_falling');
+        expect(receipt).toContain("背包里没有 'slow_falling' 药水");
+        expect(receipt).toContain('long_slow_falling');
         expect(bot.calls).toHaveLength(0);
-        expect(bot.output).toContain('没有 milk');
     });
 
-    it('equip/consume 抛异常 → 吞掉并返回 false（不能让一条命令炸掉整个循环）', async () => {
+    it('同效果多等级：给哪个 id 就喝哪个，不给就不动', async () => {
+        const base = stack('potion', 1, { nbt: { value: { Potion: 'minecraft:healing' } } });
+        const strong = stack('potion', 1, { nbt: { value: { Potion: 'minecraft:strong_healing' } } });
+        const bot = makeFakeBot({ items: [base, strong] });
+        const receipt = await drinkPotionById(bot, 'strong_healing');
+        expect(receipt).toContain('喝下 strong_healing');
+        expect(bot.calls.map((c: any) => c.fn)).toEqual(['equip', 'consume']);
+        expect(bot.calls[0].item).toBe(strong);
+        expect(countPotionsById(bot, 'healing')).toBe(1);
+    });
+
+    it('背包没有这种药 → 报结果并列出背包现有的药水 id，不做任何动作', async () => {
+        const potion = stack('potion', 1, { nbt: { value: { Potion: 'minecraft:long_slow_falling' } } });
+        const bot = makeFakeBot({ items: [stack('stone', 3), potion] });
+        const receipt = await drinkPotionById(bot, 'fire_resistance');
+        expect(receipt).toContain("背包里没有 'fire_resistance' 药水");
+        expect(receipt).toContain('long_slow_falling');
+        expect(bot.calls).toHaveLength(0);
+    });
+
+    it('equip/consume 抛异常 → 吞掉并返回失败结果（不能让一条命令炸掉整个循环）', async () => {
         const bot = makeFakeBot({ items: [stack('milk_bucket', 1)] });
         bot.equip = () => {
             throw new Error('boom');
         };
-        await expect(drinkPotionByKind(bot, 'milk')).resolves.toBe(false);
-        expect(bot.output).toContain('失败');
+        expect(await drinkMilk(bot)).toContain('喝牛奶没有成功，错误是 boom。');
     });
 
-    it('drinkPotionByKind：背包里那叠数量没变 → 不算喝成功，如实报出来', async () => {
+    it('背包里那叠数量没变 → 只报"不能确认喝下"，不谎报成功', async () => {
         const potion = stack('potion', 1, { nbt: { value: { Potion: 'minecraft:long_slow_falling' } } });
         const bot = makeFakeBot({ items: [potion] });
-        // 服务端没采纳（consume 什么也没干）——不能当喝到了。
         bot.consume = () => {
             bot.calls.push({ fn: 'consume' });
             return Promise.resolve();
         };
-        await expect(drinkPotionByKind(bot, 'slow_falling')).resolves.toBe(false);
-        expect(bot.output).toContain('数量没变');
-        expect(countPotionsOfKind(bot, 'slow_falling')).toBe(1);
+        expect(await drinkPotionById(bot, 'long_slow_falling')).toContain('使用包已经发出去了，但是 long_slow_falling 的数量从 1');
+        expect(countPotionsById(bot, 'long_slow_falling')).toBe(1);
     });
 
-    it('drinkPotionByKind：喝下去之后那一叠真的少一瓶', async () => {
-        const potions = [
-            stack('potion', 2, { nbt: { value: { Potion: 'minecraft:long_slow_falling' } } }),
-        ];
+    it('喝下去之后那一叠真的少一瓶', async () => {
+        const potions = [stack('potion', 2, { nbt: { value: { Potion: 'minecraft:long_slow_falling' } } })];
         const bot = makeFakeBot({ items: potions });
-        await expect(drinkPotionByKind(bot, 'slow_falling')).resolves.toBe(true);
-        expect(countPotionsOfKind(bot, 'slow_falling')).toBe(1);
-        expect(bot.output).toContain('还剩 1 瓶');
+        expect(await drinkPotionById(bot, 'long_slow_falling')).toContain('剩 1 瓶');
+        expect(countPotionsById(bot, 'long_slow_falling')).toBe(1);
+    });
+
+    it('喝牛奶：成功/没有都只报结果', async () => {
+        const bot = makeFakeBot({ items: [stack('milk_bucket', 1)] });
+        expect(await drinkMilk(bot)).toContain('喝下牛奶');
+        const empty = makeFakeBot({ items: [stack('stone', 1)] });
+        expect(await drinkMilk(empty)).toContain('没有喝到牛奶');
+        expect(empty.calls).toHaveLength(0);
     });
 
     it('pickBedItemName 只认床，不认 bedrock', () => {
@@ -509,7 +536,7 @@ describe('末影之眼：扔出去之后必须盯住它的飞行方向', () => {
         const report = await throwEyeAndTrack(bot, { maxMs: 150, intervalMs: 50 });
         expect(report.threw).toBe(false);
         expect(report.track).toBeNull();
-        expect(report.message).toContain('没扔出去');
+        expect(report.message).toContain('没有扔出末影之眼，手里的数量没有变化。');
     });
 
     it('手上不是眼睛 → 先 equip，背包装不下就如实说', async () => {
@@ -609,7 +636,7 @@ describe('bedBombDragon 的前置条件（不放床就拒绝）', () => {
         });
         const receipt = await bedBombDragon(bot);
         expect(receipt).toContain('血量');
-        expect(receipt).toContain('太低');
+        expect(receipt).toContain('血量只有 4.0/20，低于床炸要求的 10，现在不能点床。');
     });
 
     it('饥饿太低 → 拒绝（受伤后要靠饥饿回血）', async () => {
@@ -631,13 +658,13 @@ describe('bedBombDragon 的前置条件（不放床就拒绝）', () => {
         });
         const receipt = await bedBombDragon(bot);
         expect(receipt).toContain('sleep_in_bed');
-        expect(receipt).toContain('没有放任何方块');
+        expect(receipt).toContain('未放方块');
     });
 
     it('读不到方块（区块没加载）→ 拒绝选址，不猜地形', async () => {
         const bot = makeFakeBot({ stacks: [stack('white_bed', 1)], entities: perchedDragon });
         const receipt = await bedBombDragon(bot);
-        expect(receipt).toContain('没有执行床炸');
+        expect(receipt).toContain('没做到 bedBombDragon');
     });
 
     it('龙没低头 → 直接拒绝', async () => {
@@ -681,7 +708,7 @@ describe('bedBombDragon 的前置条件（不放床就拒绝）', () => {
         });
 
         const receipt = await bedBombDragon(bot);
-        expect(receipt).toContain('床炸完了');
+        expect(receipt).toContain('床炸完成');
         // 先放床，再在床边放挡爆风的方块
         expect(placed.map((p) => p[0])).toEqual(['white_bed', 'obsidian']);
         expect(Math.abs(placed[0][1] - placed[1][1])).toBeLessThanOrEqual(1); // 床和掩体挨着
@@ -706,7 +733,7 @@ describe('clearEndCrystals：退不到 12 格就不放箭', () => {
         vi.mocked(skills.goToPosition).mockResolvedValue(false); // 路被堵，退不动
 
         const receipt = await clearEndCrystalsSkill(bot);
-        expect(receipt).toContain('没有放箭');
+        expect(receipt).toContain('未放箭');
         expect(receipt).toContain('12');
         expect(bot.calls.filter((c: any) => c.fn === 'activateItem')).toHaveLength(0);
         expect(crystalToolKit(bot).arrows).toBe(32);
@@ -742,7 +769,7 @@ describe('clearEndCrystals：退不到 12 格就不放箭', () => {
         const receipt = await clearEndCrystalsSkill(bot);
         expect(crystalToolKit(bot).arrows).toBe(31); // 箭真的少了
         expect(receipt).toContain('这一下有效');
-        expect(receipt).toContain('水晶全拆完了');
+        expect(receipt).toContain('水晶 0 颗存活');
     });
 
     it('射了但水晶没掉 → 如实说"多半没打中/被挡住"', async () => {
@@ -891,7 +918,7 @@ describe('掩体判据：火把/栅栏/铁栏杆/台阶都不算掩体（会死�
         expect(placed[1].slice(1)).toEqual([2, 65, 0]);
         expect(slept).toHaveLength(1); // 复验通过后才点床
         expect(receipt).toContain('掩体已放好');
-        expect(receipt).toContain('床炸完了');
+        expect(receipt).toContain('床炸完成');
         vi.mocked(skills.placeBlock).mockImplementation(() => Promise.resolve(true));
     });
 
@@ -900,7 +927,7 @@ describe('掩体判据：火把/栅栏/铁栏杆/台阶都不算掩体（会死�
         const receipt = await bedBombDragon(bot);
         expect(placed).toHaveLength(0);
         expect(slept).toHaveLength(0);
-        expect(receipt).toContain('没有执行床炸');
+        expect(receipt).toContain('没做到 bedBombDragon');
         expect(receipt).toContain('不算掩体');
         vi.mocked(skills.placeBlock).mockImplementation(() => Promise.resolve(true));
     });
@@ -921,12 +948,12 @@ describe('掩体判据：火把/栅栏/铁栏杆/台阶都不算掩体（会死�
 
         // 没有可放的完整方块 → 火把不算掩体 → 干跑也拒绝
         const noBlocks = endgameStatusReport(withTorch([stack('bow', 1), stack('arrow', 32)]));
-        expect(noBlocks).toContain('【床炸闸门】现在不能炸');
+        expect(noBlocks).toContain('【末地通关·当前阶段】prepare');
         expect(noBlocks).toContain('不算掩体');
 
         // 有方块可放 → 可以炸，但报告必须说清"掩体格那根火把不算数、要先放一块"
         const withBlocks = endgameStatusReport(withTorch([stack('bow', 1), stack('arrow', 32), stack('end_stone', 64)]));
-        expect(withBlocks).toContain('【床炸闸门】现在可以炸');
+        expect(withBlocks).toContain('【末地通关·当前阶段】fight_dragon');
         expect(withBlocks).toContain('不算掩体');
         expect(withBlocks).toContain('end_stone');
     });

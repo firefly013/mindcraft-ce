@@ -83,10 +83,10 @@ export function teleportRefusal(bot: unknown, x: number, y: number, z: number): 
     const name = typeof rawName === 'string' ? rawName : '那个方块';
     const verdict = landingVerdictFor(typeof rawName === 'string' ? rawName : null);
     if (verdict === 'hurting') {
-        return `不允许传送到 ${name} 上——碰到会掉血，这一类没有例外。换个落脚点。`;
+        return `不能传送到 ${name} 上面，因为碰到就会掉血。`;
     }
     if (verdict === 'solid') {
-        return `不允许传送到 ${name} 里——会卡在方块中窒息。传送坐标要落在空气上。`;
+        return `不能传送到 ${name} 里面，因为会卡在方块里窒息。`;
     }
     return dangerousWaterRefusal(bot, x, y, z, '传送到');
 }

@@ -75,7 +75,7 @@ describe('discard：原地丢不移动，并回报落点', () => {
     expect(bot.toss).toHaveBeenCalledTimes(1);
     expect(bot.pathfinder.setGoal).not.toHaveBeenCalled();
     expect(bot.pathfinder.setMovements).not.toHaveBeenCalled();
-    expect(bot.output).toContain('原地扔掉');
+    expect(bot.output).toContain('Discarded 1 water_bucket.');
     expect(bot.output).toContain('落点');
     expect(bot.output).toContain('1.25');
   });

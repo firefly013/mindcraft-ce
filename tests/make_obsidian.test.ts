@@ -63,7 +63,8 @@ describe('makeObsidian 装备检查', () => {
     expect(a.ok).toBe(true);
     expect(a.waterBuckets).toBe(1);
     expect(a.diamondPickaxes).toBe(1);
-    expect(a.message).toContain('启动条件满足');
+    expect(a.message).toContain('检查了装备');
+    expect(a.message).toContain('水桶有 1 个');
 
     const b = assessObsidianKit({ bucket: 2, netherite_pickaxe: 1 });
     expect(b.ok).toBe(true);
@@ -99,7 +100,7 @@ describe('安全岩浆/水源选址（纯函数）', () => {
     const lava: Point = { x: 0, y: 60, z: 0 };
     const result = evaluateLavaTarget(lava, mapProbe({ '0,60,0': 'lava' }));
     expect(result.ok).toBe(false);
-    expect(result.reason).toContain('高一格');
+    expect(result.reason).toContain('高出一格');
   });
 
   it('水源同样要有安全装水位；流动水/岩浆不是水源', () => {
@@ -148,18 +149,18 @@ describe('makeObsidian 早退路径', () => {
     const result = await makeObsidian(bot);
     expect(result.ok).toBe(true);
     expect(result.produced).toBe(0);
-    expect(result.message).toContain('已获得 10/10');
+    expect(result.message).toContain('现在有 10 块黑曜石');
   });
 
   it('缺桶/缺钻石镐：在找岩浆前返回，现场不动', async () => {
     const bot = { inventory: { slots: [] } };
     const result = await makeObsidian(bot);
     expect(result.ok).toBe(false);
-    expect(result.message).toContain('装备检查');
+    expect(result.message).toContain('没能拿到 10 块黑曜石');
+    expect(result.message).toContain('检查了装备');
     expect(result.message).toContain('水桶');
     expect(result.message).toContain('钻石镐');
-    expect(result.message).toContain('阶段：检查装备');
-    expect(result.message).toContain('下一步');
+    expect(result.message).not.toContain('下一步');
   });
 });
 
@@ -221,15 +222,16 @@ describe('task-14 装水位放宽与可行动回执', () => {
 
   it('回执会报最近岩浆源坐标和距离', () => {
     const info = nearestLavaInfo([{ x: 10, y: 60, z: 0 }, { x: 0, y: 60, z: 0 }], { x: 0, y: 60, z: 0 });
-    expect(info).toContain('最近岩浆源');
+    expect(info).toContain('最近的岩浆源');
     expect(info).toContain('(0,60,0)');
     expect(info).toContain('距离 0 格');
   });
 
-  it('failureReceipt 支持分阶段细节和下一步命令', () => {
-    const text = failureReceipt(3, 0, [], [], '阶段：准备装水位。建议坐标：(1,60,0)。', 'goToCoordinates(1,60,0) 后重试 makeObsidian。');
-    expect(text).toContain('阶段：准备装水位');
-    expect(text).toContain('下一步：goToCoordinates');
+  it('failureReceipt 只留目标、实测值和失败事实', () => {
+    const text = failureReceipt(3, 0, [], [], '离我最近的岩浆源在 (10,60,0)，距离 7 格。');
+    expect(text).toContain('没能拿到 10 块黑曜石，现在有 3 块');
+    expect(text).toContain('离我最近的岩浆源在 (10,60,0)');
+    expect(text).not.toContain('下一步');
   });
 });
 
@@ -372,3 +374,4 @@ describe('task-38 禁止远距离乱走', () => {
     ]);
   });
 });
+

@@ -26,14 +26,13 @@ describe('describeInventoryDelta：只报变化，且区分三种情况', () => 
 
   // 措辞契约变了（2026-10-21 真机报告「减少 -oak_log×2」）：gained/lost 只存 `名字×数量`，
   // 方向由词承担 —— 「减少 oak_log×2」，绝不出现「减少 -2」。所以这里不再断言带符号的 +/-。
-  it('② 捡到了但原有物品减少（真机那个形状）⇒ 点名"减少"并警告这不是没捡到', () => {
+  it('② 捡到了但原有物品减少（真机那个形状）⇒ 点名"减少"', () => {
     const result = diff({ dirt: 6 }, { dirt: 0, oak_log: 1 });
     expect(result.changed).toBe(true);
     expect(result.gained.join()).toContain('oak_log×1');
     expect(result.lost.join()).toContain('dirt×6');
-    expect(result.note).toContain('减少');
+    expect(result.note).toContain('背包里多了 1 个 oak_log，背包里少了 6 个 dirt');
     expect(result.note).not.toMatch(/减少\s*-/);
-    expect(result.note).toContain('不是"没捡到"');
   });
 
   it('③ 只捡到目标物品 ⇒ 报增加，且不误报"减少"', () => {
@@ -44,18 +43,17 @@ describe('describeInventoryDelta：只报变化，且区分三种情况', () => 
     expect(result.note).not.toContain('减少');
   });
 
-  it('有变化但目标物品没涨（比如换成别的）⇒ 明说"目标物品并没有增加"', () => {
+  it('有变化但目标物品没涨（比如换成别的）⇒ 只报实际增加，不误报目标', () => {
     const result = diff({ dirt: 6 }, { dirt: 6, oak_log: 0, cobblestone: 1 });
     expect(result.changed).toBe(true);
-    expect(result.note).toContain('目标物品并没有增加');
+    expect(result.note).toContain('背包里多了 1 个 cobblestone');
     expect(result.note).not.toContain('减少');
   });
 
-  it('读数不可用（未同步/读失败）⇒ **绝不**当成"没变化"，明说不能据此判断', () => {
+  it('读数不可用（未同步/读失败）⇒ **绝不**当成"没变化"，明说读数不可用', () => {
     const result = diff(null, { dirt: 6 });
     expect(result.changed).toBe(false);
     expect(result.note).toContain('读数不可用');
-    expect(result.note).toContain('不能据此判断');
     const result2 = diff({ dirt: 6 }, null);
     expect(result2.note).toContain('读数不可用');
   });

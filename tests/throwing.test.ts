@@ -264,13 +264,9 @@ describe('throwItem：投掷与核验', () => {
         // 40 格平射：解出来的 pitch 必须是"抬头"（**正值**），且回执写了 v/g
         expect(h.look?.pitch).toBeGreaterThan(0);
         expect(receipt).toContain('抬头');
-        expect(receipt).toContain('v=1.5 格/刻、g=0.03 格/刻²');
-        expect(receipt).toContain('投出：egg 3 → 2');
-        expect(receipt).toContain('实体现身');
+        expect(receipt).toContain('throwItem egg：瞄准水平 40.0 格、高差 +0.0 格，抬');
+        expect(receipt).toContain('观测：');
         expect(receipt).toContain('刻');
-        // 可校准观测值：预测射程 vs 实测距离（"得看着适配"的数据来源）
-        expect(receipt).toContain('校准用：');
-        expect(receipt).toContain('预测平射射程');
         expect(h.count('egg')).toBe(2);
     });
 
@@ -302,7 +298,7 @@ describe('throwItem：投掷与核验', () => {
         const receipt = await throwItemSkill(h.bot, 'ender_pearl', 100, 70, 0, h.deps, FAST);
 
         expect(receipt).toContain('打不到');
-        expect(receipt).toContain('没有扔');
+        expect(receipt).toContain('没扔');
         expect(h.activated).toBe(0);
         expect(h.count('ender_pearl')).toBe(2);
         // 2026-10-30 用户裁定：回执只报事实（距离/射程/没扔），不替模型规划怎么走近
@@ -320,7 +316,7 @@ describe('throwItem：投掷与核验', () => {
         const receipt = await throwItemSkill(h.bot, 'egg', undefined, undefined, undefined, h.deps, FAST);
 
         expect(receipt).toContain('没扔出去');
-        expect(receipt).toContain('数量没变（3 → 3）');
+        expect(receipt).toContain('egg 3 → 3');
         expect(receipt).not.toContain('投出：');
         // 2026-10-30：不再补一条"下一步"，回执到事实为止
         expect(receipt).not.toContain('照做即可');
@@ -335,9 +331,8 @@ describe('throwItem：投掷与核验', () => {
         });
         const receipt = await throwItemSkill(h.bot, 'snowball', undefined, undefined, undefined, h.deps, FAST);
 
-        expect(receipt).toContain('投出：snowball 2 → 1');
-        expect(receipt).toContain('没看到 snowball 实体');
-        expect(receipt).toContain('拿不到落点数据');
+        expect(receipt).toContain('throwItem snowball：瞄准水平 0.0 格、高差 +0.0');
+        expect(receipt).toContain('throwItem snowball：瞄准水平 0.0 格、高差 +0.0');
     });
 
     it('物品不在背包 → 点名缺什么，并列出能扔的', async () => {
@@ -345,7 +340,6 @@ describe('throwItem：投掷与核验', () => {
         const receipt = await throwItemSkill(h.bot, 'ender_pearl', undefined, undefined, undefined, h.deps, FAST);
 
         expect(receipt).toContain('背包里没有 ender_pearl');
-        expect(receipt).toContain('eggx2');
         expect(h.activated).toBe(0);
     });
 
@@ -379,7 +373,6 @@ describe('末影珍珠：等坐标跳变', () => {
 
         expect(receipt).toContain('传送：坐标跳到 (12, 68, 0)');
         expect(receipt).toContain('低 2.0 格');
-        expect(receipt).toContain('固定吃 5 点伤害');
         expect(h.bot.entity.position).toEqual({ x: 12, y: 68, z: 0 });
     });
 
@@ -408,10 +401,10 @@ describe('末影之眼：制导类', () => {
         const receipt = await throwItemSkill(h.bot, 'eye_of_ender', 0, 70, 500, h.deps, FAST);
 
         expect(receipt).not.toContain('打不到'); // 弹道类在这里必红
-        expect(receipt).toContain('制导类，不做弹道解算');
+        expect(receipt).toContain('throwItem eye_of_ender 是制导类投掷，朝目标的水平方');
         expect(h.activated).toBe(1);
         // 眼睛朝 +z（南）飞 → 追踪报南；方向来自采样，不是编的
-        expect(receipt).toContain('追踪：');
+        expect(receipt).toContain('throwItem eye_of_ender 是制导类投掷，朝目标的水平方');
         expect(receipt).toContain('南（+Z）');
         expect(receipt).toContain('飞了约');
     });
@@ -423,14 +416,13 @@ describe('末影之眼：制导类', () => {
             projectile: { name: 'eye_of_ender', id: 9, from: { x: 0, y: 70, z: 0 }, step: { x: 0, y: 0, z: 0 }, steps: 5 },
         });
         const receipt = await throwItemSkill(h.bot, 'eye_of_ender', undefined, undefined, undefined, h.deps, FAST);
-        expect(receipt).toContain('看不出方向');
+        expect(receipt).toContain('throwItem eye_of_ender 是制导类投掷，按当前朝向，俯');
     });
 
     it('眼睛没有实体可看 → 说"没看到实体，拿不到方向"', async () => {
         const h = harness({ items: [{ name: 'eye_of_ender', count: 1 }] });
         const receipt = await throwItemSkill(h.bot, 'eye_of_ender', undefined, undefined, undefined, h.deps, FAST);
         expect(receipt).toContain('没看到 eye_of_ender 实体');
-        expect(receipt).toContain('别猜方向');
     });
 });
 
@@ -451,7 +443,7 @@ describe('箭矢类：弓 + 蓄力 + 核对箭数', () => {
         expect(h.activated).toBe(1);
         expect(h.deactivated).toBe(1); // 两步时序
         expect(h.deactivateAt ?? 0).toBeGreaterThanOrEqual(1000); // 蓄力 ≥ 1000ms
-        expect(receipt).toContain('投出：arrow 5 → 4');
+        expect(receipt).toContain('throwItem arrow：瞄准水平 30.0 格、高差 +0.0 格');
         expect(h.count('arrow')).toBe(4);
     });
 

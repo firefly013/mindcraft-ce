@@ -36,6 +36,7 @@ import type { PlanTodo } from '../shared/plan.js';
 import { permits } from './safety/permits.js';
 import { safeguards } from './safety/safeguards.js';
 import { getVillagerProfession } from './library/world.js';
+import { itemDisplayName } from './library/item_variants.js';
 
 /**
  * `bot.blockAt` 只接受 Vec3：mineflayer 把参数原样交给 prismarine-world，
@@ -231,12 +232,20 @@ export function sampleLiveState(ctx: SampleContext): LiveState {
     };
 
     const slots: unknown[] = Array.isArray(bot.inventory?.slots) ? bot.inventory.slots : [];
+    /**
+     * 背包里显示用的物品名。
+     *
+     * 名称相同、靠附加数据区分的东西（药水、附魔书、附魔装备、药箭、迷之炖菜、
+     * 山羊角、烟花、地图、装填的弩）都用同一套后缀显示；读不到附加数据就退回裸名。
+     */
+    const itemLabel = (item: unknown, fallback: string): string =>
+      itemDisplayName(item, fallback, (bot as { registry?: unknown }).registry ?? null);
     const slotName = (i: number): string | null => {
       const s = slots[i] as { name?: unknown; count?: unknown } | undefined;
       const n = str(s?.name);
       if (n == null) return null;
       const c = num(s?.count) ?? 1;
-      return `${n}x${c}`;
+      return `${itemLabel(s, n)}x${c}`;
     };
     const heldItem = bot.heldItem as
       | { name?: unknown; count?: unknown; durabilityUsed?: unknown; maxDurability?: unknown }
@@ -251,7 +260,9 @@ export function sampleLiveState(ctx: SampleContext): LiveState {
     const inventorySynced = ctx.inventorySynced !== false;
     empty.held = {
       synced: inventorySynced,
-      mainHand: heldItem ? `${str(heldItem.name) ?? 'unknown'}x${num(heldItem.count) ?? 1}` : null,
+      mainHand: heldItem
+        ? `${itemLabel(heldItem, str(heldItem.name) ?? 'unknown')}x${num(heldItem.count) ?? 1}`
+        : null,
       offHand: slotName(45),
       armor: [slotName(8), slotName(7), slotName(6), slotName(5)].filter(
         (s): s is string => s != null && s !== 'null',

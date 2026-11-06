@@ -88,13 +88,13 @@ describe('垂直上行工具回执', () => {
   it('没有垫脚方块：pillarUp 明确报失败原因', async () => {
     const bot = { output: '', interrupt_code: false, inventory: { items: () => [] }, entity: { position: { x: 0, y: 0, z: 0 } } };
     await expect(pillarUp(bot, 2)).resolves.toBe(false);
-    expect(bot.output).toContain('没有可垫脚的方块');
+    expect(bot.output).toContain('pillarUp 没有做成，因为背包里没有可以垫脚的方块。');
   });
 
   it('interrupt_code 已置位：stairUp 立刻退出并回报中断', async () => {
     const bot = { output: '', interrupt_code: true, inventory: { items: () => [{ name: 'cobblestone', count: 3 }] }, entity: { position: { x: 0, y: 0, z: 0 }, yaw: 0 } };
     await expect(stairUp(bot, 2)).resolves.toBe(false);
-    expect(bot.output).toContain('中断');
+    expect(bot.output).toContain('stairUp 被 Stop 或保命反射打断了，已经上了 0 格，目标是');
   });
 });
 

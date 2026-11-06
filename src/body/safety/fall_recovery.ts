@@ -77,36 +77,33 @@ export function planFallRecovery(input: {
     dropDistance: number | null;
 }): FallRecoveryPlan {
     if (input.onSolidGround) {
-        return { rung: 'brake', target: null, text: '脚下是实心地面——下坠恢复这条不触发。' };
+        return { rung: 'brake', target: null, text: '我脚下是实心地面，下坠恢复不会触发。' };
     }
     const evidence = (): string => {
-        const at = input.mediumAtY == null ? '' : `（y=${input.mediumAtY} 读到 ${input.mediumName ?? '?'}）`;
+        const at = input.mediumAtY == null ? '' : `，y=${input.mediumAtY} 那一格读到的方块是 ${input.mediumName ?? '?'}`;
         switch (input.medium) {
             case 'lava':
-                return `下方是**岩浆**${at}`;
+                return `下方是岩浆${at}`;
             case 'water':
-                return `下方是**水**${at}`;
+                return `下方是水${at}`;
             case 'void':
-                return '下方是**虚空/一路空气**';
+                return '下方是虚空';
             case 'solid':
                 return `下方 ${input.dropDistance ?? '?'} 格内有实心地面${at}`;
             default:
-                return '下方介质**读不到**';
+                return '下方是什么介质读不到';
         }
     };
 
-    // 介质**读不到**：保守，只刹车（不许赌"大概是水/大概是岛边"）。
+    // 介质**读不到**：保守，只刹车。
     if (input.medium === 'unknown') {
         return {
             rung: 'brake',
             target: null,
-            text: `脚下没有实心方块/**正在下坠**：${evidence()} ⇒ **保守：只刹车**（读不到介质时不赌；横向平移在虚空那里是死法）。`,
+            text: `我正在往下掉，${evidence()}，所以只刹车。`,
         };
     }
 
-    // **虚空 + 有方块 + 身边有可依托的实心面 ⇒ 在脚下垫一块**（不横移）。
-    // 真机 2026-10-19（末地）：「看向末影人=瞬间被瞬移近身击退掉进虚空；保命反射有
-    // 方块却只刹车不垫脚」。垫脚**不是横向移动**，而且正是这一档唯一的救命动作。
     if (
         input.medium === 'void' &&
         input.hasPlaceableBlocks === true &&
@@ -115,9 +112,7 @@ export function planFallRecovery(input: {
         return {
             rung: 'place',
             target: input.placeAgainst,
-            text:
-                '下方是**虚空**，但背包里有方块、旁边有可依托的实心面 ⇒ **在脚下垫一块**' +
-                '（只垫脚，不做任何横向移动；这是末地被击退时唯一的救命动作）。',
+            text: '我正在往下掉，下方是虚空，所以我在脚下垫了一块方块。',
         };
     }
     if (input.medium === 'void') {
@@ -125,15 +120,13 @@ export function planFallRecovery(input: {
             rung: 'brake',
             target: null,
             text:
-                `脚下没有实心方块/**正在下坠**：${evidence()}` +
-                (input.hasPlaceableBlocks === true
-                    ? '，而且旁边没有可依托的面（垫脚要靠侧面）'
-                    : '，背包里也没有可垫的方块') +
-                ' ⇒ **保守：只刹车**（横向平移在那里是死法）。已经掉到岛下方的话，这一档救不了你——如实说清。',
+                `我正在往下掉，${evidence()}` +
+                (input.hasPlaceableBlocks === true ? '，旁边也没有可以依托的面' : '，背包里也没有能垫的方块') +
+                '，所以只刹车。',
         };
     }
 
-    // 岩浆/水：先找安全落点横移——这时候横移就是救命动作。
+    // 岩浆/水：先找安全落点横移。
     if (input.safeLanding != null) {
         const dx = input.safeLanding.x - input.feet.x;
         const dz = input.safeLanding.z - input.feet.z;
@@ -141,22 +134,23 @@ export function planFallRecovery(input: {
         return {
             rung: 'lateral',
             target: input.safeLanding,
-            text: `${evidence()} ⇒ 刹车后**改朝 ${meters.toFixed(1)} 格外那块实心落点横移**（落点已验证可站立，不是岩浆/虚空）。`,
+            text: `${evidence()}，我刹车之后朝 ${meters.toFixed(1)} 格外那块实心落点横移。`,
         };
     }
 
-    // 没有安全落点：如果还有高度且带水桶，试 MLG；否则诚实说"试过了，没办法"。
     if (input.hasWaterBucket && (input.dropDistance == null || input.dropDistance >= 6)) {
         return {
             rung: 'mlg',
             target: null,
-            text: `${evidence()}，可落脚的地方都没找到 ⇒ 试**水桶 MLG**（有桶；落地前一格倒水）。`,
+            text: `${evidence()}，没有找到能落脚的地方，我试着用水桶落地。`,
         };
     }
     return {
         rung: 'brake',
         target: null,
-        text: `脚下没有实心方块/**正在下坠**：${evidence()}，而且**没有可落脚的安全点${input.hasWaterBucket ? '' : '、也没有水桶'}** ⇒ 只刹车。已经试过横移/落地手段，都不成立；这不是"反射没管你"，是确实没有可落脚处。`,
+        text:
+            `我正在往下掉，${evidence()}，没有能落脚的安全点` +
+            `${input.hasWaterBucket ? '' : '，也没有水桶'}，所以只刹车。`,
     };
 }
 

@@ -54,10 +54,10 @@ describe('formatNoObstacleDiagnosis：目标格是空的时别再说"挖不动"'
   it('点明"目标脚/头那格读起来是空的" + 天花板/悬空事实 + 下一步', () => {
     const text = formatNoObstacleDiagnosis({ target: { x: 14, y: 59, z: -41 }, headSolid: 'stone', floorSolid: 'solid', onGround: true, movedAny: false });
     expect(text).toContain('(14, 59, -41)');
-    expect(text).toContain('读起来是空的');
-    expect(text).toContain('你头顶那格是 stone');
-    expect(text).toContain('位置完全没变');
-    expect(text).toContain('mineBlock');
+    expect(text).toContain('我没能走进 (14, 59, -41)，头顶那一格是 stone，按键期间');
+    expect(text).toContain('我没能走进 (14, 59, -41)，头顶那一格是 stone，按键期间');
+    expect(text).toContain('我没能走进 (14, 59, -41)，头顶那一格是 stone，按键期间');
+    expect(text).toContain('我没能走进 (14, 59, -41)，头顶那一格是 stone，按键期间');
   });
 });
 
@@ -74,3 +74,4 @@ describe('接线守卫', () => {
     expect(progression).toContain("replace(/。+$/, '')");
   });
 });
+

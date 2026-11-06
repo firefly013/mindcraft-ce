@@ -60,7 +60,7 @@ export function createSayTool(onSay: (text: string) => void = () => {}): ToolReg
       // **空话和超长都拒绝**，而且不写 entry——说了等于没说，不如让它改写。
       // 超长尤其不能悄悄截断：模型会以为整句都发出去了。
       if (!shaped.ok) {
-        return { content: [{ type: 'text' as const, text: shaped.reason ?? 'Say 需要非空文本。' }], isError: true };
+        return { content: [{ type: 'text' as const, text: shaped.reason ?? '没有给出要说的内容，所以什么也没有发出去。' }], isError: true };
       }
       const line = shaped.line ?? '';
       await api.commit(async (tx) => {

@@ -21,7 +21,7 @@ import * as world from './world.js';
 // 找水只留一份实现（`nearestWater` 在 progression 里，只扫已加载区块）：
 // progression 不 import survival，所以这条依赖不会成环。
 import { capLines, capReceipt, nearestWater } from './progression.js';
-import { FOOD_VALUE, cookedCounterpartOf, difficultyOf, foodValueOf, isHostile, pickBestFood, starvationNote } from '../safety/emergency.js';
+import { FOOD_VALUE, cookedCounterpartOf, difficultyOf, foodValueOf, isHostile, pickBestFood } from '../safety/emergency.js';
 
 /** 与 edges / live_state 同一套夜晚阈值（12542 起怪物可刷，23460 天亮）。 */
 export const NIGHT_START = 12542;
@@ -324,7 +324,6 @@ export interface SurvivalAssessment {
     fireResistReady: boolean;
     blazeReady: boolean;
     missing: string[];
-    advice: string;
     dimension: string | null;
 }
 
@@ -379,77 +378,6 @@ export function foodReserveAssets(inventory: Record<string, number>): FoodReserv
     };
 }
 
-/** 从资产里挑一句"你能自己造食物"的具体路线（没有材料就如实说没有）。 */
-export function renewableFoodHint(assets: FoodReserveAssets | undefined): string {
-    const a = assets ?? { seeds: 0, sticks: 0, string: 0, planks: 0, rawItems: [] };
-    const hints: string[] = [];
-    if (a.sticks >= 3 && a.string >= 2) {
-        hints.push('钓鱼最稳（可再生）：useBlock(type="crafting_table", input="3 stick, 2 string", output="1 fishing_rod")');
-    }
-    if (a.seeds > 0) {
-        hints.push(`种小麦：背包有 ${a.seeds} 个种子 → 木锄 → 锄地 → 播种，3 小麦做面包`);
-    }
-    if (a.planks >= 2 && a.sticks >= 2) {
-        hints.push('做木锄：useBlock(type="crafting_table", input="2 oak_planks, 2 stick", output="1 wooden_hoe")');
-    }
-    if (hints.length === 0) {
-        return '（背包里没有种子/线/木棍这类材料：先去水边或找动物，别在原地耗）';
-    }
-    return `（${hints.join('；')}）`;
-}
-
-/** 生肉提示：有熔炉就先烤，熟食值约一倍。 */
-function rawFoodHint(rawItems: ReadonlyArray<{ name: string; count: number; cooked: string }>): string {
-    if (rawItems.length === 0) return '';
-    const worst = rawItems[0];
-    return `背包里的 ${worst.name}x${worst.count} 是生的（熟食值约一倍）：先 useBlock(type="furnace", input="1 ${worst.name}", output="1 ${worst.cooked}") 再吃。`;
-}
-
-/**
- * 食物告急：**三个条件同时成立**才说——血低 + food 低于回血线 + 背包没有能吃的。
- * 否则返回 null（有吃的、或还能回血、或血还够，都不该拿这条去吵模型）。
- */
-export function foodEmergencyLine(input: {
-    health: number | null;
-    food: number | null;
-    edibles: number;
-    assets?: FoodReserveAssets;
-    /** 世界难度（0/1/2/3）：用来把"会不会饿死"说准；读不到就什么都不说。 */
-    difficulty?: number | null;
-}): string | null {
-    if (input.edibles > 0) return null;
-    if (input.food == null || input.food >= FOOD_REGEN_THRESHOLD) return null;
-    if (input.health == null || input.health > FOOD_EMERGENCY_HEALTH) return null;
-    // 血少挨打会死是真的；但"饿"本身在 Easy/Normal 不会把人饿死——两句分开说，
-    // 模型才不会恐慌性清空存粮（真机：它们会一捡到就吃掉，然后一小时后饿死）。
-    const starving = starvationNote(input.difficulty);
-    return (
-        `- ⚠️ 食物告急：血 ${input.health}、食物 ${input.food}（低于回血线 ${FOOD_REGEN_THRESHOLD}）、**背包没有能吃的东西** → ` +
-        `**先别打**：去钓鱼或种地${renewableFoodHint(input.assets)}。现在这个血量挨一下就没了。` +
-        (starving === '' ? '' : ` ${starving}`)
-    );
-}
-
-/**
- * 存粮告急：**还有吃的但只剩 ≤2 份** + food < 14 → 现在就补，别等饿到 18 以下。
- * （consume 那边只警告不拒绝——吃不吃由模型定；这一条管的是 food < 14 时把"该补了"说出来。）
- */
-export function foodReserveLine(input: {
-    health: number | null;
-    food: number | null;
-    edibles: number;
-    assets?: FoodReserveAssets;
-}): string | null {
-    if (input.edibles <= 0 || input.edibles > FOOD_RESERVE_LOW) return null;
-    if (input.food == null || input.food >= FOOD_RESERVE_COMFORT) return null;
-    const raw = rawFoodHint(input.assets?.rawItems ?? []);
-    return (
-        `- ⚠️ 存粮只剩 ${input.edibles} 份（食物 ${input.food} < ${FOOD_RESERVE_COMFORT}）：` +
-        `**趁现在去补**（钓鱼/打猎/种地），别等饿到 ${FOOD_REGEN_THRESHOLD} 以下再找——那时已经不能回血了。` +
-        `${renewableFoodHint(input.assets)}${raw === '' ? '' : ` ${raw}`}`
-    );
-}
-
 function fireResistSecondsOf(effects: EffectInfo[]): number | null {
     const found = effects.filter((e) => normalizeEffectName(e.name).includes('fire_resistance'));
     if (found.length === 0) return null;
@@ -479,33 +407,14 @@ export function assessSurvival(signals: SurvivalSignals): SurvivalAssessment {
     if (!fireResistReady) {
         missing.push(
             fireResistPotionCount === 0
-                ? '抗火药水（背包 0 瓶、身上也没 Buff；要烈焰粉 + 岩浆膏 + 酿造台自制）'
-                : '抗火 Buff（有药水但还没喝）',
+                ? '抗火药水，背包里 0 瓶，身上也没有抗火 Buff'
+                : '抗火 Buff，有药水但还没喝',
         );
     }
-    if (!foodReady) missing.push('食物（要能顶住饿的熟食，至少 2 份）');
-    if (health != null && health < 6) missing.push('血量（先回血再打烈焰人）');
+    if (!foodReady) missing.push('食物，至少需要 2 份能顶住饿的熟食');
+    if (health != null && health < 6) missing.push('血量，现在不到 6 点');
 
     const blazeReady = missing.length === 0;
-
-    let advice: string;
-    if (nearestHostile != null && health != null && health <= 8) {
-        advice = `周围有敌对生物（最近 ${nearestHostile.name} ${nearestHostile.distance}m）而血量只剩 ${health}：先撤进地下掩体，别在地表硬拼。`;
-    } else if (isNight && !sheltered) {
-        advice = '现在是夜晚又没有地下掩体：立刻调用 seekShelter 回地下，别在地表打怪。';
-    } else if (!isNight && (ticksUntilNight(timeOfDay) ?? DAY_TICKS) <= NIGHT_WARNING_TICKS && !sheltered) {
-        advice = `快天黑了（还有 ${ticksUntilNight(timeOfDay)} tick）：先用 seekShelter 找/挖地下庇护所，把床和食物带下去。`;
-    } else if (isNight && sheltered) {
-        advice = bedCount > 0
-            ? '已在地下且有床：用 sleepUnderground 睡觉到天亮。'
-            : '已在地下但没有床：用 sleepUnderground 蹲到天亮，别出去。';
-    } else if (!fireResistReady) {
-        advice = '打烈焰人/进下界前要先备好抗火药水：调用 prepareBlaze 检查并喝下，Buff 快没了就再调一次。';
-    } else if (sheltered) {
-        advice = '地下掩体就绪，食物和抗火也够：按计划推进，Buff 快没了就补。';
-    } else {
-        advice = '先保证有地下掩体和食物，再考虑远行或打烈焰人。';
-    }
 
     return {
         timeOfDay,
@@ -533,51 +442,46 @@ export function assessSurvival(signals: SurvivalSignals): SurvivalAssessment {
         fireResistReady,
         blazeReady,
         missing,
-        advice,
         dimension: signals.dimension,
         difficulty: signals.difficulty ?? null,
     };
 }
 
 const numOr = (value: number | null, suffix = ''): string => (value == null ? 'unknown' : `${value}${suffix}`);
-const secs = (ticks: number | null): string => (ticks == null ? 'unknown' : `${Math.round(ticks / 20)}s`);
+const secs = (ticks: number | null): string => (ticks == null ? 'unknown' : `${Math.round(ticks / 20)} 秒`);
 
 /** 把评估渲成给模型看的纯文本报告（query 工具用）。 */
 export function formatSurvivalReport(a: SurvivalAssessment): string {
-    const timeLabel = a.isNight ? '夜晚' : '白天';
     const timeLine = a.timeOfDay == null
-        ? '时间：unknown'
-        : `时间：${timeLabel}（timeOfDay ${a.timeOfDay}，距天黑 ${secs(a.ticksUntilNight)} / 距天亮 ${secs(a.ticksUntilDawn)}）`;
+        ? '时间读不到'
+        : `现在 timeOfDay 是 ${a.timeOfDay}，距离天黑还有 ${secs(a.ticksUntilNight)}，距离天亮还有 ${secs(a.ticksUntilDawn)}`;
     const depth = a.y != null && a.surfaceY != null ? a.y - a.surfaceY : null;
     const posLine =
         a.surfaceY == null
-            ? `位置：y=${numOr(a.y)}（地表高度 unknown）`
-            : `位置：y=${numOr(a.y)}，该列地表 y=${a.surfaceY}（${depth != null && depth <= -2 ? `地下 ${-depth} 格` : '在地表或附近'}）`;
-    const shelterLine = `掩体：${a.sheltered ? '有（地下或有顶）' : '没有'}${a.roofed === true ? `，头顶 ${a.roofBlock ?? '实体'} 挡着` : a.roofed === false ? '，头顶露天' : '，头顶读不到'}`;
+            ? `你的 y 是 ${numOr(a.y)}，读不到这一列的地表高度`
+            : `你的 y 是 ${numOr(a.y)}，这一列的地表高度是 ${a.surfaceY} 格${
+                  depth != null && depth <= -2 ? `，你在地下 ${-depth} 格` : ''
+              }`;
+    const shelterLine = `你${a.sheltered ? '有掩体' : '没有掩体'}${
+        a.roofed === true ? `，头顶是 ${a.roofBlock ?? '实体方块'}` : ''
+    }`;
     const threatLine = a.nearestHostile == null
-        ? `危险生物：${HOSTILE_RADIUS} 格内没有`
-        : `危险生物：${a.hostileCount} 个（最近 ${a.nearestHostile.name} ${a.nearestHostile.distance}m）`;
+        ? `周围 ${HOSTILE_RADIUS} 格内没有危险生物`
+        : `周围 ${HOSTILE_RADIUS} 格内有 ${a.hostileCount} 个危险生物，最近的是${a.nearestHostile.name}，距离你 ${a.nearestHostile.distance} 米`;
     const supplyLine =
-        `物资：床 ${a.bedCount} 张；食物 hunger=${numOr(a.food)}，背包含 ${a.foodCount} 份；` +
-        `抗火药水：Buff ${a.fireResistSeconds == null ? '无' : `${a.fireResistSeconds}s`}，库存 ${a.fireResistPotionCount} 瓶`;
+        `背包里有 ${a.bedCount} 张床和 ${a.foodCount} 份食物，饱食度是 ${numOr(a.food)}，` +
+        `抗火 Buff ${a.fireResistSeconds == null ? '没有生效' : `还有 ${a.fireResistSeconds} 秒`}，抗火药水有 ${a.fireResistPotionCount} 瓶`;
     const readyLine =
-        `就绪：地下庇护 ${a.sheltered ? '是' : '否'}；烈焰人准备 ${a.blazeReady ? '是' : `否（缺 ${a.missing.join('、') || '未知'}）`}`;
-    // 食物两条线（见上方 FOOD_REGEN_THRESHOLD 那段的注释）：告急线只在该告急时出现，
-    // 存粮线只在"还有一点但快没了"时出现；两条都不会在"食物充足"时来吵模型。
-    const foodInput = { health: a.health, food: a.food, edibles: a.foodCount, assets: a.foodAssets, difficulty: a.difficulty };
-    const foodEmergency = foodEmergencyLine(foodInput);
-    const foodReserve = foodReserveLine(foodInput);
+        `地下庇护${a.sheltered ? '已经就绪' : '还没就绪'}，` +
+        `打烈焰人的准备${a.blazeReady ? '已经就绪' : `还没就绪，缺少 ${a.missing.join('、') || '未知物品'}`}`;
     return [
-        '生存检查：',
-        `- ${timeLine}`,
-        `- ${posLine}`,
-        `- ${shelterLine}`,
-        `- ${threatLine}`,
-        `- ${supplyLine}`,
-        ...(foodEmergency == null ? [] : [foodEmergency]),
-        ...(foodReserve == null ? [] : [foodReserve]),
-        `- ${readyLine}`,
-        `- 建议：${a.advice}`,
+        '生存检查的结果是这样。',
+        `- ${timeLine}。`,
+        `- ${posLine}。`,
+        `- ${shelterLine}。`,
+        `- ${threatLine}。`,
+        `- ${supplyLine}。`,
+        `- ${readyLine}。`,
     ].join('\n');
 }
 
@@ -685,10 +589,7 @@ export async function carvePocket(bot: any): Promise<boolean> {
 export async function seekShelterSkill(bot: any): Promise<string> {
     const before = assessSurvival(sampleSurvivalSignals(bot));
     if (before.sheltered) {
-        return logLine(
-            bot,
-            `已经有庇护：y=${before.y}，头顶 ${before.roofBlock ?? '有方块'} 挡着，${before.underground ? '在地下' : '不在明确地下'}。不用再动。`,
-        );
+        return logLine(bot, `你现在已经有庇护了，y 是 ${before.y}，头顶是 ${before.roofBlock ?? '方块'}。`);
     }
 
     const spot = findNearbyCoveredSpot(bot);
@@ -696,38 +597,31 @@ export async function seekShelterSkill(bot: any): Promise<string> {
         const ok = await skills.goToPosition(bot, spot.x, spot.y, spot.z, 1);
         const afterMove = assessSurvival(sampleSurvivalSignals(bot));
         if (ok && afterMove.sheltered) {
-            return logLine(bot, `附近有现成有顶空间 (${spot.x},${spot.y},${spot.z})，已经过去躲好。`);
+            return logLine(bot, `你现在在 (${spot.x}, ${spot.y}, ${spot.z}) 这里已经有头顶遮挡了。`);
         }
-        skills.log(bot, `附近的有顶空间 (${spot.x},${spot.y},${spot.z}) 没走成，改为自己挖。`);
     }
 
     let note: string;
     if (before.underground === true) {
-        note = '已经在深处但没有顶，直接往旁边掏一个洞。';
+        note = '';
     } else {
         const depth = shelterDigDepth(before.y, before.surfaceY);
         const dug = await skills.digDown(bot, depth);
         if (!dug) {
             const stuck = assessSurvival(sampleSurvivalSignals(bot));
-            return logLine(
-                bot,
-                `往下挖受阻（水/岩浆/落差），停在 y=${stuck.y}。换个位置再试 seekShelter，或用 mineBlock 手动往旁边开洞。`,
-            );
+            return logLine(bot, `没能挖出庇护所，往下挖到 y ${stuck.y} 就被挡住了。`);
         }
-        note = `向下挖了 ${depth} 格到 y=${sampleSurvivalSignals(bot).y}。`;
+        note = `往下挖了 ${depth} 格，到了 y ${sampleSurvivalSignals(bot).y}，`;
     }
 
     const carved = await carvePocket(bot);
     const after = assessSurvival(sampleSurvivalSignals(bot));
     if (after.sheltered) {
-        return logLine(
-            bot,
-            `${note}${carved ? '又向旁边掏出一格有顶空间' : '站稳了'}：地下庇护就绪（y=${after.y}，头顶 ${after.roofBlock ?? '方块'}）。把床和食物带下来，天黑用 sleepUnderground。`,
-        );
+        return logLine(bot, `${note}现在头顶有遮挡了，庇护所就绪，y 是 ${after.y}，头顶是 ${after.roofBlock ?? '方块'}。`);
     }
     return logLine(
         bot,
-        `${note}但没掏成有顶空间（四周可能都是水/岩浆/挖不动）。停在 y=${after.y}，先别上地表：换个地方再 seekShelter，或用 placeBlock 把头顶封上。`,
+        `没能挖出庇护所，${note}最后停在 y ${after.y}，头顶没有方块${carved ? '' : '，旁边的方块也掏不动'}。`,
     );
 }
 
@@ -738,12 +632,12 @@ export async function waitForDawn(bot: any, maxSeconds = 600): Promise<string> {
         const timeOfDay = sampleSurvivalSignals(bot).timeOfDay;
         // 读不到时间不能当成天亮（否则会误上地表）；继续等，到 maxSeconds 为止。
         if (timeOfDay != null && !isNightTime(timeOfDay)) {
-            return `已经天亮了（在地下待了 ${Math.round((Date.now() - start) / 1000)} 秒）。`;
+            return `天亮了，一共等了 ${Math.round((Date.now() - start) / 1000)} 秒。`;
         }
-        if (bot?.interrupt_code === true) return '等待被打断了。';
+        if (bot?.interrupt_code === true) return '这次等待天亮的动作被中断了。';
         await skills.stay(bot, 10);
     }
-    return `在地下等满 ${maxSeconds} 秒还没天亮，需要的话再调一次 sleepUnderground。`;
+    return `这次等待超时了，等了 ${maxSeconds} 秒还没天亮。`;
 }
 
 /**
@@ -757,28 +651,25 @@ export async function sleepUndergroundSkill(bot: any): Promise<string> {
     }
     const now = assessSurvival(sampleSurvivalSignals(bot));
     if (!now.sheltered) {
-        return logLine(bot, `${notes.join(' ')} 庇护还没弄好，先别睡也别上地表——处理完再调 sleepUnderground。`);
+        return logLine(bot, `没能睡下，因为庇护所还没就绪。${notes.join(' ')}`);
     }
     if (now.timeOfDay == null) {
-        return logLine(bot, `${notes.join(' ')} 读不到游戏时间，没法判断白天黑夜——先在地下待着，稍后再调 survivalCheck。`);
+        return logLine(bot, '没能判断现在该不该睡，因为读不到游戏时间。');
     }
     if (!now.isNight) {
-        return logLine(
-            bot,
-            `${notes.join(' ')} 现在是白天（距天黑 ${Math.round((now.ticksUntilNight ?? 0) / 20)} 秒），不用睡。天黑前记得早点回地下。`,
-        );
+        return logLine(bot, `现在是白天，距离天黑还有 ${Math.round((now.ticksUntilNight ?? 0) / 20)} 秒。`);
     }
     if (now.bedCount > 0) {
         const slept = await skills.goToBed(bot);
         if (slept) {
-            return logLine(bot, `${notes.join(' ')} 天亮前在地下睡了一觉，醒来再行动。`);
+            return logLine(bot, '已经睡下了。');
         }
-        notes.push('周围有床，但没能睡下（可能旁边有怪、床被占、或没到睡觉时间）。');
+        notes.push('周围有床，但没能睡下。');
     } else {
         notes.push('周围没有床。');
     }
     const waited = await waitForDawn(bot);
-    return logLine(bot, `在地下等到天亮：${notes.join(' ')} ${waited}`);
+    return logLine(bot, `${notes.join(' ')} ${waited}`);
 }
 
 /** 喝一瓶抗火药水（按 NBT 挑对药水，不靠名字猜）。 */
@@ -790,7 +681,7 @@ export async function drinkFireResistancePotion(bot: any): Promise<boolean> {
         await bot.consume();
         return true;
     } catch (error: unknown) {
-        skills.log(bot, `喝抗火药水失败：${error instanceof Error ? error.message : String(error)}`);
+        skills.log(bot, `喝抗火药水失败了，${error instanceof Error ? error.message : String(error)}`);
         return false;
     }
 }
@@ -804,46 +695,39 @@ export async function prepareBlazeSkill(bot: any): Promise<string> {
     let a = assessSurvival(sampleSurvivalSignals(bot));
 
     if (a.fireResistSeconds != null && a.fireResistSeconds >= MIN_FIRE_RESIST_SECONDS) {
-        notes.push(`抗火 Buff 还在（剩 ${a.fireResistSeconds} 秒），够用。`);
+        notes.push(`抗火 Buff 还有 ${a.fireResistSeconds} 秒`);
     } else if (a.fireResistPotionCount > 0) {
         const drank = await drinkFireResistancePotion(bot);
-        notes.push(drank ? '喝下抗火药水，Buff 已续上。' : '背包里有抗火药水，但没能喝下。');
+        notes.push(drank ? '喝下了抗火药水' : '没能喝下抗火药水');
     } else {
         notes.push(
             a.fireResistSeconds != null
-                ? `没有抗火药水可补，当前 Buff 只剩 ${a.fireResistSeconds} 秒。`
-                : '没有抗火药水：要烈焰粉 + 岩浆膏 + 酿造台自制。',
+                ? `抗火 Buff 还有 ${a.fireResistSeconds} 秒，抗火药水 0 瓶`
+                : '抗火 Buff 没有生效，抗火药水 0 瓶',
         );
     }
 
     const foodSignals = sampleSurvivalSignals(bot);
     a = assessSurvival(foodSignals);
     if (a.foodCount === 0) {
-        notes.push('背包没有食物，先准备熟食（烤熟的肉/面包）。');
+        notes.push('背包里没有食物');
     } else if (a.food == null || a.food < 18) {
         const best = pickBestFood(Object.keys(foodSignals.inventory).filter((name) => (foodSignals.inventory[name] ?? 0) > 0));
         if (best != null) {
             const ate = await skills.consume(bot, best);
-            if (ate) {
-                notes.push(`吃了 ${best} 补饱食度。`);
-            } else {
-                // 没吃成只说没吃成（原因在 consume 的回执里）。
-                // 2026-10-24 之前这里还有一支"存粮先留着"的甄别——那时 consume 会因为
-                // 存粮规则拒绝进食；现在 consume 不再拒绝，那支已经不可能触发，删掉。
-                notes.push(`想吃 ${best} 但没吃成（原因看上一条回执）。`);
-            }
+            notes.push(ate ? `吃了 ${best}` : `没能吃下 ${best}`);
         }
     } else {
-        notes.push(`饱食度 ${a.food}，够。`);
+        notes.push(`饱食度是 ${a.food}`);
     }
 
     const after = assessSurvival(sampleSurvivalSignals(bot));
     notes.push(
         after.blazeReady
-            ? '烈焰人准备就绪：抗火 Buff + 食物都够。Buff 快没了就再调 prepareBlaze。'
-            : `还没就绪，缺：${after.missing.join('、') || '见上'}。`,
+            ? '打烈焰人的准备已经就绪'
+            : `打烈焰人的准备还没就绪，缺少 ${after.missing.join('、') || '未知物品'}`,
     );
-    return logLine(bot, notes.join(' '));
+    return logLine(bot, `${notes.join('，')}。`);
 }
 
 // ---------------------------------------------------------------
@@ -1047,7 +931,7 @@ export interface WaterFlowState {
 export function waterFlowAt(bot: any, x: number, y: number, z: number): WaterFlowState | null {
     const name = blockNameAtSafe(bot, x, y, z);
     if (name == null || !isWaterBlockName(name)) return null;
-    let block: any = null;
+    let block: any;
     try {
         block = bot?.blockAt?.(new Vec3(Math.floor(x), Math.floor(y), Math.floor(z)));
     } catch {
@@ -1231,18 +1115,6 @@ function inventoryItemNames(bot: any): string[] {
     } catch {
         return [];
     }
-}
-
-/**
- * 溺水时的最后一条提示：**不要主动溺水**，继续找路或等人来救。
- *
- * 引擎不提供"用死亡脱困"这种出口，也不描述死亡划不划算——只把当前该做的事说清楚。
- */
-export function deliberateDrownAdvice(): string {
-    return (
-        '**不要主动溺水**：先继续找路（往最近干地游/挖台阶），或者等人来救。' +
-        '要停止挣扎也不是现在——空着手沉下去对谁都没有好处。'
-    );
 }
 
 function posText(bot: any): string {
@@ -1445,15 +1317,15 @@ export async function escapeWaterSkill(bot: any, deps: EscapeWaterDeps = {}): Pr
     const maxMs = deps.maxMs ?? 12000;
     const needed = Math.max(1, deps.confirmTicks ?? 3);
     if (!isInWater(bot)) {
-        return logLine(bot, '你不在水里（脚/头都不是水），不用 escapeWater。要回地面可以用 goToSurface。');
+        return logLine(bot, '你不在水里，脚和头都不在水里，不用执行 escapeWater。');
     }
     const start = posText(bot);
     const startY = botY(bot);
-    const receipt = (how: string): string => {
+    const receipt = (): string => {
         const endY = botY(bot);
         const delta = startY != null && endY != null ? Math.round((endY - startY) * 10) / 10 : null;
-        const riseText = delta == null ? '未知' : `${delta >= 0 ? '+' : ''}${delta}（${delta > 0 ? '上浮' : delta < 0 ? '下沉' : '未变'}）`;
-        return `已真正脱险（硬校验：脚/头不在水 + 脚下实心 + 连续 ${needed} 次确认）：${how}，起点 ${start} → ${posText(bot)}，水位变化 y ${riseText}。`;
+        const riseText = delta == null ? 'y 的变化读不到' : `y 从起手到现在变化了 ${delta >= 0 ? '+' : ''}${delta} 格`;
+        return `你脱险了，现在在 ${posText(bot)}，起手位置是 ${start}，${riseText}。`;
     };
 
     // ── ⓪ **横向一步上岸**（排在最前）──────────────────────────────────
@@ -1467,10 +1339,7 @@ export async function escapeWaterSkill(bot: any, deps: EscapeWaterDeps = {}): Pr
             if (ok && (await confirmDryGround(bot, { sleep, startY, needed }))) {
                 return logLine(
                     bot,
-                    receipt(
-                        `**横向一步上岸**：踩上 (${stepSpot.x},${stepSpot.y - 1},${stepSpot.z}) 这块实心` +
-                            `（就在旁边，没往上爬；落点 (${stepSpot.x},${stepSpot.y},${stepSpot.z})）`,
-                    ),
+                    receipt(),
                 );
             }
         } catch {
@@ -1484,14 +1353,14 @@ export async function escapeWaterSkill(bot: any, deps: EscapeWaterDeps = {}): Pr
         try {
             const ok = await goTo(bot, spot.x, spot.y, spot.z, 1);
             if (ok && (await confirmDryGround(bot, { sleep, startY, needed }))) {
-                return logLine(bot, receipt(`寻路到干岸 (${spot.x},${spot.y},${spot.z})`));
+                return logLine(bot, receipt());
             }
         } catch (error: unknown) {
             pathError = error instanceof Error ? error.message : String(error);
         }
         const swim = await swimToward(bot, spot, { sleep, now, maxMs, mineUp, confirmTicks: needed, startY });
         if (swim.escaped) {
-            return logLine(bot, receipt(`寻路${pathError === '' ? '没走通' : `失败（${pathError}）`}后手动游/跳，${swim.reason}`));
+            return logLine(bot, receipt());
         }
     }
 
@@ -1500,7 +1369,7 @@ export async function escapeWaterSkill(bot: any, deps: EscapeWaterDeps = {}): Pr
     if (solidAhead != null) {
         const swimSolid = await swimToward(bot, solidAhead, { sleep, now, maxMs, mineUp, confirmTicks: needed, startY });
         if (swimSolid.escaped) {
-            return logLine(bot, receipt(`无干岸，朝最近实心方块 (${solidAhead.x},${solidAhead.y},${solidAhead.z}) 游/跳，${swimSolid.reason}`));
+            return logLine(bot, receipt());
         }
     }
 
@@ -1509,14 +1378,13 @@ export async function escapeWaterSkill(bot: any, deps: EscapeWaterDeps = {}): Pr
         try {
             const climbed = await skills.pillarUp(bot, 1);
             if (climbed && (await confirmDryGround(bot, { sleep, startY, needed }))) {
-                return logLine(bot, receipt('水底有实心，垫台阶后脱险'));
+                return logLine(bot, receipt());
             }
         } catch {
             // 垫台阶失败继续走后面的上浮兜底。
         }
     }
 
-    const beforeFloatY = botY(bot);
     const float = await floatUpSkill(bot, {
         sleep,
         now,
@@ -1526,7 +1394,7 @@ export async function escapeWaterSkill(bot: any, deps: EscapeWaterDeps = {}): Pr
         startY,
     });
     if (float.ok) {
-        return logLine(bot, receipt(`无干岸，改为向上挖/上浮，${float.reason}`));
+        return logLine(bot, receipt());
     }
 
     // ── ④ **挖出台阶**（人从坑里/水坑里出来就是这么干的）────────────────
@@ -1539,40 +1407,19 @@ export async function escapeWaterSkill(bot: any, deps: EscapeWaterDeps = {}): Pr
         goTo,
     });
     if (digAttempt.ok) {
-        return logLine(bot, receipt(`**挖出台阶**：挖开 ${digAttempt.dug.join('、')}，${digAttempt.reason}`));
+        return logLine(bot, receipt());
     }
 
-    // ── 失败：把"为什么"和"下一步"说清楚，最后一档才提主动溺水 ──────────
+    // ── 失败：只报事实 ──────────────────────────────────────────────
     const endY = botY(bot);
     const delta = startY != null && endY != null ? Math.round((endY - startY) * 10) / 10 : null;
-    const riseText = delta == null ? '未知' : `${delta >= 0 ? '+' : ''}${delta}（${delta > 0 ? '上浮' : delta < 0 ? '下沉' : '未变'}）`;
-    const risingFailed = beforeFloatY != null && endY != null && endY <= beforeFloatY + 0.2;
+    const riseText = delta == null ? 'y 的变化读不到' : `y 变化了 ${delta >= 0 ? '+' : ''}${delta} 格`;
     const current = inDownwardCurrent(bot);
-    const wallPlan = planEscapeDig(
-        (x, y, z) => blockNameAtSafe(bot, x, y, z),
-        botFeet(bot) ?? { x: 0, y: 0, z: 0 },
-        (name) => canDig(bot, name),
-    );
-    const why = current && risingFailed
-        ? '**水在往下流，上浮顶不住**——你越游越被按回去，先横向离开这股水流（朝最近的干岸横着游）'
-        : digAttempt.dug.length > 0
-            ? `墙能挖开（已挖 ${digAttempt.dug.join('、')}），但${digAttempt.reason}`
-            : wallPlan == null
-                ? '四周是实心墙，而且**挖不动**（手上没有能快速挖开它的镐，徒手在水里等不起）'
-                : '四周的墙能挖，但挖完还是没找到落脚点';
-    // **不给下一步菜单**（2026-10-30 用户裁定）：能从墙挖出去、还是先垫方块，
-    // 是模型看着现场决定的事。这里只把"墙能不能挖开"这条事实写进 why。
     return logLine(
         bot,
-        `没能脱险（浅水坑困死）：${why}。` +
-            (spot == null ? '48 格内没找到可站立干岸；' : `最近干岸 (${spot.x},${spot.y},${spot.z}) 到不了；`) +
-            `向上挖/上浮也没成（${float.reason}）；` +
-            (current ? '脚下/头所在的水在流动（上浮被往下推）；' : '') +
-            `起点 ${start}，现在 ${posText(bot)}，水位变化 y ${riseText}；` +
-            '硬校验仍未上岸（脚/头仍在水里或脚下没有实心）。' +
-            '不要往下游。' +
-            ' ' +
-            deliberateDrownAdvice(),
+        `这次没能从水里出来，你还泡在水里，起手位置是 ${start}，现在是 ${posText(bot)}，${riseText}，` +
+            (spot == null ? '48 格内没有干岸' : `最近的干岸 (${spot.x}, ${spot.y}, ${spot.z}) 走不过去`) +
+            `，向上挖和上浮都没能上岸${current ? '，水还在往下流' : ''}。`,
     );
 }
 
@@ -1609,7 +1456,7 @@ async function digStepOutOfPit(
         }
         for (const cell of plan.dig) {
             if (opts.now() > deadline) return { ok: false, dug, reason: '挖台阶超时' };
-            let ok = false;
+            let ok: boolean;
             try {
                 ok = await opts.digBlock(bot, cell.x, cell.y, cell.z);
             } catch {
@@ -1628,7 +1475,7 @@ async function digStepOutOfPit(
             dug.push(`(${cell.x},${cell.y},${cell.z})`);
         }
         await opts.sleep(120);
-        let moved = false;
+        let moved: boolean;
         try {
             moved = await opts.goTo(bot, plan.stand.x, plan.stand.y, plan.stand.z, 1);
         } catch {
@@ -1746,17 +1593,17 @@ const FLUID_LABEL: Record<FluidKind, string> = { water: '水源', lava: '岩浆�
 /** `!findFluidSource` 的回执。 */
 export function fluidSourceReport(bot: any, kind: FluidKind | 'any' = 'water', radius = 32): string {
     const scan = scanFluidSources(bot, kind, radius);
-    const labels = kind === 'any' ? '水/岩浆' : FLUID_LABEL[kind];
+    const labels = kind === 'any' ? '水或岩浆' : FLUID_LABEL[kind];
     if (scan.source != null) {
         const s = scan.source;
-        return `半径 ${scan.radius} 格内找到${FLUID_LABEL[s.kind]}源头 (${s.x},${s.y},${s.z})，距 ${s.distance} 格（level 0，能装桶）。`;
+        return `半径 ${scan.radius} 格内找到了${FLUID_LABEL[s.kind]}源头，在 (${s.x}, ${s.y}, ${s.z})，距离你 ${s.distance} 格，这一格是 level 0 的源头，能装进桶。`;
     }
     if (scan.flowing != null) {
         const f = scan.flowing;
         const kindName = f.kind === 'water' ? '水' : '岩浆';
-        return `半径 ${scan.radius} 格内**没有${labels}源头，只有流动${kindName}**（最近流动${kindName}在 (${f.x},${f.y},${f.z})，距 ${f.distance} 格）。流动的装不进桶——去更远找源头，或找瀑布/岩浆瀑布最上面那一格。`;
+        return `半径 ${scan.radius} 格内没有${labels}源头，只有流动的${kindName}，最近的一格在 (${f.x}, ${f.y}, ${f.z})，距离你 ${f.distance} 格，流动的${kindName}装不进桶。`;
     }
-    return `半径 ${scan.radius} 格内没找到${labels}（连流动的都没有）。换个方向或扩大 radius 再 findFluidSource。`;
+    return `半径 ${scan.radius} 格内没有找到${labels}，连流动的都没有。`;
 }
 
 /** 找源方块旁边能站的格子（脚/头可通行、脚下实心）。 */
@@ -1820,8 +1667,8 @@ export async function fillBucketFromSourceSkill(
         return logLine(
             bot,
             already > 0
-                ? `没有空桶（只有 ${filledItem}×${already}）。先把 ${filledItem} 倒掉，或 craft 一个新桶（3 个铁锭）。`
-                : `背包里没有空桶——先 craft 一个桶（3 个铁锭）再来装${kindName}。`,
+                ? `没能把${kindName}装进桶，背包里没有空桶，只有 ${already} 个 ${filledItem}。`
+                : `没能把${kindName}装进桶，背包里没有空桶。`,
         );
     }
 
@@ -1831,11 +1678,10 @@ export async function fillBucketFromSourceSkill(
             const f = scan.flowing;
             return logLine(
                 bot,
-                `半径 ${scan.radius} 格内**没有${FLUID_LABEL[actualKind]}源头，只有流动${kindName}**（最近流动${kindName}在 (${f.x},${f.y},${f.z})，距 ${f.distance} 格）。` +
-                    `流动${kindName}装不进桶——去更远找源头，或找瀑布/岩浆瀑布最上面那一格（源头 level 0）。`,
+                `没能把${kindName}装进桶，${scan.radius} 格内没有${FLUID_LABEL[actualKind]}源头，最近的一格流动${kindName}在 (${f.x}, ${f.y}, ${f.z})，距离你 ${f.distance} 格。`,
             );
         }
-        return logLine(bot, `半径 ${scan.radius} 格内没找到${kindName}（连流动的都没有）。换方向或扩大 radius 再试。`);
+        return logLine(bot, `没能把${kindName}装进桶，${scan.radius} 格内没有${kindName}。`);
     }
 
     const src = scan.source;
@@ -1851,26 +1697,26 @@ export async function fillBucketFromSourceSkill(
             try { reached = await goTo(bot, src.x, src.y, src.z, 3); } catch { reached = false; }
         }
         if (!reached) {
-            return logLine(bot, `找到了${FLUID_LABEL[actualKind]}源头 (${src.x},${src.y},${src.z})，但走不过去（寻路失败）。可以先 goToCoordinates 靠近，再 fillBucketFromSource。`);
+            return logLine(bot, `没能把${kindName}装进桶，走到 (${src.x}, ${src.y}, ${src.z}) 时寻路失败了。`);
         }
     }
 
     let block: any;
     try { block = bot.blockAt(new Vec3(src.x, src.y, src.z)); } catch { block = null; }
-    if (block == null) return logLine(bot, `源头 (${src.x},${src.y},${src.z}) 读不到（区块可能没加载），稍后再试。`);
+    if (block == null) return logLine(bot, `没能把${kindName}装进桶，( ${src.x}, ${src.y}, ${src.z} ) 这一格读不到。`);
     if (!isFluidSourceBlock(block, actualKind)) {
-        return logLine(bot, `(${src.x},${src.y},${src.z}) 现在不是${FLUID_LABEL[actualKind]}源头了（可能变成流动或被挡住），重新 findFluidSource 找一个。`);
+        return logLine(bot, `没能把${kindName}装进桶，( ${src.x}, ${src.y}, ${src.z} ) 这一格现在不是${FLUID_LABEL[actualKind]}源头了。`);
     }
     const dist = here == null ? null : Math.hypot(src.x + 0.5 - here.x, src.y + 0.5 - here.y, src.z + 0.5 - here.z);
     if (dist != null && dist > 4.5) {
-        return logLine(bot, `够不到${FLUID_LABEL[actualKind]}源头 (${src.x},${src.y},${src.z})：现在距 ${dist.toFixed(1)} 格（交互最多 4.5）。先 goToCoordinates 靠近再装。`);
+        return logLine(bot, `没能把${kindName}装进桶，距离源头 (${src.x}, ${src.y}, ${src.z}) 还有 ${dist.toFixed(1)} 格，超过了 4.5 格的操作距离。`);
     }
 
     const before = countItemSafe(bot, filledItem);
     let actionOk: boolean;
     try { actionOk = await useOnBlock(bot, 'bucket', block); } catch { actionOk = false; }
     if (!actionOk) {
-        return logLine(bot, `在 (${src.x},${src.y},${src.z}) 装${kindName}失败：可能准星没对准、岸边够不着，或这一格其实不是源。源头还在，调整站位再试。`);
+        return logLine(bot, `没能把${kindName}装进桶，在 (${src.x}, ${src.y}, ${src.z}) 使用桶失败了。`);
     }
     const deadline = now() + 2500;
     let after = countItemSafe(bot, filledItem);
@@ -1880,10 +1726,9 @@ export async function fillBucketFromSourceSkill(
         after = countItemSafe(bot, filledItem);
     }
     if (after > before) {
-        return logLine(bot, `已装满：从${FLUID_LABEL[actualKind]}源头 (${src.x},${src.y},${src.z})（距 ${dist == null ? '未知' : dist.toFixed(1)} 格）取${kindName}，` +
-            `${filledItem} ${before} → ${after}，空桶还剩 ${countItemSafe(bot, 'bucket')} 个。`);
+        return logLine(bot, `已经装满了，${filledItem} 从 ${before} 个变成了 ${after} 个，空桶还剩 ${countItemSafe(bot, 'bucket')} 个。`);
     }
-    return logLine(bot, `装填动作执行了，但背包里没出现 ${filledItem}（before ${before} → after ${countItemSafe(bot, filledItem)}）。先 stats 核对，可能是同步延迟；确认没装到就换个站位重试。`);
+    return logLine(bot, `没能确认装到了桶，调用之后 ${filledItem} 从 ${before} 个变成了 ${countItemSafe(bot, filledItem)} 个。`);
 }
 
 // ─────────────────────────── 钓鱼：唯一可再生的食物来源 ───────────────────────────
@@ -1988,10 +1833,10 @@ export interface FishOutcome {
 const FISH_STOP_TEXT: Record<FishStopReason, string> = {
     casts_used: '抛竿次数用完了',
     budget: '时间预算用完了',
-    food_enough: `背包里的食物够了（≥${FISH_FOOD_ENOUGH} 份）`,
+    food_enough: `背包里的食物已经够了，有 ${FISH_FOOD_ENOUGH} 份以上`,
     no_rod: '背包里没有钓鱼竿',
     no_water: '够不到水面',
-    rod_broke: '钓鱼竿断了/没了',
+    rod_broke: '钓鱼竿断了，或者不见了',
     interrupted: '被 Stop 打断',
 };
 
@@ -2008,57 +1853,32 @@ export function fishReceipt(o: FishOutcome): string {
     const seconds = (o.elapsedMs / 1000).toFixed(1);
     const catchText =
         o.caughtTotal > 0
-            ? `钓到 ${o.caughtTotal} 条（${o.caught.map((c) => `${c.name} x${c.count}`).join('、')}）`
-            : '一条都没钓到';
+            ? `钓到了 ${o.caughtTotal} 条鱼，分别是 ${o.caught.map((c) => `${c.name} ${c.count} 个`).join('、')}`
+            : '没有钓到鱼';
     lines.push(
-        `fish：${catchText}；抛竿 ${o.casts.length} 次、用了 ${seconds} 秒；停止原因：${fishStopText(o.stopReason)}。`,
+        `这次钓鱼，${catchText}，一共抛竿 ${o.casts.length} 次，花了 ${seconds} 秒，停下来的原因是${fishStopText(o.stopReason)}。`,
     );
     if (o.rod.durabilityUsed != null || o.rod.maxDurability != null) {
-        lines.push(
-            `竿：${o.rod.durabilityUsed ?? '?'}/${o.rod.maxDurability ?? '?'} 耐久` +
-                (o.rod.durabilityUsed != null &&
-                o.rod.maxDurability != null &&
-                o.rod.maxDurability > 0 &&
-                o.rod.durabilityUsed / o.rod.maxDurability >= FISH_ROD_LOW_FRACTION
-                    ? '（**快断了**：再钓几竿就没了，先备一根新的）'
-                    : ''),
-        );
+        lines.push(`钓鱼竿的耐久用了 ${o.rod.durabilityUsed ?? '?'}，一共 ${o.rod.maxDurability ?? '?'}。`);
     }
     for (const cast of o.casts) {
         if (cast.note === 'no_bobber') {
-            lines.push(`- #${cast.index} 浮标没出现（抛竿可能没成功）——对准水面再试。`);
+            lines.push(`- 第 ${cast.index} 竿的浮标没有出现。`);
             continue;
         }
         if (cast.caught != null) {
-            lines.push(
-                `- #${cast.index} 第 ${(cast.waitedMs / 1000).toFixed(1)} 秒咬钩 → 收竿：+${cast.caught.count} ${cast.caught.name}`,
-            );
+            lines.push(`- 第 ${cast.index} 竿在 ${(cast.waitedMs / 1000).toFixed(1)} 秒时咬钩，钓到了 ${cast.caught.count} 个 ${cast.caught.name}。`);
             continue;
         }
         if (cast.bite) {
             lines.push(
-                `- #${cast.index} 咬钩了但**背包没多出鱼**${cast.junk ? '（上来的可能是垃圾/宝藏）' : '（可能是收竿时机不对/同步延迟）'}——别当钓到了。`,
+                `- 第 ${cast.index} 竿咬钩了，但背包里没有多出东西${cast.junk ? '，上来的可能是垃圾或者宝藏' : ''}。`,
             );
             continue;
         }
-        lines.push(
-            `- #${cast.index} 等了 ${(cast.waitedMs / 1000).toFixed(1)} 秒**没咬钩**，收竿了——这一竿没钓到（收早了钓不到，等不到也别挂死）。`,
-        );
-    }
-    if (o.caughtTotal > 0) {
-        const first = o.caught[0];
-        const cooked = cookedCounterpartOf(first.name) ?? first.name;
-        const rawValue = foodValueOf(first.name);
-        const cookedValue = foodValueOf(cooked);
-        lines.push(
-            `⚠️ **生鱼先烤再吃**：${first.name} ${rawValue == null ? '' : `${rawValue[0]} 点`}、` +
-                `${cooked} ${cookedValue == null ? '' : `${cookedValue[0]} 点`}（差一倍）。` +
-                `useBlock(type="furnace", input="${first.count} ${first.name}", output="${first.count} ${cooked}")`,
-        );
+        lines.push(`- 第 ${cast.index} 竿等了 ${(cast.waitedMs / 1000).toFixed(1)} 秒也没有咬钩。`);
     }
     for (const warning of capLines(o.warnings, HUNT_MAX_FISH_WARNINGS, '警告')) lines.push(warning);
-    // 2026-10-30：不再补"下一步"（钓到要不要烤、没竿要不要做，是模型自己的计划）
-    // 同 huntReceipt：回执是循环里拼出来的，必须有硬长度上限（单条超长警告也要兜得住）。
     return capReceipt(lines.join('\n'));
 }
 
@@ -2205,7 +2025,7 @@ export async function fishSkill(
         maxDurability: rodAtStartDurability.max,
         broke: false,
     };
-    let water = findWater(bot, position(bot), FISH_WATER_SCAN_RADIUS);
+    const water = findWater(bot, position(bot), FISH_WATER_SCAN_RADIUS);
     let failedCasts = 0;
     let stopReason: FishStopReason = 'casts_used';
 
@@ -2312,7 +2132,6 @@ export async function fishSkill(
                     if (bot?.interrupt_code === true) break;
                     const current = bobber(bot);
                     if (current == null) break;
-                    sample = current;
                     restingY = Number.isFinite(current.y) ? current.y : restingY;
                     quietPolls = Number.isFinite(current.vy) && Math.abs(current.vy) <= FISH_SETTLE_QUIET_VY ? quietPolls + 1 : 0;
                     await sleep(pollMs);
@@ -2331,7 +2150,6 @@ export async function fishSkill(
                     if (bot?.interrupt_code === true) break;
                     const current = bobber(bot);
                     if (current == null) break; // 浮标没了（被收/被拉走）
-                    sample = current;
                     if (!armed) {
                         if (Number.isFinite(current.vy) && Math.abs(current.vy) <= FISH_SETTLE_QUIET_VY) {
                             quietPolls += 1;

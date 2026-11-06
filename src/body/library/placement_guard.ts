@@ -85,8 +85,8 @@ export function clearPlacedRecords(): void {
 /**
  * `placeHere` 的回执（Lead 2026-10-21 ①）：**不许报计划，只报回读**。
  * `placeHere` 把"当前位置格"当目标——而当前位置格通常就是**身体所在格**，放进去必然被
- * 占位守卫拒绝（或根本放不上）。所以先把两种现实说清：
- * - 目标格与身体相交 ⇒ 直接说"这就是我现在站的位置"，给两条可执行替代；
+ * 占位守卫拒绝（或根本放不上）。回执只陈述两种事实：
+ * - 目标格与身体相交 ⇒ 报"是脚/头所在格"；
  * - 否则按回读说成功/失败，不写"Placed"除非回读确认。
  */
 export function formatPlaceHereReceipt(input: {
@@ -107,16 +107,13 @@ export function formatPlaceHereReceipt(input: {
     // 人已经被顶到方块上面，脚的格子当然就是那一格。先判成功，bodyCell 只在**没放上**时
     // 才是解释。）
     if (input.ok && matches) {
-        return `placeHere 确认：(${cell}) 现在是 ${read}（回读确认）。`;
+        return `这个方块已经放在 (${cell})，回读到的方块是 ${read}。`;
     }
     if (input.bodyCell) {
         return (
-            `**placeHere 放不下**：(${cell}) 就是我现在站的位置（feet/head 都在里面），方块放进去会被占位守卫拒绝。` +
-            '改用：① 先跳起来在最高点放（pillarUp 会做），或 ② 用 placeBlock 指定旁边一格坐标（先 goToCoordinates 挪开也可以）。'
+            `没能放下，(${cell}) 正是我脚和头所在的那一格` +
+            (read === '' ? '，回读不到方块。' : `，回读到的方块是 ${read}。`)
         );
     }
-    return (
-        `placeHere **没有生效**：(${cell}) 读到的是 ${read === '' ? '读不到' : read}，不是 ${input.expected}` +
-        '——可能被 autoPickup 抢回/够不着/那一格不是空气；先用 stats 核对，再 placeBlock 重试。'
-    );
+    return `没能放下，(${cell}) 回读到的方块是 ${read === '' ? '读不到' : read}，我本来想放的是 ${input.expected}。`;
 }

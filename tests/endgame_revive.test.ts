@@ -616,13 +616,12 @@ describe('endFightStatus 报告：花水晶之前先看到"门上有几个格子
         expect(report).toContain('4 个标准位置可用');
         expect(report).toContain('末影水晶 1/4');
         expect(report).toContain('还差 3 颗');
-        expect(report).toContain('恶魂之泪');
+        expect(report).toContain('末影水晶 1/4');
     });
 
-    it('水晶够了 → 报告直接说"调 reviveDragon 就能把龙叫回来"', () => {
+    it('水晶够了 → 报告写清末影水晶 4/4', () => {
         const report = endgameStatusReport(makeReportBot({ crystals: 4 }));
         expect(report).toContain('末影水晶 4/4');
-        expect(report).toContain('reviveDragon');
     });
 
     it('记过主世界传送门坐标 → 报告不再让人去掷眼找要塞（门是激活过的）', () => {

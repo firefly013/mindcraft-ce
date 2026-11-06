@@ -115,7 +115,7 @@ export function parseFluidArgs(
     const raw = typeof rawType === 'string' ? rawType.trim().toLowerCase() : '';
     const kind = raw === '' ? 'water' : raw;
     if (kind !== 'water' && kind !== 'lava' && kind !== 'any') {
-        return { kind: 'water', radius: 32, error: `type 只认 water / lava / any（收到 "${String(rawType)}"）。` };
+        return { kind: 'water', radius: 32, error: `type 只能是 water、lava 或 any，这次收到的是 "${String(rawType)}"。` };
     }
     const n = typeof rawRadius === 'number' ? rawRadius : Number(rawRadius);
     const radius = Number.isFinite(n) ? Math.max(1, Math.min(128, Math.round(n))) : 32;
@@ -179,11 +179,7 @@ function runSurvivalAction(
         );
         if (result.interrupted && !result.timedout) return;
         if (result.timedout) {
-            const why = typeof skills.describeStuck === 'function' ? skills.describeStuck(agent.bot) : '';
-            return (
-                `${label}：**超时**（${timeoutMinutes} 分钟没做完），已释放身体通道。` +
-                `超时 ≠ 没做成，先核对状态再决定要不要重试。${why === '' ? '' : `\n卡住时：${why}`}`
-            );
+            return `这次动作超时了，${timeoutMinutes} 分钟没有跑完。`;
         }
         return result.message;
     };
@@ -202,7 +198,7 @@ export const survivalQueryList: AgentCommand[] = [
         },
         perform: function (agent: any, type?: unknown, radius?: unknown): string {
             const args = parseFluidArgs(type, radius);
-            if (args.error != null) return `findFluidSource 参数不对：${args.error}`;
+            if (args.error != null) return `findFluidSource 的参数不对，${args.error}`;
             return survival.fluidSourceReport(agent.bot, args.kind, args.radius);
         },
     },

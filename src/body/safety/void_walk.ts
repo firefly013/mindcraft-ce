@@ -77,20 +77,15 @@ export function voidWalkVerdict(input: {
     if (!targetSupported) {
         return {
             refuse: true,
-            text:
-                `**拒绝走**：目标 (${Math.round(Number(to.x))},${Math.round(Number(to.y))},${Math.round(Number(to.z))}) ` +
-                '**脚下没有方块**（是空气/虚空）——走过去就是悬空。\n' +
-                '    要走这种地方，用**搭桥工具**：`travelTo(...)`（会铺路/垫方块）或先 `placeBlock` 铺出落脚点，再用 `move`。',
+            text: `不能走到 (${Math.round(Number(to.x))}, ${Math.round(Number(to.y))}, ${Math.round(Number(to.z))})，因为目标那一格脚下没有支撑。`,
         };
     }
     if (gapAt != null) {
         return {
             refuse: true,
             text:
-                '**拒绝走**：这条直线路上有一段**没有支撑**' +
-                `（大约 x=${Math.round(gapAt.x)} z=${Math.round(gapAt.z)} 附近是空中/虚空），` +
-                '`move`/`goToCoordinates` 只会走、不会铺路，跨过去就是摔下去。\n' +
-                '    过缺口用**搭桥工具**：`travelTo(...)`（会边铺边过）或先 `placeBlock` 铺一条路。',
+                `不能走到 (${Math.round(Number(to.x))}, ${Math.round(Number(to.y))}, ${Math.round(Number(to.z))})，` +
+                `因为路上 (${Math.round(gapAt.x)}, ${Math.round(gapAt.z)}) 附近有一段没有支撑。`,
         };
     }
     return { refuse: false, text: null };

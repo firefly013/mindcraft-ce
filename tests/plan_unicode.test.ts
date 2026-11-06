@@ -75,7 +75,7 @@ describe('UpdatePlan 回执：原样带回模型给的内容', () => {
     const result: any = await tool.execute(prepared as never, {} as never, {} as never);
     expect(applied).toEqual([{ goal: CHINESE, todos: [{ text: MIXED, done: false }, { text: ZWJ, done: false }] }]);
     expect(result.content).toEqual([
-      { type: 'text', text: `Plan updated. Goal: ${CHINESE}. Todos: [ ] ${MIXED}; [ ] ${ZWJ}.` },
+      { type: 'text', text: `计划已经更新，目标是 ${CHINESE}，待办有 [ ] ${MIXED}，[ ] ${ZWJ}。` },
     ]);
   });
 });

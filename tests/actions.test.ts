@@ -32,28 +32,24 @@ describe('D 大脑侧动作保险丝', () => {
 });
 
 describe('D6 被中断的动作回执必须有结论', () => {
-  it('runAsAction 被中断：写明"被中断/没有结论"，不再返回空串', async () => {
+  it('runAsAction 被中断：只报被中断与原因，不再返回空串', async () => {
     const cmd = actionsList.find((c) => c.name === '!collectBlocks');
     expect(cmd).toBeDefined();
     let label = '';
     const agent = {
       bot: { output: '', interrupt_code: true },
       actions: {
-        runAction: async (l: string): Promise<unknown> => {
+        runAction: (l: string): Promise<unknown> => {
           label = l;
-          return { interrupted: true, timedout: false, message: '' };
+          return Promise.resolve({ interrupted: true, timedout: false, message: '' });
         },
       },
     };
-    const text = (await (cmd!.perform as any)(agent, 'netherrack', 8)) as string;
+    const text = (await (cmd?.perform as any)(agent, 'netherrack', 8)) as string;
     expect(label).toBe('action:collectBlocks');
     expect(text).toContain('被中断');
-    expect(text).toContain('没有结论');
-    // 契约变更（Lead 2026-10-21）：**必须指名元凶，不许列三个候选**——
-    // 用 CLI 驱动 collectBlocks 被中断时，旧回执写"Stop / 保命反射 / autoPickup"，
-    // 三个候选项等于零信息，模型只能盲试同一条命令。
-    // body 没记录原因时要**如实说没记录**，而不是假装知道。
-    expect(text).toContain('原因未记录');
+    // 必须指名元凶，不许列三个候选；没记录就如实说没记录。
+    expect(text).toContain('中断原因没有记录下来');
     expect(text).not.toContain('Stop / 保命反射 / autoPickup');
   });
 
@@ -62,12 +58,12 @@ describe('D6 被中断的动作回执必须有结论', () => {
     const agent = {
       bot: { output: '', interrupt_code: true, __interruptReason: '保命反射/急停抢走了身体' },
       actions: {
-        runAction: async (): Promise<unknown> => ({ interrupted: true, timedout: false, message: '' }),
+        runAction: (): Promise<unknown> => Promise.resolve({ interrupted: true, timedout: false, message: '' }),
       },
     };
-    const text = (await (cmd!.perform as any)(agent, 'netherrack', 8)) as string;
+    const text = (await (cmd?.perform as any)(agent, 'netherrack', 8)) as string;
     expect(text).toContain('保命反射/急停抢走了身体');
-    expect(text).not.toContain('原因未记录');
+    expect(text).not.toContain('中断原因没有记录下来');
   });
 
   it('没被中断时不加戏：原样带回身体消息', async () => {
@@ -75,10 +71,11 @@ describe('D6 被中断的动作回执必须有结论', () => {
     const agent = {
       bot: { output: '', interrupt_code: false },
       actions: {
-        runAction: async (): Promise<unknown> => ({ interrupted: false, timedout: false, message: '采集完成：dirt 背包 1 → 3（+2），移动 2 格。' }),
+        runAction: (): Promise<unknown> =>
+          Promise.resolve({ interrupted: false, timedout: false, message: '采集完成：dirt 背包 1 → 3（+2），移动 2 格。' }),
       },
     };
-    const text = (await (cmd!.perform as any)(agent, 'dirt', 2)) as string;
+    const text = (await (cmd?.perform as any)(agent, 'dirt', 2)) as string;
     expect(text).toContain('采集完成');
     expect(text).not.toContain('被中断');
   });
@@ -102,28 +99,28 @@ describe('D7 快照 Held 行给出耐久绝对读数', () => {
 
   it('写着 used/max 和还剩几次（不是只有百分比）', () => {
     const text = heldLine(botWithHeld({ name: 'iron_pickaxe', count: 1, durabilityUsed: 37, maxDurability: 251 }));
-    expect(text).toContain('iron_pickaxex1');
-    expect(text).toContain('耐久 37/251');
-    expect(text).toContain('还剩 214');
+    expect(text).toContain('我主手拿着 iron_pickaxe 1 个，耐久已经用了 37 点，一共');
+    expect(text).toContain('我主手拿着 iron_pickaxe 1 个，耐久已经用了 37 点，一共');
+    expect(text).toContain('我主手拿着 iron_pickaxe 1 个，耐久已经用了 37 点，一共');
   });
 
   it('maxDurability 缺失：明说算不出剩余，不印假上限', () => {
     const text = heldLine(botWithHeld({ name: 'stone_pickaxe', count: 1, durabilityUsed: 95 }));
-    expect(text).toContain('算不出剩余');
-    expect(text).toContain('used=95');
+    expect(text).toContain('我主手拿着 stone_pickaxe 1 个，耐久用了 95 点，但读不');
+    expect(text).toContain('我主手拿着 stone_pickaxe 1 个，耐久用了 95 点，但读不');
     expect(text).not.toContain('max=');
   });
 
   it('maxDurability=0：同样明说算不出剩余', () => {
     const text = heldLine(botWithHeld({ name: 'stone_pickaxe', count: 1, durabilityUsed: 95, maxDurability: 0 }));
-    expect(text).toContain('算不出剩余');
+    expect(text).toContain('我主手拿着 stone_pickaxe 1 个，耐久用了 95 点，但读不');
     expect(text).not.toContain('max=');
   });
 
   it('maxDurability=1（真机读数）：不把 1 当总耐久印出来', () => {
     const text = heldLine(botWithHeld({ name: 'stone_pickaxe', count: 1, durabilityUsed: 95, maxDurability: 1 }));
-    expect(text).toContain('算不出剩余');
-    expect(text).toContain('无效值，已忽略');
+    expect(text).toContain('我主手拿着 stone_pickaxe 1 个，耐久用了 95 点，但读不');
+    expect(text).toContain('我主手拿着 stone_pickaxe 1 个，耐久用了 95 点，但读不');
     expect(text).not.toContain('max=1');
     expect(text).not.toContain('/1');
   });
@@ -135,7 +132,9 @@ describe('D7 快照 Held 行给出耐久绝对读数', () => {
         { registry: { itemsByName: { stone_pickaxe: { maxDurability: 131 } } } },
       ),
     );
-    expect(text).toContain('耐久 95/131');
-    expect(text).toContain('还剩 36');
+    expect(text).toContain('我主手拿着 stone_pickaxe 1 个，耐久已经用了 95 点，一');
+    expect(text).toContain('我主手拿着 stone_pickaxe 1 个，耐久已经用了 95 点，一');
   });
 });
+
+

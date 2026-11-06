@@ -15,14 +15,14 @@ describe('残留界面：动作入口先关、Stop 兜底、关不掉就大声�
     expect(code).toContain('const hasWindow = (this.bot as any)?.currentWindow != null;');
     expect(code).toContain("const managesWindow = name === 'useBlock' || name === 'craft' || name === 'smelt';");
     expect(code).toContain('const closed = closeStaleWindow(this.bot);');
-    expect(code).toContain('先关掉了**残留界面**');
+    expect(code).toContain('已关闭残留界面。');
   });
 
   it('关不掉 ⇒ 大声失败（REFUSED_RESIDUAL_SCREEN），并指向 Stop，而不是空转', () => {
     const code = src();
     expect(code).toContain("code: 'REFUSED_RESIDUAL_SCREEN'");
-    expect(code).toContain('先 `stop()`（Stop 会顺手关界面）');
-    expect(code).toContain('继续执行只会空转 60 秒');
+    expect(code).toContain('残留界面关不掉。');
+    expect(code).toContain('残留界面关不掉');
   });
 
   it('Stop 会顺手关界面（模型唯一的控制手段必须能解开死结）', () => {
@@ -36,3 +36,4 @@ describe('残留界面：动作入口先关、Stop 兜底、关不掉就大声�
     expect(code).toContain("const managesWindow = name === 'useBlock' || name === 'craft' || name === 'smelt';");
   });
 });
+

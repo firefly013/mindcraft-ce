@@ -1,13 +1,10 @@
 /**
- * `stats` 反轮询回执：整段逐字相同 → 追加"没变化，去做个动作"；
- * 有任何变化 → 照旧全量、不加戏；不同 type 之间互不串扰。
- *
- * 真机证据：overnight_b 15 分钟调 26 次 stats、overnight_a 15 次。
+ * `stats` 回执：只给状态事实，不做跨调用对比、不追加"没变化/去做个动作"之类的总结。
  */
 import { describe, expect, it } from 'vitest';
 import { queryList } from '../src/body/commands/queries.js';
 
-const stats = queryList.find((c) => c.name === '!stats')!;
+const stats = queryList.find((c) => c.name === '!stats') as { perform: (agent: any, type?: unknown) => string };
 
 function botWith(overrides: Record<string, unknown> = {}): any {
     return {
@@ -32,24 +29,21 @@ function agentWith(bot: any): any {
 
 const call = (agent: any, type?: string): string => (stats.perform as any)(agent, type);
 
-describe('stats 反轮询回执', () => {
-    // 2026-10-24：重复快照只追加**事实**（"和上次完全相同"），处方清掉——
-    // "去做个动作/别重复发"是在替模型决定这一轮干什么。
-    it('同一段第二次调用逐字相同：追加"完全相同"事实，状态一行不少，不含处方', () => {
+describe('stats 回执只报状态', () => {
+    it('同一段连续调用两次：两次都给全量状态，不加"和上次相同"的总结', () => {
         const agent = agentWith(botWith());
         const first = call(agent, 'inventory');
+        expect(first).toContain('我主手是空的，副手是空的，身上没有穿护甲。');
         expect(first).not.toContain('完全相同');
-        expect(first).toContain('Backpack');
+        expect(first).not.toContain('上一次');
 
         const second = call(agent, 'inventory');
-        expect(second).toContain('完全相同');
-        expect(second).not.toContain('做一个动作');
-        expect(second).not.toContain('原地停摆');
-        expect(second).not.toContain('别重复发');
-        expect(second).toContain('Backpack');
+        expect(second).toContain('我主手是空的，副手是空的，身上没有穿护甲。');
+        expect(second).not.toContain('完全相同');
+        expect(second).not.toContain('上一次');
     });
 
-    it('背包有变化：不说"完全相同"，全量照发', () => {
+    it('背包有变化：状态如实反映 iron_pickaxe', () => {
         const agent = agentWith(botWith());
         call(agent, 'inventory');
         // mineflayer 的 slots 按槽位下标索引：快捷栏 40 号。
@@ -57,36 +51,25 @@ describe('stats 反轮询回执', () => {
         slots[40] = { name: 'iron_pickaxe', count: 1 };
         agent.bot.inventory.slots = slots;
         const second = call(agent, 'inventory');
-        expect(second).not.toContain('完全相同');
         expect(second).toContain('iron_pickaxe');
     });
 
-    it('换了 type 不算重复：各段各记各的', () => {
-        const agent = agentWith(botWith());
-        call(agent, 'inventory');
-        const bodyFirst = call(agent, 'body');
-        expect(bodyFirst).not.toContain('完全相同');
-    });
-
-    it('all：整份快照逐字相同才提示；一变就不提示', () => {
+    it('all：给 SNAPSHOT 与快照正文，任何变化都直接体现', () => {
         const agent = agentWith(botWith());
         const first = call(agent);
         expect(first).toContain('SNAPSHOT');
         expect(first).not.toContain('完全相同');
 
-        const second = call(agent);
-        expect(second).toContain('完全相同');
-
         agent.liveStateText = () => '## 当前世界快照\nHeld: main iron_pickaxex1';
-        const third = call(agent);
-        expect(third).not.toContain('完全相同');
-        expect(third).toContain('iron_pickaxex1');
+        const second = call(agent);
+        expect(second).toContain('iron_pickaxex1');
+        expect(second).not.toContain('完全相同');
     });
 
-    it('不认识的 type 仍旧只回参数说明，不碰缓存', () => {
+    it('不认识的 type：只回参数说明', () => {
         const agent = agentWith(botWith());
         const text = call(agent, 'nonsense');
-        expect(text).toContain('stats 的 type 只认这些');
-        expect(text).not.toContain('完全相同');
+        expect(text).toContain('stats 的 type 只能是 all、body、inventory、entities 或 blocks');
+        expect(text).toContain('"nonsense"');
     });
 });

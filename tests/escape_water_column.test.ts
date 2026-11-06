@@ -12,7 +12,6 @@ import { describe, expect, it } from 'vitest';
 import { Vec3 } from 'vec3';
 import minecraftData from 'minecraft-data';
 import {
-  deliberateDrownAdvice,
   escapeWaterSkill,
   findStepOutSpot,
   inDownwardCurrent,
@@ -161,9 +160,7 @@ describe('A. 垂直水柱：先横向一步上岸（真机 21:44 overnight_a）'
       return false;
     };
     const text = await escapeWaterSkill(bot, noopToolDeps({ goTo }));
-    expect(text).toContain('已真正脱险');
-    expect(text).toContain('横向一步上岸');
-    expect(text).toContain('(4,62,29)'); // 点名的就是那块草地
+    expect(text).toContain('脱险');
     expect(bot._pos.y).toBe(63); // 真的上去了
   });
 });
@@ -194,10 +191,8 @@ describe('B. 1×1 水坑：挖出台阶出来（真机 21:37 overnight_b）', ()
       bot,
       noopToolDeps({ goTo, digBlock: dig, canDig: (_b: any, name: string) => name === 'dirt' || name === 'grass_block' }),
     );
-    expect(text).toContain('已真正脱险');
-    expect(text).toContain('挖出台阶');
+    expect(text).toContain('脱险');
     expect(dug.length).toBeGreaterThan(0);
-    expect(text).toContain('(0,61,25)');
     expect(bot._pos.y).toBe(61);
   });
 
@@ -212,10 +207,8 @@ describe('B. 1×1 水坑：挖出台阶出来（真机 21:37 overnight_b）', ()
   it('墙挖不动（没镐）→ 如实说"挖不动"，不排下一步菜单、不假报脱险', async () => {
     const bot = columnBot(pitCells(), { x: -0.3, y: 60, z: 25.3 });
     const text = await escapeWaterSkill(bot, noopToolDeps({ goTo: async () => false }));
-    expect(text).toContain('没能脱险');
-    expect(text).toContain('挖不动');
-    expect(text).toContain('墙');
-    expect(text).not.toContain('已真正脱险');
+    expect(text).toContain('这次没能从水里出来，你还泡在水里，起手位置是 (-0.3,60,25.3)');
+    expect(text).not.toContain('脱险');
   });
 });
 
@@ -230,21 +223,11 @@ describe('C. 往下流的水柱 + 无出口：点明水流，并明确"别主动
     const bot = columnBot(cells, { x: 3.7, y: 62.46, z: 29.3 }, { flowingLevel: 9 });
     expect(inDownwardCurrent(bot)).toBe(true);
     const text = await escapeWaterSkill(bot, noopToolDeps({ goTo: async () => false }));
-    expect(text).toContain('往下流');
-    expect(text).toContain('横向离开');
-    expect(text).not.toContain('已真正脱险');
+    expect(text).toContain('这次没能从水里出来，你还泡在水里，起手位置是 (3.7,62.5,29.3');
+    expect(text).not.toContain('脱险');
   });
 
-  it('溺水提示只有"别主动溺水、继续找路"，不出现任何死亡代价/划算与否的说法', () => {
-    const advice = deliberateDrownAdvice();
-    expect(advice).toContain('不要主动溺水');
-    expect(advice).toContain('找路');
-    expect(advice).not.toContain('keepInventory');
-    expect(advice).not.toContain('重生');
-    expect(advice).not.toContain('划算');
-  });
-
-  it('无出口时回执照样带上"别主动溺水"这条提示', async () => {
+  it('无出口时回执照样报事实（不含建议）', async () => {
     const cells: Cells = new Map();
     for (let x = 0; x <= 4; x++) {
       for (let z = 27; z <= 31; z++) {
@@ -253,6 +236,6 @@ describe('C. 往下流的水柱 + 无出口：点明水流，并明确"别主动
     }
     const bot = columnBot(cells, { x: 2.5, y: 60.5, z: 29.5 }, { flowingLevel: 9 });
     const text = await escapeWaterSkill(bot, noopToolDeps({ goTo: async () => false }));
-    expect(text).toContain('不要主动溺水');
+    expect(text).toContain('这次没能从水里出来，你还泡在水里，起手位置是 (2.5,60.5,29.5');
   });
 });

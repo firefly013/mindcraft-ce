@@ -81,7 +81,7 @@ describe('planTagCraft：按同类合计判断', () => {
     expect(plan.missingText).toContain('oak_planks×2');
     expect(plan.missingText).toContain('birch_planks×1');
     expect(plan.missingText).toContain('合计 3');
-    expect(plan.missingText).toContain('同类可混用也还差 1');
+    expect(plan.missingText).toContain('planks 还缺 1，需要 4，现在有 oak_planks×2、bir');
   });
 
   it('火把：coal 可以用 charcoal 顶', () => {

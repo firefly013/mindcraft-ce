@@ -232,7 +232,7 @@ describe('回执', () => {
   it('判决回执写明打/跑和数值', () => {
     const plan = planCombatResponse(input());
     const text = formatCombatDecision(plan);
-    expect(text).toContain('判决');
+    expect(text).toContain('我判断现在应该打，因为我 8.2 DPS / 22 有效血 vs 1 只怪');
     expect(text).toContain('打');
     expect(text).toContain('DPS');
   });
@@ -246,8 +246,8 @@ describe('回执', () => {
       ms: 3200,
     });
     expect(killed).toContain('击杀');
-    expect(killed).toContain('掉血 5.5');
-    expect(killed).toContain('3.2s');
+    expect(killed).toContain('战斗结束了，我击杀了 zombie，我掉了 5.5 点血，一共用了 3.2');
+    expect(killed).toContain('战斗结束了，我击杀了 zombie，我掉了 5.5 点血，一共用了 3.2');
     const aborted = formatCombatResult({
       targetName: 'zombie',
       outcome: 'aborted',

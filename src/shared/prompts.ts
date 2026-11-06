@@ -40,17 +40,19 @@ export const TOOL_TEXT: Record<string, { description: string; params: Record<str
   useBlock: {
     description:
       '用一个方块干活。**谁为 null 决定干什么**：input 有 output 空 = 存进去（只限箱子/木桶这类容器）；input 空 output 有 = 取出来；' +
-      '两个都有 = 加工（工作台合成 / 熔炉烧炼 / 铁砧），output 是期望产物。' +
+      '两个都有 = 加工（工作台合成 / 熔炉烧炼），output 是期望产物。' +
       '**熔炉加工必须同时给 input 和 output**：只给 input（或再补 coords）不是加工，会明确报错并告诉你正确写法；' +
       '正确例子 useBlock(type="furnace", input="8 raw_iron", output="8 iron_ingot")。' +
+      '**铁砧**：input 给**两件**（主物品 + 牺牲品，用逗号隔开，如 input="diamond_sword, enchanted_book[mending]"），output 可给可不给；' +
+      '物品可以直接写背包里看到的完整标签（enchanted_book[mending] / diamond_sword[sharpness 5]）来精确选那一本/那一把。' +
       '两个都空 = 直接用这个方块（开箱子/熔炉读内容 / 睡 / 开关门 / 附魔台读可选附魔）。' +
       'coords 给了就**走过去**用那一格；目标方块本身不能站时自动改站到相邻可站格；不给 coords 就用够得着的最近一个。' +
       '结果会逐段报告（成功/失败/超时/被中断），失败也说清卡在哪一步。',
     params: {
       type: '方块名，例如 crafting_table / furnace / chest / anvil / bed。',
       coords: '可选，"x,y,z"。给了就走到那一格再用；不给就用够得着的最近一个。',
-      input: '可选。放进去的东西，如 "3 stone" 或 [{"name":"stone","count":3}]。',
-      output: '可选。期望拿出来的东西（加工时是断言，对不上会报）。',
+      input: '可选。放进去的东西，如 "3 stone"、[{"name":"stone","count":3}]；铁砧给两件："diamond_sword, enchanted_book[mending]"。',
+      output: '可选。期望拿出来的东西（加工时是断言，对不上会报）；铁砧可不给。',
     },
   },
   useEntity: {
@@ -368,6 +370,14 @@ export const TOOL_TEXT: Record<string, { description: string; params: Record<str
         '可选。直接指定放水晶的格子（绝对坐标），格式 "x,y,z;x,y,z;x,y,z;x,y,z"，例如 "3,63,0;-3,63,0;0,63,3;0,63,-3"。给了就跳过自动推导、照你给的四格放；不给就从世界里的方块推。',
     },
   },
+  // 喝指定药水（`commands/endgame.ts`）。参数说明按 check:prompts 的要求留一份。
+  drinkPotion: {
+    description:
+      '喝一瓶指定 id 的药水（背包里所有药水的物品名都是 potion，只有药水 id 能精确到等级和时长；没有这瓶时返回现有药水清单）。',
+    params: {
+      potion: '完整药水 id，例如 healing / strong_healing / long_slow_falling / fire_resistance。',
+    },
+  },
   huntFor: {
     description:
       '刷怪刷到够数：找最近的这类怪 → 打 → 自己走过去把掉落物踩掉 → 按背包真实增量核对；够了（want）或时间到（max_ms）就停，并逐次报进度。' +
@@ -422,40 +432,19 @@ export function tp(key: string, name: string): string {
 export const MESSAGES = {
   hello: (name: string): string => `Hello world! 我是${name}`,
   modelUnsupported: '我的模型不支持原生工具调用，换个 OpenAI 兼容模型再试。',
-  usedMarker: (tool: string): string => `*used ${tool}*`,
-  toolOutcome: (tool: string, args: unknown, outcome: string): string => {
-    let argText: string;
-    try {
-      argText = JSON.stringify(args) ?? '{}';
-    } catch {
-      argText = '{}';
-    }
-    if (argText.length > 500) argText = `${argText.slice(0, 500)}…[截断]`;
-    const out = outcome === '' ? '(无输出)' : outcome;
-    return `工具 ${tool} ${argText} → ${out}`;
+  toolOutcome: (tool: string, outcome: string): string => {
+    if (outcome === '') return `调用 ${tool} 之后，没有返回任何内容。`;
+    return `调用 ${tool} 之后，返回的内容是 ${outcome}`;
   },
   death: (posText: string, dimension: string, msg: string, drops: string): string =>
-    `你死在了${dimension}维度 ${posText}。死因（临终消息）：'${msg}'。` +
-    `死亡点已存为 'last_death_position'，想回去可以找它。` +
-    (drops === '' ? '身上没带东西，没有掉落。' : `死亡瞬间身上带着（掉落清单，回去捡可得）：${drops}。`) +
-    `之前的动作已停止，你已重生。`,
-  /**
-   * 死亡之后把模型叫起来的那一句（L4）。
-   *
-   * 只给"该干什么"，事实在上一条 L2 记录里——死亡消息要**两条都发**：
-   * L4 走 `abort()`，而 `abort()` 会撤回排队中的输入，链路一堵就可能连同
-   * 被 abort 的那一轮一起丢掉（真机上 19 秒后才落地，最后彻底没了）；
-   * L2 是 write，明确"queued writes stay"，不参与撤回，是那条兜底。
-   */
-  // **和 death() 同一条信息的短版**。两条通知（L2 保底 + L4 叫醒）内容必须
-  // 一致——以前 L4 让模型"去看死亡记录（丢了哪些东西）"，而记录里根本没写，
-  // 它只能对着一句"你死了"干瞪眼（Feedback #17/#18）。
-  deathWake: (): string =>
-    '你死了，已经重生。**立刻停下手里的事**——刚才那一轮推理已被中断。' +
-    '死因、死亡坐标和掉落清单见紧邻的死亡记录，照着决定：回去捡，还是重新准备。',
-  taskGoal: (goal: string): string => `你的任务目标：${goal}`,
-  taskEnded: (score: number | string): string => `任务结束，得分：${score}`,
-  actionTimeout: (mins: number): string => `动作超时（${mins} 分钟），正在强制停止。`,
+    `你死在${dimension}维度，坐标是 ${posText}。临终消息里写的原因是 '${msg}'。` +
+    (drops === '' ? '身上没带东西，没有掉落。' : `死亡时身上带着 ${drops}。`) +
+    `你已经重生了。`,
+  /** 死亡之后把模型叫起来的那一句（L4）。事实在紧邻的 L2 死亡记录里。 */
+  deathWake: (): string => '你死了，已经重生了，死因、坐标和掉落都在上一条消息里。',
+  taskGoal: (goal: string): string => `你的任务目标是 ${goal}`,
+  taskEnded: (score: number | string): string => `任务结束了，得分是 ${score}。`,
+  actionTimeout: (mins: number): string => `这次动作超时了，${mins} 分钟没有跑完。`,
   restarting: '重启中。',
   exiting: '退出中。',
 };

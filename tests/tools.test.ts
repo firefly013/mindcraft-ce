@@ -231,10 +231,10 @@ describe('SearchWiki', () => {
   });
 
   it('says so when the injected corpus has nothing', async () => {
-    expect(await searchWiki.perform({ wikiSearch: () => '' }, 'nothing')).toBe('No wiki entry found for "nothing".');
+    expect(await searchWiki.perform({ wikiSearch: () => '' }, 'nothing')).toBe('wiki 上没有找到关于 "nothing" 的条目。');
   });
 
-  it('reports an injected failure as no-information, not as an answer', async () => {
+  it('reports an injected failure as a failure, not as an answer', async () => {
     const out = (await searchWiki.perform(
       {
         wikiSearch: () => {
@@ -243,8 +243,7 @@ describe('SearchWiki', () => {
       },
       'diamond',
     )) as string;
-    expect(out).toContain('failed');
-    expect(out).toContain('no information');
+    expect(out).toBe('查询 wiki 的 "diamond" 失败了。');
   });
 
   it('reports a non-404 HTTP failure instead of parsing the error page', async () => {
@@ -274,9 +273,8 @@ describe('SearchWiki', () => {
     try {
       const out = (await searchWiki.perform({}, 'definitely_not_a_page')) as string;
       expect(out).toContain('404');
-      expect(out).toContain('也没有这个名字');
-      // 并指向真正离线可用的工具，而不是让模型继续换关键词。
-      expect(out).toContain('getCraftingPlan');
+      expect(out).toContain('本地离线资料里也没有这个名字');
+      expect(out).not.toContain('getCraftingPlan');
     } finally {
       vi.stubGlobal('fetch', original);
     }

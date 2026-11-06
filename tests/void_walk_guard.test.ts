@@ -22,9 +22,7 @@ describe('voidWalkVerdict：走路 vs 搭桥', () => {
     const blockAt = world({ '0,0': 65, '5,0': null });
     const verdict = voidWalkVerdict({ tool: 'goToCoordinates', from, to: { x: 5.5, y: 66, z: 0.5 }, blockAt, airborne: false });
     expect(verdict.refuse).toBe(true);
-    expect(String(verdict.text)).toContain('脚下没有方块');
-    expect(String(verdict.text)).toContain('travelTo');
-    expect(String(verdict.text)).toContain('placeBlock');
+    expect(String(verdict.text)).toContain('不能走到 (6, 66, 1)，因为目标那一格脚下没有支撑。');
   });
 
   it('路径中间有缺口 ⇒ 拒绝（move 只会走、不会铺路）', () => {

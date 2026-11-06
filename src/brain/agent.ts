@@ -1315,7 +1315,7 @@ export class Agent {
             if (lines.length === 0) return '(历史是空的)';
             return lines.join('\n');
         } catch (err: unknown) {
-            return `读历史失败：${err instanceof Error ? err.message : String(err)}`;
+            return `读历史失败，错误是 ${err instanceof Error ? err.message : String(err)}。`;
         }
     }
 
@@ -1365,7 +1365,7 @@ export class Agent {
         }
 
         const found = this.catalog.get(name);
-        if (found == null) return `没有这条命令：${name}。用 tools 看看有哪些。`;
+        if (found == null) return `没有这条命令，${name}。`;
         // **参数名写错必须当场报错**（真机 2026-10-23：`cli equip --type stone_pickaxe`
         // 与 `cli mineBlock --type …` 都被静默忽略——人以为换好了镐，下一条命令又报
         // "没有工具"；`mineBlock` 更离谱，报"(undefined,undefined,undefined) 读不到方块"。
@@ -1375,7 +1375,7 @@ export class Agent {
         const unknown = Object.keys(args).filter((key) => !/^\d+$/.test(key) && !declared.has(key));
         if (unknown.length > 0) {
             const valid = declared.size > 0 ? [...declared].join(', ') : '(这条命令没有参数)';
-            return `参数名不认识：${unknown.map((key) => `--${key}`).join('、')}。${name} 的参数是：${valid}。`;
+            return `不认识参数 ${unknown.map((key) => `--${key}`).join('、')}，${name} 的参数有 ${valid}。`;
         }
 
         // **走动作通道**（CLI `--via runner`）：认领/幂等/中断/续做与模型同一条路径。
@@ -1421,10 +1421,10 @@ export class Agent {
         if (runner == null) return '动作通道还没装配好（大脑运行时未就绪）。';
         const outcome = await runner.run(name, args);
         if (outcome.status === 'rejected') {
-            return `${name} 没有开始：${outcome.reason ?? outcome.code ?? '被拒绝'}`;
+            return `${name} 没有开始，${outcome.reason ?? outcome.code ?? '被拒绝'}。`;
         }
         if (outcome.status !== 'accepted') {
-            return `${name} 返回了意料之外的状态：${String((outcome as { status?: unknown }).status ?? '')}`;
+            return `${name} 返回了意料之外的状态，状态是 ${String((outcome as { status?: unknown }).status ?? '')}。`;
         }
         const data = outcome.data as { call_id?: unknown } | undefined;
         const callId = typeof data?.call_id === 'string' ? data.call_id : null;
@@ -1482,9 +1482,9 @@ export class Agent {
                 ? join(dir, `${this.name}-${Date.now()}.jpg`)
                 : join(dir, `${this.name}-latest.jpg`);
             writeFileSync(file, Buffer.from(b64, 'base64'));
-            return `${text}\n\n画面：${file}`;
+            return `${text}\n\n画面文件是 ${file}`;
         } catch (err: unknown) {
-            return `${text}\n\n（画面存不下来：${err instanceof Error ? err.message : String(err)}）`;
+            return `${text}\n\n画面存不下来，错误是 ${err instanceof Error ? err.message : String(err)}。`;
         }
     }
 

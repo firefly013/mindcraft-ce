@@ -233,7 +233,7 @@ export function assessPortalMaterials(
     enoughObsidian,
     enoughFlintAndSteel,
     ok,
-    message: `材料${ok ? '足够' : '不足'}：${parts.join('，')}。`,
+    message: `材料${ok ? '足够' : '不足'}，${parts.join('，')}。`,
   };
 }
 
@@ -577,13 +577,12 @@ async function walkIntoPortal(
  * 身体侧完整流程：检查维度 → 复用现成门/检查材料 → 预检选址 → 放框 →
  * 点火 → 走进门 → 等维度切换。
  *
- * **失败不清理现场。** 已放的黑曜石是资产，不是垃圾；回执会说明失败在哪一步、
- * 现场保留了什么、下一步该怎么做。
+ * **失败不清理现场。** 已放的黑曜石是资产，不是垃圾；回执只报失败在哪一步、现场保留了什么。
  */
 export async function enterNether(bot: any): Promise<PortalRoutineResult> {
   const initialDimension = dimensionOf(bot);
   if (isNetherDimension(initialDimension)) {
-    return { ok: true, step: '检查维度', message: portalReceipt('已经在下界，不需要再建传送门。', [`当前维度：${initialDimension}`]) };
+    return { ok: true, step: '检查维度', message: portalReceipt('已经在下界。', []) };
   }
 
   let step = '检查附近传送门';
@@ -597,8 +596,7 @@ export async function enterNether(bot: any): Promise<PortalRoutineResult> {
           ok: true,
           step,
           message: portalReceipt('已进入下界。', [
-            `先在附近 ${PORTAL_SEARCH_RADIUS} 格内找现成的门，找到了就直接用：${formatPoint(existingPortal)}`,
-            '没有另建，也没有改动任何方块。',
+            `传送门：${formatPoint(existingPortal)}`,
             `维度：${initialDimension ?? '未知'} → ${dimensionOf(bot) ?? '未知'}`,
           ]),
         };
@@ -606,10 +604,9 @@ export async function enterNether(bot: any): Promise<PortalRoutineResult> {
       return {
         ok: false,
         step,
-        message: portalReceipt('找到了现成传送门，但没能走进去。', [
+        message: portalReceipt('没做到进入下界，现成的传送门走不进去。', [
           `传送门位置：${formatPoint(existingPortal)}`,
           `当前维度仍是：${dimensionOf(bot) ?? '未知'}`,
-          '现场没有改动任何方块。可以再调一次；若反复失败，先检查门内是否被堵住或寻路是否卡住。',
         ]),
       };
     }
@@ -621,10 +618,7 @@ export async function enterNether(bot: any): Promise<PortalRoutineResult> {
       return {
         ok: false,
         step,
-        message: portalReceipt('材料不足，没有开始搭建，现场未改动。', [
-          initialMaterials.message,
-          '先补够 10 块黑曜石和 1 个打火石，再调 enterNether。',
-        ]),
+        message: portalReceipt('材料不足，未开始搭建。', [initialMaterials.message]),
       };
     }
 
@@ -634,10 +628,7 @@ export async function enterNether(bot: any): Promise<PortalRoutineResult> {
       return {
         ok: false,
         step,
-        message: portalReceipt('材料够，但点火未授权，因此没有开始搭建。', [
-          '点火受危险操作闸门保护。请先调用 allowDangerousOps（ops="ignite"、calls 建议 1，或 minutes 建议 1），再调 enterNether。',
-          '现场未改动。',
-        ]),
+        message: portalReceipt('没有点火，因为点火需要 ignite 授权，而当前没有授权。', ['现场未改动。']),
       };
     }
 
@@ -655,10 +646,7 @@ export async function enterNether(bot: any): Promise<PortalRoutineResult> {
       return {
         ok: false,
         step,
-        message: portalReceipt('没有找到安全的建门位置，现场未改动。', [
-          selected.reason,
-          '可以走到更平坦、旁边有 2 格空位的地方再调一次。',
-        ]),
+        message: portalReceipt('没做到建门，因为没有找到安全的建门位置。', [selected.reason]),
       };
     }
 
@@ -670,7 +658,7 @@ export async function enterNether(bot: any): Promise<PortalRoutineResult> {
       return {
         ok: false,
         step,
-        message: portalReceipt('材料不足以补完这个门框，现场未改动。', [
+        message: portalReceipt('材料不足，门框未补完。', [
           `已找到门址 ${formatPoint(plan.base)}，其中已有 ${existingObsidian} 块黑曜石。`,
           materials.message,
         ]),
@@ -685,7 +673,7 @@ export async function enterNether(bot: any): Promise<PortalRoutineResult> {
           ok: true,
           step,
           message: portalReceipt('已进入下界。', [
-            `使用了已有传送门 ${formatPoint(plan.base)}`,
+            `传送门：${formatPoint(plan.base)}`,
             `维度：${initialDimension ?? '未知'} → ${dimensionOf(bot) ?? '未知'}`,
           ]),
         };
@@ -693,10 +681,9 @@ export async function enterNether(bot: any): Promise<PortalRoutineResult> {
       return {
         ok: false,
         step,
-        message: portalReceipt('已有传送门点燃着，但没能走进去。', [
+        message: portalReceipt('没做到进入下界，已有的传送门走不进去。', [
           `传送门位置：${formatPoint(plan.base)}`,
           `当前维度仍是：${dimensionOf(bot) ?? '未知'}`,
-          '现场没有改动任何方块。',
         ]),
       };
     }
@@ -707,9 +694,8 @@ export async function enterNether(bot: any): Promise<PortalRoutineResult> {
       return {
         ok: false,
         step,
-        message: portalReceipt('门框需要临时垫角，但背包里没有合适的垫块，现场未改动。', [
-          `这个 4×5 门框有 ${scaffoldBlocks.length} 个角还是空气；放侧柱和顶边前需要普通方块垫一下。`,
-          '准备 4 个 dirt / cobblestone / stone / netherrack 之类常见方块后再调一次。',
+        message: portalReceipt('没做到建门，因为背包里没有可用的垫角方块。', [
+          `门框有 ${scaffoldBlocks.length} 个角还是空气。`,
         ]),
       };
     }
@@ -728,10 +714,9 @@ export async function enterNether(bot: any): Promise<PortalRoutineResult> {
         return {
           ok: false,
           step,
-          message: portalReceipt('施工途中发现目标格被占用，已停止，没有挖任何方块。', [
+          message: portalReceipt('搭建中止了，因为目标格被占用。', [
             `${label} ${formatPoint(p)} 现在是 ${name ?? '未知'}，不是空气。`,
             `已放黑曜石 ${placed.length} 块，临时垫块 ${placedScaffolds.length} 个。`,
-            '现场保留原样，可以换一处再试。',
           ]),
         };
       }
@@ -740,12 +725,11 @@ export async function enterNether(bot: any): Promise<PortalRoutineResult> {
         return {
           ok: false,
           step,
-          message: portalReceipt('搭建失败，已停止，没有拆任何方块。', [
+          message: portalReceipt('搭建失败了，方块没有放下去。', [
             `卡在${label} ${formatPoint(p)}；这次成功放下 ${placed.length} 块新黑曜石、${placedScaffolds.length} 个临时垫块。`,
             placed.length === 0 && placedScaffolds.length === 0
               ? '现场没有新增方块。'
               : `已放：${[...placedScaffolds, ...placed].map(formatPoint).join('、')}`,
-            '可以走到更开阔的位置重试；如果重试，工具会优先复用附近已经放好的门框。',
           ]),
         };
       }
@@ -778,9 +762,9 @@ export async function enterNether(bot: any): Promise<PortalRoutineResult> {
       return {
         ok: false,
         step: '验证门框',
-        message: portalReceipt('门框没有完整落下，未点火。', [
+        message: portalReceipt('门框没搭完，未点火。', [
           `还缺 ${missingFrame.length} 格：${missingFrame.map(formatPoint).join('、')}`,
-          `这次新放 ${placed.length} 块黑曜石、${placedScaffolds.length} 个垫角块；现场保留，不拆任何方块。`,
+          `这次新放 ${placed.length} 块黑曜石、${placedScaffolds.length} 个垫角块。`,
         ]),
       };
     }
@@ -791,7 +775,7 @@ export async function enterNether(bot: any): Promise<PortalRoutineResult> {
       return {
         ok: false,
         step,
-        message: portalReceipt('点火前检查失败：点火位置不是黑曜石，现场保留。', [
+        message: portalReceipt('点火前检查没有通过，因为点火位置不是黑曜石。', [
           `点火位置 ${formatPoint(plan.ignitionBlock)} 现在是 ${ignitionName ?? '未知'}。`,
         ]),
       };
@@ -806,9 +790,7 @@ export async function enterNether(bot: any): Promise<PortalRoutineResult> {
       return {
         ok: false,
         step,
-        message: portalReceipt('点火前读不到门框方块，现场保留。', [
-          `点火位置：${formatPoint(plan.ignitionBlock)}`,
-        ]),
+        message: portalReceipt('点火前读不到门框方块。', [`点火位置在 ${formatPoint(plan.ignitionBlock)}`]),
       };
     }
     const lit = await skills.useToolOnBlock(bot, 'flint_and_steel', ignitionBlock);
@@ -816,10 +798,7 @@ export async function enterNether(bot: any): Promise<PortalRoutineResult> {
       return {
         ok: false,
         step,
-        message: portalReceipt('门框已搭好，但点火失败；现场保留，不拆任何方块。', [
-          '点火走的是危险操作闸门。如果刚才的日志说没有 ignite 许可，先 allowDangerousOps(ops="ignite", calls=1) 再调 enterNether。',
-          '如果日志说准星/方块挡住，走到门框正面再调一次。',
-        ]),
+        message: portalReceipt('点火失败，门框已经搭好，现场保留。', []),
       };
     }
 
@@ -832,10 +811,7 @@ export async function enterNether(bot: any): Promise<PortalRoutineResult> {
       return {
         ok: false,
         step: '确认传送门出现',
-        message: portalReceipt('已经点火，但 5 秒内没看到传送门方块，未进去。', [
-          '门框保留着，没有拆任何方块。可能是点火没有落在门内，或服务端还没同步。',
-          '先看附近是否出现紫色传送门；没有就走到门框正面再调一次。',
-        ]),
+        message: portalReceipt('没做到进入下界，点火之后 5 秒内没有出现 nether_portal 方块。', ['门框保留。']),
       };
     }
 
@@ -846,12 +822,11 @@ export async function enterNether(bot: any): Promise<PortalRoutineResult> {
         ok: true,
         step,
         message: portalReceipt('已进入下界。', [
-          `先在附近 ${PORTAL_SEARCH_RADIUS} 格内找过现成的门，没有找到（只扫描已加载区块），因此新建。`,
-          `传送门位置：${formatPoint(plan.base)}（门面沿 ${plan.axis} 轴）`,
-          `这次新放 ${placed.length} 块黑曜石，打火石点火成功。`,
+          `传送门：${formatPoint(plan.base)}（门面沿 ${plan.axis} 轴）`,
+          `新放 ${placed.length} 块黑曜石，打火石点火成功。`,
           placedScaffolds.length === 0
-            ? '门角都有现成支撑，没有用临时垫块。'
-            : `用了 ${placedScaffolds.length} 个 ${scaffoldChoice?.material ?? '普通'} 垫角块（留在原地，不挡门）。`,
+            ? '没有用临时垫块。'
+            : `使用了 ${placedScaffolds.length} 个 ${scaffoldChoice?.material ?? '普通'} 垫角块。`,
           `维度：${initialDimension ?? '未知'} → ${dimensionOf(bot) ?? '未知'}`,
         ]),
       };
@@ -860,10 +835,9 @@ export async function enterNether(bot: any): Promise<PortalRoutineResult> {
     return {
       ok: false,
       step,
-      message: portalReceipt('传送门已经点燃，但没能走进下界。', [
+      message: portalReceipt('没做到进入下界，传送门已经点燃，但是没有走进去。', [
         `传送门位置：${formatPoint(plan.base)}，入口目标 ${formatPoint(plan.entryTarget)}。`,
         `当前维度仍是：${dimensionOf(bot) ?? '未知'}`,
-        '门框和传送门都保留着，没有拆任何方块。再调一次 enterNether；靠近门框后它会尝试走进去。',
       ]),
     };
   } catch (error: unknown) {
@@ -871,10 +845,10 @@ export async function enterNether(bot: any): Promise<PortalRoutineResult> {
     return {
       ok: false,
       step,
-      message: portalReceipt('下界传送门流程异常中止，现场没有主动拆方块。', [
+      message: portalReceipt('流程异常中止。', [
         `出错步骤：${step}`,
         `错误：${detail}`,
-        '如果已放了部分黑曜石或门已点燃，它们都保留着；先看快照，再决定是否重试。',
+        '已放方块保留。',
       ]),
     };
   }

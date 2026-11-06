@@ -67,7 +67,7 @@ describe('estimateDigTimeoutMs', () => {
 });
 
 describe('digWithTimeout 超时续挖', () => {
-  it('第一次超时后继续第二次，成功回报实际用时', async () => {
+  it('第一次超时后继续第二次，成功后不再写过程日志', async () => {
     vi.useFakeTimers();
     try {
       const dig = vi.fn()
@@ -86,15 +86,13 @@ describe('digWithTimeout 超时续挖', () => {
       await vi.advanceTimersByTimeAsync(300);
       await pending;
       expect(dig).toHaveBeenCalledTimes(2);
-      expect(bot.output).toContain('续挖');
-      expect(bot.output).toContain('完成');
-      expect(bot.output).toContain('用时');
+      expect(bot.output).toBe('');
     } finally {
       vi.useRealTimers();
     }
   });
 
-  it('两次都超时才返回 false，并写清仍在挖 / 累计时长', async () => {
+  it('两次都超时才返回 false，并写清失败与累计时长', async () => {
     vi.useFakeTimers();
     try {
       const bot = {
@@ -109,7 +107,7 @@ describe('digWithTimeout 超时续挖', () => {
       await vi.advanceTimersByTimeAsync(300);
       await vi.advanceTimersByTimeAsync(12_100);
       await expect(pending).resolves.toBe(false);
-      expect(bot.output).toContain('仍在挖');
+      expect(bot.output).toContain('没挖到 obsidian @(0,0,0)，2 次都超时了，累计等了 24');
       expect(bot.output).toContain('累计');
       expect(bot.stopDigging).toHaveBeenCalled();
     } finally {
@@ -134,7 +132,6 @@ describe('mineBlockAt 共用动态超时', () => {
     };
     await expect(mineBlockAt(bot, 0, 0, 0)).resolves.toBe(true);
     expect(bot.output).toContain('挖掉了');
-    expect(bot.output).toContain('用时');
   });
 
   it('工具不够：不白等动态超时，明确报工具不对', async () => {
@@ -188,7 +185,7 @@ describe('mineBlockAt 共用动态超时', () => {
 });
 
 describe('dig 看门狗：目标变空气就停止等待', () => {
-  it('bot.dig 永不返回，但目标方块已经变空气：判成功并回报看门狗', async () => {
+  it('bot.dig 永不返回，但目标方块已经变空气：判成功且不写过程日志', async () => {
     vi.useFakeTimers();
     try {
       let calls = 0;
@@ -211,11 +208,10 @@ describe('dig 看门狗：目标变空气就停止等待', () => {
         },
       };
       const pending = digWithTimeout(bot, target, '@(0,0,0)');
-      // 看门狗每 200ms 查一次；推进 1 秒足够它发现目标已经空。
-      await vi.advanceTimersByTimeAsync(1_000);
+      // 看门狗每 200ms 查一次；第 6 次（1.2s）开始返回空气。
+      await vi.advanceTimersByTimeAsync(1_200);
       await expect(pending).resolves.toBe(true);
-      expect(bot.output).toContain('看门狗');
-      expect(bot.output).toContain('iron_ore');
+      expect(bot.output).toBe('');
     } finally {
       vi.useRealTimers();
     }
@@ -232,7 +228,7 @@ describe('外部 stopDigging 正常中断', () => {
       targetDigBlock: null,
     };
     await expect(digWithTimeout(bot, block('iron_ore', 4600, 3), '@(0,0,0)')).resolves.toBe(false);
-    expect(bot.output).toContain('正常中断');
+    expect(bot.output).toBe('');
     expect(bot.dig).toHaveBeenCalledTimes(1);
   });
 });

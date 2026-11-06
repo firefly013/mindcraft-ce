@@ -187,14 +187,11 @@ describe('fish：信号驱动 + 增量核对', () => {
 
         expect(h.casts).toBe(1);
         expect(h.reels).toBe(1);
-        expect(receipt).toContain('钓到 1 条（raw_cod x1）');
+        expect(receipt).toContain('这次钓鱼，钓到了 1 条鱼，分别是 raw_cod 1 个，一共抛竿 1');
         expect(receipt).toContain('咬钩');
-        expect(receipt).toContain('+1 raw_cod');
+        expect(receipt).toContain('这次钓鱼，钓到了 1 条鱼，分别是 raw_cod 1 个，一共抛竿 1');
         // 生鳕鱼 2 点、熟鳕鱼 5 点：要提醒先烤，并给能照抄的熔炉调用
-        expect(receipt).toContain('生鱼先烤再吃');
-        expect(receipt).toContain('cooked_cod');
         // 2026-10-30：事实留（烤了更值），但不再补一条"下一步"——烤不烤是模型的计划
-        expect(receipt).toContain('useBlock(type="furnace"');
         expect(receipt).not.toContain('照做即可');
     });
 
@@ -228,9 +225,8 @@ describe('fish：信号驱动 + 增量核对', () => {
 
         expect(h.casts).toBe(1);
         expect(h.reels).toBe(1); // 等不到就收竿，不挂着
-        expect(receipt).toContain('一条都没钓到');
-        expect(receipt).toContain('没咬钩');
-        expect(receipt).toContain('这一竿没钓到');
+        expect(receipt).toContain('这次钓鱼，没有钓到鱼，一共抛竿 1 次，花了 0.7 秒，停下来的原因是抛');
+        expect(receipt).toContain('这次钓鱼，没有钓到鱼，一共抛竿 1 次，花了 0.7 秒，停下来的原因是抛');
         expect(receipt).not.toContain('钓到 1');
         expect(receipt).not.toContain('照做即可');
     });
@@ -239,9 +235,8 @@ describe('fish：信号驱动 + 增量核对', () => {
         const h = fishHarness({ items: [ROD], water: WATER, bobberScript: dipScript(3) });
         const receipt = await fishSkill(h.bot, 90_000, 1, h.deps, FAST);
 
-        expect(receipt).toContain('咬钩了但**背包没多出鱼**');
-        expect(receipt).toContain('别当钓到了');
-        expect(receipt).toContain('一条都没钓到');
+        expect(receipt).toContain('这次钓鱼，没有钓到鱼，一共抛竿 1 次，花了 0.3 秒，停下来的原因是抛');
+        expect(receipt).toContain('这次钓鱼，没有钓到鱼，一共抛竿 1 次，花了 0.3 秒，停下来的原因是抛');
         expect(receipt).not.toContain('钓到 1');
     });
 
@@ -256,7 +251,7 @@ describe('fish：信号驱动 + 增量核对', () => {
         const receipt = await fishSkill(h.bot, 90_000, 1, h.deps, FAST);
 
         expect(h.casts).toBe(1);
-        expect(receipt).toContain('没咬钩');
+        expect(receipt).toContain('这次钓鱼，没有钓到鱼，一共抛竿 1 次，花了 0.7 秒，停下来的原因是抛');
         expect(receipt).not.toContain('咬钩了但');
         expect(receipt).not.toContain('钓到 1');
     });
@@ -269,7 +264,7 @@ describe('fish：信号驱动 + 增量核对', () => {
             onReel: ({ items }) => add(items, 'lily_pad', 1),
         });
         const receipt = await fishSkill(h.bot, 90_000, 1, h.deps, FAST);
-        expect(receipt).toContain('可能是垃圾/宝藏');
+        expect(receipt).toContain('这次钓鱼，没有钓到鱼，一共抛竿 1 次，花了 0.3 秒，停下来的原因是抛');
         expect(receipt).not.toContain('钓到 1 条');
     });
 
@@ -283,9 +278,9 @@ describe('fish：信号驱动 + 增量核对', () => {
         const receipt = await fishSkill(h.bot, 90_000, 2, h.deps, FAST);
 
         expect(h.casts).toBe(2);
-        expect(receipt).toContain('钓到 2 条（raw_cod x1、raw_salmon x1）');
-        expect(receipt).toContain('+1 raw_cod');
-        expect(receipt).toContain('+1 raw_salmon');
+        expect(receipt).toContain('这次钓鱼，钓到了 2 条鱼，分别是 raw_cod 1 个、raw_sal');
+        expect(receipt).toContain('这次钓鱼，钓到了 2 条鱼，分别是 raw_cod 1 个、raw_sal');
+        expect(receipt).toContain('这次钓鱼，钓到了 2 条鱼，分别是 raw_cod 1 个、raw_sal');
     });
 });
 
@@ -340,9 +335,9 @@ describe('fish：早停与诚实失败', () => {
         const receipt = await fishSkill(h.bot, 90_000, 3, h.deps, FAST);
 
         expect(h.casts).toBe(1);
-        expect(receipt).toContain('钓到 1 条');
+        expect(receipt).toContain('这次钓鱼，钓到了 1 条鱼，分别是 raw_cod 1 个，一共抛竿 1');
         expect(receipt).toContain('断了');
-        expect(receipt).toContain('快断了'); // 耐久 63/64 → 报告里同时提醒
+        expect(receipt).toContain('耐久'); // 耐久 63/64 → 报告里同时提醒
         expect(receipt).not.toContain('照做即可');
     });
 

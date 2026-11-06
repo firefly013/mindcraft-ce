@@ -48,23 +48,23 @@ describe('conversing 提示词契约', () => {
     expect(conversing).toContain('Feedback');
   });
 
-  it('死亡是两条消息：L2 记事实 + L4 叫醒，唤醒语只给"该干什么"', () => {
+  it('死亡是两条消息：L2 记事实 + L4 叫醒，唤醒语只指路', () => {
     // 为什么两条都发：L4 走 `abort()`，而 `abort()` 撤回排队中的输入——
     // 真机上死亡消息 19 秒后才落地，最后连同被 abort 的那一轮一起丢了。
     // L2 是 write（"queued writes stay"），不参与撤回，是那条兜底。
     // **死亡记录必须带掉落清单**：模型靠它决定"回去捡还是重新准备"，
     // 以前没有清单，它只能对着一句"你死了"干猜（Feedback #17/#18）。
     const record = MESSAGES.death('x: 1, y: 2, z: 3', 'overworld', 'pia drowned', 'iron_ore×6、cobblestone×64');
-    expect(record).toContain('你死在了');
-    expect(record).toContain('last_death_position');
+    expect(record).toContain('你死在');
     expect(record).toContain('iron_ore×6'); // 掉落清单在记录里
+    expect(record).not.toContain('last_death_position'); // 不再替模型记"该回去捡"
     expect(MESSAGES.death('x:1', 'overworld', 'boom', '')).toContain('身上没带东西，没有掉落');
 
     const wake = MESSAGES.deathWake();
     expect(wake).toContain('你死了');
-    expect(wake).toContain('立刻停下');
-    // 事实（坐标/掉落清单）在 L2 那条里，唤醒语只指路不复述——同一请求里喂两遍是浪费。
+    // 事实（坐标/掉落清单）在 L2 那条里，唤醒语不重复、不指挥。
     expect(wake).not.toContain('last_death_position');
-    expect(wake).toContain('死亡记录'); // 告诉模型去哪拿事实
+    expect(wake).not.toContain('立刻停下');
+    expect(wake).toContain('上一条');
   });
 });

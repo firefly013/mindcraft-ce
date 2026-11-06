@@ -94,7 +94,7 @@ describe('autoPickup 200ms 入包核验', () => {
     vi.advanceTimersByTime(PICKUP_CONFIRM_DELAY_MS);
     const call = body.notify.mock.calls.find((c: unknown[]) => c[0] === 'inventory.collected');
     expect(call?.[3]).toMatchObject({ nearby_players: ['overnight_b'] });
-    expect(String(call?.[3]?.hint)).toContain('可能是队友掉落');
+    expect(String(call?.[3]?.hint)).toContain('附近有玩家');
   });
   it('collector 不是自己就忽略', () => {
     const items: Array<{ name: string; count: number }> = [{ name: 'porkchop', count: 1 }];

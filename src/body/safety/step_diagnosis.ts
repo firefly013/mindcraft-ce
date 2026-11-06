@@ -54,17 +54,13 @@ export function planClearStep(input: {
     if (input.seconds != null && input.seconds > budget) {
         return {
             action: 'over-budget',
-            message:
-                `这格是 ${input.blockName}，你手里是 ${held}，挖它大概要 ${input.seconds} 秒 > 预算 ${budget} 秒——` +
-                '**先换一把更好的镐（或绕路）**，别在这里耗到超时。',
+            message: `这一格是 ${input.blockName}，我手里拿着 ${held}，估计要挖 ${input.seconds} 秒，比预算的 ${budget} 秒还要久。`,
         };
     }
     if (input.toolDurabilityLeft != null && input.toolDurabilityLeft <= 10) {
         return {
             action: 'tool-nearly-broken',
-            message:
-                `这格是 ${input.blockName}，但 ${held} 只剩 ${input.toolDurabilityLeft} 次耐久——` +
-                '挖它很可能挖到一半镐就断了（然后仍然是"位置没变"）。**先换镐**。',
+            message: `这一格是 ${input.blockName}，但我手里的 ${held} 只剩 ${input.toolDurabilityLeft} 次耐久。`,
         };
     }
     return { action: 'ok', message: null };
@@ -88,13 +84,12 @@ export function formatNoObstacleDiagnosis(input: {
         ['air', 'cave_air', 'void_air', 'water', 'flowing_water', 'lava', 'flowing_lava'].includes(
             input.floorSolid.toLowerCase(),
         );
-    if (input.headSolid != null) facts.push(`你头顶那格是 ${input.headSolid}`);
-    if (floorUnstandable) facts.push(`目标脚下是 ${input.floorSolid}（站不住）`);
-    if (input.onGround === false) facts.push('你现在没站在地面上（悬空/被顶回）');
-    if (!input.movedAny) facts.push('按键期间位置完全没变');
+    if (input.headSolid != null) facts.push(`头顶那一格是 ${input.headSolid}`);
+    if (floorUnstandable) facts.push(`目标脚下那一格是 ${input.floorSolid}，站不住`);
+    if (input.onGround === false) facts.push('我现在没站在地面上');
+    if (!input.movedAny) facts.push('按键期间位置完全没有变');
     return (
-        `走不进去 ${where}：**目标脚/头那格读起来是空的**（不是"挖不动"那种失败），` +
-        (facts.length > 0 ? facts.join('；') + '。' : '') +
-        '先 mineBlock 掉目标头顶那一格（腾出跳的空间），或换 goToCoordinates 绕开这一列。'
+        `我没能走进 ${where}，` +
+        (facts.length > 0 ? facts.join('，') + '。' : '那里读起来是空的。')
     );
 }

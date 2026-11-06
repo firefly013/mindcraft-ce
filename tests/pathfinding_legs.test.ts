@@ -93,54 +93,57 @@ describe('重试阶梯：顺序即加码顺序', () => {
   });
 });
 
-describe('失败分类：四类原因 + 每类一句下一步', () => {
+describe('失败分类：原因只陈述事实，不再附下一步', () => {
   it('A* 算路超时', () => {
     const d = classifyPathFailure({ message: 'Took to long to decide path to goal!' });
     expect(d.kind).toBe('timeout');
     expect(d.reason).toContain('算路超时');
-    expect(d.next).toContain('32 格');
+    expect(d.next).toBe('');
   });
 
   it('落差限制（MAX_DROP_DOWN）', () => {
     const d = classifyPathFailure({ message: 'No path to the goal!', dropAhead: 4 });
     expect(d.kind).toBe('drop');
-    expect(d.reason).toContain('落差限制');
+    expect(d.reason).toContain('落差');
     expect(d.reason).toContain('4 格');
-    expect(d.next).toContain('侧面');
+    expect(d.next).toBe('');
   });
 
   it('没工具挖不开', () => {
     const d = classifyPathFailure({ message: 'No path to the goal!', noTool: true });
     expect(d.kind).toBe('nodig');
-    expect(d.next).toContain('镐');
+    expect(d.reason).toContain('挡路的方块没有能挖开它的工具');
+    expect(d.next).toBe('');
   });
 
   it('快速探测没算出（不代表走不到）', () => {
     const d = classifyPathFailure({ probeFailed: true });
     expect(d.kind).toBe('probe');
-    expect(d.reason).toContain('不代表走不到');
+    expect(d.reason).toContain('探测没有算出路径');
+    expect(d.next).toBe('');
   });
 
-  it('纯 NoPath：也给可执行的下一步，不空手', () => {
+  it('纯 NoPath：只报原因，不给下一步', () => {
     const d = classifyPathFailure({ message: 'No path to the goal!' });
     expect(d.kind).toBe('unknown');
-    expect(d.next.length).toBeGreaterThan(5);
+    expect(d.reason).toContain('没有找到可行的路径');
+    expect(d.next).toBe('');
   });
 
   it('没有错误信息也不说谎（不编造原因）', () => {
     const d = classifyPathFailure({});
     expect(d.kind).toBe('unknown');
-    expect(d.reason).toContain('没有具体错误信息');
+    expect(d.reason).toContain('寻路失败了，但没有具体的错误信息');
   });
 
   // 真机（2026-10-18 14:56，overnight_b 掉进水里）：避水规则把所有相邻格判成危险，
-  // A* 一步都迈不出去，报出来却是干巴巴的 `No path to the goal`，模型于是开始乱换目标。
-  it('站在水里：必须点名"先上岸"，而不是让它重发同一个目标', () => {
+  // A* 一步都迈不出去，报出来却是干巴巴的 `No path to the goal`。
+  it('站在水里：分类正确（只报"站在水里"）', () => {
     const d = classifyPathFailure({ message: 'No path to the goal!', inWater: true });
     expect(d.kind).toBe('inwater');
-    expect(d.reason).toContain('正站在水里');
-    expect(d.next).toContain('出水');
-    // 优先级：水里这一条要压过普通的 NoPath 与探测失败（后两者会让它原地重试）。
+    expect(d.reason).toContain('站在水里');
+    expect(d.next).toBe('');
+    // 优先级：水里这一条要压过普通的 NoPath 与探测失败。
     expect(classifyPathFailure({ message: 'No path to the goal!', inWater: true, probeFailed: true }).kind).toBe('inwater');
   });
 
@@ -294,10 +297,9 @@ describe('goToPosition：长目标真的分段走（每段一次 A*）', () => {
     const ok = await goToPosition(bot, 20, 64, 0, 2);
     expect(ok, bot.output).toBe(false);
     expect(bot.output).toContain('脚下没有方块');
-    expect(bot.output).toContain('不算到达');
   });
 
-  it('130 格 → 5 次 goto，每次 ≤32 格，最后一次是目标，回执说明分段', async () => {
+  it('130 格 → 5 次 goto，每次 ≤32 格，最后一次是目标，且不写分段播报', async () => {
     const registry: any = minecraftData(MC_VERSION);
     const bot = fakePathBot(registry);
     const ok = await goToPosition(bot, 130, 64, 0, 2);
@@ -309,8 +311,8 @@ describe('goToPosition：长目标真的分段走（每段一次 A*）', () => {
       prev = { x: call.x, z: call.z };
     }
     expect(bot._calls[4]).toMatchObject({ x: 130, z: 0 });
-    expect(bot.output).toContain('分 5 段走');
-    expect(bot.output).toContain('还剩约');
+    expect(bot.output).not.toContain('分 5 段走');
+    expect(bot.output).not.toContain('还剩约');
   });
 
   it('短目标不分段：一次 goto 直达', async () => {
@@ -330,7 +332,7 @@ describe('goToPosition：长目标真的分段走（每段一次 A*）', () => {
     expect(PATH_SEARCH_RADIUS).toBeGreaterThan(0);
   });
 
-  it('第一档失败 → 第二档（延长算路）成功，不会原样重试', async () => {
+  it('第一档失败 → 第二档（延长算路）成功，不会原样重试（且不写换档播报）', async () => {
     const registry: any = minecraftData(MC_VERSION);
     const bot = fakePathBot(registry, { x: 0, y: 64, z: 0 }, async (_goal, n) => {
       if (n === 1) throw new Error('Took to long to decide path to goal!');
@@ -339,10 +341,8 @@ describe('goToPosition：长目标真的分段走（每段一次 A*）', () => {
     });
     await expect(goToPosition(bot, 20, 64, 0, 2)).resolves.toBe(true);
     expect(bot._calls).toHaveLength(2);
-    expect(bot.output).toContain('换下一档');
-    expect(bot.output).toContain('延长算路到 30 秒');
-    // **换档要立刻报一行**（真机 15:16：静默 60 秒只有心跳那句"还在跑"）。
-    expect(bot.output).toContain('第 2 档：延长算路到 30 秒（马上试这一档）');
+    expect(bot.output).not.toContain('换下一档');
+    expect(bot.output).not.toContain('第 2 档');
   });
 
   it('中途被打断：不再往下试，如实报中断', async () => {
@@ -353,6 +353,6 @@ describe('goToPosition：长目标真的分段走（每段一次 A*）', () => {
     });
     await expect(goToPosition(bot, 20, 64, 0, 2)).resolves.toBe(false);
     expect(bot._calls).toHaveLength(1);
-    expect(bot.output).toContain('中断');
+    expect(bot.output).toContain('被 Stop 或急停打断了，没有走到 (20,64,0)。');
   });
 });

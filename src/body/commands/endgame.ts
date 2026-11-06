@@ -7,14 +7,10 @@
  * `ENDGAME_TOOL_TEXT`，动作包装在 `runEndgameAction`，不依赖对 `actions.ts` /
  * `prompts.ts` 的改动；接线只在 `registry.ts` 加两行。
  *
- * 为什么**所有命令都没有参数**：`scripts/check-prompts.ts` 只扫
- * `actions.ts` / `queries.ts` / `interact.ts` 三个文件里的 `td()` 与 `name: '!x'`，
- * 认不到新命令文件里的参数；只要这里带参数，那个门禁就会报
- * `SCHEMA PARAM WITHOUT PROMPT TEXT`。所以：
- *   - 需要"选哪个"的地方改成**显式工具名**（`drinkPotion` / `drinkMilk`）或
- *     **写进描述里的确定性优先级**（`drinkPotion` 自己按末地优先级挑药）；
- *   - 真需要加参数时，把命令挪进 `actions.ts`、参数说明写进 `prompts.ts` 的
- *     `TOOL_TEXT`，并把本文件加进 `check-prompts.ts` 的 `COMMAND_FILES`。
+ * 为什么**大多数命令没有参数**：`scripts/check-prompts.ts` 现在也扫本文件；带参数的
+ * 命令必须同时在 `prompts.ts` 的 `TOOL_TEXT` 里留一份**参数说明**（参数名逐字对齐
+ * schema），否则门禁会报 `SCHEMA PARAM WITHOUT PROMPT TEXT`。需要"选哪个"的地方
+ * 一律做成**显式参数**（如 `drinkPotion(potion)`），不靠工具内部替模型挑。
  *
  * 动作实现全部住在 `library/endgame_routine.ts`（读 bot 信号 + 调 `skills`），
  * 纯决策住在 `library/endgame.ts`（58 条离线测试）。
@@ -60,9 +56,10 @@ export const ENDGAME_TOOL_TEXT: Record<string, { description: string; params: Re
     },
     drinkPotion: {
         description:
-            '按末地优先级喝药，**不用记药水名**（所有药水在背包里都叫 potion）：① 在末地/空中且没有缓降 Buff 或剩余不到 30 秒 → 喝**缓降**（龙的翅膀能把你掀到几十格高空，摔死是头号死法）；② 血量 ≤10 → 喝**再生**（没有就治疗）；③ 在末地且没有抗性提升 → 喝**抗性**（爆炸和撞击都减）；④ 都不需要就明说，并列出背包里有哪些药。' +
-            '想清掉负面效果、或者要主动清空自己所有 Buff 时用 drinkMilk。',
-        params: {},
+            '喝一瓶指定 id 的药水（healing / strong_healing / long_slow_falling 这类）。背包里所有药水的物品名都是 potion，只有药水 id 能精确到等级和时长；没有这瓶时返回背包里现有的药水 id 清单。',
+        params: {
+            potion: '完整药水 id，例如 healing / strong_healing / long_slow_falling / fire_resistance。',
+        },
     },
     drinkMilk: {
         description:
@@ -125,12 +122,7 @@ function runEndgameAction(
         );
         if (result.interrupted && !result.timedout) return;
         if (result.timedout) {
-            const why = typeof skills.describeStuck === 'function' ? skills.describeStuck(agent.bot) : '';
-            return (
-                `${label}：**超时**（${timeoutMinutes} 分钟没做完），已释放身体通道。注意：**超时 ≠ 没做成**——` +
-                `有些步骤已经生效（比如框架已经填了几颗、床已经放下去了），先调 endFightStatus 核对状态再决定要不要重试。` +
-                `${why === '' ? '' : `\n卡住时：${why}`}`
-            );
+            return `这次动作超时了，${timeoutMinutes} 分钟没有跑完。`;
         }
         return result.message;
     };
@@ -194,24 +186,23 @@ export const endgameActionList: AgentCommand[] = [
     {
         name: '!drinkPotion',
         description: DESCRIPTION('drinkPotion'),
-        params: {},
-        perform: runEndgameAction('drinkPotion', 2, (agent) =>
-            logReceipt(agent, () => endgame.drinkPotionsByPriority(agent.bot)),
+        params: {
+            potion: {
+                type: 'string',
+                description: ENDGAME_TOOL_TEXT.drinkPotion.params.potion,
+            },
+        },
+        perform: runEndgameAction('drinkPotion', 2, (agent, potion) =>
+            logReceipt(agent, () => endgame.drinkPotionById(agent.bot, potion)),
         ),
     },
     {
         name: '!drinkMilk',
         description: DESCRIPTION('drinkMilk'),
         params: {},
-        perform: runEndgameAction('drinkMilk', 2, async (agent) => {
-            const drank = await endgame.drinkPotionByKind(agent.bot, 'milk');
-            skills.log(
-                agent.bot,
-                drank
-                    ? '喝下牛奶：身上所有状态效果被清空（包括你自己的缓降/再生/抗性）。牛奶不能灭火。'
-                    : '没有喝到牛奶：背包里没有 milk_bucket。',
-            );
-        }),
+        perform: runEndgameAction('drinkMilk', 2, (agent) =>
+            logReceipt(agent, () => endgame.drinkMilk(agent.bot)),
+        ),
     },
     {
         name: '!recoverAfterDeath',

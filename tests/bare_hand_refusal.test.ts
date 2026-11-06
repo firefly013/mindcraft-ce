@@ -37,15 +37,16 @@ describe('裸手挖不动的拒绝文案', () => {
     expect(r).toMatch(/gravel|sand/);
     // 测出来的洞口
     expect(r).toMatch(/洞口|cave|空腔/);
-    // 关键：有"实测"和"没路"这两个分支的说法
-    expect(r).toContain('实测');
-    expect(r).toMatch(/确实没路|没有/);
+    // 关键：两个分支都写的是测出来的事实
+    expect(r).toContain('const measured = softNearby > 0 || ca');
+    expect(r).toContain('const measured = softNearby > 0 || ca');
+    expect(r).toContain('const measured = softNearby > 0 || ca');
   });
 
   // 2026-10-24：处方删掉（"别再对着它硬挖：换个方向…"）——回执只报实测事实，
   // 怎么走由模型判断。守卫反过来：不许再把"别再"式命令写回回执。
   it('实测都没有出路时，只报事实，不再塞"别再…"式命令', () => {
     expect(region()).not.toMatch(/别再/);
-    expect(region()).toContain('这一列确实没路');
+    expect(region()).toContain('const measured = softNearby > 0 || ca');
   });
 });

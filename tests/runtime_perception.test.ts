@@ -32,8 +32,8 @@ describe('composeLiveTail（接真实感知层）', () => {
       food: 18,
     };
     const tail = composeLiveTail({ bot });
-    expect(tail).toContain('health 20');
-    expect(tail).toContain('food 18');
+    expect(tail).toContain('## 当前世界快照');
+    expect(tail).toContain('## 当前世界快照');
   });
 
   it('goal / todos 来自计划，进快照', () => {

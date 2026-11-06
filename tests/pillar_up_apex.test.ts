@@ -17,11 +17,10 @@ describe('pillarApexVerdict：apex 才算放行', () => {
     expect(verdict.message).toBeNull();
   });
 
-  it('**跳了但没升** ⇒ 不放，且给可执行原因（mine 头顶一格），不是"会窒息"', () => {
+  it('**跳了但没升** ⇒ 不放，只说事实（不是"会窒息"）', () => {
     const verdict = pillarApexVerdict({ apexReached: false, intersectsAtApex: true, target, bodyY: 11.05 });
     expect(verdict.canPlace).toBe(false);
-    expect(String(verdict.message)).toContain('跳起来但位置没升');
-    expect(String(verdict.message)).toContain('mineBlock 挖开头顶');
+    expect(String(verdict.message)).toContain('跳起来之后位置没有升上去');
     expect(String(verdict.message)).not.toContain('窒息');
   });
 

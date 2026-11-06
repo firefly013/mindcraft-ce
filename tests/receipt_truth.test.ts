@@ -30,8 +30,7 @@ describe('② 熔炉账目：产物槽是合法的"东西所在处"', () => {
     };
     expect(unaccountedInput(accounting)).toBe(0);
     const text = formatSmeltAccounting(accounting, 1).join('\n');
-    expect(text).toContain('真丢：**0**');
-    expect(text).toContain('没取');
+    expect(text).toContain('炉内：输入 0、燃料 0、产物 1');
     expect(text).not.toContain('对不上账');
   });
 
@@ -39,7 +38,7 @@ describe('② 熔炉账目：产物槽是合法的"东西所在处"', () => {
     const code = interact();
     expect(code).toContain('const takeFurnaceOutput');
     expect(code).toContain('if ((accounting.furnaceOutput ?? 0) > 0) {');
-    expect(code).toContain('已取回');
+    expect(code).toContain('从产物槽取回');
   });
 });
 
@@ -47,7 +46,8 @@ describe('① 合成回执：不许两个声音、不许编造数字', () => {
   it('"现在背包里有 N 个"这句未测量断言已删除，改成背包实测', () => {
     const code = skills();
     expect(code).not.toContain('现在背包里有 ${got} 个');
-    expect(code).toContain('**背包实测**');
+    expect(code).toContain('合成了 ${craftMeasured} 个 ${itemName}');
+    expect(code).toContain('背包里的数量读不到');
   });
 
   it('材料不够那条也不再断言"现在背包里有"', () => {

@@ -53,12 +53,7 @@ function runThrowingAction(
         );
         if (result.interrupted && !result.timedout) return;
         if (result.timedout) {
-            const why = typeof skills.describeStuck === 'function' ? skills.describeStuck(agent.bot) : '';
-            return (
-                `${label}：**超时**（${timeoutMinutes} 分钟没做完），已释放身体通道。` +
-                `投掷本身只要几秒，走到这里说明卡在装备/等待上；先看回执里已经做到哪一步。` +
-                `${why === '' ? '' : `\n卡住时：${why}`}`
-            );
+            return `这次 ${label} 超时了，${timeoutMinutes} 分钟没有跑完。`;
         }
         return result.message;
     };

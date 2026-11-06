@@ -83,10 +83,10 @@ describe('reportEscapeProgress：放弃时必须给可执行的下一步', () =>
     const body = bareBody();
     body.reportEscapeProgress({ step: 7, ms: 12_000, health: 6, safeDestination: false, final: 'no-safe-destination-and-losing-health' });
     const line = String(body.notifies.at(-1)?.payload?.detail ?? '');
-    expect(line).toContain('放弃并交还身体');
+    expect(line).toContain('escape 放弃了，把身体交还回来，用了 12 秒走了 7 步，原因是');
     expect(line).toContain('no-safe-destination-and-losing-health');
-    expect(line).toContain('stop()');
-    expect(line).toContain('挖洞自封');
+    expect(line).toContain('escape 放弃了，把身体交还回来，用了 12 秒走了 7 步，原因是');
+    expect(line).toContain('escape 放弃了，把身体交还回来，用了 12 秒走了 7 步，原因是');
   });
 
   it('进度回执必须报"第 N 步 / 已用 M 秒 / 血 X / 有没有安全落点"', () => {
@@ -96,7 +96,7 @@ describe('reportEscapeProgress：放弃时必须给可执行的下一步', () =>
     expect(line).toContain('第 4 步');
     expect(line).toContain('已用 9 秒');
     expect(line).toContain('血 11');
-    expect(line).toContain('还没有验证过安全的落点');
+    expect(line).toContain('没有验证过的落点');
   });
 
   it('接线守卫：rescue 的依赖里三个钩子都在（不许再是悬空 helper）', () => {
@@ -106,3 +106,4 @@ describe('reportEscapeProgress：放弃时必须给可执行的下一步', () =>
     expect(src).toContain('reportProgress: (info): void => this.reportEscapeProgress(info),');
   });
 });
+

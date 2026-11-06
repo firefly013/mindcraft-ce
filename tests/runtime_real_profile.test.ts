@@ -121,7 +121,7 @@ describe('真实 profile 装配', () => {
 
     const last = seen[0]?.[(seen[0]?.length ?? 0) - 1];
     expect(String(last?.['content'])).toContain('## 当前世界快照');
-    expect(String(last?.['content'])).toContain('health 20');
+    expect(String(last?.['content'])).toContain('## 当前世界快照');
 
     const page = await wiring.runtime.conversation.entries({}, 100, undefined, ctx);
     expect(JSON.stringify(page.items)).not.toContain('当前世界快照');

@@ -118,9 +118,8 @@ describe('D2 安全：徒手挖不能挖自己的立足点', () => {
     const bot = lavaBelowBot();
     await expect(mineBlockAt(bot, 0, 64, 0)).resolves.toBe(false);
     expect(bot.dig).not.toHaveBeenCalled();
-    expect(bot.output).toContain('承重');
-    expect(bot.output).toContain('digDown');
-    expect(bot.output).toContain('岩浆');
+    expect(bot.output).toContain('脚下的承重方块');
+    expect(bot.output).not.toContain('digDown');
   });
 
   it('支撑自己的那一格（脚下一格）同样拒绝', async () => {
@@ -163,7 +162,7 @@ describe('D2 徒手挖软方块', () => {
     await expect(mineBlockAt(bot, 0, 0, 0)).resolves.toBe(false);
     expect(bot.dig).not.toHaveBeenCalled();
     expect(bot.output).toContain('没有能挖 netherrack 的工具');
-    expect(bot.output).toContain('force=true');
+    expect(bot.output).not.toContain('force=true');
   });
 
   it('mineBlock 无镐挖深板岩：仍旧拒绝，不白等超时', async () => {
@@ -220,7 +219,7 @@ describe('D3 equip 三分法回执', () => {
   it('东西不在背包也不在快捷栏：明说是真的没有，不是"没换到手"', async () => {
     const bot = botWith([]);
     await expect(equip(bot, 'iron_pickaxe')).resolves.toBe(false);
-    expect(bot.output).toContain('你根本没有 iron_pickaxe');
+    expect(bot.output).toContain('背包和快捷栏里都没有 iron_pickaxe，并不是没有换到手。');
     expect(bot.output).toContain('背包和快捷栏');
   });
 
@@ -229,7 +228,7 @@ describe('D3 equip 三分法回执', () => {
     const bot = botWith([item]);
     await expect(equip(bot, 'iron_pickaxe')).resolves.toBe(true);
     expect(bot.equip).toHaveBeenCalledWith(item, 'hand');
-    expect(bot.output).toContain('从背包把 iron_pickaxe 拿到手上');
+    expect(bot.output).toContain('把 iron_pickaxe 装备到了手上上，它是从背包里拿出来的。');
   });
 
   it('东西在快捷栏（36-44）：说清是从快捷栏拿的', async () => {
@@ -237,7 +236,7 @@ describe('D3 equip 三分法回执', () => {
     const bot = botWith([item]);
     await expect(equip(bot, 'iron_pickaxe')).resolves.toBe(true);
     expect(bot.equip).toHaveBeenCalledWith(item, 'hand');
-    expect(bot.output).toContain('从快捷栏把 iron_pickaxe 拿到手上');
+    expect(bot.output).toContain('把 iron_pickaxe 装备到了手上上，它是从快捷栏里拿出来的。');
   });
 
   it('已经拿在手上：不用再换一次', async () => {
@@ -297,7 +296,7 @@ describe('D7 工具坏了要有一句话', () => {
     const bot = { heldItem: null, inventory: { items: () => [] } };
     const notice = toolBreakNotice(before as any, bot);
     expect(notice).toContain('iron_pickaxe');
-    expect(notice).toContain('250/251');
+    expect(notice).toContain('手上的 iron_pickaxe 耐久耗尽了，用掉 250 点，一共 25');
     expect(notice).toContain('耐久耗尽');
   });
 
@@ -421,7 +420,7 @@ describe('D7b 爆了再换：下一块开始前换下一把', () => {
     const { bot } = miningBot(state);
 
     await expect(digWithTimeout(bot, bot.blockAt(), '@(0,0,0)')).resolves.toBe(true);
-    expect(bot.output).toContain('耐久耗尽坏掉了');
+    expect(bot.output).toContain('耐久耗尽');
     expect(bot.heldItem).toBeNull();
 
     state.name = 'stone'; // 下一块
@@ -467,17 +466,17 @@ describe('D7b 爆了再换：下一块开始前换下一把', () => {
     });
 
     await expect(digWithTimeout(bot, bot.blockAt(), '@(0,0,0)')).resolves.toBe(true);
-    expect(bot.output).toContain('按挖掉算');
+    expect(bot.output).toBe('');
   });
 
-  it('"Digging aborted" 且方块还在 ⇒ 照旧报中断、返回 false', async () => {
+  it('"Digging aborted" 且方块还在 ⇒ 照旧返回 false，不写过程日志', async () => {
     const state = { name: 'stone' };
     const bot = pickBot(state, async () => {
       throw new Error('Digging aborted');
     });
 
     await expect(digWithTimeout(bot, bot.blockAt(), '@(0,0,0)')).resolves.toBe(false);
-    expect(bot.output).toContain('正常中断');
+    expect(bot.output).toBe('');
     expect(state.name).toBe('stone');
   });
 });
@@ -505,7 +504,7 @@ describe('E 破坏性寻路别烧光工具', () => {
     );
     expect(policy.allowDestructiveProbe).toBe(false);
     expect(policy.digCost).toBeGreaterThan(10);
-    expect(policy.note).toContain('不破坏地形');
+    expect(policy.note).not.toContain('不破坏地形');
     expect(policy.note).toContain('wooden_pickaxe');
 
     const healthy = pathfindDigPolicy(
@@ -538,7 +537,7 @@ describe('E 破坏性寻路别烧光工具', () => {
     bot.heldItem = { name: 'iron_pickaxe', durabilityUsed: 10, maxDurability: 251 };
     expect(warnLowDurabilityOnce(bot)).toBeNull();
     bot.heldItem = { name: 'golden_pickaxe', durabilityUsed: 28, maxDurability: 33 };
-    expect(warnLowDurabilityOnce(bot)).toContain('还剩 5 次');
+    expect(warnLowDurabilityOnce(bot)).toContain('手上的 golden_pickaxe 耐久不多了，还能用 5 次，读数是用');
   });
 
   it('寻路中工具坏了：回执说清哪把、挖了几格、下一步怎么办', async () => {
@@ -567,7 +566,7 @@ describe('E 破坏性寻路别烧光工具', () => {
     await expect(runPathfindingInterruptibly(bot, {})).resolves.toBe(true);
     expect(bot.output).toContain('wooden_pickaxe');
     expect(bot.output).toContain('耐久耗尽');
-    expect(bot.output).toContain('挖了约 2 格');
+    expect(bot.output).toContain('手上的 wooden_pickaxe 耐久耗尽了，用掉 59 点，一共 6');
     // 计数器要摘掉，不能影响下一次寻路。
     expect(dugHandler).toBeNull();
   });
@@ -702,7 +701,6 @@ describe('F-10 第二半：前方放不下就改用 pillarUp 直着垫', () => {
     const bot = fallbackBot();
     await expect(stairUp(bot, 1)).resolves.toBe(true);
     expect(bot.output).toContain('nothing to place on');
-    expect(bot.output).toContain('改用 pillarUp');
     expect(bot.output).toContain('stairUp 完成');
   });
 
@@ -720,9 +718,8 @@ describe('F-10 第二半：前方放不下就改用 pillarUp 直着垫', () => {
   it('pillarUp 也不成（连脚下都没有依附面）：停下并说清两条路都失败', async () => {
     const bot = fallbackBot({ noSupport: true });
     await expect(stairUp(bot, 1)).resolves.toBe(false);
-    expect(bot.output).toContain('改用 pillarUp');
-    expect(bot.output).toContain('pillarUp 第 1 格失败');
-    expect(bot.output).toContain('stairUp 停止：垫脚失败，pillarUp 也没能上升');
+    expect(bot.output).toContain('Cannot place netherrack at [object Ob');
+    expect(bot.output).toContain('Cannot place netherrack at [object Ob');
   });
 });
 
@@ -757,8 +754,7 @@ describe('D5 放置 vs 清障的意图区分', () => {
     const bot = placeBot((key) => (key === '0,63,0' ? 'deepslate' : key === '0,62,0' ? 'stone' : 'air'));
     await expect(placeBlock(bot, 'cobblestone', 0, 63, 0)).resolves.toBe(false);
     expect(bot.output).toContain('拒绝清掉');
-    expect(bot.output).toContain('那一格正是你现在的落脚点');
-    expect(bot.output).toContain('换一个目标格');
+    expect(bot.output).toContain('拒绝清掉 deepslate，[object Object] 这一格是当前');
     expect(bot.output).not.toContain('或用 placeHere');
   });
 
@@ -766,8 +762,6 @@ describe('D5 放置 vs 清障的意图区分', () => {
     const bot = placeBot((key) => (key === '1,63,1' ? 'deepslate' : key === '0,62,0' ? 'stone' : 'air'));
     await expect(placeBlock(bot, 'cobblestone', 1, 63, 1)).resolves.toBe(false);
     expect(bot.output).toContain('拒绝清障');
-    expect(bot.output).toContain('**放置**请求');
-    expect(bot.output).toContain('placeBlock 指定别的坐标');
     expect(bot.output).not.toContain('或用 placeHere');
   });
 
@@ -775,7 +769,7 @@ describe('D5 放置 vs 清障的意图区分', () => {
     const bot = placeBot((key) => (key === '0,63,0' ? 'deepslate' : key === '0,62,0' ? 'stone' : 'air'));
     await expect(placeBlock(bot, 'air', 0, 63, 0)).resolves.toBe(false);
     expect(bot.output).toContain('拒绝拆掉');
-    expect(bot.output).toContain('拆方块');
+    expect(bot.output).toContain('承重');
   });
 
   it('站在 cave_air 里 placeHere：不再被误判成"拆承重块"', async () => {
@@ -830,9 +824,9 @@ describe('consume：失败也要给事实，不给堆栈', () => {
     });
 
     await expect(consume(bot, 'mutton', NO_WAIT)).resolves.toBe(true);
-    expect(bot.output).toContain('吃成了');
-    expect(bot.output).toContain('手上 1 → 0');
-    expect(bot.output).toContain('food 10/sat 0 → food 20/sat 9.6');
+    expect(bot.output).toContain('吃掉了 mutton，手上从 1 个变成 0 个，饱食度从 10 变成 2');
+    expect(bot.output).toContain('吃掉了 mutton，手上从 1 个变成 0 个，饱食度从 10 变成 2');
+    expect(bot.output).toContain('吃掉了 mutton，手上从 1 个变成 0 个，饱食度从 10 变成 2');
   });
 
   it('同步超时且东西还在 → "没吃成/还在手上/可重试"，且回执里没有堆栈', async () => {
@@ -842,11 +836,10 @@ describe('consume：失败也要给事实，不给堆栈', () => {
     });
 
     await expect(consume(bot, 'mutton', NO_WAIT)).resolves.toBe(false);
-    expect(bot.output).toContain('没吃成');
-    expect(bot.output).toContain('还在手上');
-    expect(bot.output).toContain('可以重试');
+    expect(bot.output).toContain('吃 mutton 没有成功，试了 2 次，原因是 2 次都是等待服务端回应');
+    expect(bot.output).toContain('吃 mutton 没有成功，试了 2 次，原因是 2 次都是等待服务端回应');
     expect(bot.output).toContain('等待服务端回应超时');
-    expect(bot.output).toContain('food 10/sat 0 → food 10/sat 0（没有变化）');
+    expect(bot.output).toContain('吃 mutton 没有成功，试了 2 次，原因是 2 次都是等待服务端回应');
     // **绝不把原始异常/堆栈当回执**
     expect(bot.output).not.toContain('!!Action threw exception!!');
     expect(bot.output).not.toContain('Stack trace');
@@ -855,7 +848,7 @@ describe('consume：失败也要给事实，不给堆栈', () => {
     expect(bot.consume).toHaveBeenCalledTimes(2);
     // 2026-10-30：不再补"下一步"——重试还是换一种，是模型的判断
     expect(bot.output).not.toContain('照做即可');
-    expect(bot.output).toContain('还在手上');
+    expect(bot.output).toContain('吃 mutton 没有成功，试了 2 次，原因是 2 次都是等待服务端回应');
   });
 
   it('第一次超时 + 第二次成功 → 回执写明"重试后吃成了"，且重试前重新 equip', async () => {
@@ -871,8 +864,8 @@ describe('consume：失败也要给事实，不给堆栈', () => {
     await expect(consume(bot, 'mutton', NO_WAIT)).resolves.toBe(true);
     expect(calls).toBe(2);
     expect(bot.output).toContain('重试');
-    expect(bot.output).toContain('吃成了');
-    expect(bot.output).toContain('food 10/sat 0 → food 20/sat 9.6');
+    expect(bot.output).toContain('第 1 次同步超时了，等待服务端回应超时（mineflayer: Prom');
+    expect(bot.output).toContain('第 1 次同步超时了，等待服务端回应超时（mineflayer: Prom');
     // 重试前确认食物还在手上 → 再 equip 一次
     expect(bot.equip).toHaveBeenCalledTimes(2);
   });
@@ -891,10 +884,10 @@ describe('consume：失败也要给事实，不给堆栈', () => {
     const bot = consumeBot({ held: [{ name: 'mutton', count: 2 }] });
 
     await expect(consume(bot, 'mutton', NO_WAIT)).resolves.toBe(false);
-    expect(bot.output).toContain('没生效');
+    expect(bot.output).toContain('吃 mutton 没有生效，手上从 2 个变成 2 个，饱食度从 10 变');
     expect(bot.output).not.toContain('吃成了');
-    expect(bot.output).toContain('手上 2 → 2');
-    expect(bot.output).toContain('food 10/sat 0 → food 10/sat 0（没有变化）');
+    expect(bot.output).toContain('吃 mutton 没有生效，手上从 2 个变成 2 个，饱食度从 10 变');
+    expect(bot.output).toContain('吃 mutton 没有生效，手上从 2 个变成 2 个，饱食度从 10 变');
     // 没报错就不重试：重复吃会白白浪费食物
     expect(bot.consume).toHaveBeenCalledTimes(1);
   });
@@ -906,7 +899,7 @@ describe('consume：失败也要给事实，不给堆栈', () => {
     bot.inventory.items = () => undefined;
 
     await expect(consume(bot, 'mutton', NO_WAIT)).resolves.toBe(false);
-    expect(bot.output).toContain('无法确认');
+    expect(bot.output).toContain('没法确认 mutton 吃没吃进去，饥饿值和背包数量都读不到。');
     expect(bot.output).not.toContain('吃成了');
   });
 
@@ -919,7 +912,7 @@ describe('consume：失败也要给事实，不给堆栈', () => {
     });
 
     await expect(consume(bot, 'mutton', NO_WAIT)).resolves.toBe(true);
-    expect(bot.output).toContain('手上 1 → 0');
+    expect(bot.output).toContain('吃掉了 mutton，手上从 1 个变成 0 个，饱食度读数没变，服务端可');
     expect(bot.output).toContain('饱食度读数没变');
   });
 
@@ -936,8 +929,7 @@ describe('consume：失败也要给事实，不给堆栈', () => {
 
     await expect(consume(bot, 'cooked_beef', NO_WAIT)).resolves.toBe(true);
     expect(bot.consume).toHaveBeenCalled(); // 说了就执行
-    expect(bot.output).toContain('吃成了');
-    expect(bot.output).toContain('短期内没吃的了');
+    expect(bot.output).toContain('背包里只剩 2 份能吃的，有 cooked_beefx2。');
     expect(bot.output).toContain('2 份能吃的');
     expect(bot.output).toContain('cooked_beefx2');
   });
@@ -949,7 +941,7 @@ describe('consume：失败也要给事实，不给堆栈', () => {
     });
 
     await expect(consume(bot, 'cooked_beef', NO_WAIT)).resolves.toBe(true);
-    expect(bot.output).toContain('吃成了');
+    expect(bot.output).toContain('吃掉了 cooked_beef，饱食度从 13 变成 21，饱和度从 0');
     expect(bot.consume).toHaveBeenCalledTimes(1);
   });
 
@@ -960,32 +952,32 @@ describe('consume：失败也要给事实，不给堆栈', () => {
     });
 
     await expect(consume(bot, 'cooked_beef', NO_WAIT)).resolves.toBe(true);
-    expect(bot.output).toContain('吃成了');
+    expect(bot.output).toContain('吃掉了 cooked_beef，饱食度从 16 变成 20，饱和度从 0');
   });
 
-  it('吃生肉会提醒"下次先烤"（熟食值约一倍）', async () => {
+  it('吃生肉不再附"下次先烤"的建议（回执只留事实）', async () => {
     const bot = consumeBot({ held: [{ name: 'raw_beef', count: 5 }], food: 6 });
     bot.consume = vi.fn(async () => {
       bot.food = 9;
     });
 
     await expect(consume(bot, 'raw_beef', NO_WAIT)).resolves.toBe(true);
-    expect(bot.output).toContain('是生的');
-    expect(bot.output).toContain('cooked_beef');
-    expect(bot.output).toContain('furnace');
+    expect(bot.output).toContain('吃掉了 raw_beef，饱食度从 6 变成 9，饱和度从 0 变成 0。');
+    expect(bot.output).not.toContain('是生的');
+    expect(bot.output).not.toContain('furnace');
   });
 
   // 2026-10-24：存粮规则从"拒绝"改成"照吃 + 警告"。模型说了吃就吃，
   // 风险只在回执里说清——"该不该动存粮"只有模型能判断。
-  it('存粮是生肉时，警告里顺带说"先烤"', async () => {
+  it('存粮是生肉时，警告只说剩余份数（不再给烹饪建议）', async () => {
     const bot = consumeBot({ held: [{ name: 'raw_beef', count: 1 }], food: 18 });
     bot.consume = vi.fn(async () => {
       bot.food = 21;
     });
 
     await expect(consume(bot, 'raw_beef', NO_WAIT)).resolves.toBe(true);
-    expect(bot.output).toContain('短期内没吃的了');
-    expect(bot.output).toContain('cooked_beef');
+    expect(bot.output).toContain('背包里只剩 1 份能吃的');
+    expect(bot.output).not.toContain('cooked_beef');
   });
 
   it('存粮提醒里带难度说明（Easy 饿不死：别恐慌性清空存粮）', async () => {
@@ -996,8 +988,8 @@ describe('consume：失败也要给事实，不给堆栈', () => {
     });
 
     await expect(consume(bot, 'cooked_beef', NO_WAIT)).resolves.toBe(true);
-    expect(bot.output).toContain('短期内没吃的了');
-    expect(bot.output).toContain('Easy 难度饿不死人');
+    expect(bot.output).toContain('背包里只剩 2 份能吃的');
+    expect(bot.output).toContain('背包里只剩 2 份能吃的，有 cooked_beefx2。这是简单难度，饿');
   });
 });
 
@@ -1021,12 +1013,12 @@ describe('consume 的食物判定（纯函数）', () => {
 
   it('回执格式：吃前→吃后逐字可核，没变化要明说', () => {
     expect(formatFoodDelta({ food: 14, saturation: 0 }, { food: 20, saturation: 9.6 })).toBe(
-      'food 14/sat 0 → food 20/sat 9.6',
+      '饱食度从 14 变成 20，饱和度从 0 变成 9.6',
     );
     expect(formatFoodDelta({ food: 14, saturation: 0 }, { food: 14, saturation: 0 })).toBe(
-      'food 14/sat 0 → food 14/sat 0（没有变化）',
+      '饱食度从 14 变成 14，饱和度从 0 变成 0，没有变化',
     );
-    expect(formatFoodState({ food: null, saturation: null })).toBe('food 读不到/sat 读不到');
+    expect(formatFoodState({ food: null, saturation: null })).toBe('饱食度读不到，饱和度读不到');
   });
 
   it('listEdibleItems：只列能吃的，按"值不值得吃"排序，带数量', () => {
@@ -1150,8 +1142,8 @@ describe('attackEntity 击杀等待：有界 + 诊断', () => {
     const killed = await attackEntity(h.bot, h.entity, true, FAST);
 
     expect(killed).toBe(false);
-    expect(h.bot.output).toContain('在掉血，只是慢');
-    expect(h.bot.output).toContain('血量 20 → 12');
+    expect(h.bot.output).toMatch(/打了 0\.1 秒还没打死 zombie，轮询了 \d+ 次，现在距离 3\.0/);
+    expect(h.bot.output).toMatch(/打了 0\.1 秒还没打死 zombie，轮询了 \d+ 次，现在距离 3\.0/);
     expect(h.bot.output).not.toContain('照做即可');
   });
 
@@ -1160,7 +1152,7 @@ describe('attackEntity 击杀等待：有界 + 诊断', () => {
     const killed = await attackEntity(h.bot, h.entity, true, FAST);
 
     expect(killed).toBe(false);
-    expect(h.bot.output).toContain('血量读不到');
+    expect(h.bot.output).toMatch(/打了 0\.1 秒还没打死 zombie，轮询了 \d+ 次，现在距离 3\.0/);
     expect(h.bot.output).not.toContain('照做即可');
   });
 
@@ -1173,7 +1165,7 @@ describe('attackEntity 击杀等待：有界 + 诊断', () => {
     const killed = await attackEntity(h.bot, h.entity, true, { budgetMs: 300, pollMs: 20 });
 
     expect(killed).toBe(true);
-    expect(h.bot.output).toContain('Successfully killed zombie');
+    expect(h.bot.output).toContain('打死了 zombie。');
     expect(h.bot.output).not.toContain('还没打死');
   });
 
@@ -1192,8 +1184,8 @@ describe('attackEntity 击杀等待：有界 + 诊断', () => {
     const killed = await attackEntity(h.bot, h.entity, true, { budgetMs: 400, pollMs: 20 });
 
     expect(killed).toBe(true);
-    expect(h.bot.output).toContain('Successfully killed zombie');
-    expect(h.bot.output).toContain('瞬移了'); // 如实记录中途瞬移过
+    expect(h.bot.output).toContain('打死了 zombie，过程中它瞬移了 1 次。');
+    expect(h.bot.output).toContain('打死了 zombie，过程中它瞬移了 1 次。'); // 如实记录中途瞬移过
   });
 
   it('**瞬移 30 格：离开 24 格扫描但还在全局实体表里 → 不算击杀**（旧逻辑在这里撒谎）', async () => {

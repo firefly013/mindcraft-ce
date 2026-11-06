@@ -75,7 +75,7 @@ export function planShelter(facts: ShelterFacts): ShelterPlan {
             return {
                 action: 'light-only',
                 reason: night ? 'night' : 'night-soon',
-                detail: '天黑了、帽子盖着但没光：点一支火把（怪会刷在暗处）。',
+                detail: '天黑了，头顶有遮挡，但是没有光。',
             };
         }
         return { action: 'none', reason: 'too-dark-no-material', detail: '' };
@@ -85,14 +85,14 @@ export function planShelter(facts: ShelterFacts): ShelterPlan {
         return {
             action: 'shelter',
             reason: night ? 'night' : 'night-soon',
-            detail: '天黑了/快黑了，你头上没有遮蔽：挖个 1×2 洞、封住入口、放火把，等天亮再出去。',
+            detail: '天黑了，头顶没有遮挡。',
         };
     }
     if (facts.hasTorch) {
         return {
             action: 'light-only',
             reason: night ? 'night' : 'night-soon',
-            detail: '天黑了，你没有可封口的方块：至少把火把插在脚边（不要站在纯黑里过夜）。',
+            detail: '天黑了，背包里没有可以封口的方块。',
         };
     }
     return { action: 'none', reason: 'too-dark-no-material', detail: '' };
@@ -109,14 +109,9 @@ export function formatShelterReceipt(input: {
 }): string {
     const pos = `(${Math.floor(input.position.x)}, ${Math.floor(input.position.y)}, ${Math.floor(input.position.z)})`;
     const dawn = Math.max(0, Math.ceil(input.ticksToDawn / 20));
-    const head = `天黑了，我在 ${pos} ${input.action === 'shelter' ? '挖了个洞先躲着' : '点了火把'}（血 ${input.health ?? '?'}）。`;
+    const head = `天黑了，我在 ${pos} ${input.action === 'shelter' ? '挖了个洞' : '点了火把'}，血量是 ${input.health ?? '读不到'}。`;
     const state =
-        `${input.sealed ? '入口已封住' : '入口没封住（手上没有可封的方块）'}、` +
-        `${input.lit ? '洞里有光' : '洞里没光——别在这里久留，至少别在视野死角背对门口'}`;
-    return (
-        head +
-        state +
-        `，还有约 ${dawn} 秒天亮。赶紧趁着安全：合成、整理背包、吃一口，天一亮就走。` +
-        '如果你有更重要的计划，直接下指令即可（Stop 会把身体立刻还给你）。'
-    );
+        `${input.sealed ? '入口已经封住' : '入口没有封住'}，` +
+        `${input.lit ? '洞里有光' : '洞里没有光'}`;
+    return `${head}${state}，还有大约 ${dawn} 秒天亮。`;
 }

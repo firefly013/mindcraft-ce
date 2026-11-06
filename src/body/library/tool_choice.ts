@@ -140,7 +140,7 @@ export function chooseToolForJob(input: {
             remaining: null,
             tier: null,
             failure: 'tier-too-low',
-            message: `档位不够：这活至少需要 ${minimumTier} 的 ${kind}，背包里的都不够。`,
+            message: `背包里没有可用的 ${kind}，这个动作至少需要 ${minimumTier} 级别的。`,
         };
     }
     // **附魔工具到保护线：不参与自动选择**（用户 2026-11-01）。
@@ -154,8 +154,7 @@ export function chooseToolForJob(input: {
             tier: null,
             failure: 'reserve-protected',
             message:
-                `附魔工具到了保护线（≤ ${ENCHANTED_RESERVE_USES} 次或 < ${Math.round(ENCHANTED_RESERVE_FRACTION * 100)}% 耐久）：${names}——` +
-                '不会自动用它们（附魔工具留一点耐久，别用到爆）。换一把未附魔工具，或手动 equip 决定要不要用它。',
+                `没有可用的 ${kind}：${names} 已到附魔保护线（≤ ${ENCHANTED_RESERVE_USES} 次或 < ${Math.round(ENCHANTED_RESERVE_FRACTION * 100)}% 耐久）。`,
         };
     }
     // **本动作里被拒绝过的工具不许再选回**
@@ -167,9 +166,7 @@ export function chooseToolForJob(input: {
             remaining: null,
             tier: null,
             failure: 'excluded-oscillation',
-            message:
-                `两把${kind}在互相让位（${names} 都被本次动作拒绝过）——不在这两个之间来回换：` +
-                `先 Stop 拿回身体，手动 equip 一把，或改用更便宜的活/绕路。`,
+            message: `没有可用的 ${kind}，${names} 都被这次动作排除过了。`,
         };
     }
     // **便宜优先**：档位最低，然后剩余耐久最少——先把它用掉，断了再换下一把。
@@ -180,14 +177,11 @@ export function chooseToolForJob(input: {
         return { name: null, remaining: null, tier: null, failure: 'no-tool', message: `背包里没有 ${kind}。` };
     }
     const tierName = TIER_ORDER[chosen.tierIndex] ?? '';
-    const tail = chosen.enchanted
-        ? `——附魔工具，剩 ${chosen.remaining ?? '?'} 次耐久；到 ${ENCHANTED_RESERVE_USES} 次会自动停手，不会用到爆。`
-        : '——档位最低、剩得最少的一把；先用它，断了再换下一把。';
     return {
         name: chosen.name,
         remaining: chosen.remaining,
         tier: (tierName as ToolTier) ?? null,
         failure: null,
-        message: `用 ${chosen.name}` + (chosen.remaining != null ? `（耐久 ${chosen.remaining}）` : '') + tail,
+        message: `用 ${chosen.name}` + (chosen.remaining != null ? `（耐久 ${chosen.remaining}）` : ''),
     };
 }

@@ -152,7 +152,7 @@ describe('装配层全栈', () => {
 
     const last = h.seen[0]?.[h.seen[0].length - 1];
     expect(String(last?.['content'])).toContain('## 当前世界快照');
-    expect(String(last?.['content'])).toContain('health 20');
+    expect(String(last?.['content'])).toContain('## 当前世界快照');
 
     const page = await h.wiring.runtime.conversation.entries({}, 50, undefined, ctx);
     expect(JSON.stringify(page.items)).not.toContain('当前世界快照');

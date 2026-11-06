@@ -126,7 +126,7 @@ describe('installToolGuard：bot.dig 闸（pathfinder 裸挖）', () => {
     await expect(bot.dig(STONE_BLOCK, true)).rejects.toMatchObject({ code: 'PROTECTED_TOOL' });
     expect(bot.__digs ?? 0).toBe(0);
     expect(bot.output).toContain('附魔工具');
-    expect(bot.output).toContain('已保护');
+    expect(bot.output).toContain('iron_pickaxe 是附魔工具，只剩 11 次耐久，保护线是 20');
     // 同一句话只写一次（pathfinder 会反复试同一格）。
     const first = bot.output;
     await expect(bot.dig(STONE_BLOCK, true)).rejects.toMatchObject({ code: 'PROTECTED_TOOL' });

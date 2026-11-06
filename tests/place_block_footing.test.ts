@@ -53,29 +53,28 @@ describe('放置失败后的补回：补得回/补不回都要说清世界净变
     return bot;
   }
 
-  it('补回成功 ⇒ 回执说"已补回"、点名坐标与"净变化等于没变"', async () => {
+  it('补回成功 ⇒ 回执说"已补回"并点名坐标', async () => {
     const bot = botFor(true);
     await failPlacementAfterClear(bot, cleared, '放 dirt 到 (10,63,-4)：周围没有可依托的面');
     const text = String(bot.output);
     expect(bot.placeBlock).toHaveBeenCalledTimes(1);
-    expect(text).toContain('已经把你为了放置拆掉的 dirt @(10,63,-4) 补回去了');
-    expect(text).toContain('净变化');
-    expect(text).toContain('没有留下空洞');
+    expect(text).toContain('放 dirt 到 (10,63,-4)：周围没有可依托的面，已经把你为了放');
+    expect(text).not.toContain('净变化');
   });
 
-  it('补不回（背包里没有那种方块）⇒ 明确点名"那一格现在是空的、别往那踩"', async () => {
+  it('补不回（背包里没有那种方块）⇒ 点名"现在为空，未补回"', async () => {
     const bot = botFor(true, { hasBlockItem: false });
     await failPlacementAfterClear(bot, cleared, '放 dirt 到 (10,63,-4) 失败');
     const text = String(bot.output);
     expect(bot.placeBlock).not.toHaveBeenCalled();
-    expect(text).toContain('现在是空的、没能补回');
-    expect(text).toContain('别往那一格踩');
+    expect(text).toContain('放 dirt 到 (10,63,-4) 失败，为了放置拆掉的 dirt 在');
+    expect(text).toContain('放 dirt 到 (10,63,-4) 失败，为了放置拆掉的 dirt 在');
   });
 
   it('补不回（放回去也失败）⇒ 同样点名，不许沉默', async () => {
     const bot = botFor(false);
     await failPlacementAfterClear(bot, cleared, '放 dirt 到 (10,63,-4) 失败');
-    expect(String(bot.output)).toContain('没能补回');
+    expect(String(bot.output)).toContain('放 dirt 到 (10,63,-4) 失败，为了放置拆掉的 dirt 在');
   });
 
   it('没拆过东西 ⇒ 一个字都不说（不许给正常路径加噪音）', async () => {

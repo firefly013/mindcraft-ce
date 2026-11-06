@@ -12,19 +12,19 @@ describe('措辞：词与数字永远一致', () => {
   it('减少 2（不是"减少 -2"）', () => {
     const note = formatInventoryDeltaNote({ oak_log: 3 }, { oak_log: 1 }, 'oak_log');
     expect(note.lost).toEqual(['oak_log×2']);
-    expect(note.note).toContain('减少 oak_log×2');
+    expect(note.note).toContain('背包里少了 2 个 oak_log');
     expect(note.note).not.toMatch(/减少\s*-/);
   });
   it('增加 2（不是"增加 +2"）', () => {
     const note = formatInventoryDeltaNote({ oak_log: 1 }, { oak_log: 3 }, 'oak_log');
     expect(note.gained).toEqual(['oak_log×2']);
-    expect(note.note).toContain('增加 oak_log×2');
+    expect(note.note).toContain('背包里多了 2 个 oak_log');
     expect(note.note).not.toMatch(/增加\s*\+/);
   });
   it('零变化 ⇒ 目标没增加，但不谎报减少', () => {
     const note = formatInventoryDeltaNote({ oak_log: 2 }, { oak_log: 2 }, 'oak_log');
     expect(note.lost).toEqual([]);
-    expect(note.note).toContain('目标物品并没有增加');
+    expect(note.note).toContain('背包没有变化，目标物品也没有增加');
   });
   it('读不到 ⇒ 明说读不到，不当成没变化', () => {
     expect(formatInventoryDeltaNote(null, { oak_log: 2 }).note).toContain('读数不可用');

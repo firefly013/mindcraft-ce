@@ -42,7 +42,7 @@ const FAMILY_SUFFIXES = [
 export function suggestItemFamilyIds(raw: string, max = 16): string[] {
     const name = String(raw ?? '').trim().toLowerCase().replace(/^minecraft:/, '');
     if (name === '') return [];
-    let all: string[] = [];
+    let all: string[];
     try {
         all = ((mc.getAllItems?.() ?? []) as Array<unknown>).map((entry) => {
             if (typeof entry === 'string') return entry;
@@ -71,13 +71,13 @@ export function suggestItemFamilyIds(raw: string, max = 16): string[] {
 export function dyedRecipeRequirement(itemName: string): { ingredientSuffix: string; count: number; colourPrefix: string } | null {
     const name = String(itemName ?? '').toLowerCase();
     const bed = /^([a-z_]+)_bed$/.exec(name);
-    if (bed != null) return { ingredientSuffix: '_wool', count: 3, colourPrefix: bed[1]! };
+    if (bed != null) return { ingredientSuffix: '_wool', count: 3, colourPrefix: String(bed[1]) };
     const carpet = /^([a-z_]+)_carpet$/.exec(name);
-    if (carpet != null) return { ingredientSuffix: '_wool', count: 2, colourPrefix: carpet[1]! };
+    if (carpet != null) return { ingredientSuffix: '_wool', count: 2, colourPrefix: String(carpet[1]) };
     const banner = /^([a-z_]+)_banner$/.exec(name);
-    if (banner != null) return { ingredientSuffix: '_wool', count: 6, colourPrefix: banner[1]! };
+    if (banner != null) return { ingredientSuffix: '_wool', count: 6, colourPrefix: String(banner[1]) };
     const concrete = /^([a-z_]+)_concrete(_powder)?$/.exec(name);
-    if (concrete != null) return { ingredientSuffix: '_sand', count: 4, colourPrefix: concrete[1]! };
+    if (concrete != null) return { ingredientSuffix: '_sand', count: 4, colourPrefix: String(concrete[1]) };
     return null;
 }
 
@@ -96,31 +96,18 @@ export function describeDyedShortfall(
     const have = countOf(ingredient);
     if (have != null && have >= requirement.count) return null;
     const carried = inventoryNames.filter((name) => name.endsWith(requirement.ingredientSuffix));
-    const carriedText = carried.length > 0 ? `你现在带着 ${carried.join('、')}` : '你现在没带同色原料';
-    return (
-        `做 ${itemName} 需要 **${requirement.count} 块同色的 ${ingredient}**（` +
-        `${requirement.ingredientSuffix.replace('_', '')}混色不行）；${carriedText}` +
-        (have == null ? '（数量读不到）' : `，${ingredient} 只有 ${have} 块`) +
-        `——再去弄 ${requirement.count - (have ?? 0)} 块**${requirement.colourPrefix}**${requirement.ingredientSuffix}。`
-    );
+    const carriedText = carried.length > 0 ? `，你现在带着 ${carried.join('、')}` : `，你现在没带同色的原料`;
+    const haveText = have == null ? `，背包里 ${ingredient} 的数量读不到` : `，而 ${ingredient} 只有 ${have} 块`;
+    return `做 ${itemName} 需要 ${requirement.count} 块同色的 ${ingredient}${carriedText}${haveText}。`;
 }
 
-/** 未知物品 id 的统一回执（家庭建议 + 只有在明显相关时才提金装备别名）。 */
+/** 未知物品 id 的统一回执：只报"没有"和相近注册名。 */
 export function formatUnknownItemReceipt(raw: string): string {
     const name = String(raw ?? '').trim();
     const suggestions = suggestItemFamilyIds(name);
     const family =
         suggestions.length > 0
-            ? `你是想找这些吗：${suggestions.join('、')}（共 ${suggestions.length} 种）。`
+            ? `，游戏里相近的注册名有 ${suggestions.join('、')}，一共 ${suggestions.length} 个`
             : '';
-    const golden =
-        name.startsWith('gold_') && name !== 'gold_ingot'
-            ? `提示：金装备的注册名是 golden_*（如 golden_boots）。`
-            : '';
-    return (
-        `没有 ${name} 这个物品（配方表里也没有）。` +
-        family +
-        golden +
-        '先用 getCraftingPlan / searchWiki 确认注册名，再试。'
-    );
+    return `没有 ${name} 这个物品${family}。`;
 }

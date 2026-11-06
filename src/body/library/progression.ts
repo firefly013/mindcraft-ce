@@ -120,14 +120,14 @@ export function huntBackoffMs(consecutiveFailures: number): number {
  */
 export function capLines(lines: readonly string[], max: number, label: string): string[] {
     if (lines.length <= max) return [...lines];
-    return [...lines.slice(0, max), `…（还有 ${lines.length - max} 条${label}省略：回执有硬长度上限，这里只留前 ${max} 条）`];
+    return [...lines.slice(0, max), `……还有 ${lines.length - max} 条${label}没有显示，回执有长度限制，这里只留前 ${max} 条。`];
 }
 
 /** 整段回执的硬上限：超了就保留**头部 + 尾部**（尾部带"下一步"），中间写明省略了多少字符。 */
 export function capReceipt(text: string, max: number = HUNT_RECEIPT_MAX_CHARS): string {
     if (text.length <= max) return text;
     const headBudget = Math.floor(max * 0.6);
-    const notice = `\n…（回执过长：中间省略 ${text.length - max} 字符）…\n`;
+    const notice = `\n……回执太长，中间省略了 ${text.length - max} 个字符……\n`;
     const tailBudget = Math.max(0, max - headBudget - notice.length);
     return `${text.slice(0, headBudget)}${notice}${text.slice(text.length - tailBudget)}`;
 }
@@ -378,9 +378,9 @@ export interface DropSpec {
 }
 
 const DROP_TABLE: Record<string, DropSpec> = {
-    blaze: { items: ['blaze_rod'], note: '烈焰棒 0-1 根（不是必掉），所以"打了没涨"是正常的，继续打。' },
-    enderman: { items: ['ender_pearl'], note: '末影珍珠 0-1 颗；末影人怕水，别在水边打。' },
-    wither_skeleton: { items: ['coal', 'bone'], note: '凋灵骷髅主要目标是头骨，这里只核对煤/骨头。' },
+    blaze: { items: ['blaze_rod'], note: '烈焰棒掉落 0-1 根。' },
+    enderman: { items: ['ender_pearl'], note: '末影珍珠掉落 0-1 颗。' },
+    wither_skeleton: { items: ['coal', 'bone'], note: '这里只核对煤/骨头。' },
     skeleton: { items: ['bone', 'arrow'] },
     zombie: { items: ['rotten_flesh'] },
     husk: { items: ['rotten_flesh'] },
@@ -566,12 +566,7 @@ export function hasFireResistance(bot: any): boolean {
  * 这么来的）。64 格通常落在视距内，所以可以说得强一点，但仍然要写清前提。
  */
 export function describeCoverage(radius: number): string {
-    return (
-        `每次重扫半径 ${Math.round(radius)} 格，**每腿 ≤ ${maxLegPerScan(radius)} 格（=0.75×半径）**：` +
-        '相邻两次扫描的球是重叠的，所以**走过的路径上任意一点都在某个扫描球里**（不会出现"走过去了却没扫到"）。' +
-        '注意 findBlocks **只扫已加载区块**：视距够大时这些格子是完整的，视距小于扫描半径时' +
-        `边上可能仍有没扫到的格子；"找到"是真的，"没找到"只代表这次扫过的范围里没有。`
-    );
+    return `扫描半径是 ${Math.round(radius)} 格，每步最多走 ${maxLegPerScan(radius)} 格，只覆盖已经加载的区块。`;
 }
 
 /** 把坐标串成 `(x, y, z)`（整数，和快照口径一致）。 */
@@ -637,45 +632,28 @@ export function exploreReceipt(o: ExploreOutcome): string {
     const lines: string[] = [];
     if (o.found != null) {
         lines.push(
-            `exploreFor ${o.block}：**found ${o.block} at ${formatPoint(o.found)}**` +
-                `（离你 ${(o.foundDistance ?? 0).toFixed(1)} 格）。`,
+            `用 exploreFor 找 ${o.block}，在 ${formatPoint(o.found)} 找到了，离我 ${(o.foundDistance ?? 0).toFixed(1)} 格。`,
         );
     } else if (o.danger != null) {
-        lines.push(`exploreFor ${o.block}：**中止——${o.danger}**，没找到（不是"附近没有"，是我不敢再走了）。`);
+        lines.push(`用 exploreFor 找 ${o.block}，没有找到，中途停了下来，因为${o.danger}。`);
     } else if (o.timedOut) {
-        // **时间到必须说清楚**：不是"范围里确定没有"，是"预算用完了、螺旋没走完"。
         lines.push(
-            `exploreFor ${o.block}：**时间到（预算 ${Math.round(o.budgetMs / 60000 * 10) / 10} 分钟）主动收手——没走完螺旋**，` +
-                `走完 ${o.completedLegs}/${o.maxSteps} 步；**not found after ${o.completedLegs} steps**（只代表这次扫过的范围里没有）。`,
+            `用 exploreFor 找 ${o.block}，没有找到。时间预算 ${Math.round(o.budgetMs / 6000) / 10} 分钟用完了，` +
+                `我已经走了 ${o.completedLegs} 步，一共计划 ${o.maxSteps} 步。`,
         );
     } else if (o.interrupted) {
-        lines.push(`exploreFor ${o.block}：**被打断（Stop/保命）**，没走完，**not found after ${o.completedLegs} steps**。`);
+        lines.push(`用 exploreFor 找 ${o.block}，没有找到，被中断了，只走了 ${o.completedLegs} 步。`);
     } else {
         lines.push(
-            `exploreFor ${o.block}：**not found after ${o.maxSteps} steps**` +
-                `（走完 ${o.completedLegs} 步，其中寻路失败 ${o.failedLegs} 步）。`,
+            `用 exploreFor 找 ${o.block}，没有找到。我走了 ${o.completedLegs} 步，一共计划 ${o.maxSteps} 步，` +
+                `其中 ${o.failedLegs} 步寻路失败了。`,
         );
     }
     lines.push(
-        `路线：从 ${formatPoint(o.origin)} 到 ${formatPoint(o.here)}，` +
-            `实际移动约 ${Math.round(o.walkedBlocks)} 格；` +
-            `尝试 ${o.attemptedLegs}/${o.maxSteps} 步，走完 ${o.completedLegs} 步，失败 ${o.failedLegs} 步，` +
-            `每步 ≤ ${o.maxLeg} 格（原始螺旋 ${o.requestedLegs} 腿，长腿已切段以保证不漏扫）。`,
+        `这一趟从 ${formatPoint(o.origin)} 出发，现在到了 ${formatPoint(o.here)}，实际移动了大约 ${Math.round(o.walkedBlocks)} 格。`,
     );
     lines.push(describeCoverage(o.scanRadius));
-    // 扫完了、确定没有：把"这意味着什么"说清楚。否则模型会把 "not found"
-    // 读成"工具坏了"，然后原地反复重扫（真机反馈就是这么来的）。
-    if (o.found == null && o.danger == null && !o.timedOut && !o.interrupted && !o.unknownBlock && o.completedLegs > 0) {
-        const reach = Math.round(spiralReach(o.step, o.requestedLegs));
-        lines.push(
-            `**结论：这一带（约 ${reach} 格内）已加载范围内确定没有 ${o.block}——不是工具坏了，是真没有。**` +
-                `同一片区域再扫一遍不会变出方块；**继续沿同一方向走**（至少 400 格，` +
-                `照下面这条走一次 ≈ ${WALK_FURTHER_BLOCKS} 格、重复一次就够）再 exploreFor，才有新区块。` +
-                `（参考：已探索过的下界区块里一块 nether_bricks 都没有。）`,
-        );
-    }
     if (o.notes.length > 0) for (const note of capLines(o.notes, HUNT_MAX_WARNING_LINES, '提示')) lines.push(note);
-    // 同 huntReceipt：**拼出来的东西必须有天花板**（真机教训见 HUNT_RECEIPT_MAX_CHARS）。
     return capReceipt(lines.join('\n'));
 }
 
@@ -741,134 +719,57 @@ export interface HuntOutcome {
 }
 
 const STOP_REASON_TEXT: Record<HuntOutcome['stopReason'], string> = {
-    reached: '够数了',
-    budget: '到时间预算了',
-    no_target: '半径内找不到目标了',
-    interrupted: '被 Stop/保命打断',
-    low_health: '血量太低，先保命',
-    danger: '脚下/身边有危险方块',
-    gone: '目标跑掉/消失了',
-    attack_failed: '内部打怪动作连续失败，已熔断停手',
+    reached: '数量够了',
+    budget: '时间预算用完了',
+    no_target: '附近没有目标',
+    interrupted: '动作被中断了',
+    low_health: '血量太低了',
+    danger: '脚下或身边有危险方块',
+    gone: '目标消失了',
+    attack_failed: '攻击动作连续失败，已经停手',
     attempts: '尝试次数到上限了',
-    cannot_kill: '打不死（每次都耗完击杀预算），已收手',
-    same_target: '同一个目标连续打不死，已熔断停手',
+    cannot_kill: '打不死它，每次都耗尽了击杀预算',
+    same_target: '同一个目标连续打不死',
 };
 
 export function huntReceipt(o: HuntOutcome): string {
     const lines: string[] = [];
-    const counter = o.items.length > 0 ? `${o.items[0]} ${o.gained}/${o.want}` : `背包总件数 +${o.gained}（不知道这种怪掉什么，只能这么核对）`;
-    const head = `huntFor ${o.entity}：**${counter}**（起手 ${o.baseline}）`;
-    const tail = `攻击 ${o.attacks} 次、击杀 ${o.kills} 只，用了 ${Math.round(o.elapsedMs / 1000)} 秒；停止原因：${STOP_REASON_TEXT[o.stopReason]}。`;
-    lines.push(`${head}；${tail}`);
-    // **四个事实分开说**（击杀 / 看到掉落物 / 踩到没 / 背包增量）——真机教训：
-    // 只写「捡到 0 个」会让模型读成"这种怪不掉东西"，而真相是"东西在地上、没去踩"。
+    const counter =
+        o.items.length > 0
+            ? `${o.items[0]} 拿到了 ${o.gained} 个，目标是 ${o.want} 个，起手时背包里有 ${o.baseline} 个`
+            : `背包里一共多出 ${o.gained} 件东西`;
+    lines.push(
+        `这次用 huntFor 刷 ${o.entity}，${counter}。一共攻击 ${o.attacks} 次，击杀了 ${o.kills} 只，` +
+            `用了 ${Math.round(o.elapsedMs / 1000)} 秒，停下来的原因是${STOP_REASON_TEXT[o.stopReason]}。`,
+    );
     if (o.loot != null) {
-        lines.push(`捡拾四个事实：击杀 ${o.kills} 只（已验证）；${describeDropSweep(o.loot)}；背包实测增量 ${o.gained}。`);
-        if (o.loot.seen > 0 && o.loot.picked === 0) {
-            lines.push(
-                '⚠️ **怪死了、地上有掉落物，但一个都没到手**——这**不是**"这种怪不掉东西"，是**没捡到**：' +
-                    '照下一步走过去踩它（自动拾取会收）。别把它记成"掉率为 0"。',
-            );
-        } else if (!o.loot.readable && o.loot.seen === 0) {
-            lines.push(
-                '⚠️ **掉落物实体读不到**（实体表不可用）⇒ 这条回执只能说"**没读到**"，' +
-                    '**不能说"没有掉落物"**；以 stats 的背包为准。',
-            );
-        }
-        if (o.dropDiagnostics != null && o.dropDiagnostics !== '') {
-            lines.push(`（body 侧落点诊断：${o.dropDiagnostics}）`);
-        }
+        lines.push(`${describeDropSweep(o.loot)}背包里因此多出 ${o.gained} 个。`);
+        if (o.dropDiagnostics != null && o.dropDiagnostics !== '') lines.push(`地面上测到的落点诊断是 ${o.dropDiagnostics}`);
     }
-    if (o.items.length === 0) {
-        lines.push('⚠️ 掉落表里没有这种怪：**只报攻击/击杀次数**，没有可靠的"到手几个"依据——请用 stats 核对背包。');
-    }
+    if (o.items.length === 0) lines.push('掉落表里没有这种怪，只能按背包总件数核对。');
     if (o.stopReason === 'no_target') {
-        // 和 exploreFor 同一个口径：**"这一带没有"不是"工具坏了"**，换地方才有用。
-        // 真机里模型会把"没找到"读成工具问题，然后在原地反复调同一个工具。
-        const scope = o.radius == null ? '这一带' : `这一带（半径 ${Math.round(o.radius)} 格内）`;
-        if (o.assets != null) {
-            // **被动动物**：这一带被反复猎杀之后不会很快回来 —— 必须给可再生路线，
-            // 否则模型只会换个圆心继续空跑（"世界几乎没有食物来源"就是这么来的）。
-            lines.push(
-                `**${scope}确实没有 ${o.entity}——不是工具坏了，是真没有。**` +
-                    `被动动物被打光之后不会很快回来（你们在这一带已经打了很久），**别换个圆心继续空跑**。`,
-            );
-            for (const line of foodRouteLines(o.assets)) lines.push(line);
-        } else {
-            lines.push(
-                `**${scope}确实没有 ${o.entity}——不是工具坏了，是真没有。**` +
-                    (o.netherBlaze
-                        ? '烈焰人只在要塞里刷：先在附近 exploreFor(nether_bricks) 找到要塞再回来刷。'
-                        : '同一片区域反复刷不会出怪：换地方、走远一点再来。'),
-            );
-        }
+        lines.push(o.radius == null ? `附近没有 ${o.entity}。` : `半径 ${Math.round(o.radius)} 格内没有 ${o.entity}。`);
     }
-    for (const warning of capLines(o.warnings, HUNT_MAX_WARNING_LINES, '警告')) lines.push(warning);
-    if (o.progress.length > 0) {
-        lines.push('进度：');
-        for (const line of capLines(o.progress.map((p) => `- #${p.attempt} ${p.text}`), HUNT_MAX_PROGRESS_LINES, '进度'))
-            lines.push(line);
-    }
-    if (o.stopReason !== 'cannot_kill' && (o.slowFailures ?? 0) > 0) {
-        lines.push(
-            `ℹ️ 其中 ${o.slowFailures} 次是**耗完击杀预算**的打不死（不是工具坏了）：想换打法就换更好的武器/先吃饱/换个目标。`,
-        );
-    }
-    if (o.stopReason === 'attack_failed') {
-        lines.push(
-            `**内部打怪动作连续失败 ${o.consecutiveFailures ?? '几'} 次，已熔断停手**——` +
-                `这不是"这一带没有 ${o.entity}"，而是**打怪这个动作本身没成功**（每次都是"几秒内就被拒"，` +
-                `最近的错误见上面的警告）。已经停了，不会再原地重试；下一步给的是一条**直接调用**，用来定位到底是哪一步不对。`,
-        );
-    }
+    if (o.stopReason === 'attack_failed') lines.push(`连续 ${o.consecutiveFailures ?? 0} 次攻击都在几秒内被服务端拒绝了。`);
     if (o.stopReason === 'cannot_kill') {
-        lines.push(
-            `**打不死**：这 ${o.slowFailures ?? '几'} 次攻击每次都是**耗完击杀预算**（默认 90 秒）才收手——` +
-                `说明调用本身是通的（不是被拒/解析错），是**打不动**：它太耐打、在水里回血、或者你的输出不够。` +
-                `**不是工具坏了，别去 debug attack**；要换的是打法：① 换更好的武器 ② ${
-                    o.netherBlaze ? '打烈焰人先 prepareBlaze（抗火 + 吃饱）' : '换个更好打的目标或先 reposition'
-                } ③ 打之前先吃饱/回血。`,
-        );
+        lines.push(`这 ${o.slowFailures ?? 0} 次攻击每次都耗尽了击杀预算，仍然没有打死它。`);
     }
     if (o.stopReason === 'same_target') {
-        lines.push(
-            (o.teleportFailures ?? 0) > 0
-                ? `**同一个目标连续打不死（${o.teleportFailures} 次"消失又出现"= 瞬移）**：` +
-                  `这不是"这一带没有 ${o.entity}"，也不是工具坏了——**是它每次都能跑掉，近战追着打没意义**。`
-                : `**同一个目标连续打不死**：每次攻击都没有"它真死了"的证据（${o.unverifiedKills ?? 0} 次连实体表都读不到），` +
-                  `不算击杀、也不说是工具坏了——先核对实体表再决定。`,
-        );
-        if ((o.teleportFailures ?? 0) > 0) {
-            lines.push(
-                isEndermanName(o.entity)
-                    ? '**末影人提示**：① 用**船**把它困住（坐进船里的生物不能瞬移）再打；② 用**弓**在远处耗；' +
-                      '③ 珍珠不一定要杀——要塞/末地城的箱子里也有 ender_pearl，可以顺路拿。'
-                    : '换个打法：远程（弓）/把它逼进死角，或者换个目标——别在同一只身上反复耗。',
-            );
-        }
+        lines.push(`追同一个目标的时候它瞬移了 ${o.teleportFailures ?? 0} 次，始终没有被打死。`);
     }
     if ((o.unverifiedKills ?? 0) > 0) {
-        lines.push(
-            `ℹ️ 有 ${o.unverifiedKills} 次攻击**返回成功但读不到实体表**（没证据）：**没有证据就不算击杀**。` +
-                '先用 stats(type="entities") 核对一次，再决定要不要继续。',
-        );
+        lines.push(`有 ${o.unverifiedKills} 次攻击返回成功，但读不到实体表，这些都没有算作击杀。`);
     }
     if ((o.retractions ?? 0) > 0 || (o.teleportFailures ?? 0) > 0) {
         lines.push(
-            `⚠️ 本轮有 **${(o.retractions ?? 0) + (o.teleportFailures ?? 0)} 次"击杀"是假的**` +
-                `（同一个实体 id 又出现了 = 瞬移，不是死亡），已经从击杀数里扣掉；` +
-                `现在的击杀数 ${o.kills} 只算**验证过、尸体真的没了**的。`,
+            `有 ${(o.retractions ?? 0) + (o.teleportFailures ?? 0)} 次击杀后来被推翻了，因为同一个实体又出现在世界里，` +
+                `这些已经从击杀数里扣掉。`,
         );
     }
-    // **击杀数 vs 掉落数对不上就是信号**：真机那次是"12 次击杀、0 个珍珠"。
-    // 必掉/高概率掉的怪打了 ≥5 只还一个没涨，更可能是"没真死"，不是运气差。
     if (o.kills >= 5 && o.items.length > 0 && o.gained === 0) {
-        lines.push(
-            `⚠️ 击杀 ${o.kills} 只但 **${o.items[0]} 一个都没涨**：这种怪掉率不低，` +
-                `打了 ${o.kills} 只还是 0 更可能是"它们其实没真死"（被打飞/瞬移/脱战）。` +
-                '**别把这当战果**——先 stats(type="entities") 核对，再决定换地方还是换打法。',
-        );
+        lines.push(`击杀了 ${o.kills} 只，但 ${o.items[0]} 的数量没有增加。`);
     }
+    for (const warning of capLines(o.warnings, HUNT_MAX_WARNING_LINES, '警告')) lines.push(warning);
     // **硬长度上限**：循环里拼出来的字符串必须有天花板（真机教训：1.35 亿字符把上下文打爆）。
     return capReceipt(lines.join('\n'));
 }
@@ -984,10 +885,10 @@ export function scanFoodRouteAssets(
 
 function waterLine(a: FoodRouteAssets): string {
     if (a.water == null) {
-        return `最近的水：半径 ${a.waterScanRadius} 格内**没扫到**（只扫已加载区块）——钓鱼先得找到水，用 searchForBlock(type="water", search_range=256)，或沿一个方向走远点。`;
+        return `在半径 ${a.waterScanRadius} 格内没有扫到水，只扫了已经加载的区块。`;
     }
     const p = a.water.position;
-    return `最近的水在 ${formatPoint(p)}，离你约 ${a.water.distance.toFixed(1)} 格（只扫已加载区块）。鱼就在水里：到岸边钓鱼，或者 huntFor(entity="cod")。`;
+    return `最近的水在 ${formatPoint(p)}，离你约 ${a.water.distance.toFixed(1)} 格，只扫了已经加载的区块。`;
 }
 
 /** 三条可再生路线（回执里逐条列出来；主行动只挑一条，见 `foodRoutePrimary`）。 */
@@ -1154,12 +1055,11 @@ export async function exploreForSkill(
     if (registry != null && typeof registry === 'object' && registry[block] == null) {
         outcome.unknownBlock = true;
         notes.push(
-            `⚠️ 当前版本的方块表里没有 "${block}"（原始入参 "${String(rawBlock)}"）：` +
-                '先用 searchForBlock/stats 确认真实方块 id，再重试——这次只做了原地扫描。',
+            `当前版本的方块表里没有 "${block}"，你给的原始名字是 "${String(rawBlock)}"，这次只做了原地扫描。`,
         );
     }
 
-    bot && (bot.interrupt_code = bot.interrupt_code === true);
+    if (bot != null) bot.interrupt_code = bot.interrupt_code === true;
 
     // **探索前先看自己是不是已经在水里**（2026-10-23 真机：exploreFor 在海边连续
     // 三次返回空串，查事件日志才看到是 `world.water.drowning` 把身体抢走了——
@@ -1177,10 +1077,7 @@ export async function exploreForSkill(
     };
     if (inWaterNow()) {
         outcome.danger = '人正站在水里';
-        notes.push(
-            '⚠️ 起手时人就在水里：探索是纯按坐标走螺旋的，不看地形，很可能一头扎进深水；' +
-                '被溺水反射打断时回执会写明是谁抢的身体。**想先上岸就调 escapeWater 再来**；想继续就让它跑。',
-        );
+        notes.push('起手时人站在水里。');
     }
 
     // 先原地扫一次：可能它就在身边（省掉 12 腿）。
@@ -1230,10 +1127,7 @@ export async function exploreForSkill(
         // **走到水里就收手**（同上的真机事故）：继续走只会溺水、被反射打断。
         if (inWaterNow()) {
             outcome.danger = '走到水里了';
-            notes.push(
-                '⚠️ 这一腿把人带进了水里：再往下走会被溺水反射打断（打断=空回执）。' +
-                    '**先 escapeWater 上岸**，上岸后重新调 exploreFor——已走过的腿数见回执。',
-            );
+            notes.push('这一腿走进了水里。');
             break;
         }
         if (!arrived) {
@@ -1252,7 +1146,7 @@ export async function exploreForSkill(
 
     outcome.here = position(bot);
     if (outcome.found == null && outcome.completedLegs === 0 && outcome.attemptedLegs >= outcome.maxSteps && outcome.danger == null && !outcome.interrupted && !outcome.timedOut) {
-        notes.push('⚠️ 每一腿都没走到（寻路全失败）：先 goToCoordinates 挪到一个能走通的位置，或换 step 更小的一轮。');
+        notes.push('每一腿都没走到，寻路全部失败了。');
     }
     return exploreReceipt(outcome);
 }
@@ -1381,7 +1275,7 @@ export async function huntForSkill(
     let lastKilledTargetId: number | null = null;
     let lastFailedTargetId: number | null = null;
     const maxAttempts = huntMaxAttempts(want);
-    let stopReason: HuntOutcome['stopReason'] = 'budget';
+    let stopReason: HuntOutcome['stopReason'];
     /** 岸上追水里目标的开始时刻（0 = 当前没有这种空转）。 */
     let waterStallSince = 0;
     // 空转提示是否已经进过 progress（只进一次，防刷屏）。
@@ -1389,19 +1283,16 @@ export async function huntForSkill(
     /** 最后一次捡拾的四个事实（回执要分开说：看到/踩到/到手/读不到）。 */
     let lastSweep: DropSweep | null = null;
 
-    if (dropSpec.note != null) warnings.push(`ℹ️ ${dropSpec.note}`);
+    if (dropSpec.note != null) warnings.push(dropSpec.note);
     /** 打不还手的食物动物：低血门控不拦它（理由见 `isHarmlessFoodMob`）。 */
     const harmlessFood = isHarmlessFoodMob(entity);
     const netherBlaze = isInNether(bot) && entity === 'blaze';
     if (netherBlaze && !hasFireResistance(bot)) {
-        warnings.push(
-            '⚠️ 没有抗火 Buff：烈焰人的火球和贴身火焰会掉血很快。**先 prepareBlaze 喝下抗火药水**再来刷；' +
-                '这次仍会打，但血量低于 ' + String(MIN_HEALTH_TO_HUNT) + ' 会立刻停手。',
-        );
+        warnings.push('没有抗火 Buff。');
     }
     const dangerStart = hazardHere(bot);
     if (dangerStart != null) {
-        warnings.push(`⚠️ 起手时${dangerStart}：先离开危险格再刷。`);
+        warnings.push(`起手时${dangerStart}。`);
         return huntReceipt({
             entity,
             want,
@@ -1441,13 +1332,13 @@ export async function huntForSkill(
         // 血越低越需要食物（<18 不回血），而牛/猪/羊/鸡打不还手，把它们也挡掉
         // 就是把唯一安全的回血路封死。
         if (!harmlessFood && health(bot) <= MIN_HEALTH_TO_HUNT) {
-            warnings.push(`⚠️ 血量 ${health(bot)} ≤ ${MIN_HEALTH_TO_HUNT}：停手保命，先吃喝/撤退。`);
+            warnings.push(`血量只有 ${health(bot)}，低于 ${MIN_HEALTH_TO_HUNT}。`);
             stopReason = 'low_health';
             break;
         }
         const danger = hazardHere(bot);
         if (danger != null) {
-            warnings.push(`⚠️ ${danger}：停手。`);
+            warnings.push(`${danger}。`);
             stopReason = 'danger';
             break;
         }
@@ -1611,15 +1502,14 @@ export async function huntForSkill(
             attempt: attempts,
             // **四个事实分开说**（击杀 / 看到掉落物 / 踩到没 / 背包增量）——揉成一个
             // "捡到 0 个"会让模型读成"这种怪不掉东西"（真机 overnight_b）。
-            text: `${outcomeText}；${describeDropSweep(looted.sweep)}；${counter}${delta > 0 ? '' : '（这次没涨）'}`,
+            text: `${outcomeText}，${describeDropSweep(looted.sweep)}，${counter}${delta > 0 ? '' : '，这次没有涨'}`,
         });
         if (progress.length > HUNT_MAX_PROGRESS_LINES) progress.splice(0, progress.length - HUNT_MAX_PROGRESS_LINES);
 
         // 同一个目标连续 N 次"打不死"（每次都瞬移/消失又出现）→ 熔断，别再骗自己。
         if (sameTargetFailures >= HUNT_MAX_SAME_TARGET_FAILURES) {
             warnings.push(
-                `⚠️ 同一个目标（${entity}${targetId != null ? `#${targetId}` : ''}）连续 ${sameTargetFailures} 次都没打死` +
-                    `${teleportFailures > 0 ? '——它每次都**瞬移走**' : ''}：这不是"工具坏了"，是**打不死**，已熔断停手。`,
+                `还是那个 ${entity}，实体 id 是 ${targetId ?? '读不到'}，已经连续 ${sameTargetFailures} 次没有打死它。`,
             );
             stopReason = 'same_target';
             break;
@@ -1640,17 +1530,12 @@ export async function huntForSkill(
             fastFailures += 1;
             if (consecutiveFailures >= HUNT_MAX_CONSECUTIVE_FAILURES) {
                 warnings.push(
-                    `⚠️ 连续 ${consecutiveFailures} 次攻击都是**几秒内就被拒**（最后一次 ${entity} 没打死、掉落也没涨）：` +
-                        `**内部打怪动作本身可能有问题**（参数/目标解析/服务端拒绝），熔断停手，不原地重试。`,
+                    `连续 ${consecutiveFailures} 次攻击都在 ${HUNT_FAST_FAILURE_MS} 毫秒内被服务端拒绝了。`,
                 );
                 stopReason = 'attack_failed';
                 break;
             }
             await sleep(huntBackoffMs(consecutiveFailures));
-        } else if (teleported) {
-            // 瞬移不是"工具坏了"，也不是"慢失败"：单独记在 `teleportFailures` 里，
-            // 由"同一目标连续打不死"那条熔断管（见上）。
-            await sleep(huntBackoffMs(1));
         } else {
             // 慢失败 = 耗完击杀预算还没打死。**不计数进熔断，而且把快失败连击清零**：
             // 中间发生过一次"打了 90 秒"就说明工具是通的，"连续 N 次几秒内被拒"这句话必须字面为真。
@@ -1668,10 +1553,9 @@ export async function huntForSkill(
             if (kills > 0) kills -= 1;
             retractions += 1;
             teleportFailures += 1;
-            lastKilledTargetId = null;
             progress.push({
                 attempt: attempts,
-                text: `⚠️ 收尾复核：最后那次"击杀 ${entity}#${attempts}"**也是假的**——它还在实体表里，击杀数 -1。`,
+                text: `收尾复核时发现，最后那次“击杀 ${entity}#${attempts}”也是假的，它还在实体表里，所以击杀数减 1。`,
             });
             if (progress.length > HUNT_MAX_PROGRESS_LINES) progress.splice(0, progress.length - HUNT_MAX_PROGRESS_LINES);
         }
@@ -1762,24 +1646,21 @@ export const DROP_OVERLAP_EPS = 1.5;
  * ① 看到几个（+ 最近几格）② 踩到几次 ③ 到手几个（背包增量）④ 读不到就说读不到。
  */
 export function describeDropSweep(sweep: DropSweep | null | undefined): string {
-    if (sweep == null) return '掉落物：**没读到**（这次没有捡拾记录）';
+    if (sweep == null) return '这次没有捡拾掉落物的记录，读不到掉落物。';
     const nearest = sweep.nearest;
     const where =
         nearest == null
             ? ''
-            : `（现在最近 ${Number.isFinite(nearest.distance) ? nearest.distance.toFixed(1) : '?'} 格` +
-              `${Number.isFinite(nearest.position?.x) ? ` @(${Math.round(nearest.position.x)}, ${Math.round(nearest.position.y)}, ${Math.round(nearest.position.z)})` : ''}` +
-              `${nearest.name != null ? `，${nearest.name}` : ''}）`;
-    if (!sweep.readable && sweep.seen === 0) {
-        return '掉落物：**没读到**（实体表读不到 ⇒ 这只说明"没读到"，**不等于没有掉落物**）';
-    }
-    if (sweep.seen === 0) {
-        return '掉落物：范围内**没看到**掉落物实体';
-    }
-    const pickedText = sweep.picked > 0 ? `**到手 ${sweep.picked} 个**` : '**一个都没到手**';
+            : `，最近的一个在 ${Number.isFinite(nearest.distance) ? nearest.distance.toFixed(1) : '?'} 格外的 ` +
+              `(${Number.isFinite(nearest.position?.x) ? Math.round(nearest.position.x) : '?'}, ` +
+              `${Number.isFinite(nearest.position?.y) ? Math.round(nearest.position.y) : '?'}, ` +
+              `${Number.isFinite(nearest.position?.z) ? Math.round(nearest.position.z) : '?'})` +
+              `${nearest.name != null ? `，是 ${nearest.name}` : ''}`;
+    if (!sweep.readable && sweep.seen === 0) return '掉落物读不到。';
+    if (sweep.seen === 0) return '周围没有看到掉落物。';
     return (
-        `掉落物：**看到 ${sweep.seen} 个**${where}；走过去试了 ${sweep.attempts} 次、` +
-        `**踩到 ${sweep.overlapped} 次**；${pickedText}`
+        `看到 ${sweep.seen} 个掉落物${where}。走过去 ${sweep.attempts} 次，` +
+        `踩到了 ${sweep.overlapped} 次，到手 ${sweep.picked} 个。`
     );
 }
 
@@ -2344,22 +2225,22 @@ export type TunnelStop =
     | 'stalled';
 
 const TUNNEL_STOP_TEXT: Record<TunnelStop, string> = {
-    done: '挖满了本次长度（可以接着挖同一条线）',
-    budget: '时间到（内部预算）主动收手',
-    interrupted: '被 Stop/保命打断',
-    low_health: '血量太低，停手保命',
-    damaged: '中途掉血，停手',
-    liquid_ahead: '前方是液体（岩浆/水），不能往里面挖',
-    unsupported_floor: '下一步脚下不是实心方块，会掉下去',
-    no_tool: '没有能挖的镐，而且前面的方块徒手挖不动',
-    tool_low: '（已删除的安全门：低耐久不再拦路，工具断了由动作内部换）',
-    dig_failed: '挖完还是原方块（挖不动/被挡）',
-    travel_failed: '挖通了但没走进去（寻路失败）',
-    unreadable: '读不到方块（区块没加载？），不敢瞎挖',
-    bad_direction: '方向认不出来，也不给读朝向',
-    bridge_failed: '想垫一块桥过去，但没垫成',
-    protected_block: '前面是容器/功能方块（箱子、熔炉、工作台…），**不挖穿**，而且抬/降一格都绕不开',
-    stalled: '连着几步既没挖到东西、人也没挪动（卡住了）',
+    done: '这次要挖的长度已经挖满了',
+    budget: '这一轮的时间预算用完了',
+    interrupted: '动作被中断了',
+    low_health: '血量太低了',
+    damaged: '中途掉了血',
+    liquid_ahead: '前方是液体',
+    unsupported_floor: '前方脚下不是实心方块',
+    no_tool: '没有可用的镐，方块徒手挖不动',
+    tool_low: '镐的耐久太低了',
+    dig_failed: '方块没有挖开',
+    travel_failed: '挖通了但人没有走进去',
+    unreadable: '读不到方块',
+    bad_direction: '方向认不出来',
+    bridge_failed: '没有垫成桥',
+    protected_block: '前方是容器或功能方块',
+    stalled: '连续几步都没有前进',
 };
 
 export interface TunnelOutcome {
@@ -2449,99 +2330,19 @@ export function tunnelNextAction(o: TunnelOutcome): string {
 export function tunnelReceipt(o: TunnelOutcome): string {
     const lines: string[] = [];
     const where = formatPoint(o.here);
-    const dirText = `${o.dir.label}${o.dir.fromYaw ? '（按当时的朝向推出来的，下一步照抄这个方向）' : ''}`;
-    // **进度只报量出来的数**：位移（3D 直线距离）+ 验证变空气的方块数 + 尝试次数。
     const displacement = Math.hypot(o.here.x - o.start.x, o.here.y - o.start.y, o.here.z - o.start.z);
     lines.push(
-        `mineTunnel：**沿 ${o.dir.label} 净前进 ${o.dug}/${o.requested} 格**（实测位移 ${displacement.toFixed(1)} 格：` +
-            `${formatPoint(o.start)} → 现在 ${where}），挖掉并**验证变空气**的方块 ${o.blocksDug} 个` +
-            `${o.digAttempts > o.blocksDug ? `（尝试 ${o.digAttempts} 次）` : ''}。` +
-            // **0 位移必须是标题里的事**：把"卡在什么"直接写在第一行。
-            (displacement < TUNNEL_MOVE_EPS
-                ? `**卡在**：${o.detail === '' ? TUNNEL_STOP_TEXT[o.stop] : o.detail}。`
-                : ''),
+        `这次用 mineTunnel 沿 ${o.dir.label} 挖，计划挖 ${o.requested} 格，实际前进了 ${o.dug} 格，` +
+            `实测位移 ${displacement.toFixed(1)} 格。出发时在 ${formatPoint(o.start)}，现在在 ${where}，` +
+            `一共挖掉了 ${o.blocksDug} 个方块。`,
     );
-    // **被兄弟工具交过来的**：说清"挖不动就报原因，别再交回去"（真机：两个工具互相踢皮球）。
-    if (o.handoffFrom != null) {
-        lines.push(
-            `ℹ️ 这条是 **${o.handoffFrom}** 交过来的（\`handoff="${o.handoffFrom}"\`）：**挖不动就把具体原因说出来**` +
-                '（脚下没有可站的方块 / 前面是容器·功能方块 / 手上没镐 / 读不到方块），**不要再交回 ' +
-                `${o.handoffFrom}**——来回踢皮球就是两边都不动。`,
-        );
-    }
-    // **方向是推出来的就要说清楚**（真机："方向挖反了"最常见的原因就是没给 direction、
-    // 而当时的朝向是反的）。而且要指路去那个不会猜反的工具。
-    if (o.dir.fromYaw) {
-        lines.push(
-            `⚠️ 你没给 direction：这个 **${o.dir.label}** 是**按你当时的朝向推出来的**——` +
-                `如果你其实想往另一个方向（比如目标在背后），就明确写 direction="${o.dir.label === '+x' ? '-x' : o.dir.label === '-x' ? '+x' : o.dir.label === '+z' ? '-z' : '+z'}"。` +
-                '**要去某个坐标就用 travelTo(x=…, z=…)**：它按坐标算方向，不会猜反。',
-        );
-    }
-    lines.push(`停止原因：${TUNNEL_STOP_TEXT[o.stop]}${o.detail === '' ? '' : `——${o.detail}`}。`);
-    // **三项证据不一致就不许只报大的那个数**（两条可以同时成立，所以用独立的 if）。
-    if (o.dug === 0 && (o.digAttempts > 0 || o.moved === 0)) {
-        lines.push(
-            `⚠️ 读/挖了 ${o.digAttempts} 次、**没有一格真的变成空气，人也没往前挪**——按证据这一趟是 0 格` +
-                `（以前的回执会把这整段写成"挖满了"，那是假的）。`,
-        );
-    }
-    if (o.blocksDug > 0 && displacement < TUNNEL_MOVE_EPS) {
-        lines.push(
-            `⚠️ **矛盾**：挖掉了 ${o.blocksDug} 个方块（验证过变空气），但**位移是 0 格**——` +
-                `人不在地道里/被卡住了。别按"挖掉多少方块"去算走了多远。`,
-        );
-    }
-    if (o.moved < o.dug) {
-        lines.push(`ℹ️ 有 ${o.dug - o.moved} 步是"人到了但位移判不出来"，已按证据从低计。`);
-    }
-    // **保险**：`dug` 现在由位置量出来（`dug ≤ 实测位移`），这条理论上永远不会触发；
-    // 留着是为了"万一以后有人又改成数循环"，回执会当场自曝而不是骗人。
-    if (o.dug > 0 && displacement + 0.75 < o.dug * TUNNEL_MOVE_EPS) {
-        lines.push(
-            `⚠️ **矛盾**：格数（${o.dug}）和实测位移（${displacement.toFixed(1)} 格）对不上——` +
-                '**按位移算**，格数不算数。',
-        );
-    }
-    if (o.stalls > 0) {
-        lines.push(`ℹ️ 有 ${o.stalls} 步既没挖到东西、人也没挪动（反复空转会被判"卡住了"并停手）。`);
-    }
-    // **容器/功能方块**：一个都没挖，而且点名（真机：箱子被挖了、内容物撒地、回执里一个字都没有）。
+    lines.push(`停下来的原因是${TUNNEL_STOP_TEXT[o.stop]}${o.detail === '' ? '' : `，${o.detail}`}。`);
     for (const hit of (o.protectedHits ?? []).slice(0, 4)) {
         lines.push(
-            `🛡️ ${formatPoint(hit.position)} 是 **${hit.name}**（容器/功能方块）——**没挖它**` +
-                (hit.dug ? '（记录时已经被挖掉了）' : '') +
-                (isContainerBlockName(hit.name) ? '，里面的东西原样没动；要拿就自己 useBlock 打开它' : '') +
-                '。',
+            `我没有挖掉 ${hit.name}，它在 ${formatPoint(hit.position)}。` +
+                (hit.dug ? '记录的时候它已经被挖掉了。' : ''),
         );
     }
-    if ((o.detours ?? 0) > 0) {
-        lines.push(`ℹ️ 为了绕开它们，抬/降了 ${o.detours} 次（横向隧道抬一格通常就够）。`);
-    }
-    if ((o.toolChanges ?? []).length > 0) {        const changes = (o.toolChanges ?? [])
-            .slice(0, 3)
-            .map((c) => `${c.from ?? '空手'} → ${c.to ?? '空手'}`)
-            .join('、');
-        lines.push(
-            `⚠️ **中途工具变了 ${(o.toolChanges ?? []).length} 次**（${changes}）：这是自动换手/镐断了，挖得慢是它造成的。`,
-        );
-    }
-    if (o.handMining) {
-        lines.push(
-            '⚠️ **手上和背包里都没有镐**：这些方块是**徒手挖**的，很慢，而且更费时间=更暴露；' +
-                '能找/做一把镐就先做（3 个石头 + 2 根木棍）。',
-        );
-    }
-    const toolText =
-        o.toolName == null
-            ? '镐：手上没有工具'
-            : o.toolRemaining == null
-              ? `镐：${o.toolName}（上限读不到，算不出还剩几次）`
-              : `镐：${o.toolName} 还剩约 ${o.toolRemaining} 次（${o.toolMax ?? '?'} 上限）`;
-    lines.push(toolText + '。');
-    if (o.bridges > 0) lines.push(`搭桥：这一趟垫了 ${o.bridges} 块（前方脚下是空洞时垫一块过去，横向的 pillarUp）。`);
-    for (const line of capLines(o.progress, HUNT_MAX_PROGRESS_LINES, '进度')) lines.push(line);
-    // 同 huntReceipt：隧道很长时进度行也不能无限堆。
     return capReceipt(lines.join('\n'));
 }
 
@@ -2663,14 +2464,14 @@ export async function digLine(
         }
         const out: string[] = [];
         for (let i = 0; i < BRIDGE_MAX_MATERIALS; i++) {
-            let items: Array<{ name?: unknown; count?: unknown }> = [];
+            let items: Array<{ name?: unknown; count?: unknown }>;
             try {
                 items = (b?.inventory?.items?.() ?? []) as Array<{ name?: unknown; count?: unknown }>;
             } catch {
                 items = [];
             }
             const filtered = items.filter((item) => typeof item?.name !== 'string' || !out.includes(item.name));
-            let picked: string | null = null;
+            let picked: string | null;
             try {
                 picked =
                     skills.choosePillarMaterial(
@@ -2770,7 +2571,7 @@ export async function digLine(
         // ── 时间预算：到点自己收手（回执必须由工具自己交出来） ──
         if (now() >= deadline) {
             outcome.stop = 'budget';
-            outcome.detail = `本轮预算 ${Math.round(budgetMs / 6000) / 10} 分钟用完`;
+            outcome.detail = `这一轮的预算是 ${Math.round(budgetMs / 6000) / 10} 分钟`;
             break;
         }
         if (bot?.interrupt_code === true) {
@@ -2780,12 +2581,12 @@ export async function digLine(
         const hp = health(bot);
         if (hp != null && hp <= MIN_HEALTH_TO_DIG) {
             outcome.stop = 'low_health';
-            outcome.detail = `血量 ${hp} ≤ ${MIN_HEALTH_TO_DIG}`;
+            outcome.detail = `血量只有 ${hp}`;
             break;
         }
         if (hp != null && startHealth != null && hp < startHealth) {
             outcome.stop = 'damaged';
-            outcome.detail = `血量 ${startHealth} → ${hp}`;
+            outcome.detail = `血量从 ${startHealth} 变成了 ${hp}`;
             break;
         }
 
@@ -2824,7 +2625,7 @@ export async function digLine(
             if (detourStep == null) {
                 outcome.stop = 'protected_block';
                 outcome.detail =
-                    `${formatPoint(obstruction.cell)} 是 ${name}（**容器/功能方块**，不该挖穿），抬一格、降一格都绕不开`;
+                    `${formatPoint(obstruction.cell)} 是 ${name}，抬降一格都绕不开`;
                 break;
             }
             outcome.detours += 1;
@@ -2848,7 +2649,7 @@ export async function digLine(
         const liquid = named.find(([block]) => isLiquidBlockName(block?.name));
         if (liquid != null) {
             outcome.stop = 'liquid_ahead';
-            outcome.detail = `${liquid[2]} ${cellText(liquid[1], normalizeName(liquid[0]?.name))}（挖进去就是死）`;
+            outcome.detail = `${liquid[2]} ${formatPoint(liquid[1])} 里是 ${normalizeName(liquid[0]?.name)}`;
             break;
         }
 
@@ -2863,15 +2664,14 @@ export async function digLine(
             const below = blockAt(bot, step.floor.x, step.floor.y - 1, step.floor.z);
             if (isLiquidBlockName(below?.name)) {
                 outcome.stop = 'liquid_ahead';
-                outcome.detail = `${cellText(step.floor, normalizeName(below?.name))} 就是岩浆（桥下面），不能在上面搭桥`;
+                outcome.detail = `${formatPoint(step.floor)} 的下面是 ${normalizeName(below?.name)}，所以没有搭桥`;
                 break;
             }
             const materials = scaffoldChoices(bot).slice(0, BRIDGE_MAX_MATERIALS);
             if (materials.length === 0) {
                 outcome.stop = 'unsupported_floor';
                 outcome.detail =
-                    `${cellText(step.floor, normalizeName(floorBlock?.name))}（下一步会踩空），` +
-                    `**背包里没有能垫的方块**——先弄 1 个（挖两格就有下界岩/圆石）`;
+                    `${formatPoint(step.floor)} 下面是空的，再往前走会踩空，而背包里没有可以垫的方块`;
                 break;
             }
             // **一次不成不代表搭不了**：换依附面、再换材料，都试过才认输
@@ -2901,8 +2701,8 @@ export async function digLine(
                 const nowBlock = blockAt(bot, step.floor.x, step.floor.y, step.floor.z);
                 outcome.stop = 'bridge_failed';
                 outcome.detail =
-                    `搭桥：想在 ${formatPoint(step.floor)} 垫一块桥，试了 ${tried.length} 种（${tried.slice(0, 4).join('、')}）` +
-                    `都没成功（现在还是 ${normalizeName(nowBlock?.name) ?? '读不到'}）`;
+                    `本来想在 ${formatPoint(step.floor)} 垫一块桥，试了 ${tried.length} 种材料和依附面都没有成功，` +
+                    `那里现在还是 ${normalizeName(nowBlock?.name) ?? '读不到'}`;
                 break;
             }
             outcome.bridges += 1;
@@ -2917,7 +2717,7 @@ export async function digLine(
         const unreadable = digBlocks.find(({ block }) => block == null);
         if (unreadable != null) {
             outcome.stop = 'unreadable';
-            outcome.detail = `读不到要挖的 ${formatPoint(unreadable.cell)}（区块没加载？）`;
+            outcome.detail = `读不到要挖的方块 ${formatPoint(unreadable.cell)}`;
             break;
         }
 
@@ -2925,7 +2725,7 @@ export async function digLine(
         //
         // ⚠️ **"手上没有镐" ≠ "没有镐"**（真机 overnight_b：镐就在背包里、只是没握在手上，
         // 回执却报"没有镐"，害得它掉头回去做一个已经有的工具）。所以先自己换上再判。
-        let guard = refreshTool();
+        const guard = refreshTool();
         // **拒绝过的工具本次动作不再选回**（Lead 2026-10-21：拒绝→换手→选回同一把 = 结构性震荡）。
         const refusedTools = new Set<string>();
         noteToolChange(guard.name);
@@ -2941,7 +2741,6 @@ export async function digLine(
                 const after = refreshTool();
                 if (after.name != null && after.name.includes('pickaxe')) {
                     hasPickaxe = true;
-                    guard = after;
                     noteToolChange(after.name);
                     outcome.progress.push(`- 镐在背包里没握在手上 → 已自动换上 ${after.name}`);
                 }
@@ -2965,7 +2764,7 @@ export async function digLine(
                 const replacement = bestPickaxeInInventory(bot);
                 outcome.hintEquip = replacement;
                 outcome.detail = replacement != null
-                    ? `前方 ${formatPoint(tooHard.cell)} 是 ${normalizeName(tooHard.block?.name)}，徒手挖不动；先装备 ${replacement}`
+                    ? `前方 ${formatPoint(tooHard.cell)} 是 ${normalizeName(tooHard.block?.name)}，徒手挖不动，但背包里有 ${replacement}`
                     : `前方 ${formatPoint(tooHard.cell)} 是 ${normalizeName(tooHard.block?.name)}，徒手挖不动，背包里也没有镐`;
                 break;
             }
@@ -3009,7 +2808,7 @@ export async function digLine(
             if (after == null || !isAirBlockName(after?.name)) {
                 outcome.stop = 'dig_failed';
                 outcome.detail =
-                    `第 ${index} 步的 ${cellText(cell, normalizeName(after?.name))}${ok ? '（挖过了但没变空气）' : '（挖不动）'}`;
+                    `第 ${index} 步要挖的 ${formatPoint(cell)} 是 ${normalizeName(after?.name) ?? '读不到'}，${ok ? '挖过之后仍然没有变成空气' : '挖不动'}`;
                 refreshTool();
                 return outcome;
             }
@@ -3019,7 +2818,7 @@ export async function digLine(
 
         // ── 走进去：**位移是唯一证据**（"报成功但人没动"是最常见的假进度） ──
         const beforeStep = position(bot);
-        let arrived = false;
+        let arrived: boolean;
         try {
             arrived = await travel(bot, step.feet.x, step.feet.y, step.feet.z);
         } catch {
@@ -3049,9 +2848,9 @@ export async function digLine(
             if (outcome.stalls >= TUNNEL_MAX_STALLS) {
                 outcome.stop = 'stalled';
                 outcome.detail =
-                    `连续 ${outcome.stalls} 步沿 ${request.dir.label} **一格都没前进**（` +
-                    `${arrived ? '寻路"报成功"但位移 0' : '走不进去'}；实测位移只有 ${stepDist.toFixed(2)} 格）；` +
-                    `现在 ${formatPoint(here)}，目标格 ${formatPoint(step.feet)}`;
+                    `连续 ${outcome.stalls} 步沿 ${request.dir.label} 都没有前进，` +
+                    `${arrived ? '寻路器报告到了，但位移是 0' : '人没有走进去'}，实测位移只有 ${stepDist.toFixed(2)} 格，` +
+                    `现在在 ${formatPoint(here)}，要去的格子是 ${formatPoint(step.feet)}`;
                 break;
             }
             await sleep(settleMs);
@@ -3073,8 +2872,7 @@ export async function digLine(
             outcome.stop = 'travel_failed';
             const reasonText = String(stepped.reason ?? '').replace(/。+$/, '');
             outcome.detail =
-                `第 ${index} 步挖通了 ${formatPoint(step.feet)}，但**走不进去**：${reasonText}。` +
-                `建议：mineBlock 掉 ${formatPoint(step.feet)} 那一格（或它头顶那格）后再走；若是水/岩浆，换 goToCoordinates 绕开。`;
+                `第 ${index} 步挖通了 ${formatPoint(step.feet)}，但是走不进去，${reasonText}`;
             break;
         }
         if (outcome.dug % progressEvery === 0) {
@@ -3132,7 +2930,7 @@ export async function mineTunnelSkill(
             stop: 'bad_direction',
             detail:
                 typeof rawDirection === 'string' && rawDirection.trim() !== ''
-                    ? `direction="${rawDirection}" 认不出来（只认 ±x / ±z / east / west / north / south，或留空按朝向）`
+                    ? `方向 "${rawDirection}" 认不出来，只认 +x、-x、+z、-z、east、west、north、south，或者留空按朝向走`
                     : '没给 direction，而且读不到 entity.yaw',
             hintEquip: null,
             progress: [],
@@ -3390,12 +3188,12 @@ export type TravelStop =
     | 'bad_target';
 
 const TRAVEL_STOP_TEXT: Record<TravelStop, string> = {
-    arrived: '到目的地了',
-    budget: '时间预算用完（下一趟接着走）',
-    interrupted: '被 Stop/保命打断',
-    low_health: '血量太低，停手保命',
-    blocked: '安全门触发了，停手',
-    no_pickaxe: '没有能用的镐，挖不动',
+    arrived: '已经到达目的地',
+    budget: '时间预算用完了',
+    interrupted: '动作被中断了',
+    low_health: '血量太低了',
+    blocked: '安全门触发了',
+    no_pickaxe: '没有可用的镐',
     wrong_dimension: '目标不在当前维度',
     bad_target: '坐标读不出来',
 };
@@ -3457,10 +3255,10 @@ export function travelRemainingLabel(o: TravelOutcome): string {
     const dx = Math.round(o.target.x) - Math.round(o.here.x);
     const dz = Math.round(o.target.z) - Math.round(o.here.z);
     const parts: string[] = [];
-    if (dx !== 0) parts.push(`${dx > 0 ? '+x' : '-x'} ${Math.abs(dx)} 格`);
-    if (dz !== 0) parts.push(`${dz > 0 ? '+z' : '-z'} ${Math.abs(dz)} 格`);
+    if (dx !== 0) parts.push(`往 ${dx > 0 ? '+x' : '-x'} 方向走 ${Math.abs(dx)} 格`);
+    if (dz !== 0) parts.push(`往 ${dz > 0 ? '+z' : '-z'} 方向走 ${Math.abs(dz)} 格`);
     if (parts.length === 0) return '';
-    return `方向 ${parts.join('、')}`;
+    return parts.join('，还要');
 }
 
 export function travelReceipt(o: TravelOutcome): string {
@@ -3470,61 +3268,23 @@ export function travelReceipt(o: TravelOutcome): string {
     const label = travelRemainingLabel(o);
     if (o.stop === 'arrived') {
         lines.push(
-            `travelTo：**到了**——现在 ${formatPoint(o.here)}（目标 ${formatPoint(o.target)}，水平还差 ${remaining.toFixed(1)} 格）。` +
-                `这一趟**实测位移 ${o.progressed.toFixed(1)} 格**。`,
+            `这次用 travelTo 走，现在已经到了 ${formatPoint(o.here)}，水平方向还差 ${remaining.toFixed(1)} 格，` +
+                `这一趟实际移动了 ${o.progressed.toFixed(1)} 格。`,
         );
     } else if (o.stop === 'bad_target' || o.stop === 'wrong_dimension' || o.stop === 'no_pickaxe') {
-        lines.push(`travelTo：**没出发**（还站在 ${formatPoint(o.here)}）——${TRAVEL_STOP_TEXT[o.stop]}。`);
+        lines.push(
+            `这次用 travelTo 走，但没有出发，现在还在 ${formatPoint(o.here)}。` +
+                `停下来的原因是${TRAVEL_STOP_TEXT[o.stop]}。`,
+        );
     } else {
-        // **位移是标题**：挖了多少方块、计划了多少格，都不如"人到底挪了几格"。
-        // **0 位移时标题直接写"卡在什么"**（真机：两个工具互相踢皮球、同一位置都 0 位移，
-        // 回执却看不出卡在哪儿）。
-        if (o.progressed < TUNNEL_MOVE_EPS) {
-            const why = o.detail !== '' ? o.detail : o.gate != null ? o.gate : TRAVEL_STOP_TEXT[o.stop];
-            lines.push(
-                `travelTo：这一趟**净前进 0 格**（实测位移 ${o.progressed.toFixed(1)} 格：` +
-                    `${formatPoint(o.start)} → 现在 ${formatPoint(o.here)}）：**卡在**「${why}」。` +
-                    `**离目标还剩 ${Math.round(remaining)} 格**${label === '' ? '' : `（${label}）`}。`,
-            );
-        } else {
-            lines.push(
-                `travelTo：这一趟**往前推进了 ${progressed} 格（实测位移 ${o.progressed.toFixed(1)} 格**：` +
-                    `${formatPoint(o.start)} → 现在 ${formatPoint(o.here)}），**离目标还剩 ${Math.round(remaining)} 格**` +
-                    `${label === '' ? '' : `（${label}）`}。`,
-            );
-        }
-    }
-    lines.push(`停止原因：${TRAVEL_STOP_TEXT[o.stop]}${o.detail === '' ? '' : `——${o.detail}`}。`);
-    for (const note of o.notes ?? []) lines.push(`- ${note}`);
-    // **小推进必须点名拦路的东西**（真机："挖通了但寻路失败、只推进 2.3 格"，回执里看不出被什么挡住）。
-    if (o.stop !== 'arrived' && o.stop !== 'bad_target' && o.stop !== 'wrong_dimension' && o.stop !== 'no_pickaxe') {
-        if (o.progressed < TRAVEL_SMALL_ADVANCE) {
-            const why = o.detail !== '' ? o.detail : o.gate !== undefined ? o.gate : TRAVEL_STOP_TEXT[o.stop];
-            lines.push(`⚠️ 这一趟**只推进了 ${o.progressed.toFixed(1)} 格**（< ${TRAVEL_SMALL_ADVANCE} 格）：**卡在**「${why}」。`);
-        }
-    }
-    // **挖了 ≠ 走了**：三项证据不一致就摆在最前面几行。
-    if (o.blocksDug > 0 && o.progressed < TUNNEL_MOVE_EPS) {
         lines.push(
-            `⚠️ **矛盾**：这一趟挖掉了 ${o.blocksDug} 个方块（都验证过变空气），但**位移只有 ${o.progressed.toFixed(1)} 格**——` +
-                `人不在地道里/被卡住了。**别把挖掉的方块当成走过的路。**`,
-        );
-    } else if (o.blocksDug === 0 && o.progressed < TUNNEL_MOVE_EPS && o.stop !== 'arrived') {
-        lines.push('⚠️ 这一趟**既没挖到东西、人也没挪动**（0 格）——按证据就是白跑一趟，别当成"走了一段"。');
-    }
-    if (o.layer != null && o.layerNote !== '') lines.push(`层高：${o.layerNote}`);
-    for (const leg of o.legs) lines.push(`- ${leg.text}`);
-    for (const line of capLines(o.progress, 4, '进度')) lines.push(line);
-    if (o.gate != null) lines.push(`⚠️ 安全门（来自隧道那一格一格的门，一步没放宽）：${o.gate}`);
-    if (o.handMining) lines.push('⚠️ **手上和背包里都没有镐**：这些方块是**徒手挖**的，很慢，能找/做一把就先做。');
-    if (o.toolName != null) {
-        lines.push(
-            o.toolRemaining == null
-                ? `镐：${o.toolName}（上限读不到，算不出还剩几次）。`
-                : `镐：${o.toolName} 还剩约 ${o.toolRemaining} 次（${o.toolMax ?? '?'} 上限）。`,
+            `这次用 travelTo 走，往前推进了 ${progressed} 格，实测位移 ${o.progressed.toFixed(1)} 格。` +
+                `出发时在 ${formatPoint(o.start)}，现在在 ${formatPoint(o.here)}，离目标还剩 ${Math.round(remaining)} 格。` +
+                (label === '' ? '' : `${label}。`),
         );
     }
-    if (o.cycle != null && o.cycle !== '') lines.push(o.cycle);
+    lines.push(`停下来的原因是${TRAVEL_STOP_TEXT[o.stop]}${o.detail === '' ? '' : `，${o.detail}`}。`);
+    if (o.layer != null && o.layerNote !== '') lines.push(`目标那一层的高度是 y=${o.layer}。`);
     return capReceipt(lines.join('\n'));
 }
 
@@ -3642,15 +3402,13 @@ export async function travelToSkill(
     // ── 诚实拒绝 1：坐标读不出来 ──
     if (!Number.isFinite(x) || !Number.isFinite(z)) {
         outcome.stop = 'bad_target';
-        outcome.detail = `x/z 读不出来（收到 x=${String(rawX)}, z=${String(rawZ)}）`;
+        outcome.detail = `读不出目标的 x 和 z 坐标，收到的是 x=${String(rawX)}，z=${String(rawZ)}`;
         return travelReceipt(outcome);
     }
     // ── 诚实拒绝 2：目标在别的维度 ──
     if (wantedDimension != null && currentDimension != null && wantedDimension !== currentDimension) {
         outcome.stop = 'wrong_dimension';
-        outcome.detail =
-            `目标是 ${wantedDimension}，你现在在 ${currentDimension}——**跨维度要先走传送门**` +
-            (wantedDimension === 'the_nether' ? '（用 enterNether()）' : '（先走回你进来时的那个门：getPlaces 找坐标）');
+        outcome.detail = `目标是 ${wantedDimension}，现在人在 ${currentDimension}`;
         return travelReceipt(outcome);
     }
 
@@ -3667,8 +3425,7 @@ export async function travelToSkill(
     if (needsDigging && !equippedPickaxe && sparePickaxe == null) {
         outcome.stop = 'no_pickaxe';
         outcome.detail =
-            `这条路线要挖（${planProbe.map((leg) => leg.kind).join('+')}），但手上和背包里都没有镐；` +
-            '镐是 3×3 配方，**要在工作台上做**（2×2 放不下）';
+            `这条路线要挖，需要 ${planProbe.map((leg) => leg.kind).join('、')} 这样的动作，但手上和背包里都没有镐`;
         return travelReceipt(outcome);
     }
     if (needsDigging && !equippedPickaxe && sparePickaxe != null) {
@@ -3684,8 +3441,8 @@ export async function travelToSkill(
         const nowHeld = after.name != null && after.name.includes('pickaxe');
         (outcome.notes ??= []).push(
             nowHeld
-                ? `镐在背包里没握在手上 → 已自动换上 ${after.name}。`
-                : `背包里有 ${sparePickaxe}，但自动换镐没成功（手上还是 ${after.name ?? '空手'}）——会按徒手规则走，慢且更危险。`,
+                ? `已自动换上 ${after.name}。`
+                : `自动换镐失败（手上还是 ${after.name ?? '空手'}）。`,
         );
     }
 
@@ -3706,18 +3463,18 @@ export async function travelToSkill(
         const left = deadline - now();
         if (left <= 0) {
             outcome.stop = 'budget';
-            outcome.detail = `本轮预算 ${Math.round(budgetMs / 6000) / 10} 分钟用完（还剩 ${Math.round(remaining)} 格）`;
+            outcome.detail = `这一轮的 ${Math.round(budgetMs / 6000) / 10} 分钟预算用完了，离目标还剩 ${Math.round(remaining)} 格`;
             break;
         }
         if (left < TRAVEL_MIN_LEG_MS) {
             outcome.stop = 'budget';
-            outcome.detail = `只剩 ${Math.round(left / 1000)} 秒，不够再开一条腿（还剩 ${Math.round(remaining)} 格）`;
+            outcome.detail = `只剩下 ${Math.round(left / 1000)} 秒，不够再开一条腿，离目标还剩 ${Math.round(remaining)} 格`;
             break;
         }
         const hp = health(bot);
         if (hp != null && hp <= MIN_HEALTH_TO_DIG) {
             outcome.stop = 'low_health';
-            outcome.detail = `血量 ${hp} ≤ ${MIN_HEALTH_TO_DIG}`;
+            outcome.detail = `血量只有 ${hp}`;
             break;
         }
 
@@ -3730,7 +3487,7 @@ export async function travelToSkill(
 
         const before = position(bot);
         if (leg.kind === 'walk') {
-            let arrived = false;
+            let arrived: boolean;
             // **停滞熔断（用在移动上）**：真机「goToCoordinates 卡在水边 90 秒不动」——
             // 寻路器没靠近就一直在那儿磨。这里盯着"离这一腿目标有没有变近"，
             // 连续 `TRAVEL_WALK_STALL_MS` 没变近就**停手改挖隧道**（而不是继续等）。
@@ -3789,7 +3546,7 @@ export async function travelToSkill(
                 outcome.here = position(bot);
                 if (!settled) {
                     outcome.stop = 'blocked';
-                    outcome.detail = `寻路卡住而且停不下来（现在 ${formatPoint(position(bot))}），先 stats 看清身体状态`;
+                    outcome.detail = `寻路卡住了，一直停不下来，现在在 ${formatPoint(position(bot))}`;
                     outcome.gate = '寻路没靠近、也没能停下';
                     outcome.gateNextCall = 'stats(type="body")';
                     break;
@@ -3804,14 +3561,14 @@ export async function travelToSkill(
             if (advanced < 1 && !arrived) {
                 // 走不过去：换成隧道（下一次规划会切到 tunnel），这一腿如实说"没走动"。
                 walkFailed = true;
-                outcome.legs.push({ plan: leg, advanced: 0, text: `${leg.label} → **没走动**（寻路失败），下一腿改挖隧道` });
+                outcome.legs.push({ plan: leg, advanced: 0, text: `${leg.label} 没有走动，寻路失败了。` });
                 await sleep(150);
                 continue;
             }
             outcome.legs.push({
                 plan: leg,
                 advanced,
-                text: `${leg.label} → 实际推进 ${advanced.toFixed(1)} 格${arrived ? '（到了）' : ''}`,
+                text: `${leg.label} 实际推进了 ${advanced.toFixed(1)} 格${arrived ? '，已经到达' : ''}。`,
             });
             await sleep(150);
             continue;
@@ -3820,7 +3577,7 @@ export async function travelToSkill(
         if (leg.kind === 'stairUp' || leg.kind === 'digDown') {
             const legBudget = Math.min(TRAVEL_VERTICAL_BUDGET_MS, Math.max(5_000, left - 5_000));
             const startedLeg = now();
-            let ok = false;
+            let ok: boolean;
             try {
                 ok = leg.kind === 'stairUp' ? await stairUp(bot, leg.blocks) : await digDown(bot, leg.blocks);
             } catch {
@@ -3839,7 +3596,7 @@ export async function travelToSkill(
             });
             if (dy === 0 && !ok) {
                 outcome.stop = 'blocked';
-                outcome.detail = `竖直段没推进（${leg.kind} ${leg.blocks} 格没成功），不硬钻`;
+                outcome.detail = `竖直方向没有推进，${leg.kind} ${leg.blocks} 格没有成功`;
                 // 竖直段失败通常是**缺垫脚料**（stairUp）或**下不去**（digDown 遇到岩浆/水）：
                 // 别再给同一条会被照抄的续跑调用（那会原地打转），先让模型看清背包。
                 outcome.gate = '竖直段没进步：stairUp 要垫脚方块，digDown 可能是下面有岩浆/水';

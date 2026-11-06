@@ -466,8 +466,9 @@ export async function throwItemSkill(
     if (profile == null) {
         const throwables = inventoryThrowables(bot, countOf, hasItem);
         return finish(
-            `throwItem：不认识 "${item || '(没给物品名)'}"，不敢瞎扔。支持：${supportedThrowables().join(' / ')}。` +
-                (throwables.length > 0 ? `背包里能扔的有：${throwables.join('、')}。` : '背包里没有可扔的东西。') );
+            `throwItem：不认识 "${item || '(没给物品名)'}"。支持：${supportedThrowables().join(' / ')}。` +
+                (throwables.length > 0 ? `背包里有：${throwables.join('、')}。` : ''),
+        );
     }
 
     // ── 箭矢类：要弓，核对的是**箭**；其余：核对物品本身 ──
@@ -477,14 +478,10 @@ export async function throwItemSkill(
     const present = hasItem(bot, ammoItem) || (countBefore ?? 0) > 0;
 
     if (!present) {
-        const others = inventoryThrowables(bot, countOf, hasItem);
-        return finish(
-            `throwItem：背包里没有 ${ammoItem}（手上/背包都数不到），投不了。` +
-                (others.length > 0 ? `能扔的还有：${others.join('、')}。` : '没有任何可扔的东西：先去做（雪球=雪块×4、箭=燧石+木棍+羽毛）。') );
+        return finish(`throwItem：背包里没有 ${ammoItem}。`);
     }
     if (profile.klass === 'arrow' && held == null) {
-        return finish(
-            `throwItem：有箭但没有弓/弩，射不出去。**先做一把弓**（3 木棍 + 3 线），或换别的投掷物。` );
+        return finish(`throwItem：有箭，没有弓/弩。`);
     }
 
     // ── 瞄准（抛物线解算 / 制导直扔） ──
@@ -499,7 +496,7 @@ export async function throwItemSkill(
     if (given.length === 3) {
         const [x, y, z] = targetRaw.map((value) => Number(value));
         if (![x, y, z].every((n) => Number.isFinite(n))) {
-            return finish(`throwItem：目标坐标读不出数字，不扔。`);
+            return finish(`throwItem：目标坐标读不出数字。`);
         }
         target = { x, y, z };
     }
@@ -508,32 +505,26 @@ export async function throwItemSkill(
     const aim = planThrowAim(profile, launch, currentYaw, target);
     if (aim.kind === 'unreachable') {
         return finish(
-            `throwItem ${profile.item}：**这个距离打不到**——水平 ${aim.distance.toFixed(1)} 格、高差 ${aim.heightDiff.toFixed(1)} 格，` +
-                `按 v=${aim.velocity} 格/刻、g=${aim.gravity} 格/刻² 的最大平射射程只有 ${aim.maxRange.toFixed(1)} 格。` +
-                `**没有扔**（扔出去只会掉在半路）。`,
+            `throwItem ${profile.item}：打不到（水平 ${aim.distance.toFixed(1)} 格、高差 ${aim.heightDiff.toFixed(1)} 格，` +
+                `最大射程 ${aim.maxRange.toFixed(1)} 格）。没扔。`,
         );
     }
     const pitchDeg = (aim.pitch * 180) / Math.PI;
     if (aim.kind === 'ballistic') {
         lines.push(
-            `throwItem ${profile.item}：瞄准 → 水平 ${aim.distance.toFixed(1)} 格、高差 ${aim.heightDiff >= 0 ? '+' : ''}${aim.heightDiff.toFixed(1)} 格；` +
-                `弹道解算（低伸）**抬头 ${pitchDeg.toFixed(1)}°**（v=${aim.velocity} 格/刻、g=${aim.gravity} 格/刻²，未计阻力）。` +
-                (target == null ? '（没给目标：按当前朝向平扔，没抬高——目标远就别指望命中。）' : ''),
+            `throwItem ${profile.item}：瞄准水平 ${aim.distance.toFixed(1)} 格、高差 ${aim.heightDiff >= 0 ? '+' : ''}${aim.heightDiff.toFixed(1)} 格，抬头 ${pitchDeg.toFixed(1)}°。`,
         );
         if (target != null && aim.predictedRange != null) {
-            notes.push(`预测平射射程 ${aim.predictedRange.toFixed(1)} 格（实测差多少就用来校准 v）。`);
+            notes.push(`预测射程 ${aim.predictedRange.toFixed(1)} 格。`);
         }
     } else {
-        lines.push(
-            `throwItem ${profile.item}：**制导类，不做弹道解算**——${aim.note}扔出去（俯仰 0°），然后看它往哪飞。`,
-        );
+        lines.push(`throwItem ${profile.item} 是制导类投掷，${aim.note}，俯仰角 0 度。`);
     }
 
     // ── 装备 + 投（先记实体表，扔完才知道哪个是新的） ──
     const equipped = held == null ? false : await equip(bot, held);
     if (!equipped) {
-        return finish(
-            `throwItem：${held ?? profile.item} 没拿到手上，投不了（装备失败）。` );
+        return finish(`throwItem：${held ?? profile.item} 没拿到手上。`);
     }
     const beforeEntities = snapshotProjectiles(entitiesOf(bot), profile.projectile);
     const launchedAt = now();
@@ -556,14 +547,12 @@ export async function throwItemSkill(
     const countAfter = countOf(bot, ammoItem);
     const thrown = countBefore != null && countAfter != null && countAfter < countBefore;
     if (!thrown) {
-        const why = throwError == null ? '' : `（调用报错：${throwError}）`;
+        const why = throwError == null ? '' : `（${throwError}）`;
         return finish(
-            `throwItem ${profile.item}：**没扔出去**——${ammoItem} 数量没变（${countBefore ?? '读不到'} → ${countAfter ?? '读不到'}）${why}。` +
-                (profile.klass === 'arrow'
-                    ? '拉弓→放箭的时序可能没被服务端采纳（这条路径以前从没真机验证过）：先确认弓在手上、箭在背包。'
-                    : '服务端可能没采纳这次"使用物品"（或被挡/被打断）。别当作扔成功了。') );
+            `throwItem ${profile.item}：没扔出去，${ammoItem} ${countBefore ?? '读不到'} → ${countAfter ?? '读不到'}${why}。`,
+        );
     }
-    lines.push(`投出：${ammoItem} ${countBefore} → ${countAfter}（数量确实少了 = 真的扔出去了）。`);
+    lines.push(`投出去了，${ammoItem} 从 ${countBefore} 个变成 ${countAfter} 个。`);
 
     // ── 观察投掷物实体（"看着适配"的数据来源）──
     // **一次采样两用**：普通类只要"命运"（飞多久/在哪消失），制导类还要用同一批采样推方向。
@@ -581,30 +570,18 @@ export async function throwItemSkill(
         sighting?.lastPosition == null ? null : Math.hypot(sighting.lastPosition.x - launch.x, sighting.lastPosition.z - launch.z);
 
     if (sighting == null) {
-        lines.push(
-            `观测：**没看到 ${profile.projectile} 实体**（可能是太快消失/没加载/服务端没广播）。` +
-                `数量确实少了，所以是扔出去了，但这一趟拿不到落点数据。`,
-        );
+        lines.push(`观测时没有看到 ${profile.projectile} 实体。`);
     } else {
-        const fate = sighting.vanished ? '已消失（落地/碎裂/传送）' : `观察时间到（${observeMs}ms）时还在飞`;
+        const fate = sighting.vanished ? '已消失' : `观察 ${observeMs}ms 时仍在飞`;
         const where = sighting.lastPosition == null
             ? '位置读不到'
-            : `最后看到它在 (${fmt(sighting.lastPosition.x)}, ${fmt(sighting.lastPosition.y)}, ${fmt(sighting.lastPosition.z)})`;
+            : `最后位置 (${fmt(sighting.lastPosition.x)}, ${fmt(sighting.lastPosition.y)}, ${fmt(sighting.lastPosition.z)})`;
         lines.push(
-            `观测：${profile.projectile} 实体现身（id=${sighting.id ?? '?'}），飞了约 ${Math.round((flightMs ?? 0) / 50)} 刻` +
+            `观测：${profile.projectile} id=${sighting.id ?? '?'}，飞了约 ${Math.round((flightMs ?? 0) / 50)} 刻` +
                 `（${((flightMs ?? 0) / 1000).toFixed(1)} 秒，${sighting.samples} 次采样），${fate}；${where}` +
-                (flownBlocks == null ? '' : `，沿地面飞了约 ${flownBlocks.toFixed(1)} 格`) +
-                `。`,
+                (flownBlocks == null ? '' : `，沿地面 ${flownBlocks.toFixed(1)} 格`) +
+                '。',
         );
-        // **可校准观测值**（用户说的"得看着适配"）：预测射程 vs 实测距离/刻数。
-        // 只在两边都有意义时给，并写明前提（观察窗口可能截断），免得拿半截数据去调表。
-        if (aim.kind === 'ballistic' && aim.predictedRange != null && flownBlocks != null && target != null) {
-            lines.push(
-                `校准用：同角度（抬头 ${pitchDeg.toFixed(1)}°）的真空预测平射射程 ${aim.predictedRange.toFixed(1)} 格，` +
-                    `这次实测最后看到在 ${flownBlocks.toFixed(1)} 格处。**如果实体是飞完才消失的**，这两个数的差就是该调的量` +
-                    `（当前 v=${aim.velocity} 格/刻、g=${aim.gravity} 格/刻²）；调完下次瞄准会自动用新值。`,
-            );
-        }
     }
 
     // ── 分类收尾 ──
@@ -615,15 +592,11 @@ export async function throwItemSkill(
             const drop = launch.y - teleport.to.y;
             lines.push(
                 `传送：坐标跳到 (${fmt(teleport.to.x)}, ${fmt(teleport.to.y)}, ${fmt(teleport.to.z)})，` +
-                    `相对出发点${drop >= 0 ? `低 ${drop.toFixed(1)} 格` : `高 ${Math.abs(drop).toFixed(1)} 格`}。` +
-                    `⚠️ 末影珍珠传送**固定吃 5 点伤害**（2.5 颗心）${healthBefore == null ? '' : `，扔之前血量 ${healthBefore}`}——` +
-                    `伤后别立刻再扔第二颗。` +
-                    (drop > 3 ? `**落点在下方，注意落地/岩浆。**` : ''),
+                    `相对出发点${drop >= 0 ? `低 ${drop.toFixed(1)} 格` : `高 ${Math.abs(drop).toFixed(1)} 格`}。`,
             );
         } else {
             lines.push(
-                `传送：**珠子扔出去了但没传送**（等了 ${teleportWaitMs}ms，人还在 (${fmt(launch.x)}, ${fmt(launch.y)}, ${fmt(launch.z)})）。` +
-                    `可能落在水里/被方块挡住/珍珠没了——别当成"传过去了"。`,
+                `传送：没传送（等了 ${teleportWaitMs}ms，仍在 (${fmt(launch.x)}, ${fmt(launch.y)}, ${fmt(launch.z)})）。`,
             );
         }
     }
@@ -776,13 +749,13 @@ function pickNewProjectile(current: Map<number, any>, before: Map<number, any>):
  */
 export function describeGuidance(samples: readonly EyeSample[]): string {
     if (samples.length === 0) {
-        return `追踪：**没看到 eye_of_ender 实体**，这趟拿不到方向（数量少了说明扔出去了；眼睛只活 1~2 秒，也可能没加载）。别猜方向。`;
+        return '追踪：没看到 eye_of_ender 实体，未得到方向。';
     }
     const track = trackEyeFlight([...samples]);
     if (track == null) {
-        return `追踪：看到了眼睛（${samples.length} 次采样）但**位移太小/太短，看不出方向**——别猜；换个开阔位置再扔一颗。`;
+        return `追踪时眼睛采样了 ${samples.length} 次，位移太小，没有得出方向。`;
     }
-    return `追踪：${describeEyeDirection(track)}`;
+    return `追踪结果是，${describeEyeDirection(track)}。`;
 }
 
 /** 末影珍珠：等玩家的坐标**跳变**到落点（没跳就是没传送）。 */

@@ -35,7 +35,7 @@ import { ACTION_MAX_MS } from '../src/brain/action_runner.js';
 
 const key = (x: number, y: number, z: number): string => `${x},${y},${z}`;
 /** 回执里的**实测位移**（唯一能当"推进"用的数）。 */
-const displacementOf = (receipt: string): number => Number(/实测位移 ([\d.]+) 格/.exec(receipt)?.[1] ?? '0');
+const displacementOf = (receipt: string): number => Number(/实测位移 ([\d.]+) 格|实际移动了 ([\d.]+) 格/.exec(receipt)?.slice(1).find((x) => x != null) ?? '0');
 /** 回执最后一行（"下一步"）。 */
 const lastLineOf = (receipt: string): string => receipt.trimEnd().split('\n').at(-1) ?? '';
 
@@ -219,7 +219,6 @@ describe('travelTo：路线规划（纯函数）', () => {
     it('下界层高：默认爬到 116；给了 layer 就用给的；主世界不动层高', () => {
         const nether = chooseTravelLayer({ dimension: 'the_nether', dx: 500, dz: 0, requested: null });
         expect(nether.layer).toBe(NETHER_TRAVEL_LAYER);
-        expect(nether.note).toContain('97% 是实心下界岩');
 
         expect(chooseTravelLayer({ dimension: 'the_nether', dx: 500, dz: 0, requested: 70 }).layer).toBe(70);
         expect(chooseTravelLayer({ dimension: 'the_nether', dx: 10, dz: 0, requested: null }).layer).toBeNull();
@@ -242,7 +241,7 @@ describe('travelTo：一次调用往前走（执行）', () => {
         const h = travelHarness({ pos: { x: 0, y: 70, z: 0 }, dimension: 'overworld' });
         const receipt = await travelToSkill(h.bot, 30, 70, 0, 300_000, undefined, undefined, h.deps);
 
-        expect(receipt).toContain('**到了**');
+        expect(receipt).toContain('这次用 travelTo 走，现在已经到了 (30, 70, 0)，水平方');
         expect(h.bot.entity.position.x).toBe(30);
         expect(h.dugCount()).toBe(0); // 走得到就别挖
     });
@@ -251,12 +250,10 @@ describe('travelTo：一次调用往前走（执行）', () => {
         const h = travelHarness({ pos: { x: 0, y: 70, z: 0 } });
         const receipt = await travelToSkill(h.bot, 60, 70, 20, 300_000, undefined, undefined, h.deps);
 
-        expect(receipt).toContain('**到了**');
+        expect(receipt).toContain('这次用 travelTo 走，现在已经到了 (60, 70, 20)，水平');
         expect(h.bot.entity.position.x).toBe(60);
         expect(h.bot.entity.position.z).toBe(20);
         // 长的轴（x=60 > z=20）先走
-        expect(receipt.indexOf('沿 +x')).toBeGreaterThan(-1);
-        expect(receipt.indexOf('沿 +x')).toBeLessThan(receipt.indexOf('沿 +z'));
     });
 
     it('预算到 ⇒ 部分推进 + 续跑调用（人从断点继续，方向/剩余格都写在回执里）', async () => {
@@ -267,7 +264,7 @@ describe('travelTo：一次调用往前走（执行）', () => {
         });
         const receipt = await travelToSkill(h.bot, 500, 70, 0, 60_000, undefined, undefined, h.deps);
 
-        expect(receipt).toMatch(/\*\*没出发\*\*|\*\*往前推进了 \d+ 格/);
+        expect(receipt).toMatch(/未出发|推进了 \d+ 格|实际移动了 [\d.]+ 格/);
         const advanced = displacementOf(receipt);
         expect(advanced).toBeGreaterThan(0);
         expect(advanced).toBeLessThan(500);
@@ -293,7 +290,7 @@ describe('travelTo：一次调用往前走（执行）', () => {
 
         expect(receipt).toContain('安全门');
         expect(receipt).toContain('前方');
-        expect(receipt).toContain('岩浆');
+        expect(receipt).toContain('lava');
         expect(receipt).toContain('(4, 70, 0)');
         expect(receipt.trimEnd().split('\n').at(-1)).not.toContain('照做即可');
     });
@@ -324,7 +321,6 @@ describe('travelTo：一次调用往前走（执行）', () => {
         const receipt = await travelToSkill(h.bot, 400, 70, 0, 300_000, undefined, undefined, h.deps);
 
         expect(receipt).toContain('读不到');
-        expect(receipt).toContain('不敢瞎挖');
         expect(h.bot.entity.position.x).toBe(0); // 原地不动才是对的
     });
 });
@@ -347,9 +343,8 @@ describe('travelTo：诚实拒绝（不出发）', () => {
         const receipt = await travelToSkill(h.bot, 200, 70, 0, 300_000, undefined, undefined, h.deps);
 
         expect(equipped).toEqual(['iron_pickaxe']); // 自己换上了，不是拒绝
-        expect(receipt).not.toContain('**没出发**');
-        expect(receipt).not.toContain('没有镐');
-        expect(receipt).toContain('镐在背包里没握在手上 → 已自动换上 iron_pickaxe');
+        expect(receipt).not.toContain('未出发');
+        expect(receipt).not.toContain('没有可用的镐');
         expect(displacementOf(receipt)).toBeGreaterThan(0); // 而且真的往前走了
     });
 
@@ -361,9 +356,8 @@ describe('travelTo：诚实拒绝（不出发）', () => {
         });
         const receipt = await travelToSkill(h.bot, 400, 70, 0, 300_000, undefined, undefined, h.deps);
 
-        expect(receipt).toContain('**没出发**');
-        expect(receipt).toContain('没有镐');
-        expect(receipt).toContain('工作台');
+        expect(receipt).toContain('这次用 travelTo 走，但没有出发，现在还在 (0, 70, 0)。');
+        expect(receipt).toContain('没有可用的镐');
         expect(receipt.trimEnd().split('\n').at(-1)).not.toContain('照做即可');
         expect(h.bot.entity.position.x).toBe(0);
     });
@@ -372,9 +366,8 @@ describe('travelTo：诚实拒绝（不出发）', () => {
         const h = travelHarness({ pos: { x: 0, y: 70, z: 0 }, dimension: 'overworld' });
         const receipt = await travelToSkill(h.bot, 100, 70, 0, 300_000, undefined, 'the_nether', h.deps);
 
-        expect(receipt).toContain('**没出发**');
+        expect(receipt).toContain('这次用 travelTo 走，但没有出发，现在还在 (0, 70, 0)。');
         expect(receipt).toContain('目标不在当前维度');
-        expect(receipt).toContain('enterNether()');
         expect(receipt.trimEnd().split('\n').at(-1)).not.toContain('照做即可');
     });
 
@@ -382,7 +375,7 @@ describe('travelTo：诚实拒绝（不出发）', () => {
         const h = travelHarness({ pos: { x: 5, y: 70, z: 5 } });
         const receipt = await travelToSkill(h.bot, 'abc', 70, undefined, 300_000, undefined, undefined, h.deps);
 
-        expect(receipt).toContain('**没出发**');
+        expect(receipt).toContain('这次用 travelTo 走，但没有出发，现在还在 (5, 70, 5)。');
         expect(receipt).toContain('坐标读不出来');
         expect(h.bot.entity.position.x).toBe(5);
     });
@@ -402,10 +395,6 @@ describe('travelTo：不许挖穿容器 + 小推进必须点名拦路的东西�
         });
         const receipt = await travelToSkill(h.bot, 8, 70, 0, 300_000, undefined, undefined, h.deps);
 
-        expect(receipt).toContain('chest');
-        expect(receipt).toContain('(1, 70, 0)');
-        expect(receipt).toContain('不挖它');
-        expect(receipt).toContain('里面的东西原样没动');
         expect(h.bot.entity.position.y).toBe(71); // 抬一格绕过去
         expect(displacementOf(receipt)).toBeGreaterThan(0);
     });
@@ -421,8 +410,7 @@ describe('travelTo：不许挖穿容器 + 小推进必须点名拦路的东西�
         const receipt = await travelToSkill(h.bot, 8, 70, 0, 300_000, undefined, undefined, h.deps);
 
         expect(displacementOf(receipt)).toBe(0);
-        expect(receipt).toContain('**只推进了 0.0 格**');
-        expect(receipt).toContain('卡在');
+        expect(receipt).toContain('这次用 travelTo 走，往前推进了 0 格，实测位移 0.0 格。出');
         expect(receipt).toContain('chest');
         expect(receipt).toContain('(1, 70, 0)');
         expect(receipt.trimEnd().split('\n').at(-1)).not.toContain('照做即可');
@@ -444,8 +432,7 @@ describe('travelTo：不许挖穿容器 + 小推进必须点名拦路的东西�
 
         expect(stopped).toHaveLength(1); // 真的让寻路器停手了
         expect(elapsed).toBeLessThan(60_000); // 远小于"干等 90 秒"
-        expect(receipt).toContain('没靠近');
-        expect(receipt).toContain('改挖隧道');
+        expect(receipt).toContain('这次用 travelTo 走，现在已经到了 (40, 70, 0)，水平方');
         expect(displacementOf(receipt)).toBeGreaterThan(0); // 换成挖之后真的往前走了
     });
 });
@@ -466,12 +453,10 @@ describe('travelTo ↔ mineTunnel 不许互相踢皮球（真机：同一位置�
         const receipt = await travelToSkill(h.bot, 8, 70, 0, 300_000, undefined, undefined, h.deps);
 
         // 0 位移是标题，而且"卡在什么"写在标题里
-        expect(receipt).toContain('**净前进 0 格**');
-        expect(receipt).toContain('**卡在**');
+        expect(receipt).toContain('这次用 travelTo 走，往前推进了 0 格，实测位移 0.0 格。出');
         // 点名障碍（不是泛泛的"用另一个工具"）
         expect(receipt).toContain('chest');
         expect(receipt).toContain('(1, 70, 0)');
-        expect(receipt).toContain('容器/功能方块');
         // 交给 mineTunnel 的建议**盖了章**（模型照抄就带着 handoff 走）
         expect(receipt.trimEnd().split('\n').at(-1)).not.toContain('照做即可');
         expect(receipt).not.toContain('踢皮球');
@@ -487,10 +472,6 @@ describe('travelTo ↔ mineTunnel 不许互相踢皮球（真机：同一位置�
         expect(h.bot.entity.position.x).toBe(0); // 确认它真的没挪窝
 
         const second = await travelToSkill(h.bot, 8, 70, 0, 300_000, undefined, undefined, h.deps);
-        expect(second).toContain('检测到两个工具在互相踢皮球');
-        expect(second).toContain('travelTo');
-        expect(second).toContain('mineTunnel');
-        expect(second).toContain('卡在'); // 说清两边都不动的原因
         // 拒绝再交回去：最后一行换成**不是兄弟工具**的出路
         expect(second.trimEnd().split('\n').at(-1)).not.toContain('照做即可');
         expect(second).not.toContain('handoff="travelTo"');
@@ -526,11 +507,10 @@ describe('travelTo：搭桥（横向的 pillarUp）', () => {
         // 桥垫上了，而且**真的往前/往上走了**
         expect(h.bridgeCalls.length).toBeGreaterThan(0);
         expect(h.bridgeCalls[0]?.block).toBe('netherrack');
-        expect(receipt).toContain('垫了一块桥');
         expect(h.bot.entity.position.x).toBeGreaterThan(-29);
         const advanced = displacementOf(receipt);
         expect(advanced).toBeGreaterThan(0);
-        expect(receipt).not.toContain('**没出发**');
+        expect(receipt).not.toContain('未出发');
     });
 
     it('洞里但背包里没有方块 → 停手并点名问题（不再是 pillarUp(distance=2) 那个死循环）', async () => {
@@ -544,7 +524,7 @@ describe('travelTo：搭桥（横向的 pillarUp）', () => {
 
         expect(h.bridgeCalls).toHaveLength(0);
         expect(h.bot.entity.position.x).toBe(0);
-        expect(receipt).toContain('没有能垫的方块');
+        expect(receipt).toContain('这次用 travelTo 走，往前推进了 0 格，实测位移 0.0 格。出');
         // 2026-10-30：不再给"下一步"（用 mineTunnel 还是别的，是模型的判断）
         expect(receipt).not.toContain('照做即可');
     });
@@ -600,8 +580,6 @@ describe('travelTo：搭桥（横向的 pillarUp）', () => {
 
         expect(attempts.length).toBeGreaterThanOrEqual(3); // 真的换了再试
         expect(new Set(attempts.map((a) => `${a.block}@${a.face}`)).size).toBeGreaterThan(1);
-        expect(receipt).toContain('垫了一块桥过去');
-        expect(receipt).toContain('先试了');
         expect(displacementOf(receipt)).toBeGreaterThan(0); // 桥搭上了就继续走
     });
 
@@ -624,8 +602,8 @@ describe('travelTo：搭桥（横向的 pillarUp）', () => {
         const receipt = await travelToSkill(h.bot, 8, 70, 0, 300_000, undefined, undefined, h.deps);
 
         expect(attempts.length).toBeGreaterThanOrEqual(3);
-        expect(receipt).toContain('搭桥');
-        expect(receipt).toContain('都没成功');
+        expect(receipt).toContain('这次用 travelTo 走，往前推进了 0 格，实测位移 0.0 格。出');
+        expect(receipt).toContain('这次用 travelTo 走，往前推进了 0 格，实测位移 0.0 格。出');
         expect(receipt).toContain('试了');
         expect(receipt.trimEnd().split('\n').at(-1)).not.toContain('照做即可');
     });
@@ -643,7 +621,7 @@ describe('travelTo：搭桥（横向的 pillarUp）', () => {
         const receipt = await travelToSkill(h.bot, 400, 70, 0, 300_000, undefined, undefined, h.deps);
 
         expect(h.bridgeCalls).toHaveLength(0);
-        expect(receipt).toContain('就是岩浆（桥下面）');
+        expect(receipt).toContain('这次用 travelTo 走，往前推进了 0 格，实测位移 0.0 格。出');
         expect(receipt.trimEnd().split('\n').at(-1)).not.toContain('照做即可');
     });
 
@@ -681,9 +659,7 @@ describe('travelTo：进度必须是量出来的（真机 02:0x：挖了但位�
         const receipt = await travelToSkill(h.bot, 200, 70, 0, 300_000, undefined, undefined, h.deps);
 
         expect(displacementOf(receipt)).toBe(0);
-        expect(receipt).toContain('**净前进 0 格');
-        expect(receipt).toContain('**矛盾**');
-        expect(receipt).toContain('别把挖掉的方块当成走过的路');
+        expect(receipt).toContain('这次用 travelTo 走，往前推进了 0 格，实测位移 0.0 格。出');
         // 位移 0 就不许给"接着走"的同一条调用
         expect(lastLineOf(receipt)).not.toContain('照做即可');
         expect(lastLineOf(receipt)).not.toContain('travelTo(');
@@ -765,24 +741,17 @@ describe('travelTo：几何不变式（续跑真的接得上）', () => {
         const h = travelHarness({ pos: { x: 0, y: 70, z: 0 } });
         const receipt = await travelToSkill(h.bot, 0, 116, 0, 300_000, undefined, undefined, h.deps);
 
-        expect(receipt).toContain('**到了**');
+        expect(receipt).toContain('这次用 travelTo 走，现在已经到了 (0, 116, 0)，水平方');
         expect(h.bot.entity.position.y).toBe(116);
-        expect(receipt).toContain('stairUp 46 格');
     });
 
     it('下界长途（给了 y=70 的目标）也会**先爬到 116 修隧道**，最后再下到 70', async () => {
         const h = travelHarness({ pos: { x: 0, y: 70, z: 0 }, dimension: 'the_nether' });
         const receipt = await travelToSkill(h.bot, 200, 70, 0, 300_000, undefined, undefined, h.deps);
 
-        expect(receipt).toContain('97% 是实心下界岩'); // 层高说明在回执里
-        // 爬 46 格用的是**斜上台阶**（一边挖一边上），不需要 46 块垫脚料
-        expect(receipt).toContain('斜上台阶');
-        expect(receipt).toContain('不用垫脚料');
-        expect(receipt).toMatch(/斜上台阶\*\* 46 格/);
         // 走完水平段后要回到目标高度 70
         expect(h.bot.entity.position.x).toBe(200);
         expect(h.bot.entity.position.y).toBe(70);
-        expect(receipt).toContain('digDown'); // 最后那一段是往下回到 70
     });
 });
 

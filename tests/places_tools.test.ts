@@ -93,13 +93,13 @@ describe('地点工具：不许假报成功', () => {
   it('存不进去就报失败——不许出现"回执说存好了，其实没有"', async () => {
     const { deps } = fakeDeps({ failWrite: true });
     const text = await run(createRememberHereTool(deps), { name: '铁矿洞' });
-    expect(text).toContain('NOT saved');
+    expect(text).toContain('地点没有记住，因为写入失败了，错误是 磁盘满了。');
   });
 
   it('读不到当前位置也报失败，而不是存个空坐标', async () => {
     const { deps } = fakeDeps({ here: null });
     const text = await run(createRememberHereTool(deps), { name: '铁矿洞' });
-    expect(text).toContain('NOT saved');
+    expect(text).toContain('地点没有记住，因为读不到当前位置。');
   });
 
   it('没这个地名时把记住的都列出来（模型不用猜）', async () => {
@@ -114,14 +114,14 @@ describe('getPlaces：列地名带坐标', () => {
   it('一个都没记住时明说', async () => {
     const { deps } = fakeDeps();
     const result: any = await (createGetPlacesTool(deps) as any).execute({}, {} as any, {} as any);
-    expect(String(result.content[0].text)).toBe('（一个都没记住）');
+    expect(String(result.content[0].text)).toBe('一个地点都还没有记住。');
   });
 
   it('记住的带上坐标', async () => {
     const { deps } = fakeDeps({ here: { x: -40.51, y: 51, z: 7.25 } });
     await run(createRememberHereTool(deps), { name: '铁矿洞' });
     const result: any = await (createGetPlacesTool(deps) as any).execute({}, {} as any, {} as any);
-    expect(String(result.content[0].text)).toContain('铁矿洞(-40.5,51,7.3)');
+    expect(String(result.content[0].text)).toContain('记住的地点有，铁矿洞 在 (-40.5, 51, 7.3)。');
   });
 });
 

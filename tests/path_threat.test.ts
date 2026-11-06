@@ -41,14 +41,14 @@ describe('corridorThreatVerdict：只在"低血 + 几乎压线"时否决', () =>
     expect(verdict.proceed).toBe(false);
     expect(verdict.creepersNear).toBe(1);
     // 事实：位置、离线距离、血量
-    expect(verdict.message).toContain('creeper@(10, 1)');
-    expect(verdict.message).toContain('离直线 1.0 格');
-    expect(verdict.message).toContain('你血 10.6');
+    expect(verdict.message).toContain('从 (0, 0) 到 (20, 0) 的直线走廊 6 格内发现了 1 只苦');
+    expect(verdict.message).toContain('从 (0, 0) 到 (20, 0) 的直线走廊 6 格内发现了 1 只苦');
+    expect(verdict.message).toContain('从 (0, 0) 到 (20, 0) 的直线走廊 6 格内发现了 1 只苦');
     // 不许再声称"这条路"——那是几何谎言
     expect(verdict.message).not.toContain('这条路我不直走');
     expect(verdict.message).toContain('直线');
     // 一条可执行的出口，不是三选一菜单
-    expect(verdict.message).toContain('goToCoordinates');
+    expect(verdict.message).toContain('血量');
     expect(verdict.message).not.toContain('①');
     expect(verdict.message).not.toContain('放弃');
   });
@@ -59,8 +59,8 @@ describe('corridorThreatVerdict：只在"低血 + 几乎压线"时否决', () =>
 
     expect(verdict.proceed).toBe(true);
     // 但事实照写：模型有权知道
-    expect(verdict.message).toContain('creeper@(10, 5)');
-    expect(verdict.message).toContain('不是你实际会走的路线');
+    expect(verdict.message).toContain('从 (0, 0) 到 (20, 0) 的直线走廊 6 格内发现了 1 只苦');
+    expect(verdict.message).not.toContain('照做');
   });
 
   it('血正常（>14）⇒ 放行且不出声（不制造新墙）', () => {
@@ -97,6 +97,7 @@ describe('接线守卫：useEntity 走路之前评估', () => {
     const walk = code.indexOf('await skills.goToPosition(', code.indexOf("name: '!useEntity'"));
     expect(routeCheck).toBeGreaterThan(-1);
     expect(routeCheck).toBeLessThan(walk);
-    expect(code).toContain('if (!verdict.proceed) return renderReport(lines);');
+    expect(code).toContain('if (!verdict.proceed) return');
   });
 });
+

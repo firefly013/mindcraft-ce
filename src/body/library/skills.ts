@@ -4,7 +4,7 @@ import pf from 'mineflayer-pathfinder';
 import Vec3 from 'vec3';
 import { cellIntersectsBody, standingRoomOk } from '../safety/suffocation.js';
 import { isJustPlacedDrop, markPlaced, placementVerdict } from './placement_guard.js';
-import { formatProgressLine, formatTimeoutSummary, LONG_ACTION_MAX_MS, recordActionProgress, shouldEmitProgress } from './progress.js';
+import { LONG_ACTION_MAX_MS, recordActionProgress } from './progress.js';
 import { estimateDigSeconds, formatNoObstacleDiagnosis, planClearStep } from '../safety/step_diagnosis.js';
 /**
  * ⚠️ **必须读共享单例，不许读根目录那份 `settings.ts`。**
@@ -252,8 +252,7 @@ export function planDig(
             ok: false,
             ms: null,
             drops: false,
-            note: `${name} 挖不动（不可破坏：硬度 ${block?.hardness ?? '?'} 或 diggable=false）。` +
-                'force 也帮不了你——只能绕开，或者换个目标。',
+            note: `${name} 挖不动，因为它不可破坏，硬度是 ${block?.hardness ?? '?'}，diggable 是 false。`,
         };
     }
 
@@ -268,15 +267,7 @@ export function planDig(
 
     // ② 需要工具，而背包里有能收获它的：**直接挖**（挖之前会先换上那把）。
     if (best != null) {
-        const heldIsBest = bot?.heldItem?.name === best.name;
-        return {
-            ok: true,
-            ms,
-            drops: true,
-            note: heldIsBest
-                ? ''
-                : `用 ${best.name}（背包里能收获 ${name} 的最好一把；手上是 ${heldName}，会先换上）。`,
-        };
+        return { ok: true, ms, drops: true, note: '' };
     }
 
     // ③ 需要工具、背包里一把能收获它的都没有（等级不够）。
@@ -285,18 +276,15 @@ export function planDig(
             ok: true,
             ms,
             drops: false,
-            note: `**force 挖穿 ${name}**：${ms == null ? '时间读不到' : `约 ${secs(ms)} 秒`}、` +
-                `**没有掉落**（手持 ${heldName}，背包里没有能收获它的工具）——` +
-                '这是为了把它挖开，不是为了采集。',
+            note: `用 force 挖穿 ${name}，${ms == null ? '需要多久读不到' : `大约要 ${secs(ms)} 秒`}，没有掉落，因为手上拿的是 ${heldName}，背包里也没有能收获它的工具。`,
         };
     }
     return {
         ok: false,
         ms,
         drops: false,
-        note: `没有能挖 ${name} 的工具（手持 ${heldName}，背包里没有能收获它的工具）` +
-            (ms == null ? '（徒手时间读不到）' : `，徒手约 ${secs(ms)} 秒且不掉落`) + '。' +
-            '只想**挖开**它（开路/逃命/拆挡路的墙）就加 `force=true`——那时候没有掉落、会很慢，但会真的挖。',
+        note: `没有能挖 ${name} 的工具，手上拿的是 ${heldName}，背包里也没有能收获它的工具` +
+            (ms == null ? '，徒手需要多久也读不到' : `，徒手大约要 ${secs(ms)} 秒，而且没有掉落`) + '。',
     };
 }
 /**
@@ -416,10 +404,9 @@ export function toolBreakNotice(before: HeldToolState, bot: any): string | null 
     const after = inventoryCountOf(bot, before.name);
     if (before.count == null || after == null || after >= before.count) return null;
     const remain = after > 0
-        ? `背包里还剩 ${after} 个 ${before.name}，先换下一把。`
-        : `背包里已经没有 ${before.name} 了——接下来挖石头/矿会挖不动；先找替代工具。` +
-          '泥土/沙/沙砾这类可以空手挖（有掉落）；石头类和下界岩不行（要镐，只想挖开就 mineBlock(force=true)，没有掉落）。';
-    return `⚠ 手上的 ${before.name} 耐久耗尽坏掉了（${before.used}/${before.max}）。${remain}`;
+        ? `背包里还剩 ${after} 个 ${before.name}。`
+        : `背包里没有 ${before.name} 了。`;
+    return `手上的 ${before.name} 耐久耗尽了，用掉 ${before.used} 点，一共 ${before.max} 点。${remain}`;
 }
 
 /**
@@ -476,9 +463,7 @@ export function warnLowDurabilityOnce(bot: any): string | null {
     const key = `${g.name}:${g.max ?? '?'}`;
     if (_lowDurabilityWarnedFor === key) return null;
     _lowDurabilityWarnedFor = key;
-    const msg =
-        `⚠ 手上的 ${g.name} 耐久不多了（还剩 ${g.remaining} 次，读数 ${g.used}/${g.max}）：` +
-        '接下来寻路会尽量不挖方块（需要挖路的事改用别的工具/先补一把）；工具烧光就没得挖了。';
+    const msg = `手上的 ${g.name} 耐久不多了，还能用 ${g.remaining} 次，读数是用掉 ${g.used} 点，一共 ${g.max} 点。`;
     log(bot, msg);
     return msg;
 }
@@ -507,8 +492,7 @@ export function pathfindDigPolicy(guard: ToolDurabilityGuard): PathfindDigPolicy
         allowDestructiveProbe: false,
         digCost: 40,
         note:
-            `手上只有 ${guard.remaining} 次耐久的 ${guard.name}（读数 ${guard.used}/${guard.max}），` +
-            '改走不破坏地形的路线；真绕不过去才挖，要强行挖路就先换把镐或补工具。',
+            `手上这把 ${guard.name} 只剩下 ${guard.remaining} 次耐久，读数是用掉 ${guard.used} 点，一共 ${guard.max} 点。`,
     };
 }
 
@@ -581,9 +565,7 @@ export async function forceExitWater(bot: any, urgency: 'oxygen-low' | 'drowning
     if (head) {
         log(
             bot,
-            urgency === 'drowning'
-                ? '头在水下且正在掉血（溺水，或水下有别的伤害源比如岩浆块）——立刻处理：先上浮，浮不上去就往岸去。'
-                : '氧气快用完了（水下待太久）——先上浮换气。',
+            urgency === 'drowning' ? '头在水下且正在掉血。' : '氧气快用完了。',
         );
         const result = await swimToSurface(bot);
         if (result === 'surfaced') {
@@ -594,7 +576,7 @@ export async function forceExitWater(bot: any, urgency: 'oxygen-low' | 'drowning
             // y 还在涨——上浮**有效**，只是深。继续按住空格等它出头，
             // 别切寻路把正在上升的身体拽去水平移动。第二轮总会落到
             // surfaced（出头）或 stuck（y 卡住），不会无限 'slow'。
-            log(bot, '还在上浮中（水较深），继续。');
+            log(bot, '仍在水中。');
             const second = await swimToSurface(bot);
             if (second === 'surfaced') {
                 log(bot, '头已露出水面。');
@@ -606,17 +588,13 @@ export async function forceExitWater(bot: any, urgency: 'oxygen-low' | 'drowning
                 // 头**还在水里**、只是 y 可能还在涨"，这也是一种尽力而为，**不是出水面**。
                 // 所以这里如实说"还在水里、还在上浮"，并且返回 true 只表示"我尽力了、外层
                 // 继续盯"，不能给模型一个"已经安全"的假信号。
-                log(
-                    bot,
-                    '头**还在水里**（已尽力上浮，但没到出水面）——外层会继续盯；' +
-                        '如果你看到血在掉，说明还在溺水，继续按住上浮或往岸上走。',
-                );
+                log(bot, '头还在水里。');
                 return true;
             }
-            log(bot, '上浮无效：头顶上不去（被水或方块封住了）——改寻路，往没有水的地方去。');
+            log(bot, '上浮没有效果，因为头顶被方块封住了。');
         } else {
             // 'stuck'：y 卡住了——头顶封死，按空格只是原地浮沉。必须水平移动。
-            log(bot, '上浮无效：头顶上不去（被水或方块封住了）——改寻路，往没有水的地方去。');
+            log(bot, '上浮没有效果，因为头顶被方块封住了。');
         }
     }
     if (urgency === 'drowning' || head) {
@@ -662,7 +640,7 @@ export async function forceExitWater(bot: any, urgency: 'oxygen-low' | 'drowning
         // 原来这里做的是"跳 1.5 秒然后松手"，配上外层 2 秒一轮的重试，效果是
         // 机器人**一直在原地上下浮动**，既上不了浮也沉不下去，直到耗死。而且每
         // 一轮都往 `bot.output` 里塞一条，后台调用产生的这些回执模型还不一定看得到。
-        log(bot, `脚下是危险的水（${info.reason}），附近 12 格内找不到能上岸的地方——先浮起来把头露出水面。`);
+        log(bot, `脚下是危险的水，${info.reason}，12 格内没有可以上岸的地方。`);
         const floated = await swimToSurface(bot);
         // 'surfaced' = 真活下来了；'slow' = 仍在上升（尽力了）；'stuck' = 没救回来。
         // 返回值喂给外层的失败退避：true 不退避（继续保持浮着盯），false 退 30 秒。
@@ -670,7 +648,7 @@ export async function forceExitWater(bot: any, urgency: 'oxygen-low' | 'drowning
     }
 
     permits.bypassFor('enter_deep_water', 30_000, 'forceExitWater: 强制出水', Date.now());
-    log(bot, `脚下是危险的水（${info.reason}），自动上岸：${land.x},${land.y},${land.z}。`);
+    log(bot, `上岸了，位置在 (${land.x}, ${land.y}, ${land.z})。`);
     try {
         bot.pathfinder?.stop?.();
     } catch {
@@ -769,13 +747,10 @@ export function protectedWeaponNotice(items: any[]): string | null {
     const list = protectedItems
         .map((item) => {
             const remaining = toolRemainingUses(item as ToolCandidate);
-            return `${String(item?.name ?? '武器')}（${remaining == null ? '耐久读不到' : `剩 ${remaining} 次`}）`;
+            return `${String(item?.name ?? '武器')}${remaining == null ? '的耐久读不到' : `还剩 ${remaining} 次`}`;
         })
         .join('、');
-    return (
-        `⚠ 附魔武器到了保护线：${list}——不会自动拿它们打（留一点耐久，别用到爆）；` +
-        '换一把未附魔武器，或手动 equip 决定要不要用。'
-    );
+    return `这些附魔武器到了保护线，${list}，不会自动使用。`;
 }
 
 async function equipHighestAttack(bot: any): Promise<void> {
@@ -879,7 +854,7 @@ export async function craftRecipe(bot: any, itemName: string, num: number = 1): 
     const recipeInfos: any = (mc as any).getItemCraftingRecipes(itemName);
     const itemId: any = (mc as any).getItemId(itemName);
     if (itemId == null || recipeInfos == null || recipeInfos.length === 0) {
-        log(bot, `${itemName} is either not an item, or it does not have a crafting recipe.（金装备的注册名是 golden_*，例如 golden_boots）`);
+        log(bot, `${itemName} 不是物品，或者没有合成配方。`);
         return false;
     }
 
@@ -906,7 +881,7 @@ export async function craftRecipe(bot: any, itemName: string, num: number = 1): 
                     placedTable = true;
                 }
             } else {
-                log(bot, `Crafting ${itemName} requires a crafting table: there is none nearby and none in the inventory. 先 placeHere 放一个工作台再合成。`);
+                log(bot, `附近 16 格内没有工作台，背包里也没有。`);
                 return false;
             }
         } else {
@@ -947,7 +922,7 @@ export async function craftRecipe(bot: any, itemName: string, num: number = 1): 
             Object.keys(requiredIngredients)
                 .map((key) => `${key}×${Number(inventory[key] ?? 0)}`)
                 .join('、') || '0';
-        log(bot, `材料不够：做 ${num} 个 ${itemName} 需要 ${needText}；现有 ${haveText}。`);
+        log(bot, `材料不够，做 ${num} 个 ${itemName} 需要 ${needText}，现在只有 ${haveText}。`);
         if (placedTable) await collectBlock(bot, 'crafting_table', 1);
         return false;
     }
@@ -957,7 +932,7 @@ export async function craftRecipe(bot: any, itemName: string, num: number = 1): 
     await craftWithStaleWindowGuard(bot, recipe, crafts, craftingTable);
     const got = world.getInventoryCounts(bot)[itemName];
     if (crafts < craftsWanted) {
-        log(bot, `材料不够：想做 ${num} 个 ${itemName}（需跑 ${craftsWanted} 遍配方，每遍出 ${perCraft} 个），只够跑 ${crafts} 遍；限料是 ${craftLimit.limitingResource}。`);
+        log(bot, `材料不够，想做 ${num} 个 ${itemName}，需要跑 ${craftsWanted} 遍配方，每遍产出 ${perCraft} 个，现在的材料只够跑 ${crafts} 遍，卡住的是 ${craftLimit.limitingResource}。`);
 
         // **"现在背包里有 N 个"是未测量的断言**（真机 2026-10-20：回执说 4 个火把、实际 0 个，coal/stick 被吃掉）。
         // 只报**实测**；测不出就如实说测不出，不替模型编造"有几个"。
@@ -968,7 +943,9 @@ export async function craftRecipe(bot: any, itemName: string, num: number = 1): 
                 return null;
             }
         })();
-        log(bot, `合成了 ${itemName}：跑 ${crafts} 遍配方（每遍出 ${perCraft} 个）；**背包实测** ${craftMeasured == null ? "读不到（以 stats 为准）" : `${itemName}×${craftMeasured}`}。`);
+        log(bot, craftMeasured == null
+            ? `合成了 ${itemName}，但背包里的数量读不到。`
+            : `合成了 ${craftMeasured} 个 ${itemName}，跑了 ${crafts} 遍配方，每遍产出 ${perCraft} 个。`);
     }
     if (placedTable) {
         await collectBlock(bot, 'crafting_table', 1);
@@ -1393,7 +1370,7 @@ export function classifyKillEvidence(bot: any, entity: any): KillEvidence {
     if (health != null && health <= 0) return 'dead';
     const present = entityPresentById(bot, entity?.id);
     if (present === true) return 'alive';
-    let nearby = false;
+    let nearby: boolean;
     try {
         nearby = world.getNearbyEntities(bot, KILL_WAIT_NEARBY_RADIUS).includes(entity);
     } catch {
@@ -1440,32 +1417,29 @@ export function describeKillGiveUp(
     })();
     const seconds = (info.waitedMs / 1000).toFixed(1);
     const distanceText = distance == null ? '距离读不到' : `现在距离 ${distance.toFixed(1)} 米`;
-    const head = `打了 ${seconds} 秒还没打死 ${name}（轮询 ${info.polls} 次）；${distanceText}。`;
+    const head = `打了 ${seconds} 秒还没打死 ${name}，轮询了 ${info.polls} 次，${distanceText}。`;
     const teleportNote =
         (info.teleports ?? 0) > 0
-            ? `\n**它在这段时间里消失了又出现 ${info.teleports} 次——那是瞬移，不是死亡**（同一个实体 id 还在）。` +
-              (name === 'enderman'
-                  ? '\n末影人一被打就瞬移，**近战反复追是打不死的**；能用的打法是：① 用**船**把它困住（坐进船里的生物不能瞬移）再打 ② 用**弓**在远处耗。'
-                  : '')
+            ? `\n它在这段时间里消失了又出现 ${info.teleports} 次，那是瞬移，不是死亡，同一个实体 id 还在。`
             : '';
 
     if (info.healthBefore == null || after == null) {
         return (
-            `${head}${teleportNote}\n血量读不到（服务端没给），**看不出掉没掉血**——这是全部能说的。`
+            `${head}${teleportNote}\n读不到它的血量，所以看不出掉没掉血。`
         );
     }
     if (after < info.healthBefore) {
         return (
-            `${head}${teleportNote}\n血量 ${info.healthBefore} → ${after}（**在掉血，只是慢**）：不是打不到，是没打死（护甲/回血/你输出不够）。`
+            `${head}${teleportNote}\n它的血量从 ${info.healthBefore} 变成 ${after}，在掉血，只是掉得慢，不是打不到。`
         );
     }
     if (distance != null && distance > 6) {
         return (
-            `${head}${teleportNote}\n血量 ${info.healthBefore} → ${after}（**一点没掉**）：**你打不到它**——太远/隔着方块，或者它在水里、在飞。`
+            `${head}${teleportNote}\n它的血量从 ${info.healthBefore} 变成 ${after}，一点没掉，你打不到它，可能太远了，也可能隔着方块。`
         );
     }
     return (
-        `${head}${teleportNote}\n血量 ${info.healthBefore} → ${after}（**一点没掉**，而且就在手边）：它可能是无敌/被方块挡着/根本不在射程内。`
+        `${head}${teleportNote}\n它的血量从 ${info.healthBefore} 变成 ${after}，一点没掉，而且它就在手边，可能它是无敌的，也可能被方块挡着。`
     );
 }
 
@@ -1577,8 +1551,8 @@ export async function attackEntity(
         log(
             bot,
             teleports > 0
-                ? `Successfully killed ${entity.name}.（击杀已验证；不过在打的过程中它**瞬移了 ${teleports} 次**，不是一次打死的）`
-                : `Successfully killed ${entity.name}.（击杀已验证：实体从世界里消失并保持消失）`,
+                ? `打死了 ${entity.name}，过程中它瞬移了 ${teleports} 次。`
+                : `打死了 ${entity.name}。`,
         );
         await pickupNearbyItems(bot);
         return true;
@@ -1662,7 +1636,6 @@ export async function collectBlock(bot: any, blockType: string, num: number = 1,
     let collected = 0;
     // **长动作：计时 + 进度 + 硬上限**（真机 2026-10-21：4 块铁矿在 1-1.7m 处，静默 73 秒）。
     const collectStartedAt = Date.now();
-    let collectLastProgressAt = 0;
     // 工具在这轮采集里坏掉（耐久耗尽消失）要立刻说一声：模型只会看到
     // "挖不动了"，而原因可能是手上那把镐刚刚没了。
     const heldBefore = heldToolState(bot);
@@ -1714,17 +1687,11 @@ export async function collectBlock(bot: any, blockType: string, num: number = 1,
             return safe || unsafeBlocks.includes(block.name);
         }, 64, 1);
 
-        // 每轮先报进度（8 秒一次，有界内容：第几块/已用/还剩/离目标多远）。
+        // 进度记录只喂卡死判定，不写回执。
         const collectElapsed = Date.now() - collectStartedAt;
-        if (shouldEmitProgress(collectLastProgressAt, Date.now())) {
-            collectLastProgressAt = Date.now();
-            const nextBlock = blocks[0] as any;
-            const nextDistance = nextBlock?.position != null ? bot.entity.position.distanceTo(nextBlock.position) : null;
-            log(bot, 'collect-progress{' + JSON.stringify({ done: collected, total: num, elapsedMs: collectElapsed, remaining: Math.max(0, num - collected), distance: nextDistance }) + '} ' + formatProgressLine({ label: '挖矿', done: collected, total: num, elapsedMs: collectElapsed, remaining: Math.max(0, num - collected), distance: nextDistance }));
-            recordActionProgress(bot, { label: '挖矿', done: collected, total: num });
-        }
+        recordActionProgress(bot, { label: '挖矿', done: collected, total: num });
         if (collectElapsed >= LONG_ACTION_MAX_MS) {
-            log(bot, formatTimeoutSummary({ label: '采集', done: collected, total: num, elapsedMs: collectElapsed, remaining: Math.max(0, num - collected) }));
+            log(bot, `采集超时了，已经采到 ${collected} 个，一共要采 ${num} 个。`);
             return collected > 0;
         }
         if (blocks.length === 0) {
@@ -1760,8 +1727,7 @@ export async function collectBlock(bot: any, blockType: string, num: number = 1,
             // 真正缺的那把镐反而没人提。措辞与 mineBlock 保持一致，便于回执层收口。
             log(
                 bot,
-                `没有能挖 ${block.name} 的工具（手持 ${bot?.heldItem?.name ?? '空手'}）；` +
-                    '先换正确的工具（对应镐/铲/斧）再来；急着清路可以用 mineBlock(force=true) 硬挖开（没有掉落）。',
+                `没有能挖 ${block.name} 的工具，手上拿的是 ${bot?.heldItem?.name ?? '空手'}。`,
             );
             reportToolBreak();
             return false;
@@ -1775,7 +1741,7 @@ export async function collectBlock(bot: any, blockType: string, num: number = 1,
                 await goToPosition(bot, block.position.x, block.position.y, block.position.z, 2);
                 // 统一走 digWithTimeout：裸 bot.dig 会在方块中途变化时永不 resolve。
                 if (!(await digWithTimeout(bot, block, `@(${block.position.x},${block.position.y},${block.position.z})`))) {
-                    log(bot, `挖 ${blockType} 超时，跳过这一格。`);
+                    log(bot, `没挖到 ${blockType}，超时了，跳过这个。`);
                 } else {
                     await pickupNearbyItems(bot);
                     success = true;
@@ -1800,18 +1766,18 @@ export async function collectBlock(bot: any, blockType: string, num: number = 1,
                     await goToPosition(bot, block.position.x, block.position.y, block.position.z, 2);
                     // 统一走 digWithTimeout：裸 bot.dig 会在方块中途变化时永不 resolve。
                     if (!(await digWithTimeout(bot, block, `@(${block.position.x},${block.position.y},${block.position.z})`))) {
-                        log(bot, `挖 ${blockType} 超时，跳过这一格。`);
+                        log(bot, `没挖到 ${blockType}，超时了，跳过这个。`);
                         continue;
                     }
                     await pickupNearbyItems(bot);
                     collected++;
-                    log(bot, `背包满了，改用"自己挖 + 捡"的方式收了 ${blockType}（掉落物能并进已有的半栈）。`);
+                    log(bot, `背包满了，于是自己动手挖，收下了 ${blockType}。`);
                     continue;
                 } catch (fallbackErr: unknown) {
                     const fmsg: string = fallbackErr instanceof Error ? fallbackErr.message : String(fallbackErr);
                     log(
                         bot,
-                        `Failed to collect ${blockType}: 背包满了，而且手动挖也失败（${fmsg}）。先 discard 一批，或者找个箱子存起来。`,
+                        `没能采集 ${blockType}，背包满了，手动挖也失败了，原始错误是 ${fmsg}。`,
                     );
                     break;
                 }
@@ -2018,13 +1984,9 @@ async function digOnce(bot: any, block: any, where: string): Promise<boolean> {
     const plan = estimateDigTimeoutMs(block, toolId, expectedOverride == null ? {} : { digTimeMs: expectedOverride });
     const attempts = 2;
     let totalMs = 0;
-    const expectedText = plan.expectedMs === Infinity ? '不可破坏/工具不够' : Math.round(plan.expectedMs / 100) / 10 + 's';
-    const stateText = (state: ReturnType<typeof digTargetState>): string =>
-        '目标=' + (state.name ?? '读不到') + '，手持=' + (state.heldName ?? '空手') +
-        '，canHarvest=' + (state.canHarvest == null ? '未知' : String(state.canHarvest));
     for (let attempt = 1; attempt <= attempts; attempt++) {
         if (bot?.interrupt_code) {
-            log(bot, '挖 ' + name + ' ' + where + ' 被 Stop/保命打断，已放弃（累计 ' + Math.round(totalMs / 1000) + 's）。');
+            log(bot, `没挖到 ${name} ${where}，被中断了，原因是 Stop 或保命反射。`);
             try {
                 bot.stopDigging?.();
             } catch {
@@ -2032,7 +1994,6 @@ async function digOnce(bot: any, block: any, where: string): Promise<boolean> {
             }
             return false;
         }
-        const stateBefore = digTargetState(bot, block);
         const started = Date.now();
         let timer: ReturnType<typeof setTimeout> | undefined;
         let watcher: ReturnType<typeof setInterval> | undefined;
@@ -2045,15 +2006,6 @@ async function digOnce(bot: any, block: any, where: string): Promise<boolean> {
                 if (isAirBlockName(current)) resolve('gone');
             }, 200);
         });
-        const progressTimer: ReturnType<typeof setInterval> = setInterval(() => {
-            const elapsed = Date.now() - started;
-            const state = digTargetState(bot, block);
-            log(
-                bot,
-                '挖 ' + name + ' ' + where + ' 进度：已 ' + Math.round(elapsed / 1000) + 's，仍在挖=' +
-                    (bot?.targetDigBlock != null) + '，' + stateText(state) + '。',
-            );
-        }, 3_000);
         let outcome: 'ok' | 'gone' | 'timeout' | 'error';
         try {
             outcome = await Promise.race([
@@ -2064,14 +2016,10 @@ async function digOnce(bot: any, block: any, where: string): Promise<boolean> {
         } catch (err: unknown) {
             const msg = err instanceof Error ? err.message : String(err);
             if (/Digging aborted/i.test(msg)) {
-                // 外部 health/death/插件调 stopDigging 会走到这里：这是正常中断，不是故障。
-                // **但"被中断"和"没挖到"是两件事**：那一格已经是空气就别报失败
-                // （窄窗口里会出现"挖 stone 失败"而格子其实是空的，模型下一轮对着空气重挖）。
+                // 外部 health/death/插件调 stopDigging：已经不是"没挖到"。
                 if (isAirBlockName(digTargetState(bot, block).name)) {
-                    log(bot, '挖 ' + name + ' ' + where + ' 被外部 stopDigging 中断，但那一格已经是空气——按挖掉算。');
                     return true;
                 }
-                log(bot, '挖 ' + name + ' ' + where + ' 被外部 stopDigging 正常中断（Digging aborted），本次动作结束。');
                 try {
                     bot.stopDigging?.();
                 } catch {
@@ -2080,24 +2028,14 @@ async function digOnce(bot: any, block: any, where: string): Promise<boolean> {
                 return false;
             }
             outcome = 'error';
-            log(bot, '挖 ' + name + ' ' + where + ' 抛错：' + msg);
+            log(bot, `没挖到 ${name} ${where}，原始错误是 ${msg}。`);
         } finally {
             if (timer !== undefined) clearTimeout(timer);
-            clearInterval(progressTimer);
             if (watcher !== undefined) clearInterval(watcher);
         }
         const elapsed = Date.now() - started;
         totalMs += elapsed;
-        const stateAfter = digTargetState(bot, block);
-        const stillDigging = bot?.targetDigBlock != null;
-        if (outcome === 'gone' || isAirBlockName(stateAfter.name)) {
-            if (outcome === 'gone') {
-                log(bot, '挖 ' + name + ' ' + where + ' 看门狗发现目标已变空气：dig 未返回也判成功（用时 ' +
-                    Math.round(elapsed / 100) / 10 + 's）。' + stateText(stateBefore) + ' -> ' + stateText(stateAfter) + '。');
-            } else {
-                log(bot, '挖 ' + name + ' ' + where + ' 完成：用时 ' + Math.round(elapsed / 100) / 10 +
-                    's（预计 ' + expectedText + '，第 ' + attempt + '/' + attempts + ' 次，硬度 ' + plan.hardness + '）。');
-            }
+        if (outcome === 'gone' || isAirBlockName(digTargetState(bot, block).name)) {
             try {
                 if (outcome === 'gone') bot.stopDigging?.();
             } catch {
@@ -2106,14 +2044,7 @@ async function digOnce(bot: any, block: any, where: string): Promise<boolean> {
             return true;
         }
         if (outcome === 'ok') {
-            log(bot, '挖 ' + name + ' ' + where + ' 完成：用时 ' + Math.round(elapsed / 100) / 10 +
-                's（预计 ' + expectedText + '，第 ' + attempt + '/' + attempts + ' 次，硬度 ' + plan.hardness + '）。');
             return true;
-        }
-        if (outcome === 'timeout') {
-            log(bot, '挖 ' + name + ' ' + where + ' 第 ' + attempt + '/' + attempts + ' 次超时：实际 ' +
-                Math.round(elapsed / 100) / 10 + 's，预计 ' + expectedText + '（硬度 ' + plan.hardness + '），仍在挖=' +
-                stillDigging + '；' + stateText(stateAfter) + '。');
         }
         // 无论 dig 是否还挂着，续挖前先停一次，让下一轮从干净状态重新发起。
         try {
@@ -2124,10 +2055,8 @@ async function digOnce(bot: any, block: any, where: string): Promise<boolean> {
         if (attempt < attempts) {
             const refreshed = digTargetState(bot, block);
             if (isAirBlockName(refreshed.name)) {
-                log(bot, '续挖前发现 ' + name + ' ' + where + ' 已经是空气，直接判成功。');
                 return true;
             }
-            log(bot, '续挖 ' + name + ' ' + where + '（第 ' + (attempt + 1) + ' 次；' + stateText(refreshed) + '）...');
             await sleep(200);
             continue;
         }
@@ -2137,12 +2066,7 @@ async function digOnce(bot: any, block: any, where: string): Promise<boolean> {
     } catch {
         // 忽略。
     }
-    log(
-        bot,
-        '挖 ' + name + ' ' + where + ' 结束：连续 ' + attempts + ' 次超时/失败，累计 ' +
-            Math.round(totalMs / 1000) + 's；仍在挖=' + (bot?.targetDigBlock != null) + '；' +
-            stateText(digTargetState(bot, block)) + '。可稍后重试或换工具。',
-    );
+    log(bot, `没挖到 ${name} ${where}，${attempts} 次都超时了，累计等了 ${Math.round(totalMs / 1000)} 秒。`);
     return false;
 }
 
@@ -2188,9 +2112,8 @@ export function protectedToolNotice(bot: any, targetName: string | null): string
     const left = remaining == null ? '耐久读不到' : `只剩 ${remaining} 次耐久`;
     const what = targetName == null ? '' : `，不用它挖 ${targetName}`;
     return (
-        `⚠ ${name} 是附魔工具，${left}（保护线 ${ENCHANTED_RESERVE_USES} 次 / ` +
-        `${Math.round(ENCHANTED_RESERVE_FRACTION * 100)}% 耐久）${what}——已保护，不会自动用到爆；` +
-        '换一把未附魔工具，或手动 equip 决定要不要用它。'
+        `${name} 是附魔工具，${left}，保护线是 ${ENCHANTED_RESERVE_USES} 次或者 ` +
+        `${Math.round(ENCHANTED_RESERVE_FRACTION * 100)}% 耐久${what}，已经保护起来。`
     );
 }
 
@@ -2354,9 +2277,8 @@ export async function breakBlockAt(bot: any, x: number, y: number, z: number, fo
                     bot,
                     plan.note +
                         (measured
-                            ? `**附近实测**：软方块 ${softNearby > 0 ? `有（最近的 ${softAt}）` : '0 个'}；` +
-                              `可钻的洞口 ${caveNearby > 0 ? '有（4 格内有 3 格高的空腔）' : '0 个'}。`
-                            : '**附近实测：6 格内没有 dirt/gravel/sand，4 格内也没有能钻的洞口——这一列确实没路。**'),
+                            ? `附近有 ${softNearby} 个软方块，有 ${caveNearby} 个能钻进去的洞口。`
+                            : '6 格内没有 dirt、gravel 或 sand，4 格内也没有能钻进去的洞口。'),
                 );
                 return false;
             }
@@ -2452,30 +2374,30 @@ export function assessPlaceBlockRisk(
 
     // 1) 玩家站立格/脚下承重格：绝不能拆。
     if (tx === fx && tz === fz && (ty === fy || ty === fy - 1)) {
-        return { ok: false, reason: '目标格是你脚下/站立格的承重方块，拆了会掉下去' };
+        return { ok: false, reason: '目标格就是脚下的承重方块，拆掉会掉下去' };
     }
     const feetName = nameAt(fx, fy, fz);
     const supportName = nameAt(fx, fy - 1, fz);
     if (feetName === 'lava' || feetName === 'water') {
-        return { ok: false, reason: '你正站在 ' + feetName + ' 里，先脱离再放/清障' };
+        return { ok: false, reason: '你正站在 ' + feetName + ' 里' };
     }
     if (supportName == null || supportName === 'air' || supportName === 'lava' || supportName === 'water') {
-        return { ok: false, reason: '脚下没有实心支撑，先 goToCoordinates 站到安全地面' };
+        return { ok: false, reason: '脚下没有实心支撑' };
     }
 
     // 2) 目标格/目标下方紧邻格是危险流体或空：直接拒绝。
     const targetName = nameAt(tx, ty, tz);
-    if (targetName === 'lava') return { ok: false, reason: '目标格就是岩浆，不能挖/放' };
-    if (targetName === 'water') return { ok: false, reason: '目标格就是水，先处理水源' };
+    if (targetName === 'lava') return { ok: false, reason: '目标格是岩浆，不能挖也不能放' };
+    if (targetName === 'water') return { ok: false, reason: '目标格是水' };
     const belowTarget = nameAt(tx, ty - 1, tz);
     if (belowTarget === 'lava' || belowTarget === 'water') {
-        return { ok: false, reason: '目标格下方紧邻 ' + belowTarget + '，清障会挖穿到岩浆/水' };
+        return { ok: false, reason: '目标格下方紧邻 ' + belowTarget + '，清障会挖穿到这里' };
     }
     // 3) 目标紧邻岩浆：清障可能放岩浆进来。
     for (const [dx, dy, dz] of [[1,0,0],[-1,0,0],[0,0,1],[0,0,-1],[0,-1,0],[0,1,0]]) {
         const adjacent = nameAt(tx + dx, ty + dy, tz + dz);
         if (adjacent === 'lava') {
-            return { ok: false, reason: '目标格紧邻岩浆，清障风险高；先换一格或换个站位' };
+            return { ok: false, reason: '目标格紧邻岩浆，清障会把它放进来' };
         }
     }
     return { ok: true, reason: '' };
@@ -2510,9 +2432,7 @@ export async function placeBlock(bot: any, blockType: string, x: number, y: numb
             // 而且同一格的承重规则不会因为换个工具就消失。
             log(
                 bot,
-                '拒绝拆掉 ' + target_dest + '：' + risk.reason + '。' +
-                    '这次是**拆方块**的请求：换一格拆（placeBlock/mineBlock 指定别的坐标），' +
-                    '或先 goToCoordinates 站到别的位置再拆。',
+                `拒绝拆掉 ${target_dest}，原因是 ${risk.reason}。`,
             );
             return false;
         }
@@ -2603,10 +2523,7 @@ export async function placeBlock(bot: any, blockType: string, x: number, y: numb
     if (!empty_blocks.includes(targetBlock.name) && isFootingCell({ x: Math.floor(x), y: Math.floor(y), z: Math.floor(z) }, bot?.entity?.position)) {
         log(
             bot,
-            '拒绝清掉 ' + targetBlock.name + ' @' + targetBlock.position + '：**那一格正是你现在的落脚点（或它的承重块）**——' +
-                '把它挖掉再放失败，你就会踩空（虚空上方尤其致命）。' +
-                '换一个目标格（placeBlock 指定别的坐标），或先 goToCoordinates 站到旁边的实心处再放；' +
-                '要往上垫就先跳到下一格/站到稳固处，别从脚下拆。',
+            `拒绝清掉 ${targetBlock.name}，${targetBlock.position} 这一格是当前的落脚点或它的承重方块。`,
         );
         return false;
     }
@@ -2622,10 +2539,7 @@ export async function placeBlock(bot: any, blockType: string, x: number, y: numb
             // 建议里却写着"或用 placeHere"）。
             log(
                 bot,
-                '拒绝清障 ' + targetBlock.name + ' @' + targetBlock.position + '：' + risk.reason +
-                    '。注意：这是**放置**请求（要先把那一格清出来），不是拆承重块的任务；' +
-                    '换一个目标格（placeBlock 指定别的坐标）、或先 goToCoordinates 站到旁边的安全实心处再放；' +
-                    '同一格再用 placeHere/placeBlock 也会被同一条规则拒绝。',
+                `拒绝清障 ${targetBlock.name}，${targetBlock.position} 这一格的原因是 ${risk.reason}。`,
             );
             return false;
         }
@@ -2747,8 +2661,7 @@ export async function placeBlock(bot: any, blockType: string, x: number, y: numb
                 if (verdict !== 'ok' || !confirmed) {
                     log(
                         bot,
-                        `**放置没有生效**：${blockType} @${target_dest} 现在读到的仍然是 ${readBack === '' ? '读不到' : readBack}（不是 ${bareName}）——` +
-                            `这一格**不是** ${blockType}，别据此继续施工；先确认脚下/旁边能站人，再试一次或换一格。`,
+                        `放置没有生效，${target_dest} 这一格读到的方块是 ${readBack === '' ? '读不到' : readBack}，并不是 ${bareName}。`,
                     );
                     await failPlacementAfterClear(bot, clearedForPlacement, `放 ${blockType} 到 ${target_dest} 没有生效`);
                     return false;
@@ -2757,15 +2670,15 @@ export async function placeBlock(bot: any, blockType: string, x: number, y: numb
             if (verdict === 'placed-but-item-not-consumed') {
                 log(
                     bot,
-                    `放置已落地，但背包里的 ${blockType} 数量没有减少（${countBefore} → ${countAfter}）：` +
-                        '服务端可能还在同步；这一格的掉落物 3 秒内不会被 autoPickup 捡（不会"放下去又被自己捡回来"）。',
+                    `放置确实生效了，但背包里的 ${blockType} 数量没有减少，从 ${countBefore} 个变成 ${countAfter} 个，` +
+                        '可能是服务端还在同步，这一格的掉落物 3 秒内不会被 autoPickup 捡起。',
                 );
             }
             log(
                 bot,
                 confirmed
-                    ? `Placed ${blockType} at ${target_dest}（回读确认 ${readBack || bareName}）。`
-                    : `Placed ${blockType} at ${target_dest}（回读 ${readBack === '' ? '读不到' : readBack}，已重试一次）。`,
+                    ? `在 ${target_dest} 放置了 ${blockType}，回读确认这一格现在是 ${readBack || bareName}。`
+                    : `在 ${target_dest} 放置了 ${blockType}，回读到的方块是 ${readBack === '' ? '读不到' : readBack}，已经重试过一次。`,
             );
             return true;
         }
@@ -2827,14 +2740,12 @@ export async function failPlacementAfterClear(
     if (restored) {
         log(
             bot,
-            `${reason}；**已经把你为了放置拆掉的 ${cleared.name} @(${cleared.x},${cleared.y},${cleared.z}) 补回去了**——` +
-                '世界净变化：拆了 1 格、放回 1 格（等于没变），没有留下空洞。',
+            `${reason}，已经把你为了放置拆掉的 ${cleared.name} 放回 (${cleared.x}, ${cleared.y}, ${cleared.z}) 了。`,
         );
     } else {
         log(
             bot,
-            `${reason}；**注意：为了放置拆掉的 ${cleared.name} @(${cleared.x},${cleared.y},${cleared.z}) 现在是空的、没能补回**——` +
-                '世界净变化：那一格被移除了。**别往那一格踩**；先 goToCoordinates 站到实心处，或重新 placeBlock 把它填上。',
+            `${reason}，为了放置拆掉的 ${cleared.name} 在 (${cleared.x}, ${cleared.y}, ${cleared.z}) 那个位置还空着，没有补回去。`,
         );
     }
 }
@@ -2856,7 +2767,7 @@ export async function equip(bot: any, itemName: string): Promise<boolean> {
     // **已经拿在手上**：不用再换一次，也别说成失败（模型反复 equip 同一件
     // 东西时，它需要的是"已经是它了"，不是又一条动作记录）。
     if (bot?.heldItem?.name === itemName) {
-        log(bot, `已经拿在手上：${itemName}（不用再换）。`);
+        log(bot, `已经拿在手上的是 ${itemName}，不用再换一次。`);
         return true;
     }
     let item: any = bot.inventory.slots.find((slot: any) => slot && slot.name === itemName);
@@ -2872,8 +2783,7 @@ export async function equip(bot: any, itemName: string): Promise<boolean> {
             // 只能再拍一次 stats 对账。
             log(
                 bot,
-                `你根本没有 ${itemName}：背包和快捷栏里都没有这个东西，不是"没换到手"。` +
-                    '先采集/合成，或者去箱子里拿（拿到后 stats 能看到）。',
+                `背包和快捷栏里都没有 ${itemName}，并不是没有换到手。`,
             );
             return false;
         }
@@ -2904,7 +2814,7 @@ export async function equip(bot: any, itemName: string): Promise<boolean> {
             : itemName.includes('helmet') ? '头上'
                 : itemName.includes('chestplate') || itemName.includes('elytra') ? '身上'
                     : itemName.includes('shield') ? '副手' : '手上';
-    log(bot, `Equipped ${itemName}.（从${where}把 ${itemName} 拿到${bodyPart}）`);
+    log(bot, `把 ${itemName} 装备到了${bodyPart}上，它是从${where}里拿出来的。`);
     return true;
 }
 
@@ -3098,10 +3008,10 @@ export function formatLootReport(outcome: LootOutcome): string[] {
     const describe = (list: Array<{ name: string; count: number }>): string =>
         list.map((entry) => `${entry.name}×${entry.count}`).join('、');
     if (contents.length === 0) {
-        lines.push('箱子是**空的**：没有拿任何东西（这不是失败，也不是"拿走 0 个"）。');
+        lines.push('箱子是空的，没有拿到任何东西。');
         return lines;
     }
-    lines.push(`箱子里有：${describe(contents)}（共 ${contents.reduce((sum, e) => sum + e.count, 0)} 件）。`);
+    lines.push(`箱子里有 ${describe(contents)}，一共 ${contents.reduce((sum, e) => sum + e.count, 0)} 件。`);
     if (outcome.taken.length === 0) {
         lines.push(
             `**一件都没拿走**${outcome.reason != null ? `：${outcome.reason}` : ''}。` +
@@ -3272,9 +3182,9 @@ export async function viewChest(bot: any): Promise<boolean> {
     if (!contents.readable) {
         log(bot, contents.lines.join('\n'));
     } else if (contents.lines.length === 0) {
-        log(bot, '容器区间内没有物品（只读了槽位 0..' + contents.invStart + '，不含查看者背包）。');
+        log(bot, '这个容器读不到内容，只读了槽位 0 到 ' + contents.invStart + '，不含查看者的背包。');
     } else {
-        log(bot, '容器内容（只读槽位 0..' + contents.invStart + '）：');
+        log(bot, '容器内容如下，只读槽位 0 到 ' + contents.invStart + '。');
         for (const line of contents.lines) log(bot, line);
     }
     await chestContainer.close();
@@ -3342,17 +3252,19 @@ export function readFoodState(bot: any): FoodState {
     return { food: finiteOrNull(bot?.food), saturation: finiteOrNull(bot?.foodSaturation) };
 }
 
-/** `food 14/sat 0`；读不到就写"读不到"。 */
+/** 例如「饱食度是 14，饱和度是 0」；读不到就写读不到。 */
 export function formatFoodState(state: FoodState): string {
-    const food = state.food == null ? '读不到' : String(state.food);
-    const saturation = state.saturation == null ? '读不到' : String(Math.round(state.saturation * 10) / 10);
-    return `food ${food}/sat ${saturation}`;
+    const food = state.food == null ? '饱食度读不到' : `饱食度是 ${state.food}`;
+    const saturation = state.saturation == null ? '饱和度读不到' : `饱和度是 ${Math.round(state.saturation * 10) / 10}`;
+    return `${food}，${saturation}`;
 }
 
-/** `food 14/sat 0 → food 20/sat 9.6`；一模一样时补一句"没有变化"。 */
+/** 例如「饱食度从 14 变成 20，饱和度从 0 变成 9.6」；一模一样时补一句「没有变化」。 */
 export function formatFoodDelta(before: FoodState, after: FoodState): string {
     const same = before.food === after.food && before.saturation === after.saturation;
-    return `${formatFoodState(before)} → ${formatFoodState(after)}${same ? '（没有变化）' : ''}`;
+    const food = `饱食度从 ${before.food ?? '读不到'} 变成 ${after.food ?? '读不到'}`;
+    const saturation = `饱和度从 ${before.saturation == null ? '读不到' : Math.round(before.saturation * 10) / 10} 变成 ${after.saturation == null ? '读不到' : Math.round(after.saturation * 10) / 10}`;
+    return `${food}，${saturation}${same ? '，没有变化' : ''}`;
 }
 
 /**
@@ -3416,7 +3328,7 @@ export function ateByFacts(
 /** 供回执用的一句话：手上还有什么能吃的。 */
 function describeEdibles(edibles: readonly EdibleItem[]): string {
     if (edibles.length === 0) return '背包里没有别的东西能吃。';
-    return `能吃的还有：${edibles.map((e) => `${e.name}x${e.count}`).join('、')}。`;
+    return `背包里能吃的还有 ${edibles.map((e) => `${e.name}x${e.count}`).join('、')}。`;
 }
 
 /** 失败之后：说清换哪一种、够不够、要不要先烤/做，并给**一条**能照抄的调用。 */
@@ -3426,7 +3338,7 @@ function consumeAdvice(bot: any, wanted: string, edibles: readonly EdibleItem[])
     // 不排"下一步调用"——吃哪个、要不要烤，是模型自己的判断。
     if (others.length > 0) {
         return {
-            text: `背包里还有别的能吃：${others.map((e) => `${e.name}x${e.count}`).join('、')}（生肉也能吃，只是补得少；烤熟补得多）。`,
+            text: `背包里能吃的还有 ${others.map((e) => `${e.name}x${e.count}`).join('、')}。`,
         };
     }
     const same = wanted === '' ? null : inventoryCountOf(bot, wanted);
@@ -3478,8 +3390,8 @@ export async function consume(bot: any, itemName: string = "", options: ConsumeO
         const advice = consumeAdvice(bot, wanted, edibles);
         log(
             bot,
-            `没吃成：背包里没有 ${wanted || '(没给物品名)'}。${describeEdibles(edibles)}` +
-                `现在 ${formatFoodState(before)}。${advice.text}`,
+            `没吃成，背包里没有 ${wanted || '(没给物品名)'}。${describeEdibles(edibles)}` +
+                `现在的状态是，${formatFoodState(before)}。${advice.text}`,
         );
         return false;
     }
@@ -3498,20 +3410,13 @@ export async function consume(bot: any, itemName: string = "", options: ConsumeO
     const rawInPack = edibles.filter((edible) => cookedCounterpartOf(edible.name) != null);
     if (edibleTotal > 0 && edibleTotal <= FOOD_RESERVE_MIN && before.food != null && before.food >= FOOD_RESERVE_COMFORT) {
         const keep = edibles.map((edible) => `${edible.name}x${edible.count}`).join('、');
-        const rawHint =
-            rawInPack.length > 0
-                ? ` 生肉只有熟食的一半左右：有熔炉就先 useBlock(type="furnace", input="1 ${rawInPack[0].name}", output="1 ${cookedCounterpartOf(rawInPack[0].name)}") 再吃。`
-                : '';
-        // 难度说明：Easy/Normal 饿不死，真正致命的是"不能回血 + 挨打"——
-        // 说清楚它才不会恐慌性清空存粮（真机原话：一捡到就吃掉，然后饿死）。
         const starving = starvationNote(difficultyOf(bot));
         reserveWarning =
-            `⚠️ 背包里只剩 ${edibleTotal} 份能吃的（${keep}），这份吃掉之后**短期内没吃的了**。` +
-            `${rawHint}${starving === '' ? '' : ` ${starving}`}` +
-            '接下来趁早补：钓鱼（工作台做 fishing_rod）／打猎／种小麦。';
+            `背包里只剩 ${edibleTotal} 份能吃的，有 ${keep}。` +
+            (starving === '' ? '' : `${starving}`);
         log(bot, reserveWarning);
     }
-    let failures: string[] = [];
+    const failures: string[] = [];
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
         const item = findItem();
         if (item == null) {
@@ -3541,7 +3446,7 @@ export async function consume(bot: any, itemName: string = "", options: ConsumeO
             (before.food != null && after.food != null && after.food > before.food) ||
             (before.saturation != null && after.saturation != null && after.saturation > before.saturation);
         const ateByCount = countBefore != null && countAfter != null && countAfter < countBefore;
-        const countText = countBefore == null || countAfter == null ? '数量读不到' : `手上 ${countBefore} → ${countAfter}`;
+        const countText = countBefore == null || countAfter == null ? '数量读不到' : `手上从 ${countBefore} 个变成 ${countAfter} 个`;
         const retried = failures.length > 0;
 
         if (ateByFacts(before, after, countBefore, countAfter)) {
@@ -3550,36 +3455,21 @@ export async function consume(bot: any, itemName: string = "", options: ConsumeO
                     ? `${countText}，${formatFoodDelta(before, after)}`
                     : ateByState
                       ? formatFoodDelta(before, after)
-                      : `${countText}（饱食度读数没变，服务端可能还没同步——别再连吃）`;
-            const retryNote = retried ? `第 ${attempt - 1} 次同步超时（${failures.join('；')}），退避后重试成功——` : '';
-            log(bot, `${retryNote}吃成了：${wanted}（${how}）。`);
+                      : `${countText}，饱食度读数没变，服务端可能还没同步`;
+            const retryNote = retried ? `第 ${attempt - 1} 次同步超时了，${failures.join('。')}，退避之后重试成功，` : '';
+            log(bot, `${retryNote}吃掉了 ${wanted}，${how}。`);
             if (reserveWarning !== '') log(bot, reserveWarning);
-            // 生肉只有熟食的一半左右：吃都吃了，但把"下次先烤"说清楚（有熔炉就直接给调用）。
-            const cooked = cookedCounterpartOf(wanted);
-            const rawValue = foodValueOf(wanted);
-            const cookedValue = cooked == null ? null : foodValueOf(cooked);
-            if (cooked != null && rawValue != null && cookedValue != null) {
-                log(
-                    bot,
-                    `⚠️ ${wanted} 是生的：只有 ${rawValue[0]} 点食物，烤成 ${cooked} 是 ${cookedValue[0]} 点` +
-                        `（约一倍）。下次先 useBlock(type="furnace", input="1 ${wanted}", output="1 ${cooked}") 再吃。`,
-                );
-            }
             return true;
         }
 
         if (failure == null) {
             // 调用没报错、但事实没变：如实说"没生效"，**不再重试**（免得重复吃）。
             const readable = after.food != null || countAfter != null;
-            const advice = consumeAdvice(bot, wanted, edibles);
             log(
                 bot,
                 readable
-                    ? `consume ${wanted}：**没生效**——调用没报错，但${countText}、${formatFoodDelta(before, after)}，` +
-                          '说明这一口服务端没采纳。可以按下面这条再试一次；连续两次这样就别在原地反复吃。' +
-                          ` ${advice.text}`
-                    : `consume ${wanted}：**无法确认**——调用没报错，但饥饿值和背包数量都读不到，不能证明吃进去了。` +
-                          ` 请用 stats(type="inventory") 核对。 ${advice.text}`,
+                    ? `吃 ${wanted} 没有生效，${countText}，${formatFoodDelta(before, after)}。`
+                    : `没法确认 ${wanted} 吃没吃进去，饥饿值和背包数量都读不到。`,
             );
             return false;
         }
@@ -3589,7 +3479,6 @@ export async function consume(bot: any, itemName: string = "", options: ConsumeO
 
     const after = readFoodState(bot);
     const countAfter = wanted === '' ? null : inventoryCountOf(bot, wanted);
-    const advice = consumeAdvice(bot, wanted, edibles);
     const stillHeld = countAfter != null && countAfter > 0;
     // 两次都是同一个原因时别复读两遍（真机回执要短、要能一眼看完）。
     const reason =
@@ -3598,9 +3487,9 @@ export async function consume(bot: any, itemName: string = "", options: ConsumeO
             : failures.join('；') || '未知原因';
     log(
         bot,
-        `consume ${wanted}：**没吃成**（试了 ${Math.max(1, failures.length)} 次）——${reason}。` +
-            (stillHeld ? `东西**还在手上**（${countAfter} 个），可以重试。` : '东西已经不在手上了，先确认背包再决定。') +
-            `饥饿值 ${formatFoodDelta(before, after)}——这一口没起效。${advice.text}`,
+        `吃 ${wanted} 没有成功，试了 ${Math.max(1, failures.length)} 次，原因是 ${reason}。` +
+            (stillHeld ? `东西还在手上，一共 ${countAfter} 个。` : '东西已经不在手上了。') +
+            `${formatFoodDelta(before, after)}。`,
     );
     return false;
 }
@@ -3813,7 +3702,7 @@ export function canRelaxDropDown(bot: any): boolean {
     const fy = Math.floor(Number(feet.y));
     const fz = Math.floor(Number(feet.z));
     for (let dy = -1; dy >= -4; dy--) {
-        let block: { name?: unknown } | null = null;
+        let block: { name?: unknown } | null;
         try {
             block = bot?.blockAt?.(new Vec3(fx, fy + dy, fz)) ?? null;
         } catch {
@@ -3858,7 +3747,7 @@ export function findDropAhead(
         const x = Math.floor(from.x + ux * step);
         const z = Math.floor(from.z + uz * step);
         for (let dy = 0; dy >= -6; dy--) {
-            let block: { name?: unknown } | null = null;
+            let block: { name?: unknown } | null;
             try {
                 block = blockAt(x, fy + dy, z);
             } catch {
@@ -3892,14 +3781,16 @@ export interface PathFailureDiagnosis {
 export function isStandingInWater(bot: unknown): boolean {
     const b = bot as { entity?: { position?: { x?: number; y?: number; z?: number } }; blockAt?: (p: unknown) => { name?: string } | null } | null;
     const pos = b?.entity?.position;
-    if (pos == null || typeof b?.blockAt !== 'function') return false;
+    if (pos == null) return false;
+    const blockAt = b?.blockAt;
+    if (typeof blockAt !== 'function') return false;
     const x = Number(pos.x);
     const y = Number(pos.y);
     const z = Number(pos.z);
     if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(z)) return false;
     for (const dy of [0, 1]) {
         try {
-            const block = b.blockAt!(new Vec3(Math.floor(x), Math.floor(y) + dy, Math.floor(z)));
+            const block = blockAt(new Vec3(Math.floor(x), Math.floor(y) + dy, Math.floor(z)));
             if (block?.name === 'water') return true;
         } catch {
             return false;
@@ -3924,55 +3815,35 @@ export function classifyPathFailure(input: {
 }): PathFailureDiagnosis {
     const message = input.message ?? '';
     if (/Took to (o)?(long|longer)|timed? ?out|Execution timed out/i.test(message)) {
-        return {
-            kind: 'timeout',
-            reason: `整段算路超时（A* 把算路预算用完了，通常因为目标太远或地形太碎）`,
-            next: '把目标拆成更短的中间点（≤32 格）再走一次，别一次给上百格',
-        };
+        return { kind: 'timeout', reason: '算路超时', next: '' };
     }
     // **站在水里时，避水规则会把这趟寻路变成"无解"**：所有相邻格都被判成危险，
     // A* 一步都迈不出去——但报出来只有干巴巴的 `No path to the goal`。
     // 真机（2026-10-18 14:56，overnight_b 掉进水里）：模型看到那句就开始乱换目标，
     // 其实解法只有一个——先上岸。所以这一条要排在 NoPath 之前，并且点名动作。
     if (input.inWater === true) {
-        return {
-            kind: 'inwater',
-            reason: '你**正站在水里**：避水规则把所有相邻格都判成危险，A* 因此一步都走不出去（不是路不存在）',
-            next: '先出水——朝最近的岸边走上去（或调 escapeWater），上岸之后再发 goToCoordinates；在水里重发同一个目标只会得到同一句失败',
-        };
+        return { kind: 'inwater', reason: '你正站在水里，避水规则下找不到可行的相邻格', next: '' };
     }
     if (input.dropAhead != null && input.dropAhead > 0) {
         return {
             kind: 'drop',
-            reason: `落差限制挡住了（前方有 ${input.dropAhead} 格落差，安全上限是 ${MAX_DROP_DOWN} 格）`,
-            next: '往侧面挪 4~8 格找缓坡，或先 placeBlock 垫一层再往下走',
+            reason: `前方有 ${input.dropAhead} 格的落差，上限是 ${MAX_DROP_DOWN} 格`,
+            next: '',
         };
     }
     if (input.noTool === true) {
-        return {
-            kind: 'nodig',
-            reason: '挡路的方块手上没工具挖（徒手只挖得动下界岩/沙/沙砾这类软方块）',
-            next: '先补一把镐（背包里有就 equip 到手上），或者绕开这段地形',
-        };
+        return { kind: 'nodig', reason: '挡路的方块没有能挖开它的工具', next: '' };
     }
     if (input.probeFailed === true) {
-        return {
-            kind: 'probe',
-            reason: '快速探测（1 秒预算）没算出路径——**这不代表走不到**',
-            next: '会按完整算路继续走；还失败就把目标拆成 ≤32 格的中间点',
-        };
+        return { kind: 'probe', reason: '1 秒的探测没有算出路径', next: '' };
     }
     if (/No path/i.test(message)) {
-        return {
-            kind: 'unknown',
-            reason: 'A* 没找到可行路径（可能是夹角、封闭地形，或挖不动的方块挡着）',
-            next: '换一个中间点、往侧面挪 2~4 格再试，或自己 mineBlock 开一条路',
-        };
+        return { kind: 'unknown', reason: '没有找到可行的路径', next: '' };
     }
     return {
         kind: 'unknown',
-        reason: message === '' ? '寻路失败（没有具体错误信息）' : `寻路失败：${message}`,
-        next: '先把目标拆小（≤32 格的中途点），或换一个中间点再试',
+        reason: message === '' ? '寻路失败了，但没有具体的错误信息' : `寻路失败了，原始错误是 ${message}`,
+        next: '',
     };
 }
 
@@ -3987,11 +3858,8 @@ export const PATHFIND_INTERRUPT_POLL_MS = 200;
 function reportPathfindingToolUse(bot: any, before: HeldToolState, dugBlocks: number): void {
     const notice = toolBreakNotice(before, bot);
     if (notice == null) return;
-    const dugText = dugBlocks > 0 ? `这次寻路挖了约 ${dugBlocks} 格` : '这次寻路没有记录到挖掉的方块';
-    log(
-        bot,
-        `${notice}（${dugText}；寻路挖路同样消耗耐久，长距离移动前先备好替换工具或改走不破坏地形的路线。）`,
-    );
+    const dugText = dugBlocks > 0 ? `，寻路时挖了 ${dugBlocks} 格` : '';
+    log(bot, dugText === '' ? notice : `${notice}${dugText}`);
 }
 
 /**
@@ -4117,7 +3985,6 @@ export async function goToGoalDetailed(bot: any, goal: any, options: PathfindGoa
     // 只有给了明确坐标的 goal（GoalNear / GoalBlock / GoalXZ 那一类）才查得动；
     // GoalFollow 之类追实体的没有坐标，交给下面第二道闸（allowWater）。
     const g = goal as { x?: unknown; y?: unknown; z?: unknown } | null | undefined;
-    const label = options.label != null && options.label !== '' ? options.label + '：' : '';
     const attempt = Number.isFinite(Number(options.attempt)) ? Number(options.attempt) : 0;
     const gx = g != null ? Number(g.x) : NaN;
     const gy = g != null ? Number(g.y) : NaN;
@@ -4196,7 +4063,6 @@ export async function goToGoalDetailed(bot: any, goal: any, options: PathfindGoa
             m.allow1by1towers = true;
             applyScaffoldingBlocks(bot, m);
         }
-        log(bot, label + '这一档确认允许 1x1 搭塔（垫脚方块来自背包里实际有的整方块）。');
     }
     // 第 4 档：允许挖穿挡路的软方块（徒手也能挖，只要不是"真挖不动"）。
     // 工具耐久低时**不降 digCost**——那正是 E 要防的"拿最后一点耐久挖路"。
@@ -4208,9 +4074,6 @@ export async function goToGoalDetailed(bot: any, goal: any, options: PathfindGoa
             }
             nonDestructiveMovements.blocksCantBreak?.clear?.();
             destructiveMovements.blocksCantBreak?.clear?.();
-            log(bot, label + '这一档允许挖穿挡路的方块（含徒手挖软方块；不需要掉落）。');
-        } else {
-            log(bot, label + '工具耐久不够，这一档不放开挖掘：' + digPolicy.note);
         }
     }
     // 条件放宽落差：只在血够多、脚下 4 格内无岩浆时 +1 格，并说明。
@@ -4218,35 +4081,22 @@ export async function goToGoalDetailed(bot: any, goal: any, options: PathfindGoa
         for (const m of [nonDestructiveMovements, destructiveMovements]) {
             m.maxDropDown = MAX_DROP_DOWN + 1;
         }
-        log(bot, label + `这一档把落差上限从 ${MAX_DROP_DOWN} 格放宽到 ${MAX_DROP_DOWN + 1} 格（血量 ≥16、脚下无岩浆）。`);
     }
 
     let probeFailed = false;
     const pathfind_timeout = 1000;
     if (await bot.pathfinder.getPathTo(nonDestructiveMovements, goal, pathfind_timeout).status === 'success') {
         final_movements = nonDestructiveMovements;
-        log(bot, label + `探到一条不挖方块的路线。`);
     }
     else if (digPolicy.allowDestructiveProbe
         && await bot.pathfinder.getPathTo(destructiveMovements, goal, pathfind_timeout).status === 'success') {
-        log(bot, label + `探到一条需要挖方块的路线。`);
+        // 破坏性探测成功：沿用 digPolicy 选的 movements。
     }
     else if (!digPolicy.allowDestructiveProbe) {
-        log(
-            bot,
-            label + '低耐久寻路：快速探测没找到完全不挖路的路线；只在绕不过去时才挖（每格都在烧耐久）。' +
-                '要保住工具就先换/补一把，或者改去更近的目标。',
-        );
+        // 低耐久：不探测破坏性路线。
     }
     else {
         probeFailed = true;
-        // **探测失败 ≠ 走不到。** 模型读到 "Path not found" 就以为没路、开始换招；
-        // 这里把"仍然会走"放在最前面，并标明这是 1 秒探测的结论。
-        log(
-            bot,
-            label + `快速探测（1 秒预算）没算出完整路径——**这不代表走不到**；` +
-                `接下来按完整算路实际走（${attempt >= 1 ? 30 : 20} 秒预算 + 需要时挖开挡路的方块）。`,
-        );
     }
 
     const doorCheckInterval: ReturnType<typeof setInterval> = startDoorInterval(bot);
@@ -4344,15 +4194,13 @@ export function describeStuck(bot: any): string {
             const b = bot.blockAt?.(p.offset(0, dy, 0));
             return typeof b?.name === 'string' ? b.name : '?';
         };
-        const physics = bot.physicsEnabled === false ? '**物理已关闭**' : '物理正常';
-        const inBlock = at(0) !== 'air' && at(0) !== 'cave_air' && at(0) !== 'water';
+        const physics = bot.physicsEnabled === false ? '物理被关闭了' : '物理正常';
         return (
-            `你在 (${p.x.toFixed(1)},${p.y.toFixed(1)},${p.z.toFixed(1)})，` +
-            `脚 ${at(0)} / 头 ${at(1)}，${physics}` +
-            (inBlock ? '——**脚下方块是实心的，你可能卡在方块里**：用 mineBlock 挖开再走。' : '。')
+            `你在 (${p.x.toFixed(1)}, ${p.y.toFixed(1)}, ${p.z.toFixed(1)})，` +
+            `脚下是 ${at(0)}，头上是 ${at(1)}，${physics}。`
         );
     } catch {
-        return '（读不到物理状态）';
+        return '读不到物理状态。';
     }
 }
 
@@ -4376,27 +4224,12 @@ export function describeArrival(
 ): string {
     const pos = bot?.entity?.position;
     const one = (n: number): number => Math.round(n * 10) / 10;
-    if (pos == null) return `到了 ${x}, ${y}, ${z} 附近（读不到自己的位置）。`;
+    if (pos == null) return `到了 (${x}, ${y}, ${z}) 附近，但读不到你的位置。`;
     const dx = pos.x - x;
     const dz = pos.z - z;
-    const dy = pos.y - y;
+    const vertical = Math.abs(pos.y - y);
     const horizontal = Math.hypot(dx, dz);
-    const vertical = Math.abs(dy);
-    // 垂直差超过 1.5 格就值得单独说——1 格是台阶，走上去就行。
-    const where =
-        vertical <= 1.5
-            ? '同一层'
-            : dy < 0
-              ? `在你的头顶上方 ${one(vertical)} 格`
-              : `在你的脚下下方 ${one(vertical)} 格`;
-    const tail =
-        vertical <= 1.5
-            ? ''
-            : `；要够到它得先${dy < 0 ? '垫方块往上、或者找路上去' : '往下挖或跳下去'}`;
-    return (
-        `到了 ${x}, ${y}, ${z} 附近：还差 ${one(distance)} 格（水平 ${one(horizontal)} / 垂直 ${one(vertical)}），` +
-            `目标${where}${tail}。`
-    );
+    return `到了 (${x}, ${y}, ${z}) 附近，还差 ${one(distance)} 格，水平方向差 ${one(horizontal)} 格，垂直方向差 ${one(vertical)} 格。`;
 }
 
 export async function goToPosition(
@@ -4453,7 +4286,7 @@ export async function goToPosition(
             // ——人被实心方块包住，走不了也挖不了（Feedback #38/#43）。
             // 现在只有真挖不动的方块（不可破坏/不可挖）才值得打断寻路。
             if (pathfindingDigAbort(targetBlock)) {
-                log(bot, `Pathfinding stopped: ${targetBlock.name} 挖不动（不可破坏/不可挖），换条路或用别的办法。`);
+                log(bot, `挖不动 ${targetBlock.name}，这个方块不可破坏，寻路停下来了。`);
                 bot.pathfinder.stop();
                 bot.stopDigging();
             }
@@ -4465,56 +4298,24 @@ export async function goToPosition(
     try {
         const here: any = bot?.entity?.position;
         const legs = planPathLegs(here, { x, y, z });
-        if (legs.length > 1) {
-            const horizontal = Math.round(Math.hypot((x as number) - here.x, (z as number) - here.z));
-            log(
-                bot,
-                `目标 ${horizontal} 格（水平），一次 A* 容易算不完——**分 ${legs.length} 段走**，` +
-                    `每段 ≤ ${PATH_CHUNK_LENGTH} 格；先到 (${legs[0].x.toFixed(0)},${legs[0].y.toFixed(0)},${legs[0].z.toFixed(0)})。`,
-            );
-        }
         for (let i = 0; i < legs.length; i++) {
             const leg = legs[i] as PathLeg;
             const lastLeg = i === legs.length - 1;
-            const label = legs.length > 1 ? `第 ${i + 1}/${legs.length} 段` : undefined;
-            // 每一段**开始就报一行**：长导航静默几十秒时，模型至少知道自己在第几段。
-            if (legs.length > 1 && i > 0) {
-                const now: any = bot?.entity?.position;
-                const left = now == null ? null : Math.round(Math.hypot((x as number) - now.x, (z as number) - now.z));
-                log(
-                    bot,
-                    `${label}：开始走 (${Math.round(leg.x)},${Math.round(leg.y)},${Math.round(leg.z)})` +
-                        (left == null ? '。' : `，还剩约 ${left} 格。`),
-                );
-            }
             // 中间段只要求"进到那一格附近"（1 格），最后一段才用调用方的 min_distance。
-                const outcome = await navigateLegWithLadder(bot, leg, lastLeg ? min_distance : 1, label, options);
+            const outcome = await navigateLegWithLadder(bot, leg, lastLeg ? min_distance : 1, options);
             if (outcome.ok) {
-                if (legs.length > 1 && !lastLeg) {
-                    const now: any = bot?.entity?.position;
-                    const left = Math.round(Math.hypot((x as number) - now.x, (z as number) - now.z));
-                    log(bot, `${label} 到了，还剩约 ${left} 格。`);
-                }
                 continue;
             }
             if (bot.interrupt_code) {
-                log(bot, `走到 (${x},${y},${z}) 的路上被中断（Stop/急停，Navigation interrupted）——没有到达。`);
+                log(bot, `被 Stop 或急停打断了，没有走到 (${x},${y},${z})。`);
                 return false;
             }
-            log(
-                bot,
-                `走不到 (${x},${y},${z})：${label != null ? label + ' ' : ''}试了 ${PATH_LEG_LADDER.length} 档都没走通。` +
-                    outcome.reason +
-                    describeStuck(bot) +
-                    '\n可行的做法：① 换一个中间点（往侧面挪 4~8 格再试，目标那一列常常恰好不可达）；' +
-                    '② 自己挖——mineBlock / digDown 开一条通道；' +
-                    '③ 若你在**地上**而目标在**地下**（或反过来），先找洞口/竖井下去，别指望平地寻路穿越。',
-            );
+            log(bot, `没能走到 (${x},${y},${z})，${outcome.reason}${describeStuck(bot)}`);
             return false;
         }
         // 中断优先于"距离够近就算到了"：Stop/急停之后不能报成功。
         if (bot.interrupt_code) {
-            log(bot, `走到 (${x},${y},${z}) 的路上被中断（Stop/急停，Navigation interrupted）——没有到达。`);
+            log(bot, `被 Stop 或急停打断了，没有走到 (${x},${y},${z})。`);
             return false;
         }
         const distance: number = bot.entity.position.distanceTo(new (Vec3 as any)(x, y, z));
@@ -4543,31 +4344,22 @@ export async function goToPosition(
             return true;
         }
         if (distance <= min_distance+1 && !supported) {
-            // **坐标到了、人悬着**：末地虚空就是这么摔死的，这**不算到达**。
-            log(
-                bot,
-                `到了 (${x},${y},${z}) 的坐标，但**脚下没有方块**（悬空/在虚空上方）——这不算到达。` +
-                    '先 placeHere 垫一块、或退回到最近的实心处再继续；别从这里往前走。',
-            );
+            log(bot, `没到 (${x},${y},${z})，因为脚下没有方块。`);
             return false;
         }
         else {
-            log(bot, `Unable to reach ${x}, ${y}, ${z}, you are ${Math.round(distance)} blocks away. ${describeStuck(bot)}`);
+            log(bot, `没到 (${x},${y},${z})，还差 ${Math.round(distance)} 格。${describeStuck(bot)}`);
             return false;
         }
     } catch (err: unknown) {
         const msg: string = err instanceof Error ? err.message : String(err);
-        // **每一类失败都给一句能照做的下一步**（不再是清一色 "Pathfinding stopped"）。
         const diag = classifyPathFailure({
             message: msg,
             dropAhead: readDropAhead(bot, x as number, y as number, z as number),
             noTool: !hasDigTool(bot),
             inWater: isStandingInWater(bot),
         });
-        log(
-            bot,
-            `走不到 (${x}, ${y}, ${z})：${diag.reason}。下一步：${diag.next}。${describeStuck(bot)}`,
-        );
+        log(bot, `没能走到 (${x},${y},${z})，${diag.reason}。${describeStuck(bot)}`);
         return false;
     } finally {
         // 分段/阶梯都会走很多次，间隔一定得在所有出口上关掉。
@@ -4602,7 +4394,6 @@ async function navigateLegWithLadder(
     bot: any,
     leg: PathLeg,
     minDistance: number,
-    label?: string,
     options: { allowWater?: boolean } = {},
 ): Promise<{ ok: boolean; reason: string }> {
     let reason = '寻路失败（没有具体错误信息）';
@@ -4612,40 +4403,29 @@ async function navigateLegWithLadder(
         const waypoint: PathLeg =
             step.side === 0 ? leg : lateralOffsetWaypoint(here, leg, step.side as 1 | -1);
         const goal = new (pf as any).goals.GoalNear(waypoint.x, waypoint.y, waypoint.z, minDistance);
-        const prefix = label != null ? label + '·第 ' + (step.attempt + 1) + ' 档' : '第 ' + (step.attempt + 1) + ' 档';
-        // **换档立刻报一行**（不等这一档跑完）。真机反馈（overnight_b 15:16）：
-        // goToCoordinates 静默 60 秒，只在心跳时回一句"还在跑"，模型分不清
-        // "在慢慢走"和"彻底卡住"。第几段、第几档、这一档在试什么，身体此刻就知道。
-        if (step.attempt > 0 || step.side !== 0) {
-            log(bot, prefix + '：' + step.what + '（马上试这一档）。');
-        }
         let outcome: PathfindOutcome;
         try {
             outcome = await goToGoalDetailed(bot, goal, {
                 attempt: step.attempt,
                 relaxDropDown: step.attempt >= 3,
-                label: prefix + '（' + step.what + '）',
                 allowWater: options.allowWater === true,
             });
         } catch (err: unknown) {
             const msg = err instanceof Error ? err.message : String(err);
             reason = diagnosisText(bot, msg, waypoint);
             if (bot?.interrupt_code) return { ok: false, reason: '被 Stop/保命打断，停止重试。' };
-            log(bot, prefix + '（' + step.what + '）没走通：' + reason + ' 换下一档。');
             continue;
         }
         if (outcome.arrived) {
-            if (step.attempt > 0) log(bot, prefix + '走通了（' + step.what + '）。');
             return { ok: true, reason: '' };
         }
         if (bot?.interrupt_code) return { ok: false, reason: '被 Stop/保命打断，停止重试。' };
         reason = diagnosisText(bot, outcome.message, waypoint, outcome.probeFailed);
-        log(bot, prefix + '（' + step.what + '）没走通：' + reason + ' 换下一档。');
     }
     return { ok: false, reason };
 }
 
-/** 把一次失败翻成"原因 + 下一步"的一句话（回执用）。 */
+/** 把一次失败翻成一句「原因」的事实描述（回执用）。 */
 function diagnosisText(
     bot: any,
     message: string | null,
@@ -4661,7 +4441,7 @@ function diagnosisText(
     });
     // 分类是给人看的归纳，**原始错误**也留着：归纳错了才有得查。
     const raw = message != null && message !== '' && !diag.reason.includes(message) ? `（原始错误：${message}）` : '';
-    return diag.reason + raw + '；下一步：' + diag.next + '。';
+    return diag.reason + raw + '。';
 }
 
 /**
@@ -4680,7 +4460,7 @@ export async function goToBlockFace(bot: any, position: { x: number; y: number; 
     try {
         await goToGoal(bot, goal);
     } catch (err: unknown) {
-        log(bot, `Pathfinding stopped: ${err instanceof Error ? err.message : String(err)}. ${describeStuck(bot)}`);
+        log(bot, `没到 (${position.x}, ${position.y}, ${position.z})，错误是 ${err instanceof Error ? err.message : String(err)}。`);
         return false;
     }
     // GoToBlock 到达即"够得着"，但仍有极少数情况（比如最后一步被挤开）——
@@ -4690,7 +4470,7 @@ export async function goToBlockFace(bot: any, position: { x: number; y: number; 
         log(bot, describeArrival(bot, position.x, position.y, position.z, distance));
         return true;
     }
-    log(bot, `走到了 ${position.x}, ${position.y}, ${position.z} 边上但还差 ${Math.round(distance * 10) / 10} 格（够不着）。${describeStuck(bot)}`);
+    log(bot, `没到 (${position.x}, ${position.y}, ${position.z})，还差 ${Math.round(distance * 10) / 10} 格。${describeStuck(bot)}`);
     return false;
 }
 
@@ -4707,30 +4487,24 @@ export async function goToNearestBlock(bot: any, blockType: string, min_distance
      * **/
     const MAX_RANGE = 512;
     if (range > MAX_RANGE) {
-        log(bot, `Maximum search range capped at ${MAX_RANGE}. `);
+        log(bot, `搜索半径上限 ${MAX_RANGE}，按 ${MAX_RANGE} 搜索。`);
         range = MAX_RANGE;
     }
-    // **先说"开始搜了"**：`getNearestBlock` 是同步遍历，半径 512 时要扫几万个
-    // 已加载方块，期间占住事件循环——一条日志都没有，模型看到的就是"给了
-    // action_id 之后彻底静默"，只能靠 Stop（Feedback #16 原话）。
-    // 先报一句，它至少知道是在搜、而不是卡死。
-    log(bot, `Searching for ${blockType} within ${range} blocks...`);
     if (bot.interrupt_code) {
-        log(bot, `Search interrupted before scanning ${blockType} (Stop/保命打断).`);
+        log(bot, '搜索被 Stop 或保命反射打断了。');
         return false;
     }
     let block: any;
     if (blockType === 'water' || blockType === 'lava') {
         let blocks: any[] = world.getNearestBlocksWhere(bot, (block: any) => block.name === blockType && block.metadata === 0, range, 1);
         if (bot.interrupt_code) {
-            log(bot, `Search interrupted while looking for ${blockType} (Stop/保命打断).`);
+            log(bot, '搜索被 Stop 或保命反射打断了。');
             return false;
         }
         if (blocks.length === 0) {
-            log(bot, `Could not find any source ${blockType} in ${range} blocks, looking for uncollectable flowing instead...`);
             blocks = world.getNearestBlocksWhere(bot, (b: any) => b.name === blockType, range, 1);
             if (bot.interrupt_code) {
-                log(bot, `Search interrupted while looking for flowing ${blockType} (Stop/保命打断).`);
+                log(bot, '搜索被 Stop 或保命反射打断了。');
                 return false;
             }
         }
@@ -4739,17 +4513,15 @@ export async function goToNearestBlock(bot: any, blockType: string, min_distance
     else {
         block = world.getNearestBlock(bot, blockType, range);
         if (bot.interrupt_code) {
-            log(bot, `Search interrupted before navigation (Stop/保命打断).`);
+            log(bot, '搜索被 Stop 或保命反射打断了。');
             return false;
         }
     }
     if (!block) {
-        // 找不到也要**给结论**——模型明确要求过：不管找没找到都要有回执，
-        // "别让调用方只能靠猜"（Feedback #16：长距离搜索什么都不报，它只能 Stop）。
-        log(bot, `Could not find any ${blockType} in ${range} blocks.（搜完了，范围内确实没有）`);
+        log(bot, `在 ${range} 格范围内没有找到 ${blockType}，这个范围内确实没有。`);
         return false;
     }
-    log(bot, `Found ${blockType} at ${block.position}. Navigating...`);
+    log(bot, `Found ${blockType} at ${block.position}.`);
     // **精确寻路到"够得着这个方块"的位置**，而不是"距它 4 格就算到"。
     //
     // 以前这里是 `goToPosition(..., min_distance)`，而 `searchForBlock` 传的
@@ -4852,7 +4624,7 @@ export async function followPlayer(bot: any, username: string, distance: number 
     let doorCheckInterval: ReturnType<typeof setInterval> | null = startDoorInterval(bot);
 
     bot.pathfinder.setGoal(new (pf as any).goals.GoalFollow(player, distance), true);
-    log(bot, `You are now actively following player ${username}.`);
+    log(bot, `Following ${username}.`);
 
 
     while (!bot.interrupt_code) {
@@ -4900,20 +4672,20 @@ async function moveAwaySafely(
     const blockAt = (x: number, y: number, z: number): { name?: unknown } | null => bot.blockAt(new Vec3(x, y, z));
     const choice = chooseSafeFleeTarget(blockAt, from, awayFrom, distance);
     if (!choice.ok) {
-        log(bot, label + ' 找不到安全落点：' + choice.reason + '；不再硬走，改用 pillarUp 向上争取空间。');
+        log(bot, `${label} 找不到安全的落脚点，${choice.reason}。`);
         const climbed = await pillarUp(bot, 1);
-        log(bot, climbed ? label + ' 已向上垫一格，请下一轮重新评估逃跑方向。' : label + ' 向上也失败，留在原地等安全时机。');
+        log(bot, climbed ? `${label} 向上垫了 1 格。` : `${label} 向上也失败。`);
         return climbed;
     }
-    log(bot, label + ' 选到安全落点 @(' + choice.target.x + ',' + choice.target.y + ',' + choice.target.z + ')（' + choice.reason + '）。');
+    log(bot, `${label} 选到安全落点 @(${choice.target.x},${choice.target.y},${choice.target.z})（${choice.reason}）。`);
     const moved = await goToPosition(bot, choice.target.x, choice.target.y, choice.target.z, 0);
     const check = assessStandingSpot(blockAt, choice.target.x, choice.target.y, choice.target.z);
     if (!moved || !check.ok) {
-        log(bot, label + ' 到达/落点校验失败：' + (check.ok ? '路径没走通' : check.reason) + '；停在当前可控位置。');
+        log(bot, `${label} 到达之后落点校验没有通过，${check.ok ? '路径没有走通' : check.reason}。`);
         return false;
     }
     const newPos: any = bot.entity.position;
-    log(bot, label + ' 安全到达 @(' + newPos.x.toFixed(1) + ',' + newPos.y.toFixed(1) + ',' + newPos.z.toFixed(1) + ')。');
+    log(bot, `${label} 到达 @(${newPos.x.toFixed(1)},${newPos.y.toFixed(1)},${newPos.z.toFixed(1)})。`);
     return true;
 }
 
@@ -5432,32 +5204,24 @@ export async function mineBlockAt(bot: any, x: number, y: number, z: number, for
      * @param {number} x, y, z, 目标方块坐标。
      * @returns {Promise<boolean>} 挖掉了返回 true。
      **/
-    // **入口探针**（Lead 2026-10-21：`eb29ade` 后 `mine-progress` 全仓为 0——必须先确定工具
-    // 到底有没有进到这里、以及每次调用是"工具在跑 27 秒"还是"模型两轮之间隔了 27 秒"）。
-    // 无条件写：即使下面 early-return（空气/够不着/承重方块）也能在回执里看见这一行。
-    log(bot, 'mine-block-entry{' + JSON.stringify({ x, y, z }) + '}');
     const target: any = bot.blockAt(new Vec3(x, y, z));
     if (!target) {
         log(bot, `(${x},${y},${z}) 读不到方块。`);
         return false;
     }
     if (target.name === 'air' || target.name === 'cave_air' || target.name === 'void_air') {
-        log(bot, `(${x},${y},${z}) 是空气，不用挖。`);
+        log(bot, `(${x},${y},${z}) 是空气。`);
         return false;
     }
     // **别挖自己的立足点。** 徒手挖软方块放行之后（D2），软方块正好是脚下那格时
     // 会连人带方块一起掉下去——下界岩下面常常就是岩浆海。往前往侧挖不受影响。
     if (isFootingBlock(bot?.entity?.position, target.position)) {
-        log(
-            bot,
-            `不挖 ${target.name} @(${x},${y},${z})：**这是你脚下的承重方块**，拆了会掉下去（下面可能是岩浆或深井）。` +
-                '要往下走用 digDown（它自带岩浆/落差检查）；只想换位置就先挪到旁边一格再挖。',
-        );
+        log(bot, `没有挖 ${target.name} @(${x},${y},${z})，因为它是脚下的承重方块。`);
         return false;
     }
     const dist: number = bot.entity.position.distanceTo(target.position);
     if (dist > 4.5) {
-        log(bot, `${target.name} @(${x},${y},${z}) 离你 ${dist.toFixed(1)} 格，够不着（最多 4.5）。先走过去，或者用 placeBlock 搭个脚点。`);
+        log(bot, `${target.name} @(${x},${y},${z}) 离你 ${dist.toFixed(1)} 格，够不着（上限 4.5）。`);
         return false;
     }
     try {
@@ -5477,23 +5241,12 @@ export async function mineBlockAt(bot: any, x: number, y: number, z: number, for
         }
         // **同一个入口**：mineBlock 以前是裸的 await bot.dig()，8 秒超时没覆盖到它
         // （模型真机报"mineBlock 挖黑曜石空回执×2 + 卡死 280 秒"，而其他 17 格全正常）。
-        // **长动作进度 + 硬上限**（Lead 2026-10-21：mineBlock 117 秒无进度）。
-        const mineStartedAt = Date.now();
-        let mineLastProgressAt = 0;
-        if (shouldEmitProgress(mineLastProgressAt, Date.now())) {
-            mineLastProgressAt = Date.now();
-            log(bot, 'mine-progress{' + JSON.stringify({ block: target.name, x, y, z, elapsedMs: 0 }) + '} ' + formatProgressLine({ label: '挖方块 ', done: 0, total: 1, elapsedMs: 0 }));
-            recordActionProgress(bot, { label: '挖方块', done: 0, total: 1 });
-        }
-        if (Date.now() - mineStartedAt >= LONG_ACTION_MAX_MS) {
-            log(bot, formatTimeoutSummary({ label: '挖方块', done: 0, total: 1, elapsedMs: Date.now() - mineStartedAt, remaining: 1 }));
-            return false;
-        }
+        recordActionProgress(bot, { label: '挖方块', done: 0, total: 1 });
         if (!(await digWithTimeout(bot, target, `@(${x},${y},${z})`))) return false;
         log(bot, `挖掉了 ${target.name} @(${x},${y},${z})。`);
         return true;
     } catch (err: unknown) {
-        log(bot, `挖 ${target.name} @(${x},${y},${z}) 失败：${err instanceof Error ? err.message : String(err)}`);
+        log(bot, `没有挖到 ${target.name} @(${x},${y},${z})，错误是 ${err instanceof Error ? err.message : String(err)}。`);
         return false;
     }
 }
@@ -5831,17 +5584,13 @@ export function pillarApexVerdict(input: {
     if (!input.apexReached) {
         return {
             canPlace: false,
-            message:
-                `pillarUp 停止：跳起来但位置没升（现在 y=${input.bodyY.toFixed(1)}，目标格 ${cell} 仍在身体里）——` +
-                '头顶多半被挡。先 mineBlock 挖开头顶那一格，再 pillarUp；窄井里也可以改用 stairUp。',
+            message: `pillarUp 停下来了，因为跳起来之后位置没有升上去，y 还是 ${input.bodyY.toFixed(1)}，目标格 ${cell} 仍在身体里。`,
         };
     }
     if (input.intersectsAtApex === true) {
         return {
             canPlace: false,
-            message:
-                `pillarUp 停止：**要放的格子就是我现在站的位置**（目标格 ${cell}，身体在 y=${input.bodyY.toFixed(1)}` +
-                '——feet/head 都在里面），这一次不放；先 mineBlock 挖开头顶那一格，或换位置。',
+            message: `pillarUp 停下来了，因为目标格 ${cell} 和身体重叠，身体在 y=${input.bodyY.toFixed(1)}。`,
         };
     }
     return { canPlace: true, message: null };
@@ -5854,7 +5603,7 @@ export async function pillarUp(bot: any, blocks: number = 1): Promise<boolean> {
     // 而且"要爬这么多"本身就是上游判定出错的信号。超上限就只爬上限，并说清。
     const wanted = Math.min(requested, MAX_VERTICAL_CLIMB_PER_CALL);
     if (requested > wanted) {
-        log(bot, `pillarUp：请求 ${requested} 格超过单次上限 ${MAX_VERTICAL_CLIMB_PER_CALL} 格，只垫 ${wanted} 格（要更高请分几次，或先确认目标高度是不是搞错了）。`);
+        log(bot, `pillarUp 这次请求上升 ${requested} 格，上限是 ${MAX_VERTICAL_CLIMB_PER_CALL} 格，所以只垫 ${wanted} 格。`);
     }
     const choice = choosePillarMaterialChoice(
         bot?.inventory?.items?.() as Array<{ name?: unknown; count?: unknown }>,
@@ -5862,49 +5611,42 @@ export async function pillarUp(bot: any, blocks: number = 1): Promise<boolean> {
         (bot?.registry?.blocksByName ?? null) as Record<string, BlockDefLike> | null,
     );
     if (choice == null) {
-        log(bot, 'pillarUp 失败：背包里没有可垫脚的方块（圆石/深板岩/泥土/木板/原木这类整块都行）。');
+        log(bot, 'pillarUp 没有做成，因为背包里没有可以垫脚的方块。');
         return false;
     }
     const material = choice.name;
     // 数量不够就只垫得到的格数：比在第 N 格突然断供、回执还说不清强。
     const target = choice.shortfall ? choice.count : wanted;
-    log(
-        bot,
-        'pillarUp 开始：目标 ' + wanted + ' 格，选了 ' + material +
-            '（背包剩 ' + choice.count + ' 个，需要 ' + wanted + ' 个' +
-            (choice.shortfall ? '——不够，最多垫 ' + choice.count + ' 格' : '') +
-            '），当前 y=' + Number(bot?.entity?.position?.y ?? 0).toFixed(1) + '。',
-    );
     if (bot?.interrupt_code) {
-        log(bot, 'pillarUp 中断：Stop/保命打断，一步没走。');
+        log(bot, '被 Stop 或保命反射打断了，还没有开始。');
         return false;
     }
     if (!(await equip(bot, material))) {
-        log(bot, 'pillarUp 失败：拿不到 ' + material + '。');
+        log(bot, `pillarUp 失败了，因为拿不到 ${material}。`);
         return false;
     }
     const deadline = Date.now() + Math.max(30_000, wanted * 8_000);
     let done = 0;
     while (done < target) {
         if (bot.interrupt_code) {
-            log(bot, 'pillarUp 中断：Stop/保命打断，已完成 ' + done + '/' + wanted + ' 格。');
+            log(bot, `pillarUp 被 Stop 或保命反射打断了，已经垫了 ${done} 格，目标是 ${wanted} 格。`);
             return false;
         }
         if (Date.now() > deadline) {
-            log(bot, 'pillarUp 超时：已完成 ' + done + '/' + wanted + ' 格，先停在这里。');
+            log(bot, `pillarUp 超时了，已经垫了 ${done} 格，目标是 ${wanted} 格。`);
             return false;
         }
         const feet = bot.entity.position;
         const blockAt = (x: number, y: number, z: number): { name?: unknown } | null => bot.blockAt(new Vec3(x, y, z));
         const plan = planPillarStep(blockAt, { x: feet.x, y: feet.y, z: feet.z });
         if (plan.kind === 'blocked') {
-            log(bot, 'pillarUp 停止：' + plan.reason + '（已完成 ' + done + '/' + wanted + ' 格）。');
+            log(bot, `pillarUp 停下来了，${plan.reason}，已经垫了 ${done} 格，目标是 ${wanted} 格。`);
             return false;
         }
         if (plan.kind === 'mine') {
             const dug = await breakBlockAt(bot, plan.target.x, plan.target.y, plan.target.z, true);
             if (!dug) {
-                log(bot, 'pillarUp 停止：挖头顶方块失败（已完成 ' + done + '/' + wanted + ' 格）。');
+                log(bot, 'pillarUp 停下来了，因为挖头顶方块失败，已经垫了 ' + done + ' 格，目标是 ' + wanted + ' 格。');
                 return false;
             }
             // **挖了却还是实心 ⇒ 不许原地循环重挖**（真机 A：回执只有 dig 行反复出现，
@@ -5913,9 +5655,7 @@ export async function pillarUp(bot: any, blocks: number = 1): Promise<boolean> {
             if (stillThere != null && !isVerticalPassable(stillThere)) {
                 log(
                     bot,
-                    'pillarUp 停止：挖了 (' + plan.target.x + ',' + plan.target.y + ',' + plan.target.z + ') 的 ' +
-                        stillThere + '，但那里**仍然是实心**（方块没更新/是挖不动的方块）——不再原地重挖。' +
-                        '下一步：换位置重试，或先 mineBlock 那一格确认能挖掉。',
+                    `pillarUp 停止：挖了 (${plan.target.x},${plan.target.y},${plan.target.z}) 的 ${stillThere}，仍然实心。`,
                 );
                 return false;
             }
@@ -5937,16 +5677,14 @@ export async function pillarUp(bot: any, blocks: number = 1): Promise<boolean> {
             1600,
             40,
         );
-        let placed = false;
+        let placed: boolean;
         if (apexReached) {
             // **守卫保留**：放的那一刻再验一次，方块绝不能落在身体里。
             if (cellIntersectsBody(bot?.entity?.position, standingCell) === true) {
                 const p = bot.entity.position;
                 log(
                     bot,
-                    'pillarUp 停止：目标格 ' + standingCell.x + ',' + standingCell.y + ',' + standingCell.z +
-                        ' 与身体重叠（身体在 ' + Number(p.x).toFixed(1) + ',' + Number(p.y).toFixed(1) + ',' + Number(p.z).toFixed(1) +
-                        '），这一步不放——先 mine 头顶一格再试。',
+                    `pillarUp 停止：目标格 ${standingCell.x},${standingCell.y},${standingCell.z} 与身体重叠。`,
                 );
                 bot.setControlState('jump', false);
                 return false;
@@ -5971,9 +5709,7 @@ export async function pillarUp(bot: any, blocks: number = 1): Promise<boolean> {
                         const rescueY = headFilled ? by + 1 : by;
                         log(
                             bot,
-                            'pillarUp：放块之后**自己的身体格子被占住了**（' +
-                                (headFilled ? '头部 ' + String(headBlk) : '脚下 ' + String(feetBlk)) +
-                                '），正在挖掉自救——这一格本来绝不该被填。已垫 ' + done + '/' + wanted + ' 格。',
+                            `pillarUp：放块后身体格子被占（${headFilled ? `头部 ${String(headBlk)}` : `脚下 ${String(feetBlk)}`}），已挖掉自救（已垫 ${done}/${wanted} 格）。`,
                         );
                         await breakBlockAt(bot, bx, rescueY, bz, true);
                     }
@@ -5987,9 +5723,7 @@ export async function pillarUp(bot: any, blocks: number = 1): Promise<boolean> {
             const p = bot.entity.position;
             log(
                 bot,
-                'pillarUp 停止：跳起来但位置没升（现在 y=' + Number(p.y).toFixed(1) + '，目标格 ' +
-                    standingCell.x + ',' + standingCell.y + ',' + standingCell.z + ' 仍在身体里）——' +
-                    '头顶多半被挡。先 mineBlock 挖开头顶那一格，再 pillarUp；窄井里也可以改用 stairUp。',
+                `pillarUp 停止：跳起来但位置没升（y=${Number(p.y).toFixed(1)}，目标格 ${standingCell.x},${standingCell.y},${standingCell.z} 仍在身体里）。`,
             );
             return false;
         }
@@ -5998,21 +5732,20 @@ export async function pillarUp(bot: any, blocks: number = 1): Promise<boolean> {
         const placedCell = standingCell;
         if (placed && cellIntersectsBody(bot?.entity?.position, placedCell) === true) {
             const rescued = await breakBlockAt(bot, placedCell.x, placedCell.y, placedCell.z, true);
-            log(bot, 'pillarUp 紧急自救：方块落进了身体里，' + (rescued ? '已立刻挖掉' : '**没能挖掉**——先 Stop 再 mineBlock') + '（位置 ' + placedCell.x + ',' + placedCell.y + ',' + placedCell.z + '）。');
+            log(bot, `pillarUp 紧急自救时有一块方块落进了身体，${rescued ? '已经挖掉' : '没有挖掉'}，位置在 (${placedCell.x},${placedCell.y},${placedCell.z})。`);
             return false;
         }
         if (!placed) {
-            log(bot, 'pillarUp 第 ' + (done + 1) + ' 格失败：没能把 ' + material + ' 垫到脚下。');
+            log(bot, 'pillarUp 垫第 ' + (done + 1) + ' 格时失败，没能把 ' + material + ' 垫到脚下。');
             return false;
         }
         await waitFor(bot, () => bot?.entity?.onGround === true, 2500, 50);
         done++;
-        log(bot, 'pillarUp 进度 ' + done + '/' + wanted + '：现在 y=' + Number(bot.entity.position.y).toFixed(1) + '。');
     }
     if (done >= wanted) {
         // **"完成"=人站在柱子上**，不是"方块放下了"。真机 2026-10-19：报「pillarUp 完成/
         // 已到达」，实际人悬空掉进虚空。所以放完必须确认脚下有东西、且真的站住了。
-        let standing = false;
+        let standing: boolean;
         try {
             await waitFor(bot, () => bot?.entity?.onGround === true, 1500, 50);
             standing = bot?.entity?.onGround === true;
@@ -6026,7 +5759,7 @@ export async function pillarUp(bot: any, blocks: number = 1): Promise<boolean> {
             standing = true; // 读不到不谎报失败
         }
         if (!standing) {
-            log(bot, 'pillarUp：垫了 ' + done + ' 格，但**人没有站在柱子上**（脚下仍然没有方块）——不算完成，别往前走。');
+            log(bot, `pillarUp 垫了 ${done} 格，但脚下没有方块。`);
             return false;
         }
         // **完成也要由实测高度门控**（Lead 2026-10-21：与 stairUp 同款缺陷——报的是计划不是事实）。
@@ -6035,15 +5768,14 @@ export async function pillarUp(bot: any, blocks: number = 1): Promise<boolean> {
         if (pillarClimb <= 0.4) {
             log(
                 bot,
-                'pillarUp **没有升上去**：垫了 ' + done + ' 格，y 仍是 ' + pillarEndY.toFixed(1) +
-                    '（起点 ' + pillarStartY.toFixed(1) + '）——先 mineBlock 头顶那一格，或检查脚下依附面。',
+                `pillarUp 没有升上去：垫了 ${done} 格，y 仍是 ${pillarEndY.toFixed(1)}（起点 ${pillarStartY.toFixed(1)}）。`,
             );
             return false;
         }
-        log(bot, 'pillarUp 完成：实际上升 ' + pillarClimb + ' 格（目标 ' + wanted + '，已确认站在柱子上，现在 y=' + pillarEndY.toFixed(1) + '）。');
+        log(bot, `pillarUp 完成了，上升了 ${pillarClimb} 格，目标是 ${wanted} 格。`);
         return true;
     }
-    log(bot, 'pillarUp 结束：只垫了 ' + done + '/' + wanted + ' 格（背包里的 ' + material + ' 用完了）。');
+    log(bot, `pillarUp 结束了，只垫了 ${done} 格，目标是 ${wanted} 格，因为 ${material} 已经用完。`);
     return false;
 }
 
@@ -6053,7 +5785,7 @@ export async function stairUp(bot: any, blocks: number = 1, force: boolean = fal
     // 同 pillarUp：单次上限（真机出现过 258 格的"上地表"）。
     const wanted = Math.min(requested, MAX_VERTICAL_CLIMB_PER_CALL);
     if (requested > wanted) {
-        log(bot, `stairUp：请求 ${requested} 格超过单次上限 ${MAX_VERTICAL_CLIMB_PER_CALL} 格，只上 ${wanted} 格（要更高请分几次，或先确认目标高度是不是搞错了）。`);
+        log(bot, `stairUp 这次请求上升 ${requested} 格，上限是 ${MAX_VERTICAL_CLIMB_PER_CALL} 格，所以只上 ${wanted} 格。`);
     }
     const choice = choosePillarMaterialChoice(
         bot?.inventory?.items?.() as Array<{ name?: unknown; count?: unknown }>,
@@ -6063,24 +5795,16 @@ export async function stairUp(bot: any, blocks: number = 1, force: boolean = fal
     const material = choice?.name ?? null;
     // 数量不够就只垫得到的格数（同上：别在第 N 格断供）。
     const target = choice != null && choice.shortfall ? choice.count : wanted;
-    log(
-        bot,
-        'stairUp 开始：目标 ' + wanted + ' 格，' + (choice == null
-            ? '材质 无（只能挖台阶）'
-            : '选了 ' + choice.name + '（背包剩 ' + choice.count + ' 个，需要 ' + wanted + ' 个' +
-                (choice.shortfall ? '——不够，最多垫 ' + choice.count + ' 格' : '') + '）') +
-            '，当前 y=' + Number(bot?.entity?.position?.y ?? 0).toFixed(1) + '。',
-    );
     const deadline = Date.now() + Math.max(30_000, wanted * 8_000);
     let done = 0;
     const stairStartY = Number(bot?.entity?.position?.y ?? 0);
     while (done < target) {
         if (bot.interrupt_code) {
-            log(bot, 'stairUp 中断：Stop/保命打断，已完成 ' + done + '/' + wanted + ' 格。');
+            log(bot, `stairUp 被 Stop 或保命反射打断了，已经上了 ${done} 格，目标是 ${wanted} 格。`);
             return false;
         }
         if (Date.now() > deadline) {
-            log(bot, 'stairUp 超时：已完成 ' + done + '/' + wanted + ' 格，先停在这里。');
+            log(bot, `stairUp 超时了，已经上了 ${done} 格，目标是 ${wanted} 格。`);
             return false;
         }
         const feet = bot.entity.position;
@@ -6088,28 +5812,27 @@ export async function stairUp(bot: any, blocks: number = 1, force: boolean = fal
         const blockAt = (x: number, y: number, z: number): { name?: unknown } | null => bot.blockAt(new Vec3(x, y, z));
         const plan = planStairStep(blockAt, { x: feet.x, y: feet.y, z: feet.z }, dir.dx, dir.dz);
         if (plan.kind === 'blocked') {
-            log(bot, 'stairUp 停止：' + plan.reason + '（已完成 ' + done + '/' + wanted + ' 格）。');
+            log(bot, `stairUp 停下来了，${plan.reason}，已经上了 ${done} 格，目标是 ${wanted} 格。`);
             return false;
         }
         if (plan.kind === 'mine') {
             const dug = await breakBlockAt(bot, plan.target.x, plan.target.y, plan.target.z, force);
             if (!dug) {
-                log(bot, 'stairUp 停止：挖 ' + plan.target.x + ',' + plan.target.y + ',' + plan.target.z + ' 失败（已完成 ' + done + '/' + wanted + ' 格）。');
+                log(bot, `stairUp 停下来了，因为挖 (${plan.target.x},${plan.target.y},${plan.target.z}) 失败，已经上了 ${done} 格，目标是 ${wanted} 格。`);
                 return false;
             }
             continue;
         }
         if (plan.kind === 'place_step') {
             if (material == null) {
-                log(bot, 'stairUp 停止：前方要垫脚但背包里没有方块。');
+                log(bot, 'stairUp 停下来了，因为前方要垫脚，而背包里没有方块。');
                 return false;
             }
             const placed = await placeBlock(bot, material, plan.target.x, plan.target.y, plan.target.z, 'bottom', true);
             if (!placed) {
                 log(
                     bot,
-                    'stairUp：往 (' + plan.target.x + ',' + plan.target.y + ',' + plan.target.z + ') 垫 ' + material +
-                        ' 失败（那一格周围没有可依附的实心方块，或已经被占）。改用 pillarUp 在当前位置直着垫高 1 格。',
+                    `stairUp：往 (${plan.target.x},${plan.target.y},${plan.target.z}) 垫 ${material} 失败。`,
                 );
                 // **F-10 第二半：放不下就改成"原地往上垫"。** 真机里 stairUp 在窄通道/
                 // 悬空处就是这么卡的（`Cannot place oak_planks at …: nothing to place on`）：
@@ -6117,50 +5840,38 @@ export async function stairUp(bot: any, blocks: number = 1, force: boolean = fal
                 // 而且 pillarUp 自己会先把头顶挖开（2 格高通道）。
                 const climbed = await pillarUp(bot, 1);
                 if (!climbed) {
-                    log(bot, 'stairUp 停止：垫脚失败，pillarUp 也没能上升（已完成 ' + done + '/' + wanted + ' 格）。');
+                    log(bot, `stairUp 停下来了，因为垫脚失败，pillarUp 也没能上升，已经上了 ${done} 格，目标是 ${wanted} 格。`);
                     return false;
                 }
                 done++;
-                log(
-                    bot,
-                    'stairUp 进度 ' + done + '/' + wanted + '：换 pillarUp 在脚下垫了 1 格，现在 y=' +
-                        Number(bot.entity.position.y).toFixed(1) + '。',
-                );
                 continue;
             }
         }
         // **统一走到移动原语**：不再让寻路器钻进 1×1 的洞（四个工具同一个病）。
         const step = await stepIntoCellClearing(bot, { x: Math.floor(feet.x) + dir.dx, y: Math.floor(feet.y) + 1, z: Math.floor(feet.z) + dir.dz  });
         if (!step.moved) {
-            log(bot, 'stairUp 第 ' + (done + 1) + ' 格失败：' + String(step.reason) + (step.cleared.length > 0 ? '（已顺手挖开：' + step.cleared.join('、') + '）' : '') + ' 建议：先 mineBlock 掉头上那一格，再用 pillarUp 原地垫高 1 格。');
+            log(bot, `stairUp 垫第 ${done + 1} 格时失败，${String(step.reason)}${step.cleared.length > 0 ? `，已经挖开了 ${step.cleared.join('、')}` : ''}。`);
             return false;
         }
         done++;
-        log(bot, 'stairUp 进度 ' + done + '/' + wanted + '：现在 y=' + Number(bot.entity.position.y).toFixed(1) + '。');
     }
     // **"完成"必须由实测高度门控**（Lead 2026-10-21 真机 A：进度里 y 一直没变，
     // 最后却写「stairUp 完成 / 上升 10 格」——测的是计划不是事实）。
     const stairEndY = Number(bot?.entity?.position?.y ?? stairStartY);
     const measuredClimb = Math.round((stairEndY - stairStartY) * 10) / 10;
     if (done >= wanted && measuredClimb > 0.4) {
-        log(bot, 'stairUp 完成：实际上升 ' + measuredClimb + ' 格（目标 ' + wanted + '），现在 y=' + stairEndY.toFixed(1) + '。');
+        log(bot, `stairUp 完成了，上升了 ${measuredClimb} 格，目标是 ${wanted} 格。`);
         return true;
     }
     if (done >= wanted && measuredClimb <= 0.4) {
-        log(
-            bot,
-            'stairUp **没有升上去**：y 仍是 ' + stairEndY.toFixed(1) + '（目标 ' + wanted + '，挖了 ' + done +
-                ' 格但没走上去）——先确认头顶/脚下空间，用 mineBlock 挖开那一格，或改用 pillarUp。',
-        );
+        log(bot, `stairUp 没有升上去，y 仍然是 ${stairEndY.toFixed(1)}，目标是 ${wanted} 格。`);
         return false;
     }
-    log(bot, 'stairUp 结束：只上了 ' + done + '/' + wanted + ' 格（实测 y=' + stairEndY.toFixed(1) + '，没材料也没能挖出台阶）。');
+    log(bot, `stairUp 结束了，只上了 ${done} 格，目标是 ${wanted} 格，当前 y 是 ${stairEndY.toFixed(1)}。`);
     return false;
 }
 
 export async function digDown(bot: any, distance: number = 10, force: boolean = false): Promise<boolean> {
-    // **入口探针**（同上：区分"工具真在跑"与"两次调用之间的间隔"）。
-    log(bot, 'dig-down-entry{' + JSON.stringify({ distance }) + '}');
     /**
      * Digs down a specified distance. Will stop if it reaches lava, water, or a fall of >=4 blocks below the bot.
      * @param {MinecraftBot} bot, reference to the minecraft bot.
@@ -6174,13 +5885,12 @@ export async function digDown(bot: any, distance: number = 10, force: boolean = 
 
     // **长动作进度 + 硬上限**（Lead 2026-10-21：digDown 88 秒零位移、零信息）。
     const digStartedAt = Date.now();
-    let digLastProgressAt = 0;
     const digStartY = Number(bot?.entity?.position?.y ?? 0);
     for (let i = 1; i <= distance; i++) {
         // Stop / 保命打断要先于下一铲：不然 ActionManager.stop 只能等 10 秒
         // 再杀进程，整晚反复回出生点。
         if (bot.interrupt_code) {
-            log(bot, 'Dug down ' + (i - 1) + ' blocks, but Stop was requested (stopping before digging further).');
+            log(bot, `被 Stop 打断了，已经挖了 ${i - 1} 格，目标是 ${distance} 格。`);
             return false;
         }
 
@@ -6190,42 +5900,26 @@ export async function digDown(bot: any, distance: number = 10, force: boolean = 
         const verdict = classifyDigDownStep(blockAt, feet, i);
 
         if (verdict.kind === 'stop') {
-            // **停下必须给一个真能成功的下一步**（真机：模型只被告知"停了"，然后原样重试）。
-            // 水/岩浆这类挡住竖井的，正确动作是**横向绕开**再继续，而不是原地再挖一次。
-            const reason = verdict.reason;
-            const blockedByFluid = /water|lava|flowing_|not diggable/i.test(reason);
-            const advice = blockedByFluid
-                ? '水/岩浆挡在竖井下面，**原地重挖没有用**。绕行方案（按顺序试）：' +
-                  '① 先横向走 2-3 格再 digDown（水不会跟着你走）：goToCoordinates 到旁边再挖；' +
-                  '② 目标是往下的高度就用 stairUp/digDown 的斜台阶绕开水层；' +
-                  '③ 水面上方要下去，先 placeHere 垫一块方块站上去再挖，别直接挖穿含水层。'
-                : '';
-            log(bot, 'Dug down ' + (i - 1) + ' blocks, but stopped: ' + reason + '.' + (advice ? ' ' + advice : ''));
+            log(bot, `Dug down ${i - 1} blocks, but stopped: ${verdict.reason}.`);
             return false;
         }
-        // 每轮先报进度：`dig-progress{done,total,elapsedMs,fromY,toY}` + 人话（复用统一格式）。
-        if (shouldEmitProgress(digLastProgressAt, Date.now())) {
-            digLastProgressAt = Date.now();
-            const nowY = Number(bot?.entity?.position?.y ?? 0);
-            const elapsed = Date.now() - digStartedAt;
-            log(bot, 'dig-progress{' + JSON.stringify({ done: i - 1, total: distance, elapsedMs: elapsed, fromY: Math.round(digStartY * 10) / 10, toY: Math.round(nowY * 10) / 10 }) + '} ' + formatProgressLine({ label: '向下挖', done: i - 1, total: distance, elapsedMs: elapsed }));
-            recordActionProgress(bot, { label: '向下挖', done: i - 1, total: distance, fromY: digStartY, toY: nowY });
-        }
+        // 进度记录只喂卡死判定，不写回执。
+        const nowY = Number(bot?.entity?.position?.y ?? 0);
+        recordActionProgress(bot, { label: '向下挖', done: i - 1, total: distance, fromY: digStartY, toY: nowY });
         if (Date.now() - digStartedAt >= LONG_ACTION_MAX_MS) {
-            log(bot, formatTimeoutSummary({ label: '向下挖', done: i - 1, total: distance, elapsedMs: Date.now() - digStartedAt, remaining: distance - (i - 1) }));
+            log(bot, `向下挖超时了，已经挖了 ${i - 1} 格，目标是 ${distance} 格。`);
             return false;
         }
         if (verdict.kind === 'skip_air') {
-            log(bot, 'Skipping air block at (' + verdict.target.x + ',' + verdict.target.y + ',' + verdict.target.z + ').');
+            log(bot, `(${verdict.target.x},${verdict.target.y},${verdict.target.z}) 是空气，跳过。`);
             continue;
         }
 
         const dug: boolean = await breakBlockAt(bot, verdict.target.x, verdict.target.y, verdict.target.z, force);
         if (!dug) {
-            log(bot, 'Dug down ' + (i - 1) + ' blocks, failed to dig block at (' + verdict.target.x + ',' + verdict.target.y + ',' + verdict.target.z + ').');
+            log(bot, `Dug down ${i - 1} blocks, failed to dig block at (${verdict.target.x},${verdict.target.y},${verdict.target.z}).`);
             return false;
         }
-        log(bot, 'Dug down ' + i + '/' + distance + ' blocks (broke (' + verdict.target.x + ',' + verdict.target.y + ',' + verdict.target.z + ')).');
         // **挖完必须真的下去**（真机 2026-10-20：「Skipping air block… 挖了 4/80 格」后 GoalChanged）。
         // 这一动作以前完全没有——只挖不走，于是人停在洞口、下一铲继续挖空气。
         const sunkInto = await stepIntoCellClearing(bot, { x: verdict.target.x, y: verdict.target.y, z: verdict.target.z });
@@ -6262,11 +5956,9 @@ export async function digDown(bot: any, distance: number = 10, force: boolean = 
                 }
             })();
             if (viaPath) {
-                log(bot, 'Dug down ' + i + '/' + distance + ' blocks 后原语没推进，寻路器进去了（继续往下）。');
                 continue;
             }
-            log(bot, 'Dug down ' + (i - 1) + ' blocks 后**下不去**：' + String(sunkInto.reason) + '。');
-            log(bot, '建议：先 mineBlock 掉那一格再走；若那是空气/水，改用 goToCoordinates 移到旁边再 digDown，或用 placeHere 垫一块站上去再挖。');
+            log(bot, `向下挖了 ${i - 1} 格之后下不去了，${String(sunkInto.reason)}。`);
             return false;
         }
     }
@@ -6398,18 +6090,18 @@ export async function goToSurface(bot: any): Promise<boolean> {
         { x: pos.x, y: pos.y, z: pos.z },
     );
     if (choice.chosen == null) {
-        log(bot, 'goToSurface 失败：' + choice.reason + '。没有做任何攀爬（不会把你往上垫）。');
+        log(bot, 'goToSurface 没有做成，' + choice.reason + '，所以没有做任何攀爬。');
         return false;
     }
     const block = { name: choice.chosen.name, position: { x: choice.chosen.x, y: choice.chosen.y, z: choice.chosen.z } };
     const targetY: number = choice.chosen.standY;
     const dy: number = targetY - pos.y;
-    log(bot, 'goToSurface：' + choice.reason + '。');
+    log(bot, 'goToSurface 没有做成，' + choice.reason + '。');
     for (const rej of choice.rejected) {
-        log(bot, 'goToSurface：y=' + rej.y + ' 那格上面没有当成地表——' + rej.why + '。');
+        log(bot, 'goToSurface 没有把 y=' + rej.y + ' 那一格当成地表，因为' + rej.why + '。');
     }
     if (bot.interrupt_code) {
-        log(bot, 'goToSurface 中断：Stop/保命打断，一步没走。');
+        log(bot, 'goToSurface 被 Stop 或保命反射打断了，一步也没有走。');
         return false;
     }
     if (dy >= 4) {
@@ -6417,14 +6109,14 @@ export async function goToSurface(bot: any): Promise<boolean> {
         // （每一块都来自背包，而且"爬 258 格"本身就是判定出错的信号）。
         const need = Math.min(Math.ceil(dy), SURFACE_MAX_CLIMB);
         const material = choosePillarMaterial(bot?.inventory?.items?.() as Array<{ name?: unknown; count?: unknown }>);
-        log(bot, 'goToSurface：高差 ' + dy.toFixed(1) + ' 格，先用 ' + (material != null ? 'pillarUp' : 'stairUp') + ' 垂直上行 ' + need + ' 格（上限 ' + SURFACE_MAX_CLIMB + '）。');
+        log(bot, 'goToSurface 要上升 ' + dy.toFixed(1) + ' 格，所以先用 ' + (material != null ? 'pillarUp' : 'stairUp') + ' 垂直上行 ' + need + ' 格，上限是 ' + SURFACE_MAX_CLIMB + ' 格。');
         const climbed = material != null ? await pillarUp(bot, need) : await stairUp(bot, need);
         if (bot.interrupt_code) {
-            log(bot, 'goToSurface 中断：垂直上行被 Stop/保命打断。');
+            log(bot, 'goToSurface 的垂直上行被 Stop 或保命反射打断了。');
             return false;
         }
         if (!climbed) {
-            log(bot, 'goToSurface：垂直上行没能完成，继续尝试普通寻路（失败会说明卡在哪）。');
+            log(bot, 'goToSurface 的垂直上行没有完成，接下来继续试普通寻路，失败时会说明卡在哪里。');
         }
     }
     const arrived = await goToPosition(bot, block.position.x, targetY, block.position.z, 0);
@@ -6554,9 +6246,8 @@ export async function useToolOn(bot: any, toolName: string, targetName: string):
             if (block.metadata !== 0) {
                 log(
                     bot,
-                    `附近只有流动${targetName === 'water' ? '水' : '岩浆'}（${block.position}，${chosenDist.toFixed(1)} 格）——` +
-                        `流动水装不进桶，得找**源头方块**（平静的、不流动的那一格）。` +
-                        `64 格内${source == null ? '也没有找到源头方块' : `最近的源头在 ${source.position}`}。`,
+                    `附近只有流动${targetName === 'water' ? '水' : '岩浆'}（${block.position}，${chosenDist.toFixed(1)} 格）；` +
+                        `64 格内${source == null ? '没有源头方块' : `最近源头在 ${source.position}`}。`,
                 );
             } else {
                 log(bot, `Using ${block.name} at ${block.position} (${chosenDist.toFixed(1)} blocks away, source block).`);
@@ -6671,9 +6362,8 @@ export async function useToolOn(bot: any, toolName: string, targetName: string):
                 // **归因要对。** 对流动水用桶本来就不可能成功，怪"准星没对准"
                 // 会让模型一直对着它重试（它自述重试了 6 次）。
                 block.metadata !== 0 && (block.name === 'water' || block.name === 'lava')
-                    ? `对 ${block.name} 用了 ${toolName}，没装进去：**这是流动水/岩浆，桶装不了**——要找源头方块（不流动的那一格）。` +
-                        `换一个目标，别对着它再试。`
-                    : `对 ${block.name} 用了 ${toolName}，但物品没变化——准星多半没真的对着它（或者够不着/被方块挡住）。往目标挪近、正对着再来一次。`,
+                    ? `对 ${block.name} 用了 ${toolName}，没装进去：这是流动${block.name === 'water' ? '水' : '岩浆'}。`
+                    : `对 ${block.name} 用了 ${toolName}，物品没变化。`,
             );
             return false;
         }
@@ -6752,7 +6442,7 @@ export function closeStaleWindow(bot: any): boolean {
     // 没有 provider（老调用方/纯单元测试）才回退到旧判据，行为不变。
     const provider = (bot as { __residualScreenOpen?: unknown } | null)?.__residualScreenOpen;
     if (typeof provider === 'function') {
-        let verdict: unknown = null;
+        let verdict: unknown;
         try {
             verdict = (provider as () => unknown)();
         } catch {
@@ -7045,7 +6735,7 @@ async function withWindowTimeout<T>(
 /**
  * 单次打开（内部用）：超时口径统一在 `withWindowTimeout`。
  */
-async function openWithTimeout(bot: any, block: any, furnaceLike: boolean, timeoutMs: number): Promise<any> {
+function openWithTimeout(bot: any, block: any, furnaceLike: boolean, timeoutMs: number): Promise<any> {
     return withWindowTimeout(furnaceLike ? bot.openFurnace(block) : bot.openContainer(block), timeoutMs);
 }
 
@@ -7088,7 +6778,7 @@ export async function craftWithStaleWindowGuard(
     const inventoryBefore: Record<string, number> = countInventory();
     for (let attempt = 0; attempt <= retries; attempt++) {
         if (closeStaleWindow(bot)) {
-            log(bot, '合成之前先关掉了残留的界面（上一次会话/动作留下的）。');
+            log(bot, '已关掉残留的界面。');
         }
         try {
             // **合成窗口也要取证**（Lead 2026-10-19 ①）：`bot.craft` 自己开 3×3 窗口，
@@ -7152,7 +6842,7 @@ export async function craftWithStaleWindowGuard(
             closeStaleWindow(bot);
             // **别的错误不是窗口问题**：原样抛（重试也没有意义）。
             if (!isWindowOpenTimeout(err)) throw err;
-            if (attempt < retries) log(bot, `合成没等到工作台窗口事件（${Math.round(timeoutMs / 1000)} 秒上限）；已清残留，重试一次。`);
+            if (attempt < retries) log(bot, `合成没有等到工作台窗口打开，等了 ${Math.round(timeoutMs / 1000)} 秒，清理残留之后重试一次。`);
         }
     }
     const raw = lastError instanceof Error ? lastError.message : String(lastError);
@@ -7201,11 +6891,11 @@ export async function jump(bot: any): Promise<boolean> {
     const leftGround = await waitFor(bot, () => bot.entity?.onGround === false, 1200);
     bot.setControlState('jump', false);
     if (!leftGround) {
-        log(bot, '跳不起来：可能头顶被方块挡住了。');
+        log(bot, '跳不起来，因为头顶被方块挡住了。');
         return false;
     }
     const landed = await waitFor(bot, () => bot.entity?.onGround === true, 3000);
-    log(bot, landed ? '跳了一下，已经落地。' : '跳起来后 3 秒还没落地（可能掉进洞里了）。');
+    log(bot, landed ? '跳了一下，已经落地。' : '没有落地，3 秒内没有回到地面。');
     return landed;
 }
 
@@ -7292,13 +6982,13 @@ export async function moveBy(
 ): Promise<boolean> {
     if (bot == null || typeof bot.setControlState !== 'function') return false;
     if (!MOVE_DIRECTIONS.includes(direction)) {
-        log(bot, `不认识的方向 ${direction}；可用：${MOVE_DIRECTIONS.join('、')}。`);
+        log(bot, `不认识这个方向 ${direction}，可用的方向有 ${MOVE_DIRECTIONS.join('、')}。`);
         return false;
     }
     // 上限兜底：走远路是 goToCoordinates 的活，这里只做"挪几格"。
     const MAX_STEP = 64;
     if (!(distance > 0) || distance > MAX_STEP) {
-        log(bot, `距离要大于 0 且不超过 ${MAX_STEP} 格（更远请用 goToCoordinates），收到的是 ${distance}。`);
+        log(bot, `距离 ${distance} 格超出了范围，范围是 1 到 ${MAX_STEP} 格。`);
         return false;
     }
     // **不转身**，靠"前/后/左/右"按键换算（契约见 atomic_actions 测试）。
@@ -7398,12 +7088,12 @@ export async function moveBy(
 
     if (hazardStop != null) {
         const roundedHazard = Math.round(moved * 10) / 10;
-        log(bot, `朝${direction}前方是${hazardStop}，已挪 ${roundedHazard} 格就停下（不会走进岩浆）。`);
+        log(bot, `朝${direction}前方是${hazardStop}，已挪 ${roundedHazard} 格，停下。`);
         return false;
     }
     const rounded = Math.round(moved * 10) / 10;
     if (moved >= distance - 0.2) {
-        log(bot, `朝${direction}走了 ${rounded} 格（目标 ${distance} 格）${mode === 'sneak' ? '，走完已站起' : ''}。`);
+        log(bot, `朝${direction}走了 ${rounded} 格（目标 ${distance} 格）${mode === 'sneak' ? '，已站起' : ''}。`);
         return true;
     }
     // **卡住要说清楚卡成什么样**（2026-10-23：这条以前只报"被挡住了"，操作者不知道
@@ -7413,8 +7103,8 @@ export async function moveBy(
     log(
         bot,
         `朝${direction}只前进了 ${rounded} 格（目标 ${distance} 格）；实际总位移 ${totalRounded} 格` +
-            (totalRounded > rounded + 0.5 ? '（**方向偏了**：走了但没朝目标方向走）' : '（**没迈开步**：被方块/水/边缘挡住）') +
-            '。可以换方向、先挖开挡路的方块，或改用 goToCoordinates。',
+            (totalRounded > rounded + 0.5 ? '（方向偏了）' : '（没迈开步）') +
+            '。',
     );
     return false;
 }
@@ -7438,7 +7128,7 @@ export function setPosture(bot: any, posture: string): string {
         bot.setControlState('sneak', false);
         return '站起来了，不再潜行。';
     }
-    return `不认识的姿态 ${posture}；可用：sneak（蹲下）、stand（站起）。`;
+    return `不认识这个姿态 ${posture}，可用的有 sneak 表示蹲下，stand 表示站起。`;
 }
 
 /**
@@ -7587,12 +7277,12 @@ export async function lookInDirection(bot: any, direction: string, pitch?: numbe
     if (name === 'up' || name === 'down') {
         const target = name === 'up' ? 90 : -90;
         const result = await setLookDegrees(bot, beforeYaw, target, true);
-        log(bot, '视角转到朝' + (name === 'up' ? '上' : '下') + '：pitch ' + result.beforePitch.toFixed(1) + '° → ' + result.afterPitch.toFixed(1) + '°。');
+        log(bot, '视角转到了朝' + (name === 'up' ? '上' : '下') + '，pitch 从 ' + result.beforePitch.toFixed(1) + ' 度变成 ' + result.afterPitch.toFixed(1) + ' 度。');
         return true;
     }
     const yawDeg = DIRECTION_YAW[name];
     if (yawDeg == null) {
-        log(bot, '不认识的方位 ' + direction + '；可用：north、south、east、west、up、down。');
+        log(bot, '不认识这个方位 ' + direction + '，可用的有 north、south、east、west、up、down。');
         return false;
     }
     const targetPitch = typeof pitch === 'number' ? Math.max(-90, Math.min(90, pitch)) : 0;

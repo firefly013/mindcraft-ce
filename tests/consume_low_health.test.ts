@@ -19,7 +19,7 @@ describe('consume：存粮规则只警告、不拒绝', () => {
     expect(code).not.toMatch(/const lowHealthEmergency/);
     // 存粮块里不许再出现 return false
     const start = code.indexOf('const edibleTotal = edibles.reduce');
-    const block = code.slice(start, code.indexOf('let failures: string[] = [];', start));
+    const block = code.slice(start, code.indexOf('const failures: string[] = [];', start));
     expect(block).not.toContain('return false');
   });
 
@@ -27,7 +27,7 @@ describe('consume：存粮规则只警告、不拒绝', () => {
     const code = skills();
     expect(code).toContain('edibleTotal <= FOOD_RESERVE_MIN');
     expect(code).toContain('before.food >= FOOD_RESERVE_COMFORT');
-    expect(code).toContain('短期内没吃的了');
+    expect(code).toContain('背包里只剩 ${edibleTotal} 份能吃的');
     // 关键：吃完那一下也要把警告打出来，否则模型只看到"吃成了"
     expect(code).toContain("if (reserveWarning !== '') log(bot, reserveWarning);");
   });

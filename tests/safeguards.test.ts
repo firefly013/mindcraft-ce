@@ -61,14 +61,13 @@ describe('次数制授权', () => {
     const text = p.describe(T0);
     expect(text).toContain('ignite');
     expect(text).toContain('4 次');
-    expect(text).toContain('点地狱门');
   });
 
   it('次数制过期（被 revoke 或用尽）后 describe 回到默认', () => {
     const p = createPermits();
     p.grantCalls(null, 1, 'x', T0);
     p.consumeCall(T0);
-    expect(p.describe(T0)).toContain('没有任何授权');
+    expect(p.describe(T0)).toContain('我现在没有任何危险操作的授权。');
   });
 
   it('0 或负数会被兜成 1 次（不给"申请 0 次就等于关闸门"这种玩法）', () => {
@@ -119,13 +118,12 @@ describe('保命开关', () => {
     expect(s.isSuppressed(T0)).toBe(false);
   });
 
-  it('describe 说清代价（出事没人救），模型得知道自己签了什么', () => {
+  it('describe 只报关闭状态与剩余额度', () => {
     const s = createSafeguards();
     s.suppressCalls(3, '挖洞留空气', T0);
     const text = s.describe(T0);
-    expect(text).toContain('已关闭');
+    expect(text).toContain('保命程序已经关闭，还能用 3 次');
     expect(text).toContain('3 次');
-    expect(text).toContain('出事没人救');
   });
 });
 
@@ -140,7 +138,7 @@ describe('一键恢复两层保护', () => {
 
     // 授权没了，内部豁免票也该没了 —— 否则"立刻恢复"里有残留。
     expect(p.isAllowed('enter_deep_water', dry, T0).allowed).toBe(false);
-    expect(p.describe(T0)).toContain('没有任何授权');
+    expect(p.describe(T0)).toContain('我现在没有任何危险操作的授权。');
     expect(p.describe(T0)).not.toContain('内部豁免');
   });
 

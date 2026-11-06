@@ -53,8 +53,7 @@ describe('接线：不确定就别结算、并给包级证据', () => {
     const code = interact();
     expect(code).toContain('const slotsTrust = furnaceSlotsVerdict({');
     expect(code).toContain('furnaceInput: uncertainAllZero ? null : slots.input,');
-    expect(code).toContain('两件事互相矛盾');
-    expect(code).toContain('这次**不结算**');
+    expect(code).toContain('读数存疑');
   });
 
   it('身体：合成/熔炉各自的窗口诊断事件（含槽位快照）', () => {

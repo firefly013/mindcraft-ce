@@ -112,25 +112,27 @@ export function formatCreeperReflexReceipt(result: CreeperResult): string {
               : result.threatClass === 'creeper'
                 ? '苦力怕'
                 : '威胁';
-    if (result.action === 'yield') return '威胁逼近，但身体被更高优先级反射占用（死亡恢复/重生循环）——反射让位。';
+    if (result.action === 'yield') return '这次反射让位了，身体被更高优先级的反射占着。';
     if (result.action === 'cover') {
         const damageText =
-            damage == null ? '掉血读不到' : damage === 0 ? '这一轮没再中箭' : `中箭掉血 ${damage}`;
-        const slowNote = result.outcome === 'tooLate' ? '——慢了一步' : '';
-        return `${cls} ${dist}、血 ${healthAfter ?? '读不到'}：退到掩体（${damageText}）${slowNote}。`;
+            damage == null ? '掉血读不到' : damage === 0 ? '这一轮没有中箭' : `中了箭，掉了 ${damage} 点血`;
+        return `${cls}在 ${dist} 外，我的血量是 ${healthAfter ?? '读不到'}，我退到了掩体后面，${damageText}。`;
     }
     if (result.outcome === 'blocked') {
-        return `苦力怕 ${dist} 扑过来：举盾挡住（掉血 ${damage == null ? '读不到' : damage === 0 ? '0' : damage}）。`;
+        return `苦力怕在 ${dist} 外扑过来，我举盾挡住了，掉了 ${damage == null ? '读不到' : damage === 0 ? '0' : damage} 点血。`;
     }
     if (result.outcome === 'tooLate') {
-        return `来不及，被炸了（掉血 ${damage == null ? '读不到' : damage}）。`;
+        return `我没来得及，被炸了，掉了 ${damage == null ? '读不到' : damage} 点血。`;
     }
     if (result.outcome === 'tookDamage') {
-        return `苦力怕 ${dist}：盾没完全挡住/被炸到（掉血 ${damage == null ? '读不到' : damage}）。`;
+        return `苦力怕在 ${dist} 外，盾没完全挡住，掉了 ${damage == null ? '读不到' : damage} 点血。`;
     }
     // ran：只报实测距离，不说"躲过了"
-    return `没盾，跑了 ${result.ranBlocks == null ? '（距离读不到）' : `${Math.round(result.ranBlocks)} 格`}${result.steps != null ? `（${result.steps} 步）` : ''}；苦力怕是否炸/炸在原地没有观测到` +
-        `${damage != null && damage > 0 ? `（掉血 ${damage}）` : ''}。`;
+    return (
+        `我没盾，跑了 ${result.ranBlocks == null ? '多少格读不到' : `${Math.round(result.ranBlocks)} 格`}` +
+        `${result.steps != null ? `，一共 ${result.steps} 步` : ''}，苦力怕有没有炸没有观测到` +
+        `${damage != null && damage > 0 ? `，我掉了 ${damage} 点血` : ''}。`
+    );
 }
 
 // ─────────────────────────── 威胁分类：同一个反射，不再只认苦力怕 ───────────────────────────

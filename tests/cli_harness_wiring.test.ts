@@ -169,7 +169,7 @@ describe('测试台事件链路：L5 → 作废 → completes → 续做（与�
     expect(h.scheduler.locked).toBe(false);
     expect(h.calls).toHaveLength(2);
     expect(h.calls[1].args).toEqual({ x: 4, y: 64, z: 4 });
-    expect(resumed.some((line) => line.includes('已替你续做 travelTo'))).toBe(true);
+    expect(resumed.some((line) => line.includes('已经替你接着做 travelTo'))).toBe(true);
   });
 });
 

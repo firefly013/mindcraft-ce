@@ -392,29 +392,23 @@ export function describeViewDirection(pitch: unknown, yaw: unknown): string | nu
   // **`null` 不是 0**：`Number(null) === 0` ⇒ 直转会把"没读到"读成"平视"（就是今晚那条
   // fail-open 的同款坑）。先判类型，再谈数值。
   if (pitch == null || yaw == null) {
-    return `视线：**读不到**（pitch/yaw 读数不可用）⇒ **不要假设现在是平视**；判断地形前先看 Position 行，或先 \`stats(type="body")\`。`;
+    return '我读不到现在的视线方向。';
   }
   const p = Number(pitch);
   const y = Number(yaw);
   if (!Number.isFinite(p) || !Number.isFinite(y)) {
     // **读不到 ≠ 平视**：说清"读不到"，否则这一行永远说不出自己是不是被跳过了。
-    return `视线：**读不到**（pitch/yaw 读数不可用）⇒ **不要假设现在是平视**；判断地形前先看 Position 行，或先 \`stats(type="body")\`。`;
+    return '我读不到现在的视线方向。';
   }
   const pitchDeg = (p * 180) / Math.PI;
   // 水平朝向取 `getViewDirection(pitch, yaw)` 的 x/z 分量：**两项都是负的**
   // （(−sin yaw, −cos yaw)）。以前 z 项漏了负号 ⇒ 正对北会报"S"。
   const compass = compassOf(-Math.sin(y), -Math.cos(y));
   if (pitchDeg >= SKY_PITCH_DEG) {
-    return (
-      `视线：**朝天空**（pitch +${pitchDeg.toFixed(0)}°，仰视，朝 ${compass}）——` +
-      '画面里基本没有地面，**这时的截图不能用来判断地形/挖向**（纯天空色是正常的），看 near key blocks。'
-    );
+    return `这张图拍的时候我的视线朝向天空，俯仰角是正 ${pitchDeg.toFixed(0)} 度，面朝${compassName(compass)}。`;
   }
   if (pitchDeg <= DOWN_PITCH_DEG) {
-    return (
-      `视线：**几乎垂直向下**（pitch ${pitchDeg.toFixed(0)}°，俯视，朝 ${compass}）——` +
-      '只能看到脚下几格，判断远处地形/走位不可靠。'
-    );
+    return `这张图拍的时候我的视线几乎垂直向下，俯仰角是负 ${Math.abs(pitchDeg).toFixed(0)} 度，面朝${compassName(compass)}。`;
   }
   return null; // 平视：**这一种**沉默才是一个字都不加
 }
@@ -443,17 +437,39 @@ function heldDurabilitySuffix(h: LiveHeld): string {
   const max = h.mainHandDurabilityMax;
   if (used != null && max != null && max > 1) {
     const remain = Math.max(0, max - used);
-    const pct = h.mainHandDurability != null ? `，${Math.round(h.mainHandDurability * 100)}%` : '';
-    return `（耐久 ${used}/${max}，还剩 ${remain}${pct}）`;
+    const pct = h.mainHandDurability != null ? `，相当于 ${Math.round(h.mainHandDurability * 100)}%` : '';
+    return `，耐久已经用了 ${used} 点，一共 ${max} 点，还能用 ${remain} 点${pct}`;
   }
   if (used != null) {
-    const bogus = h.mainHandDurabilityMaxInvalid === true ? '（读到的上限是无效值，已忽略）' : '';
-    return `（耐久读数 used=${used}，上限读不到${bogus}——算不出剩余次数）`;
+    const bogus = h.mainHandDurabilityMaxInvalid === true ? '，而且读到的总耐久是无效值，已经忽略' : '';
+    return `，耐久用了 ${used} 点，但读不到总耐久，算不出还能用几次${bogus}`;
   }
   if (max != null) {
-    return `（耐久上限 ${max}，但已用读数读不到——算不出剩余次数）`;
+    return `，总耐久是 ${max} 点，但读不到已经用掉多少，算不出还能用几次`;
   }
   return '';
+}
+
+/** 罗盘缩写换成中文方向，回执里读起来才顺。 */
+function compassName(short: string): string {
+  const names: Record<string, string> = {
+    N: '北',
+    NE: '东北',
+    E: '东',
+    SE: '东南',
+    S: '南',
+    SW: '西南',
+    W: '西',
+    NW: '西北',
+  };
+  return names[short] ?? short;
+}
+
+/** 背包里的 `dirtx11` 这种写法换成「dirt 11 个」。 */
+function itemPhrase(raw: string): string {
+  const matched = /^(?:\*)?(?:\[\d+\])?(.+?)x(\d+)$/.exec(raw);
+  if (matched == null) return raw;
+  return `${matched[1]} ${matched[2]} 个`;
 }
 
 /** 每段渲成若干行：有的段有附带行（backpack 的 totals、entities 的 farther merged）。 */
@@ -463,89 +479,58 @@ const SECTION_RENDERERS: Record<LiveSectionKey, (s: LiveState) => string[]> = {
     // oxygen 故意不显示：mineflayer 的 oxygenLevel 在 1.20.6 上取不到 air_supply，
     // 会出现 -1、"干燥洞窟里 0"这种不可能的读数（模型真机报过），摆出来只会误导判断。
     // 水下安全改用 submerged（头+脚都是水）那条独立信号。
-    const lines = [
-      `Body: health ${b.health ?? UNKNOWN} food ${b.food ?? UNKNOWN} saturation ${b.saturation ?? UNKNOWN} ` +
-        `xp ${b.xpLevel ?? UNKNOWN} pose ${b.pose ?? UNKNOWN} ` +
-        `onGround ${b.onGround ?? UNKNOWN} effects ${b.effects.length > 0 ? b.effects.join(', ') : 'none'}`,
+    const onGround =
+      b.onGround === true ? '现在站在地面上' : b.onGround === false ? '现在没站在地面上' : '读不到现在有没有站在地面上';
+    const effects =
+      b.effects.length > 0 ? `身上有状态效果，分别是 ${b.effects.join('、')}` : '身上没有任何状态效果';
+    return [
+      `我的血量是 ${b.health ?? '读不到'}，饱食度是 ${b.food ?? '读不到'}，饱和度是 ${b.saturation ?? '读不到'}，` +
+        `经验等级是 ${b.xpLevel ?? '读不到'}，姿势是 ${b.pose ?? '读不到'}，${onGround}，${effects}。`,
     ];
-    // **"低血 + 无食物"是死锁，必须说出来**（2026-10-22 真机：overnight_a 卡在
-    // hp 0.73 整整 15 分钟不动——不是快死，是**根本死不掉也好不了**：
-    // 饱食度 0、背包里没有任何食物 ⇒ Minecraft 的回血机制不会启动；
-    // 而 hp 0.73 又不敢去打动物。引擎知道这两件事，却从没告诉过它。）
-    // 这只是事实 + 两条出路，不是门控。
-    const hp = typeof b.health === 'number' ? b.health : null;
-    const food = typeof b.food === 'number' ? b.food : null;
-    if (hp != null && hp <= 8 && food != null && food <= 10) {
-      lines.push(
-        '- **回血死锁**：血量低，而饱食度是 0 时 Minecraft **不会自然回血**——' +
-          '光等是永远不会好起来的。你必须弄到食物：`huntFor` 打动物、`getFood` 找现成的、' +
-          '或有小麦就种/有骨头就骨粉催熟。**在这个血量下跟任何敌对生物打架都会死**，' +
-          '优先去找最容易到手的食物（羊/牛/猪/鸡），别下矿、别远行。',
-      );
-    }
-    return lines;
   },
   // 危险操作许可：默认全禁，要用得先授权。**必须让模型看得见**——否则
   // 它不知道自己现在能不能倒水/点火，只能靠"试一下被拒"来发现，那是最贵的发现方式。
-  ops: (s) => [`DangerousOps: ${s.dangerousOps}`, `Safeguards: ${s.safeguards}`],
+  ops: (s) => [`危险操作这边，${s.dangerousOps}。保命程序这边，${s.safeguards}。`],
   held: (s) => {
     const h = s.held;
     // **"不知道"不许写成"空"**（真机 2026-10-18：进程重启后第一份快照读成
     // `Held: main empty` / `Backpack: empty`，而物品其实一直在——玩家数据里
     // dirt×11 好端端躺着，模型据此以为自己丢了全部家当，从零开始重新采集）。
-    // **"不知道"不许写成"空"，但也不许写成"东西还在"**（两次真机教训，方向相反）：
-    //  2026-10-18：重启后第一份快照读成 `Backpack: empty`，物品其实在 ⇒ 模型以为丢光、从零重采。
-    //  2026-10-21：修成"物品还在，别重采"之后，overnight_a 真的**空包**却被反复告知"物品还在"，
-    //              于是它不去采集，在 y=33 原地耗了 2 小时（日志 inventory-sync-stuck itemCount:0）。
-    // 正确说法：**读数不可知**（可能空也可能有），并给一个能确认的动作。
     if (h.synced === false) {
-      return [
-        'Held: main 读数未同步（**不可知，可能空也可能有东西**，别据此断言手上没东西，也别据此以为还有） ' +
-          'off 读数未同步 armor 读数未同步',
-      ];
+      return ['手上和护甲的读数都还没同步，现在不知道实际拿着什么。'];
     }
-    return [
-      `Held: main ${h.mainHand ?? 'empty'}${heldDurabilitySuffix(h)} ` +
-        `off ${h.offHand ?? 'empty'} armor ${h.armor.length > 0 ? h.armor.join('/') : 'none'}`,
-    ];
+    const main =
+      h.mainHand != null && h.mainHand !== '' && h.mainHand !== 'empty'
+        ? `我主手拿着 ${itemPhrase(h.mainHand)}${heldDurabilitySuffix(h)}`
+        : '我主手是空的';
+    const off =
+      h.offHand != null && h.offHand !== '' && h.offHand !== 'empty'
+        ? `副手拿着 ${itemPhrase(h.offHand)}`
+        : '副手是空的';
+    const armor = h.armor.length > 0 ? `身上穿着 ${h.armor.map(itemPhrase).join('、')}` : '身上没有穿护甲';
+    return [`${main}，${off}，${armor}。`];
   },
   backpack: (s) => {
     if (s.backpack.synced === false) {
-      return [
-        'Backpack: **读数未同步（不可知：可能空、也可能有东西）**。' +
-          '**两种说法都是猜，别据此判定丢东西，也别据此以为还有**。' +
-          '要确认就做一件会回执的事：collectBlocks(oak_log) 砍一个、或 equip 一件工具——回执会告诉你实际拿到了什么。',
-      ];
+      return ['背包读数还没同步，现在不知道里面有什么。'];
     }
-    const lines = [
-      `Backpack (free ${s.backpack.freeSlots ?? UNKNOWN}): ${s.backpack.items.length > 0 ? s.backpack.items.join(', ') : 'empty'}`,
-    ];
+    const free = s.backpack.freeSlots == null ? '读不到还剩几个空格' : `还剩 ${s.backpack.freeSlots} 个空格`;
+    const items =
+      s.backpack.items.length > 0
+        ? `里面装着 ${s.backpack.items.map(itemPhrase).join('、')}`
+        : '里面是空的';
+    const lines = [`背包${free}，${items}。`];
     const totals = aggregateTotals(s.backpack.items);
-    if (totals.length > 0) lines.push(`- totals: ${totals.join(', ')}`);
-    // **价值感知的风险提示**（2026-10-22 真机惨痛数据点，Lead 亲眼看着丢的）：
-    // overnight_b 在 y=-29 挖到 diamond×8、捡到 flint_and_steel、**合成出 diamond_pickaxe**，
-    // 当时 hp 8/20、food 1；它继续在地下活动，然后死了一次——
-    // **钻石镐、5 颗钻石、打火石、4 个铁锭全部掉落**，下界门的两件关键道具一次清零。
-    // 根因不是某个 bug，而是**引擎不知道"它身上的东西值多少"**：
-    // 空手时 hp 10 不算危险；拿着钻石镐和打火石时 hp 18 就该收工。
-    // 这只是一条**事实提示**（不是门控）：把"身上这东西有多难重来"摆到模型眼前，让它自己决定。
-    const highValue = s.backpack.items.filter((item) =>
-      /^(diamond|diamond_pickaxe|diamond_sword|diamond_axe|netherite.*|emerald|ender_pearl|blaze_rod|.*_ingot|flint_and_steel|obsidian|ancient_debris|eye_of_ender|totem_of_undying)$/
-        .test(String(item).replace(/x\d+$/, '')),
-    );
-    if (highValue.length > 0) {
-      lines.push(
-        `- **价值提示**：身上有不可替代/难重来的东西（${highValue.join(', ')}）。` +
-          '**血低或食物见底时先把它们带回家或放进箱子，别在危险的地方硬扛。**',
-      );
-    }
+    if (totals.length > 0) lines.push(`按同类合并之后，${totals.map(itemPhrase).join('、')}。`);
     return lines;
   },
   position: (s) => {
     const p = s.position;
+    const speed = p.speed == null ? '移动速度读不到' : `移动速度是每秒 ${p.speed} 格`;
     return [
-      `Position (此刻): ${p.x ?? UNKNOWN},${p.y ?? UNKNOWN},${p.z ?? UNKNOWN} facing yaw ${p.yaw ?? UNKNOWN} pitch ${p.pitch ?? UNKNOWN} ` +
-        `speed ${p.speed ?? UNKNOWN} dimension ${p.dimension ?? UNKNOWN} biome ${p.biome ?? UNKNOWN}`,
+      `我现在在 (${p.x ?? '读不到'}, ${p.y ?? '读不到'}, ${p.z ?? '读不到'})，` +
+        `偏航角是 ${p.yaw ?? '读不到'}，俯仰角是 ${p.pitch ?? '读不到'}，${speed}，` +
+        `所在维度是 ${p.dimension ?? '读不到'}，生物群系是 ${p.biome ?? '读不到'}。`,
     ];
   },
   /**
@@ -554,87 +539,102 @@ const SECTION_RENDERERS: Record<LiveSectionKey, (s: LiveState) => string[]> = {
    * 真机（overnight_a）：pitch ≈ −87°~−90°（几乎垂直朝上）时两张截图整片是天空色，
    * bot 以为"渲染坏了/掉进虚空"，其实**画面是对的** —— 它缺的是"我现在朝上"这条元数据。
    * 所以：只有视线**不寻常**时才加这一行（俯仰超出临界角），平视时一个字都不加。
-   * 这一行放在截图块里（下面 `screenshot` 段），因为它描述的是"这张图在拍什么"。
    */
   environment: (s) => {
     const e = s.environment;
-    return [
-      `Environment: day ${e.day ?? UNKNOWN} time ${e.timeOfDay ?? UNKNOWN} weather ${e.weather} light ${e.light ?? UNKNOWN} (confidence ${e.lightConfidence})`,
-    ];
+    const weather =
+      e.weather === 'Clear' ? '晴天' : e.weather === 'Rain' ? '下雨' : e.weather === 'Thunderstorm' ? '雷暴' : '读不到';
+    const light =
+      e.light == null
+        ? '光照读不到'
+        : e.lightConfidence === 'high'
+          ? `光照是 ${e.light}，这个读数可信`
+          : `光照是 ${e.light}，但读数可能已经过期`;
+    return [`这是第 ${e.day ?? '读不到'} 天，游戏内时间是 ${e.timeOfDay ?? '读不到'}，天气是${weather}，${light}。`];
   },
   entities: (s) => {
-    const head = `Nearby entities (within ${PERCEPTION_RADIUS}: ${s.entities.length}${s.entitiesTruncated > 0 ? `+${s.entitiesTruncated} more` : ''})`;
+    const truncated = s.entitiesTruncated > 0 ? `，更远处可能还有 ${s.entitiesTruncated} 个` : '';
+    if (s.entities.length === 0) {
+      return [`${PERCEPTION_RADIUS} 格内没有其他实体${truncated}。`];
+    }
     const lines = [
-      `${head}:\n${s.entities.map((x) => `- ${x.name}#${x.id} ${x.distance}m (${x.x},${x.y},${x.z})${x.health != null ? ` hp ${x.health}` : ''}${x.tag != null ? ` (${x.tag})` : ''}`).join('\n') || 'none'}`,
+      `${PERCEPTION_RADIUS} 格内有 ${s.entities.length} 个实体${truncated}，最近的几个是这些。`,
+      ...s.entities.map((x) => {
+        const health = x.health != null ? `，血量是 ${x.health}` : '';
+        const tag = x.tag != null ? `，另外 ${x.tag}` : '';
+        return `${x.name} 的编号是 ${x.id}，离我 ${x.distance} 格，在 (${x.x}, ${x.y}, ${x.z})${health}${tag}。`;
+      }),
     ];
     if (s.entitiesSummary.length > 0) {
-      lines.push(`- farther (merged): ${s.entitiesSummary.join(', ')}`);
+      lines.push(`更远处的实体合并之后，${s.entitiesSummary.map(itemPhrase).join('、')}。`);
     }
     return lines;
   },
   blocks: (s) => {
-    const head = `Nearby key blocks (within ${PERCEPTION_RADIUS}: ${s.blocks.length}${s.blocksTruncated > 0 ? `+${s.blocksTruncated} more` : ''})`;
+    const truncated = s.blocksTruncated > 0 ? `，更远处可能还有 ${s.blocksTruncated} 个` : '';
+    if (s.blocks.length === 0) {
+      return [`${PERCEPTION_RADIUS} 格内没有关键方块${truncated}。`];
+    }
     const lines = [
-      `${head}:\n${s.blocks.map((x) => `- ${x.name} ${x.distance}m (${x.x},${x.y},${x.z})`).join('\n') || 'none'}`,
+      `${PERCEPTION_RADIUS} 格内有 ${s.blocks.length} 个关键方块${truncated}，最近的几个是这些。`,
+      ...s.blocks.map((x) => `${x.name} 离我 ${x.distance} 格，在 (${x.x}, ${x.y}, ${x.z})。`),
     ];
     if (s.blocksSummary.length > 0) {
-      lines.push(`- farther (merged): ${s.blocksSummary.join(', ')}`);
+      lines.push(`更远处的方块合并之后，${s.blocksSummary.map(itemPhrase).join('、')}。`);
     }
     return lines;
   },
   screenshot: (s) => {
     if (s.screenshot.ref != null) {
       const age = Date.now() - s.screenshot.ref.takenAt;
-      const head = `Screenshot: ${s.screenshot.ref.file} (taken ${Math.max(0, Math.round(age / 1000))}s ago)`;
+      const lines = [`有一张截图，文件是 ${s.screenshot.ref.file}，是 ${Math.max(0, Math.round(age / 1000))} 秒前拍的。`];
       // **裁决写进第一行**（overnight_b：多轮靠猜"这图能不能信"，把恶地岩壁当树冠、
-      // 把锻造台当传送门框架）。可靠性必须**被告知**，不能让模型每帧自己推断；
-      // 数字也在这一行里，所以这个说法是可核对的。
+      // 把锻造台当传送门框架）。可靠性必须**被告知**，不能让模型每帧自己推断。
       const trust = s.screenshot.trust;
       const verdict = trust != null && trust.usable === false ? (trust.verdict ?? '') : '';
-      const lines = [`${head}${verdict === '' ? '' : ` ${verdict}`}`];
-      // **先说"这张图在拍什么"（上下文），再说"这张图可不可信"（怀疑）** —— 顺序是有意的：
-      // 上下文明明可以把一张"全天空"的图解释清楚，先给怀疑会让模型把正常画面也当成坏的。
-      //
+      if (verdict !== '') lines.push(verdict);
       // **朝向只认这一帧自己的**（`screenshot.view`，拍摄时记录的）：绝不拿 `position.pitch`
-      // 顶替 —— 那是"现在身体朝哪"，和图可能差好几秒（真机：文字说朝天空、图里是水平隧道）。
-      // 没有这一帧的朝向 ⇒ **什么都不说**（宁可不说，也不说一个可能是假的朝向）。
+      // 顶替 —— 那是"现在身体朝哪"，和图可能差好几秒。
       const view =
         s.screenshot.view != null
           ? describeViewDirection(s.screenshot.view.pitch, s.screenshot.view.yaw)
           : null;
       if (view != null) lines.push(view);
-      // **颜色是独立事实，不并进"可不可信"**：丢颜色的图画质可读（认方块可以），
-      // 只是不能靠颜色认材质（真机 overnight_b：同会话里全灰帧时有时无）。
+      // **颜色是独立事实，不并进"可不可信"**。
       const color = s.screenshot.color;
       if (color != null && color.grayscale === true) {
-        // **判据写进消息**，让这个说法可核对：彩色像素占比（阈值 ≥24 算彩色）+
-        // 95 分位（尾部强度）+ 平均（次要）。平均低不等于没颜色 —— 灰墙面积会把它拉平。
         const fractionPct = Math.round(color.colouredFraction * 1000) / 10;
         lines.push(
-          `颜色：**这张图丢了颜色**（已测：彩色像素 ${fractionPct}%（彩度 ≥24 算彩色；判灰 <2%），` +
-            `95 分位 ${color.p95}，平均彩度 ${color.mean}）——` +
-            '**认方块可以，但别靠颜色认材质/判断"这是不是同一种方块"**。',
+          `这张图丢了颜色，彩色像素只占 ${fractionPct}%，彩度在 24 以上才算彩色，低于 2% 就判成灰图，` +
+            `彩度的 95 分位是 ${color.p95}，平均彩度是 ${color.mean}。`,
         );
       }
       // 裁决为空串时（老数据/异常）回落到详细说明，**绝不静默**；
-      // 但**可用**的帧一个字都不加（不误报 —— 否则视觉通道会被"每帧都警告"淹掉）。
+      // 但**可用**的帧一个字都不加（不误报）。
       const line = trust?.line ?? '';
       if (trust != null && trust.usable === false && verdict === '' && line !== '') lines.push(line);
       return lines;
     }
-    return [`Screenshot: none (${s.screenshot.unavailableReason ?? UNKNOWN})`];
+    return [`现在没有可用的截图，原因是 ${s.screenshot.unavailableReason ?? '读不到'}。`];
   },
-  goal: (s) => [
-    `Goal: ${s.goal ?? 'none'} Todos: ${
-      s.todos.length > 0 ? s.todos.map((t) => `${t.done ? '✓' : '○'}${t.text}`).join('; ') : 'none'
-    }`,
-  ],
-  meta: (s) => [
-    `Meta: gamemode ${s.meta.gamemode ?? UNKNOWN} screen ${s.meta.openScreen ?? 'none'} ` +
-      `action ${s.meta.currentAction ?? 'idle'} posture ${s.meta.posture ?? 'standing'}`,
-  ],
+  goal: (s) => {
+    const goal = s.goal == null || s.goal === '' ? '现在没有设定目标' : `现在的目标是 ${s.goal}`;
+    const todos =
+      s.todos.length === 0
+        ? '也没有待办事项'
+        : `待办事项里，${s.todos
+            .map((t) => (t.done ? `已经完成 ${t.text}` : `还没完成 ${t.text}`))
+            .join('，')}`;
+    return [`${goal}，${todos}。`];
+  },
+  meta: (s) => {
+    const screen = s.meta.openScreen == null ? '现在没有打开任何界面' : `现在打开的界面是 ${s.meta.openScreen}`;
+    return [
+      `游戏模式是 ${s.meta.gamemode ?? '读不到'}，${screen}，` +
+        `正在执行的动作是 ${s.meta.currentAction ?? 'idle'}，身体姿势是 ${s.meta.posture ?? 'standing'}。`,
+    ];
+  },
 };
-
 /** 只渲指定段落（`stats(type=…)` 用）。顺序以 `keys` 为准。 */
 export function renderSections(s: LiveState, keys: readonly LiveSectionKey[]): string {
   const lines: string[] = [];

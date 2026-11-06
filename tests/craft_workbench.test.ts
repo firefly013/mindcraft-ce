@@ -90,7 +90,7 @@ describe('skills.craftRecipe：3×3 金靴（工作台路径）', () => {
     const bot = makeBot({ gold_ingot: 4 }, { table: false });
     const ok = await craftRecipe(bot, 'golden_boots', 1);
     expect(ok).toBe(false);
-    expect(String(bot.output)).toContain('requires a crafting table');
+    expect(String(bot.output)).toContain('没有工作台');
     expect(bot._crafted).toHaveLength(0);
   });
 
@@ -98,7 +98,7 @@ describe('skills.craftRecipe：3×3 金靴（工作台路径）', () => {
     const bot = makeBot({});
     const ok = await craftRecipe(bot, 'gold_boots', 1);
     expect(ok).toBe(false);
-    expect(String(bot.output)).toContain('not an item');
+    expect(String(bot.output)).toContain('不是物品');
   });
 
   it('金锭不够 → 写清材料不够，且不调用 craft', async () => {

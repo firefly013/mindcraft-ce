@@ -97,15 +97,12 @@ export function planWaterHuntNotice(input: WaterHuntNoticeInput): WaterHuntNotic
     if (input.landAnimals == null || input.landAnimals > 0) return { notice: false, text: '' };
     if (input.elapsedMs < HUNT_WATER_EARLY_STOP_MS) return { notice: false, text: '' };
     const target = String(input.targetName ?? '水生动物').replace(/^minecraft:/, '');
-    const repeat =
-        input.attempts >= 2
-            ? `（这是第 ${input.attempts} 次空转——同样的死路不要再花整段预算）`
-            : '';
+    const repeat = input.attempts >= 2 ? `，这已经是第 ${input.attempts} 次空转` : '';
     return {
         notice: true,
         text:
-            `**${target} 在水里 ${Math.round(input.distance)} 格，我在岸上**${repeat}。` +
-            '已空转 ' + Math.round(input.elapsedMs / 1000) + ' 秒，没有移动也没有攻击命中。' +
-            '附近 48 格内陆生动物：无。要么继续等它上岸/换角度，要么 Stop 换目标——怎么选由你。',
+            `${target} 还在水里，离我 ${Math.round(input.distance)} 格，我在岸上守着${repeat}。` +
+            `到现在已经空了 ${Math.round(input.elapsedMs / 1000)} 秒，这段时间没有移动，也没有打中任何东西。` +
+            '附近 48 格内没有陆生动物。',
     };
 }

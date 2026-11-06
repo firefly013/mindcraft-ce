@@ -52,16 +52,15 @@ describe('判定：该拒的必须拒', () => {
   it('① 保命反射正在跑 ⇒ 拒（中途静音就是 F-23 的另一扇门）', () => {
     const verdict = disableSafeguardsVerdict(facts({ reflex: 'escape', reflexMs: 18_000 }));
     expect(verdict.allowed).toBe(false);
-    expect(verdict.text).toContain('拒绝');
+    expect(verdict.text).toContain('现在不能关闭保命，因为保命反射 escape 正在跑，已经 18 秒。');
     expect(verdict.text).toContain('escape');
     expect(verdict.text).toContain('18 秒');
-    expect(verdict.text).toContain('stop()');
   });
 
   it('② 血 3.87 + 15 米外有怪 ⇒ 拒，理由写清、不排下一步（真机现场）', () => {
     const verdict = disableSafeguardsVerdict(facts({ health: 3.87, hostileMeters: 15, food: 8 }));
     expect(verdict.allowed).toBe(false);
-    expect(verdict.text).toContain('3.87 血');
+    expect(verdict.text).toContain('现在不能关闭保命，因为你的血量只有 3.87，15 格外还有敌对生物。');
     expect(verdict.text).toContain('15 格');
     // 2026-10-30：只有"身体被反射占着"才给下一步（stop），其余只报原因
     expect(verdict.text).not.toContain('下一步（照做即可）');
@@ -70,7 +69,7 @@ describe('判定：该拒的必须拒', () => {
   it('② 血 3.87 但**周围什么都没有** ⇒ 照样拒（≤3 血不看环境）', () => {
     const verdict = disableSafeguardsVerdict(facts({ health: 3.87, hostileMeters: null }));
     expect(verdict.allowed).toBe(false);
-    expect(verdict.text).toContain('3.87 血');
+    expect(verdict.text).toContain('现在不能关闭保命，因为你的血量只有 3.87。');
   });
 
   it('② 血 6 且有怪 16 米内 ⇒ 拒；血 6 而怪在 40 米外 ⇒ 允许（不过度拦截）', () => {
@@ -83,7 +82,7 @@ describe('判定：该拒的必须拒', () => {
     expect(disableSafeguardsVerdict(facts({ submerged: true })).allowed).toBe(false);
     expect(disableSafeguardsVerdict(facts({ belowVoid: true })).allowed).toBe(false);
     expect(disableSafeguardsVerdict(facts({ inLava: true })).text).toContain('岩浆');
-    expect(disableSafeguardsVerdict(facts({ submerged: true })).text).toContain('溺水');
+    expect(disableSafeguardsVerdict(facts({ submerged: true })).text).toContain('头在水里');
     expect(disableSafeguardsVerdict(facts({ belowVoid: true })).text).toContain('虚空');
   });
 
@@ -100,16 +99,15 @@ describe('接线：拒绝时绝不静音（也不留计时器）', () => {
       reflexStatus: () => ({ reflex: 'escape', intent: 'flee', ms: 18_000 }),
     });
     const text = disableTool.perform(agent, undefined, 6, '血只剩 3.87、背包无食物', false);
-    expect(String(text)).toContain('拒绝');
+    expect(String(text)).toContain('现在不能关闭保命，因为保命反射 escape 正在跑，已经 18 秒。');
     expect(safeguards.isSuppressed(Date.now())).toBe(false);
     expect(safeguards.current(Date.now())).toBeNull();
   });
 
-  it('满血安全 ⇒ 工具真的关闭，并且回执不再替模型的理由背书', () => {
+  it('满血安全 ⇒ 工具真的关闭，回执只报状态', () => {
     const agent = fakeAgent();
     const text = String(disableTool.perform(agent, undefined, 6, '我想挖岩浆旁边的矿', false));
     expect(text).toContain('保命程序已关闭');
-    expect(text).toContain('你自己写的理由');
     expect(safeguards.isSuppressed(Date.now())).toBe(true);
   });
 });
@@ -133,4 +131,6 @@ describe('事实采集：从 agent 读得出该读的东西', () => {
     expect(disableSafeguardsVerdict(read).allowed).toBe(false);
   });
 });
+
+
 

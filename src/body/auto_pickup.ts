@@ -336,8 +336,8 @@ export function pickupOverlapVerdict(input: {
     const overlapY = dy >= -0.5 - half && dy <= height + 0.5 + half;
     const overlap = overlapX && overlapY && overlapZ;
     const reason = overlap
-        ? '包围盒相交 ⇒ 服务端应当判定可拾取（还捡不到就不是几何问题）'
-        : `包围盒不相交（|dx|=${Math.abs(dx).toFixed(2)} |dz|=${Math.abs(dz).toFixed(2)} dy=${dy.toFixed(2)}）`;
+        ? `包围盒相交了，水平方向差 ${Math.abs(dx).toFixed(2)} 和 ${Math.abs(dz).toFixed(2)}，垂直方向差 ${dy.toFixed(2)}`
+        : `包围盒没有相交，水平方向差 ${Math.abs(dx).toFixed(2)} 和 ${Math.abs(dz).toFixed(2)}，垂直方向差 ${dy.toFixed(2)}`;
     return { overlap, dx, dy, dz, reason };
 }
 
@@ -355,7 +355,7 @@ export interface PickupTraceSummary {
 export function summarizePickupTrace(samples: PickupSample[]): PickupTraceSummary {
     const list = samples.filter((s) => s != null);
     if (list.length === 0) {
-        return { samples: 0, botTravel: 0, overlapEver: false, closest: null, note: '没有采到轨迹（掉落物可能已经消失）' };
+        return { samples: 0, botTravel: 0, overlapEver: false, closest: null, note: '没有采到轨迹' };
     }
     let botTravel = 0;
     let overlapEver = false;
@@ -370,12 +370,15 @@ export function summarizePickupTrace(samples: PickupSample[]): PickupTraceSummar
             closest = { dx: sample.dx, dy: sample.dy, dz: sample.dz };
         }
     }
-    const parts: string[] = [`采样 ${list.length} 次`];
-    parts.push(botTravel < 0.2 ? `bot **几乎没动**（共 ${botTravel.toFixed(2)} 米）——"靠近"这一步没生效` : `bot 移动了 ${botTravel.toFixed(1)} 米`);
-    if (overlapEver) parts.push('期间**出现过包围盒相交**⇒ 几何上早该能捡，问题在别处（拾取延迟/服务端/免疫）');
-    else parts.push('**从未出现过包围盒相交**⇒ 一直没真正靠近到可拾取范围');
-    if (closest != null) parts.push(`最近时 Δ=(${closest.dx.toFixed(2)},${closest.dy.toFixed(2)},${closest.dz.toFixed(2)})`);
-    return { samples: list.length, botTravel, overlapEver, closest, note: parts.join('；') };
+    const parts: string[] = [`一共采样 ${list.length} 次`];
+    parts.push(`这期间我移动了 ${botTravel.toFixed(2)} 米`);
+    parts.push(overlapEver ? '中途出现过包围盒相交' : '整个过程中包围盒都没有相交');
+    if (closest != null) {
+        parts.push(
+            `最近的时候三个方向差分别是 ${closest.dx.toFixed(2)}、${closest.dy.toFixed(2)}、${closest.dz.toFixed(2)}`,
+        );
+    }
+    return { samples: list.length, botTravel, overlapEver, closest, note: parts.join('，') + '。' };
 }
 
 /**

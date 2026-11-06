@@ -303,8 +303,7 @@ describe('dangerousWaterRefusal（落点闸门）', () => {
     const text = dangerousWaterRefusal(bot, 5, 64, 5);
     expect(text).not.toBeNull();
     expect(text).toContain('2 格深');
-    expect(text).toContain('allowDangerousOps');
-    expect(text).toContain('enter_deep_water');
+    expect(text).toContain('这次要走到的目标点在水里，这里的水有 2 格深，可能没过头顶。这一步需要先');
   });
 
   it('1 格浅水落点 → 放行（null）', () => {

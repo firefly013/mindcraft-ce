@@ -29,16 +29,19 @@ describe('suggestItemFamilyIds：family 名字要列具体 id', () => {
   });
 });
 
-describe('formatUnknownItemReceipt：给下一步 + 不夹无关句子', () => {
-  it('bed：列出颜色 bed 的 id，且**不出现** golden_*（02:41 的噪音）', () => {
+describe('formatUnknownItemReceipt：只报"没有"和相近注册名', () => {
+  it('bed：列出颜色 bed 的注册名，且**不出现** golden_*（02:41 的噪音）', () => {
     const text = formatUnknownItemReceipt('bed');
     expect(text).toContain('没有 bed 这个物品');
     expect(text).toContain('white_bed');
-    expect(text).toContain('你是想找这些吗');
+    expect(text).toContain('没有 bed 这个物品，游戏里相近的注册名有 white_bed、oran');
     expect(text).not.toContain('golden_');
   });
-  it('gold_boots 这种明显相关的才提示 golden_*（有用的别名，不删干净）', () => {
-    expect(formatUnknownItemReceipt('gold_boots')).toContain('golden_*');
+  it('gold_boots 不再夹带"金装备注册名是 golden_*"的教程句', () => {
+    const text = formatUnknownItemReceipt('gold_boots');
+    expect(text).toContain('没有 gold_boots 这个物品');
+    expect(text).not.toContain('提示');
+    expect(text).not.toContain('golden_*');
   });
 });
 
@@ -49,13 +52,13 @@ describe('染色配方：同色数量要求是可测的', () => {
     expect(dyedRecipeRequirement('blue_banner')).toMatchObject({ count: 6 });
     expect(dyedRecipeRequirement('oak_planks')).toBeNull();
   });
-  it('真机 A 的背包（white_wool×2 + black_wool×1）⇒ 明说差 1 块白的、混色不行', () => {
+  it('真机 A 的背包（white_wool×2 + black_wool×1）⇒ 明说只有 2 块白的', () => {
     const counts: Record<string, number> = { white_wool: 2, black_wool: 1 };
     const text = describeDyedShortfall('white_bed', (name) => counts[name] ?? 0, ['white_wool', 'black_wool']);
     expect(text).toContain('3 块同色的 white_wool');
-    expect(text).toContain('混色不行');
     expect(text).toContain('white_wool 只有 2 块');
-    expect(text).toContain('再去弄 1 块**white**');
+    expect(text).toContain('现在带着 white_wool、black_wool');
+    expect(text).not.toContain('再去弄');
   });
   it('同色羊毛够 ⇒ 不报短（让合成照常走）', () => {
     const counts: Record<string, number> = { white_wool: 3 };
@@ -65,12 +68,6 @@ describe('染色配方：同色数量要求是可测的', () => {
 
 describe('接线守卫', () => {
   const src = (): string => readFileSync(join(process.cwd(), 'src', 'body', 'commands', 'interact.ts'), 'utf8');
-  it('未知物品回执改用统一 helper；旧的 golden 括注已删除', () => {
-    const code = src();
-    expect(code).toContain('formatUnknownItemReceipt(itemName)');
-    expect(code).toContain('formatUnknownItemReceipt(wanted.name)');
-    expect(code).not.toContain('金装备的注册名是 golden_*（如 golden_boots）；` +');
-  });
   it('合成前先查染色同色缺口（craftSmartDetailed）', () => {
     expect(src()).toContain('const shortfall = describeDyedShortfall(');
   });

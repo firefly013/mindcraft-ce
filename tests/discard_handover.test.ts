@@ -7,6 +7,8 @@
  * 记录——B 的免疫不该拦 A。这里把它做成**实例**，并用"X 扔、Y 捡"钉住。
  */
 import { describe, expect, it } from 'vitest';
+import fs from 'node:fs';
+import path from 'node:path';
 import { createDiscardTracker, nearestDropWithin } from '../src/body/auto_pickup.js';
 
 const DROP_AT = { x: 18.125, y: 70, z: -14.672 };
@@ -42,14 +44,14 @@ describe('X 扔、Y 捡（两个 tracker 实例）', () => {
     expect(nearestDropWithin(botAt(DROP_AT.x + 0.4, 70, DROP_AT.z, drop), 8, trackerY)).toMatchObject({ id: 4242 });
   });
 
-  it('丢完回执不再暗示"丢东西交接"可行，而是指向箱子', () => {
+  it('丢完回执只报坐标事实，不再夹带"丢东西交接"的教学', () => {
     // 回执文案在 actions.ts 的 !discard 分支里；这里做一个源码守卫：
-    // 一旦有人把"要交接就给队友让开位置"这种暗示写回来，测试就红。
-    const fs = require('node:fs') as typeof import('node:fs');
-    const path = require('node:path') as typeof import('node:path');
+    // 教学/劝告文案不许写回来。
     const src = fs.readFileSync(path.join(process.cwd(), 'src', 'body', 'commands', 'actions.ts'), 'utf8');
-    expect(src).toContain('交接别靠丢东西');
-    expect(src).toContain('takeFromChest');
+    expect(src).toContain('丢了 ');
+    expect(src).toContain('落点在 (');
+    expect(src).not.toContain('交接别靠丢东西');
+    expect(src).not.toContain('takeFromChest');
     expect(src).not.toContain('要交接就给队友让开位置');
   });
 

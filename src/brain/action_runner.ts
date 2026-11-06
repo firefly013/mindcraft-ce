@@ -17,7 +17,6 @@
 
 import { Scheduler } from './scheduler.js';
 import type { CurrentAction } from './scheduler.js';
-import { MESSAGES } from '../shared/prompts.js';
 import type { ToolCatalog } from './tools/catalog.js';
 import { isActionTool, validateToolCall } from './tools/validate.js';
 import type { ToolOutcome } from './tools/tools.js';
@@ -112,7 +111,7 @@ const TRUNCATE_KEEP_HEAD = 9_000;
 const TRUNCATE_KEEP_TAIL = 9_000;
 
 /**
- * 截断策略是**留头留尾**：头部是"发生了什么"，尾部是**结论/最后一个可核对的事实**，
+ * 截断策略是**留头留尾**：头部是"发生了什么"，尾部是最后一个可核对的事实，
  * 中间那几百万次重复的失败全部丢掉。截断本身必须**明说**，绝不悄悄吞内容。
  */
 export function clampActionOutput(data: string): string {
@@ -121,23 +120,20 @@ export function clampActionOutput(data: string): string {
   const tail = data.slice(-TRUNCATE_KEEP_TAIL);
   const dropped = data.length - head.length - tail.length;
   return (
-    `${head}\n\n…（**回执过长已截断**：中间省略 ${dropped.toLocaleString('en-US')} 字符，` +
-    `原文共 ${data.length.toLocaleString('en-US')} 字符。开头和结尾都保留了——` +
-    `结尾通常是你最需要的"下一步"。中间那一大段多半是同一个错误在重复，` +
-    `**别把"下一步"里那个同样的调用原样再发一次**。）\n\n${tail}`
+    `${head}\n\n……内容太长，中间截掉了 ${dropped.toLocaleString('en-US')} 个字符，` +
+    `原文一共 ${data.length.toLocaleString('en-US')} 个字符……\n\n${tail}`
   );
 }
 
 /**
  * 一次动作完成的回执载荷。
  *
- * `call_id` 是这一次调用的唯一标识，`generation` 是调度器那一代。
- * 两者一起放进事件里，模型才能在回执乱序/延迟时认出「这条结果是哪一次调用交出来的」。
+ * `call_id` 是这一次调用的唯一标识，模型据此把结果对回自己那次调用。
  */
-export interface ActionNotice {  call: string;
+export interface ActionNotice {
+  call: string;
   action_id: string;
   call_id: string;
-  generation: number;
   result: ToolOutcome;
 }
 
@@ -245,14 +241,13 @@ export class ActionRunner {
   async run(name: string, args: unknown): Promise<ToolOutcome> {
     const checked = validateToolCall(this.catalog, name, args);
     if (!checked.ok) {
-      const reason = checked.errors?.join('; ') ?? 'Bad arguments.';
+      const reason = checked.errors?.join('，') ?? 'Bad arguments.';
       this.trace({ kind: 'query', name });
       await this.record(`rejected: ${reason}`, name, args);
       return { status: 'rejected', code: checked.code ?? 'BAD_ARGS', reason };
     }
     if (!isActionTool(this.catalog, name)) {
       this.trace({ kind: 'query', name });
-      this.speak(MESSAGES.usedMarker(name));
       // **查询路径同样必须封顶。** 对抗验证的探针（tmp/verify/receipt_caps.probe.test.ts）
       // 发现：动作路径 clamp 了、查询路径没 clamp——`stats` 这类查询返回 10 万字符时
       // 会原样透出，而"回执不许无限长"这条纪律不该分路径。
@@ -266,28 +261,17 @@ export class ActionRunner {
       // 幂等：被拒的这次**就是**正在跑的那个动作。
       // 模型被事件叫醒后常常把同一个动作再下一次，此时逼它 Stop
       // 就等于让它把自己正在做的事打断重来——正是"反复卡住"的来源。
-      // 直接告诉它"已经在做了"，让它等结果。
       if (claim.code === 'ACTION_BUSY' && running != null && running.id === name) {
         this.trace({ kind: 'busy_same', name, actionId: running.id });
         const runningSeconds = Math.max(0, Math.round((Date.now() - running.startedAt) / 1000));
-        const reason =
-          name + ' 已经在跑了，不用重发，也不用 Stop——它跑完会自己报结果。' +
-          '（占用者 ' + running.id + '，generation ' + String(running.generation) + '，已 ' + String(runningSeconds) + ' 秒）';
-        await this.record(`already running: ${reason}`, name, args);
+        const reason = `${name} 还在跑，已经跑了 ${runningSeconds} 秒。`;
+        await this.record(reason, name, args);
         return {
           status: 'accepted',
-          data: {
-            already_running: true,
-            action_id: running.id,
-            call_id: this.activeCallId ?? running.id,
-            generation: running.generation,
-            running_for_seconds: runningSeconds,
-            reason,
-          },
+          data: reason,
         };
       }
-      // 确实是另一个动作：报清楚谁在跑、跑了多久，并把"要不要打断"
-      // 交还给模型，而不是命令它先 Stop。
+      // 确实是另一个动作：报清楚谁在跑、跑了多久。
       this.trace({
         kind: 'busy_other',
         name,
@@ -296,21 +280,11 @@ export class ActionRunner {
           running == null ? 0 : Math.max(0, Math.round((Date.now() - running.startedAt) / 1000)),
       });
       const runningSeconds = running == null ? 0 : Math.max(0, Math.round((Date.now() - running.startedAt) / 1000));
-      // **紧急锁与"另一个动作在跑"必须说成两句不同的话。**
-      //
-      // 真机事故（2026-10-18 17:15，overnight_b）：它在 y=20 的深洞里、血 12、僵尸 11.7m，
-      // 想自救却连续收到 `An action is already running. Stop() first, then retry.`
-      // ——那是"调度器说忙、却报不出占用者"时的**回退文案**，而 `beginEmergency()`
-      // 故意清空 `currentAction()`，所以在紧急锁开着的那段时间里，**这句话是唯一可能的回复**。
-      // 模型于是以为自己被一个"看不见的动作"挡着，Stop 了也没用（当时 stopAll 不解锁）。
-      // 现在锁能解了，文案也必须点名：是谁占着、要不要 Stop、Stop 之后会发生什么。
       const reason = this.scheduler.locked
-        ? '保命反射正在占用身体（保命优先），它会自己结束——不用重发这个动作。' +
-          '连续占用超过 45 秒它会主动把身体交还给你 25 秒；**急的话直接 Stop：Stop 会立刻解锁并把身体给你**。'
+        ? '保命反射还在跑，身体通道暂时被它占着。'
         : running != null
-          ? `另一个动作正在跑（${running.id}，generation ${String(running.generation)}，已 ${String(runningSeconds)} 秒）。` +
-            `它会自己报结果；只有你确实要改做别的事时，才需要先 Stop。`
-          : 'An action is already running. Stop() first, then retry.';
+          ? `${running.id} 还在跑，已经跑了 ${runningSeconds} 秒，身体通道暂时被它占着。`
+          : '身体通道暂时被占着。';
       await this.record(`rejected: ${reason}`, name, args);
       return { status: 'rejected', code: claim.code ?? 'ACTION_BUSY', reason };
     }
@@ -323,7 +297,6 @@ export class ActionRunner {
     // checkpoint 类动作在这里抓进度基线（被打断后算"还剩多少"用）。
     this.activeBaseline = this.captureBaseline(name, args as Record<string, unknown>);
     this.trace({ kind: 'claim', name, actionId: claim.actionId ?? name, generation });
-    this.speak(MESSAGES.usedMarker(name));
     // 后台跑，不等：这一轮的推理到此结束，结果以后报。
     void this.finish(name, args as Record<string, unknown>, generation, callId);
     return {
@@ -331,9 +304,6 @@ export class ActionRunner {
       data: {
         action_id: claim.actionId,
         call_id: callId,
-        generation,
-        // 明确告诉模型：这不是最终结果，真正的回执会带同一个 call_id 回来。
-        note: `动作已开始；结束/失败/被中断时会以 Tool 事件回报，事件里带同一个 call_id=${callId}。`,
       },
     };
   }
@@ -372,31 +342,21 @@ export class ActionRunner {
       } catch {
         pos = null; // 采样失败就当"读不到坐标"，不编造。
       }
-      const where =
-        pos == null
-          ? '读不到坐标'
-          : `(${pos.x.toFixed(1)}, ${pos.y.toFixed(1)}, ${pos.z.toFixed(1)})`;
-      let movement: string;
+      let data: string;
       if (pos == null) {
-        // 读不到坐标：只说读不到，不编一个位置、也不拿它推"卡没卡"。
-        movement = '';
-      } else if (lastPingPosition == null || lastPingAt == null) {
-        movement = '（第一条进度，还没有可比对的位移。）';
+        data = `[${callId}] ${name} 还在跑，已经跑了 ${seconds} 秒，读不到当前坐标。`;
       } else {
-        const moved = Math.hypot(pos.x - lastPingPosition.x, pos.y - lastPingPosition.y, pos.z - lastPingPosition.z);
-        const spanSeconds = Math.max(1, Math.round((now - lastPingAt) / 1000));
-        const perSecond = moved / spanSeconds;
-        // **只报位移，不判"卡住"。**
-        //
-        // 以前这里写成「⚠️ 位置几乎没变——**很可能是卡住了**」外加一句「下一步：Stop 掉它，
-        // 把目标拆成 ≤32 格」。那是在替模型判案：位移小可能是在钓鱼（fish 默认 3 分钟）、
-        // 睡觉（sleepUnderground 12 分钟）、熔炼、打贴身怪——那些动作本来就不移动。
-        // 真机上 fish 每一趟都会在 60 秒时收到这条假警报和一句 Stop。
-        // 现在只给量到的数：**判断归模型**（它知道自己发的是哪个工具、要去哪）。
-        movement =
-          moved < 1
-            ? `这 ${spanSeconds} 秒里位置几乎没变（位移 ${moved.toFixed(1)} 格）。`
-            : `距上一条回执移动了 ${moved.toFixed(1)} 格（约 ${perSecond.toFixed(1)} 格/秒）。`;
+        const where = `(${pos.x.toFixed(1)}, ${pos.y.toFixed(1)}, ${pos.z.toFixed(1)})`;
+        let movement = '';
+        if (lastPingPosition != null && lastPingAt != null) {
+          const moved = Math.hypot(pos.x - lastPingPosition.x, pos.y - lastPingPosition.y, pos.z - lastPingPosition.z);
+          const spanSeconds = Math.max(1, Math.round((now - lastPingAt) / 1000));
+          const perSecond = moved / spanSeconds;
+          movement = moved < 1
+            ? `，这 ${spanSeconds} 秒里只移动了 ${moved.toFixed(1)} 格`
+            : `，从上次回执到现在移动了 ${moved.toFixed(1)} 格，大约每秒 ${perSecond.toFixed(1)} 格`;
+        }
+        data = `[${callId}] ${name} 还在跑，已经跑了 ${seconds} 秒，现在在 ${where}${movement}。`;
       }
       lastPingPosition = pos;
       lastPingAt = now;
@@ -404,19 +364,11 @@ export class ActionRunner {
         call: name,
         action_id: name,
         call_id: callId,
-        generation,
-        result: {
-          status: 'accepted',
-          data:
-            `[${callId} · generation ${generation}] ${name} 还在跑（已 ${seconds} 秒，尚未返回结果）。` +
-            `现在在 ${where}。${movement}`,
-        },
+        result: { status: 'accepted', data },
       });
       })();
     }, ACTION_PROGRESS_NOTICE_MS);
     // **最后保险丝**：身体侧长时间不返回时，动作通道不能永久泄漏。
-    // 真机出现过 currentAction 卡住、快照却显示 idle 的幽灵锁；到点强制释放，
-    // 让模型至少能继续发动作（身体侧自己的 action 超时会负责收手）。
     const watchdog = setTimeout(() => {
       const running = this.scheduler.currentAction();
       if (running == null || running.id !== name) return;
@@ -425,12 +377,9 @@ export class ActionRunner {
         call: name,
         action_id: name,
         call_id: callId,
-        generation,
         result: {
           status: 'completed',
-          data:
-            `[${callId} · generation ${generation}] ${name} 超过 ${ACTION_MAX_MS / 60000} 分钟没有返回，` +
-            '已强制释放动作通道；它可能仍在跑，请先用 Stop 或 stats 核对，不要盲目重发。',
+          data: `[${callId}] ${name} 超时了，${ACTION_MAX_MS / 60000} 分钟没有跑完。`,
         },
       });
     }, ACTION_MAX_MS);
@@ -438,7 +387,7 @@ export class ActionRunner {
     try {
       data = clampActionOutput(await this.execute(name, args));
     } catch (err: unknown) {
-      data = `Tool ${name} failed: ${err instanceof Error ? err.message : String(err)}`;
+      data = `调用 ${name} 的时候出错了，${err instanceof Error ? err.message : String(err)}`;
     } finally {
       clearInterval(progressTimer);
       clearTimeout(watchdog);
@@ -452,36 +401,26 @@ export class ActionRunner {
       const why = this.scheduler.lastInvalidationReason();
       this.trace({ kind: 'stale_discarded', name });
       this.clearActiveCall(callId);
-      // **保命反射不是 Stop**：Feedback #22 里模型从未调 Stop，却读到 Stop 字样。
-      // 而且保命反射有时只是在旁边响了，身体其实已经把搜索跑完了——这种情况下
-      // 把结果丢掉等于让普通动作被无关急停误伤。保命原因 + 有结果时保留结果并注明。
+      // 保命原因 + 有结果时保留结果：身体其实已经把活干完了。
       if (why === 'emergency' && data.trim() !== '') {
-        // 身体其实把活干完了：这次不需要续做（否则会重复做一遍）。
         this.cancelPendingFor(callId);
         await this.record(data, name, args);
         this.notify({
           call: name,
           action_id: name,
           call_id: callId,
-          generation,
           result: {
             status: 'completed',
-            data:
-              `[${callId} · generation ${generation}] 动作期间发生了保命反射（不是你调用的 Stop），` +
-              `但身体仍返回了结果，供参考：${data}`,
+            data: `[${callId}] 保命反射期间身体还是把结果交回来了，${data}`,
           },
         });
         return;
       }
-      const reasonText =
-        why === 'emergency'
-          ? '保命反射/急停抢走了身体（不是你调用的 Stop）'
-          : why === 'stop'
-            ? 'Stop 停掉了它'
-            : 'generation 失效（可能被 Stop/急停/新动作作废）';
-      // 续做承诺：**先说清楚，再去做**——模型看到这条回执时，反射可能还在跑。
-      // 如果声明允许续做，就在反射结束后按声明机械续上（见 `resumeInterrupted`），
-      // 模型不需要重发；不续做的（manual / Stop）也如实说明。
+      const reasonText = why === 'emergency'
+        ? '保命反射抢走了身体'
+        : why === 'stop'
+          ? 'Stop 把它打断了'
+          : '原因没有记录';
       const policy = this.resumePolicyOf(name);
       const willResume = why === 'emergency' && policy !== 'manual';
       // 兜底捕获（正常路径在 `beginEmergency` 时就抓过了）。**只抓"仍然是当前那次"**：
@@ -501,20 +440,14 @@ export class ActionRunner {
         call: name,
         action_id: name,
         call_id: callId,
-        generation,
         result: {
           status: 'completed',
-          data: `动作 ${name}（${callId}）被中断：${reasonText}，没有结果。` +
-            (willResume
-              ? '这条动作会在反射结束后按声明**自动续做**（不需要你重发）；要改主意就直接 Stop 再发新动作。'
-              : policy === 'manual'
-                ? '它不会自动续做（有副作用/没法机械重放），需要你重新发起。'
-                : '它不会自动续做。'),
+          data: `[${callId}] 动作被中断了，${reasonText}。`,
         },
       });
       return;
     }
-    const text = this.completionText(name, callId, generation, data);
+    const text = this.completionText(name, callId, data);
     await this.record(text, name, args);
     this.scheduler.releaseAction();
     this.cancelPendingFor(callId);
@@ -524,7 +457,6 @@ export class ActionRunner {
       call: name,
       action_id: name,
       call_id: callId,
-      generation,
       result: { status: 'completed', data: text },
     });
   }
@@ -590,7 +522,7 @@ export class ActionRunner {
           call_id: null,
           resumed: false,
           args: null,
-          detail: `${pending.name} 被打断；进度读不到（背包/坐标还没同步），没有自动续做。`,
+          detail: `${pending.name} 被打断了，读不到当前进度，所以没有接着做。`,
         });
         return;
       }
@@ -601,7 +533,7 @@ export class ActionRunner {
           call_id: null,
           resumed: false,
           args: null,
-          detail: `${pending.name} 被打断，但${adjusted.note}，不再续做。`,
+          detail: `${pending.name} 被打断了，但${adjusted.note}，所以不再接着做。`,
         });
         return;
       }
@@ -630,7 +562,7 @@ export class ActionRunner {
         resumed: false,
         args: null,
         detail:
-          `${pending.name} 被打断后想续做，但通道已经被别的动作占用（${claim.code ?? 'busy'}），没有抢。`,
+          `${pending.name} 被打断之后本来要接着做，但身体通道被占着，错误码是 ${claim.code ?? 'busy'}，所以没有接着做。`,
       });
       return;
     }
@@ -646,7 +578,7 @@ export class ActionRunner {
       call_id: callId,
       resumed: true,
       args,
-      detail: `已替你续做 ${pending.name}（${describeResumeArgs(args)}）——想改主意就 Stop 再发新动作。`,
+      detail: `已经替你接着做 ${pending.name} 了，参数是 ${describeResumeArgs(args)}。`,
     });
     void this.finish(pending.name, args, generation, callId);
   }
@@ -677,7 +609,7 @@ export class ActionRunner {
       const doneCount = Math.max(0, (counts[baseline.item] ?? 0) - baseline.start);
       const remaining = baseline.target - doneCount;
       if (remaining <= 0) {
-        return { args: pending.args, done: true, note: `目标已经完成（${doneCount}/${baseline.target}）` };
+        return { args: pending.args, done: true, note: `目标已经完成，已经收集了 ${doneCount} 个，目标是 ${baseline.target} 个` };
       }
       return { args: { ...pending.args, num: remaining }, done: false, note: '' };
     }
@@ -833,20 +765,13 @@ export class ActionRunner {
    * 动作完成回执的统一渲染。
    *
    * 身体返回空串并不等于什么都没发生（成功但没写日志、被中断、被自动拾取
-   * 抢走身体都会这样）。这里必须把空结果翻成一句模型能行动的话，不能把
-   * (no output) 或空事件丢回去让它继续猜。
+   * 抢走身体都会这样）。空结果要如实说"没有返回结果"，不替模型猜原因。
    */
-  private completionText(name: string, callId: string, generation: number, data: unknown): string {
+  private completionText(name: string, callId: string, data: unknown): string {
     const raw = typeof data === 'string' ? data.trim() : data == null ? '' : String(data);
-    const header = `[${callId} · generation ${generation}]`;
+    const header = `[${callId}]`;
     if (raw !== '' && raw !== '(no output)') return `${header} ${raw}`;
-    const hint =
-      name === 'searchForBlock'
-        ? 'searchForBlock 没有得到明确结果，不能确认是否找到目标（可能被中断）。' +
-          '请用 stats 看当前位置和背包，再决定是否重试。'
-        : `${name} 已经结束，但身体没有返回具体结果（可能动作已完成但没写日志，或被 autoPickup / Stop 打断了）。` +
-          '请用 stats 核对当前位置与背包后再决定是否重试。';
-    return `${header} ${hint}`;
+    return `${header} ${name} 已经结束了，但身体没有返回结果。`;
   }
 }
 

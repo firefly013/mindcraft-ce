@@ -73,7 +73,7 @@ describe('planShelter：最小动作，绝不砌死自己', () => {
 });
 
 describe('formatShelterReceipt：说清"我在哪、能做什么、什么时候出去"', () => {
-  it('回执含坐标 / 血 / 封口与光照状态 / 天亮倒计时 / 可执行下一步', () => {
+  it('回执含坐标 / 血 / 封口与光照状态 / 天亮倒计时', () => {
     const text = formatShelterReceipt({
       position: { x: 12.7, y: 64.2, z: -3.9 },
       action: 'shelter',
@@ -83,12 +83,12 @@ describe('formatShelterReceipt：说清"我在哪、能做什么、什么时候�
       lit: true,
     });
     expect(text).toContain('(12, 64, -4)');
-    expect(text).toContain('挖了个洞先躲着');
-    expect(text).toContain('入口已封住');
+    expect(text).toContain('挖了个洞');
+    expect(text).toContain('天黑了，我在 (12, 64, -4) 挖了个洞，血量是 17。入口已经封');
     expect(text).toContain('洞里有光');
     expect(text).toContain('约 120 秒天亮');
-    expect(text).toContain('合成');
-    expect(text).toContain('Stop');
+    expect(text).toContain('天亮');
+    expect(text).toContain('秒天亮');
   });
 
   it('没封住/没光时如实说（不许假装安全）', () => {
@@ -100,9 +100,9 @@ describe('formatShelterReceipt：说清"我在哪、能做什么、什么时候�
       sealed: false,
       lit: false,
     });
-    expect(text).toContain('入口没封住');
-    expect(text).toContain('洞里没光');
-    expect(text).toContain('血 ?');
+    expect(text).toContain('天黑了，我在 (0, 64, 0) 点了火把，血量是 读不到。入口没有封住');
+    expect(text).toContain('天黑了，我在 (0, 64, 0) 点了火把，血量是 读不到。入口没有封住');
+    expect(text).toContain('天黑了，我在 (0, 64, 0) 点了火把，血量是 读不到。入口没有封住');
   });
 });
 

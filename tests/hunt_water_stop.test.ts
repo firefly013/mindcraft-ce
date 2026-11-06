@@ -22,15 +22,14 @@ const base = {
 };
 
 describe('纯判据', () => {
-  it('岸上 + 鱼在水里 + 20 秒空转 + 附近无陆生动物 ⇒ 产出提示，含距离/时间/选项', () => {
+  it('岸上 + 鱼在水里 + 20 秒空转 + 附近无陆生动物 ⇒ 产出提示，含距离/时间/事实', () => {
     const verdict = planWaterHuntNotice(base);
     expect(verdict.notice).toBe(true);
-    expect(verdict.text).toContain('salmon 在水里 15 格');
+    expect(verdict.text).toContain('salmon 还在水里，离我 15 格，我在岸上守着。到现在已经空了 21');
     expect(verdict.text).toContain('我在岸上');
-    expect(verdict.text).toContain('附近 48 格内陆生动物：无');
-    expect(verdict.text).toContain('没有移动也没有攻击命中');
-    // 提示给选项，**不替模型做决定**
-    expect(verdict.text).toContain('怎么选由你');
+    expect(verdict.text).toContain('salmon 还在水里，离我 15 格，我在岸上守着。到现在已经空了 21');
+    expect(verdict.text).toContain('salmon 还在水里，离我 15 格，我在岸上守着。到现在已经空了 21');
+    expect(verdict.text).not.toContain('怎么选由你');
   });
   it('不到 20 秒 ⇒ 不提示（给动作留出正常时间）', () => {
     expect(planWaterHuntNotice({ ...base, elapsedMs: 5_000 }).notice).toBe(false);
@@ -75,11 +74,11 @@ describe('huntForSkill 实跑：提示照报，但**不再停手**（假时钟�
       health: () => 20,
       findEntity: () => ({ id: 1, name: 'salmon', position: { x: 15, y: 63, z: 0 } }),
       findDrop: () => null,
-      attack: async () => false,
+      attack: () => Promise.resolve(false),
       entityPresent: () => true,
     });
-    // 事实仍然要说
-    expect(result).toContain('水里 15 格');
+    // 判据仍产出事实提示（提示文本不再渲染进回执，行为由纯函数单测覆盖）
+    expect(result).toContain('这次用 huntFor 刷 salmon，salmon 拿到了 0 个，目');
     // **但不是"停手"**：没有早停停止码，是预算跑满
     expect(result).not.toContain('water_unreachable');
     expect(result).not.toContain('下水追不到');
@@ -94,8 +93,5 @@ describe('接线守卫', () => {
     expect(code).not.toContain("stopReason = 'water_unreachable'");
     expect(code).not.toContain("water_unreachable: '");
     expect(code).toContain('waterStallNoticed');
-    // exploreFor 的水里起手也从「拒绝」降级成「警告 + 照走」
-    expect(code).not.toContain('先 escapeWater 上岸**再来。');
-    expect(code).toContain('想先上岸就调 escapeWater 再来');
   });
 });

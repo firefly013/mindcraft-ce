@@ -98,7 +98,7 @@ describe('(i) 接线：遇怪接管', () => {
     expect(body.emergency).not.toHaveBeenCalled();
     const shadow = events.find((e: { type: string; payload?: any }) => e.type === 'combat.shadow');
     expect(shadow).toBeTruthy();
-    expect(String(shadow?.payload?.detail ?? '')).toContain('判决');
+    expect(String(shadow?.payload?.detail ?? '')).toContain('我判断现在应该打，因为我 8.2 DPS / 22 有效血 vs 1 只怪');
   });
 
   it('模式 off ⇒ 完全不动', () => {

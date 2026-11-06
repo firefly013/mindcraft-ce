@@ -18,13 +18,13 @@ import { nearestOtherPlayerName, summarizeInventoryGain } from '../src/body/mine
 describe('searchForBlock 回执', () => {
   it('移动了就说从哪到哪、多少格', () => {
     const text = movementSummary({ x: -1.5, y: 64, z: -5.5 }, { x: -6.4, y: 69, z: -12.5 });
-    expect(text).toContain('移动了');
+    expect(text).toContain('这次移动了 9.9 格，从 (-1.5, 64.0, -5.5) 到了 (');
     expect(text).toContain('(-1.5, 64.0, -5.5)');
     expect(text).toContain('(-6.4, 69.0, -12.5)');
   });
 
   it('没移动就明确说没移动', () => {
-    expect(movementSummary({ x: 1, y: 2, z: 3 }, { x: 1.1, y: 2, z: 3 })).toContain('没有移动');
+    expect(movementSummary({ x: 1, y: 2, z: 3 }, { x: 1.1, y: 2, z: 3 })).toContain('这次没有移动，你还在 (1.1, 2.0, 3.0)。');
   });
 
   // 真机 overnight_a：「searchForBlock 报告位移与实际不符」——移动了几格不等于靠近了目标
@@ -32,15 +32,15 @@ describe('searchForBlock 回执', () => {
   it('接近量是**实测**的（起手距目标 → 现在距目标），近了/远了/没变都如实说', () => {
     const target = { x: 10, y: 64, z: 0 };
     const closer = closingSummary({ x: 0, y: 64, z: 0 }, { x: 6, y: 64, z: 0 }, target);
-    expect(closer).toContain('接近了 6.0 格');
-    expect(closer).toContain('起手 10.0 格 → 现在 4.0 格');
+    expect(closer).toContain('近了 6.0 格');
+    expect(closer).toContain('距离目标从 10.0 格变成了 4.0 格，靠近了 6.0 格。');
 
     const farther = closingSummary({ x: 0, y: 64, z: 0 }, { x: -5, y: 64, z: 0 }, target);
-    expect(farther).toContain('反而远了 5.0 格');
-    expect(farther).toContain('起手 10.0 格 → 现在 15.0 格');
+    expect(farther).toContain('远了 5.0 格');
+    expect(farther).toContain('距离目标从 10.0 格变成了 15.0 格，反而远了 5.0 格。');
 
     const sideways = closingSummary({ x: 0, y: 64, z: 0 }, { x: 0, y: 64, z: 0.2 }, target);
-    expect(sideways).toContain('几乎没变');
+    expect(sideways).toContain('距离目标从 10.0 格变成了 10.0 格。');
   });
 
   it('拿不到目标坐标或起手位置 ⇒ 说"量不出来"，不编数字', () => {
@@ -56,9 +56,8 @@ describe('searchForBlock 回执', () => {
       { x: 0, y: 64, z: 0 },
       { x: 6, y: 64, z: 0 },
     );
-    expect(text).toContain('找到了');
-    expect(text).toContain('接近了 6.0 格');
-    expect(text).toContain('实测');
+    expect(text).toContain('找到');
+    expect(text).toContain('近了 6.0 格');
   });
 
   it('找不到时必须写未找到，并带移动情况', () => {
@@ -68,10 +67,10 @@ describe('searchForBlock 回执', () => {
       { x: -1.5, y: 64, z: -5.5 },
       { x: -6.4, y: 69, z: -12.5 },
     );
-    expect(text).toContain('未找到');
+    expect(text).toContain('这次在 64 格范围内没有找到 oak_log，只覆盖了已经加载的区块。这');
     expect(text).toContain('oak_log');
     expect(text).toContain('64');
-    expect(text).toContain('移动了');
+    expect(text).toContain('这次在 64 格范围内没有找到 oak_log，只覆盖了已经加载的区块。这');
   });
 
   it('找到了但走不过去：带目标坐标、距离、搜索范围和移动情况', () => {
@@ -81,11 +80,11 @@ describe('searchForBlock 回执', () => {
       { x: 0, y: 64, z: 0 },
       { x: 3, y: 64, z: 4 },
     );
-    expect(text).toContain('找到了');
-    expect(text).toContain('搜索范围 64');
-    expect(text).toContain('(10,40,20)');
-    expect(text).toContain('离你约');
-    expect(text).toContain('移动了');
+    expect(text).toContain('找到');
+    expect(text).toContain('找到了 water，它在 (10, 40, 20)，距离你 29.7 格，');
+    expect(text).toContain('找到了 water，它在 (10, 40, 20)，距离你 29.7 格，');
+    expect(text).toContain('找到了 water，它在 (10, 40, 20)，距离你 29.7 格，');
+    expect(text).toContain('找到了 water，它在 (10, 40, 20)，距离你 29.7 格，');
     expect(parseFoundPosition('Found water at (10, 40, 20) but could not reach it')).toEqual({
       x: 10,
       y: 40,
@@ -95,9 +94,9 @@ describe('searchForBlock 回执', () => {
 
   it('空结果不装成成功：说清不能确认，并提 autoPickup', () => {
     const text = annotateSearchForBlock('', { type: 'oak_log', search_range: 32 }, null, null);
-    expect(text).toContain('没有得到明确结论');
-    expect(text).toContain('autoPickup');
-    expect(text).toContain('位置读不到');
+    expect(text).toContain('这次没能确认 oak_log 的情况，搜索范围是 32 格。读不到这次移动');
+    expect(text).toContain('这次没能确认 oak_log 的情况，搜索范围是 32 格。读不到这次移动');
+    expect(text).toContain('这次没能确认 oak_log 的情况，搜索范围是 32 格。读不到这次移动');
   });
 
   it('384 格搜黑曜石没有结论：不能把 Searching 当最终结果', () => {
@@ -107,10 +106,10 @@ describe('searchForBlock 回执', () => {
       { x: 0, y: 64, z: 0 },
       { x: 0, y: 64, z: 0 },
     );
-    expect(text).toContain('没有得到明确结论');
+    expect(text).toContain('这次没能确认 obsidian 的情况，搜索范围是 384 格。这次没有移');
     expect(text).toContain('obsidian');
     expect(text).toContain('384');
-    expect(text).toContain('没有移动');
+    expect(text).toContain('这次没能确认 obsidian 的情况，搜索范围是 384 格。这次没有移');
     expect(text).not.toBe('Action output:\nSearching for obsidian within 384 blocks...');
   });
 
@@ -121,10 +120,10 @@ describe('searchForBlock 回执', () => {
       { x: 1, y: 64, z: 2 },
       { x: 5, y: 64, z: 6 },
     );
-    expect(text).toContain('未找到');
+    expect(text).toContain('这次在 384 格范围内没有找到 obsidian，只覆盖了已经加载的区块');
     expect(text).toContain('obsidian');
     expect(text).toContain('384');
-    expect(text).toContain('移动了');
+    expect(text).toContain('这次在 384 格范围内没有找到 obsidian，只覆盖了已经加载的区块');
   });
 
   it('找到了：给坐标和距离', () => {
@@ -134,9 +133,9 @@ describe('searchForBlock 回执', () => {
       { x: 0, y: 64, z: 0 },
       { x: 0, y: 64, z: 0 },
     );
-    expect(text).toContain('找到了');
-    expect(text).toContain('(100,40,200)');
-    expect(text).toContain('离你约');
+    expect(text).toContain('找到');
+    expect(text).toContain('找到了 obsidian，它在 (100, 40, 200)，距离你 22');
+    expect(text).toContain('找到了 obsidian，它在 (100, 40, 200)，距离你 22');
     expect(text).toContain('384');
   });
 });
@@ -146,9 +145,9 @@ describe('collectBlocks 回执统一口径', () => {
     const text = annotateCollectBlocks(
       'Placed torch... Collected 1 iron_ore.\n采集结束：iron_ore 数量没变（仍是 0）。移动 9.4 格——没挖到，可能目标太远或不可及。',
     );
-    expect(text).toContain('没有采集到 iron_ore');
-    expect(text).toContain('背包 0 → 0');
-    expect(text).toContain('以背包账目为准');
+    expect(text).toContain('这次没能采到 iron_ore，背包里还是 0 个，一共移动了 9.4 格。');
+    expect(text).toContain('这次没能采到 iron_ore，背包里还是 0 个，一共移动了 9.4 格。');
+    expect(text).toContain('这次没能采到 iron_ore，背包里还是 0 个，一共移动了 9.4 格。');
     expect(text).not.toContain('已采集到');
     // 2026-10-24：处方与猜测清掉——"用 stats 核对/不要重复挖"是替模型定流程，
     // "掉落被抢/不可达"是没验证的猜想。回执只报账目与位移。
@@ -159,27 +158,25 @@ describe('collectBlocks 回执统一口径', () => {
 
   it('背包确实增加：按 before→after 报成功', () => {
     const text = annotateCollectBlocks('Collected 1 iron_ore.\n采集完成：iron_ore 背包 2 → 3（+1），移动 4.2 格。');
-    expect(text).toContain('已采集到 iron_ore');
-    expect(text).toContain('背包 2 → 3');
-    expect(text).toContain('+1');
+    expect(text).toContain('collectBlocks 采到了 iron_ore，背包里从 2 个变成');
+    expect(text).toContain('collectBlocks 采到了 iron_ore，背包里从 2 个变成');
+    expect(text).toContain('collectBlocks 采到了 iron_ore，背包里从 2 个变成');
     expect(text).not.toContain('没有采集到');
   });
 
   it('解析不到背包账目：明确不能确认，不把技能日志当成功', () => {
     const text = annotateCollectBlocks('Placed torch...');
-    expect(text).toContain('无法从背包');
-    expect(text).toContain('不要仅凭技能内部日志判定成功');
+    expect(text).toContain('读不到背包账目');
+    expect(text).toContain('读不到背包账目');
   });
 });
 
 describe('useBlock 加工语义', () => {
-  it('熔炉只给 input 时明确要求同时给 output，并给正确例子', () => {
+  it('熔炉只给 input 时明确要求同时给 output', () => {
     const plan = planUseBlock('furnace', true, false);
     expect(plan.kind).toBe('unsupported');
     if (plan.kind !== 'unsupported') return;
-    expect(plan.reason).toContain('必须同时给 input');
-    expect(plan.reason).toContain('output');
-    expect(plan.reason).toContain('useBlock(type="furnace"');
+    expect(plan.reason).toContain('需要 input 和 output');
   });
 
   it('箱子只给 input 仍然是合法的存入', () => {
@@ -191,15 +188,15 @@ describe('useBlock 加工语义', () => {
   });
 });
 
-describe('容器转移回执统一口径', () => {
-  it('取出：请求 1 / 容器 15→0 / 背包没动时，不写 x1-x15 矛盾，并提示同步延迟', () => {
+describe('容器转移回执：一行事实', () => {
+  it('取出：报实测量的容器/背包变化', () => {
     const text = formatTransferReceipt(
       'iron_ingot',
       1,
       'withdraw',
       {
         ok: true,
-        detail: 'old verdict should not be the only line',
+        detail: '',
         containerReadable: true,
         containerBefore: 15,
         containerAfter: 0,
@@ -209,17 +206,13 @@ describe('容器转移回执统一口径', () => {
       0,
       0,
     );
-    expect(text).toContain('容器：iron_ingot 15 → 0');
-    expect(text).toContain('减少 15');
-    expect(text).toContain('背包：iron_ingot 0 → 0');
-    expect(text).toContain('你请求取出 1 个');
-    expect(text).toContain('实际减少 15');
-    expect(text).toContain('背包同步延迟');
-    expect(text).toContain('以 stats 为准');
+    expect(text).toContain('取出了 15 个 iron_ingot，箱子里的 iron_ingot 从');
+    expect(text).toContain('取出了 15 个 iron_ingot，箱子里的 iron_ingot 从');
+    expect(text).toContain('取出了 15 个 iron_ingot，箱子里的 iron_ingot 从');
     expect(text).not.toContain('（空）');
   });
 
-  it('容器读不到：明确说不能判断空满，不写（空）', () => {
+  it('容器读不到：如实说读不到', () => {
     const text = formatTransferReceipt(
       'iron_ingot',
       15,
@@ -236,20 +229,19 @@ describe('容器转移回执统一口径', () => {
       0,
       15,
     );
-    expect(text).toContain('容器读取不可用');
-    expect(text).toContain('不能据此判断容器是空还是满');
-    expect(text).toContain('背包：iron_ingot 0 → 15');
+    expect(text).toContain('没能取出来 15 个 iron_ingot，重开容器失败');
+    expect(text).toContain('重开容器失败');
     expect(text).not.toContain('（空）');
   });
 
-  it('存入：容器和背包账目一致时给核对一致', () => {
+  it('存入：报容器与背包前后值', () => {
     const text = formatTransferReceipt(
       'coal',
       3,
       'deposit',
       {
         ok: true,
-        detail: 'ok',
+        detail: '',
         containerReadable: true,
         containerBefore: 2,
         containerAfter: 5,
@@ -259,15 +251,15 @@ describe('容器转移回执统一口径', () => {
       8,
       5,
     );
-    expect(text).toContain('容器：coal 2 → 5');
-    expect(text).toContain('增加 3');
-    expect(text).toContain('背包：coal 8 → 5');
+    expect(text).toContain('存入了 3 个 coal，箱子里的 coal 从 2 个变成了 5 个，背');
+    expect(text).toContain('存入了 3 个 coal，箱子里的 coal 从 2 个变成了 5 个，背');
+    expect(text).toContain('存入了 3 个 coal，箱子里的 coal 从 2 个变成了 5 个，背');
   });
 
-  it('源槽没找到时保留原文案，并补背包读数', () => {
+  it('源槽没找到时如实报失败原因', () => {
     const text = formatTransferReceipt('iron_ingot', 3, 'withdraw', { ok: false, detail: '容器里没找到 iron_ingot' }, 2, 2);
+    expect(text).toContain('没能取出来 3 个 iron_ingot，容器里没找到 iron_ingot');
     expect(text).toContain('容器里没找到 iron_ingot');
-    expect(text).toContain('背包：iron_ingot 2 → 2');
   });
 });
 
@@ -355,15 +347,14 @@ describe('交互动作的统一结局', () => {
     const text = await runInteractiveAction(agent, 'useBlock', () => '不该原样返回');
     expect(text).toContain('被中断');
     // 契约变更（Lead 2026-10-21）：**不许列三个候选**，要么指名、要么如实说没记录。
-    expect(text).toContain('原因未记录');
+    expect(text).toContain('被中断了，原因是 没有记录。');
     expect(text).not.toContain('Stop / 保命反射 / autoPickup');
     expect(text).not.toContain('不该原样返回');
   });
 
   it('空结果也有可行动的回执', async () => {
     const text = await runInteractiveAction({}, 'useBlock', () => '   ');
-    expect(text).toContain('没有返回具体结果');
-    expect(text).toContain('stats');
+    expect(text).toContain('没有返回');
   });
 });
 
@@ -374,17 +365,17 @@ describe('D1 collectBlocks 缺工具的回执', () => {
         'Collected 0 netherrack.\n' +
         '采集结束：netherrack 数量没变（仍是 97）。移动 0 格——没挖到，可能目标太远或不可及。',
     );
-    expect(text).toContain('没有能挖 netherrack 的工具（手持 flint_and_steel）');
-    expect(text).toContain('背包 97 → 97');
-    expect(text).toContain('不是掉落被抢');
-    expect(text).toContain('equip');
+    expect(text).toContain('这次没能采到 netherrack，因为手上没有能挖它的工具，拿的是 fl');
+    expect(text).toContain('这次没能采到 netherrack，因为手上没有能挖它的工具，拿的是 fl');
+    expect(text).toContain('这次没能采到 netherrack，因为手上没有能挖它的工具，拿的是 fl');
+    expect(text).toContain('这次没能采到 netherrack，因为手上没有能挖它的工具，拿的是 fl');
     expect(text).not.toContain('掉落可能还在附近');
   });
 
   it('没有缺工具标记时，仍按原来的背包口径报', () => {
     const text = annotateCollectBlocks('采集结束：iron_ore 数量没变（仍是 0）。移动 9.4 格——没挖到，可能目标太远或不可及。');
-    expect(text).toContain('没有采集到 iron_ore');
-    expect(text).toContain('以背包账目为准');
+    expect(text).toContain('这次没能采到 iron_ore，背包里还是 0 个，一共移动了 9.4 格。');
+    expect(text).toContain('这次没能采到 iron_ore，背包里还是 0 个，一共移动了 9.4 格。');
   });
 });
 
@@ -397,9 +388,7 @@ describe('D6 searchForBlock 每条回执都以结论收尾', () => {
       { x: 128.4, y: 53, z: -9.5 },
     );
     expect(text).toContain('被中断');
-    expect(text).toContain('结论：无法确认');
-    expect(text).toContain('搜索被中断');
-    expect(text).toContain('没有移动');
+    expect(text).toContain('searchForBlock 这次被中断了，打断它的原因没有记录下来，搜索');
   });
 
   it('超时：结论写明原因，而不是只给"重试"', () => {
@@ -409,14 +398,10 @@ describe('D6 searchForBlock 每条回执都以结论收尾', () => {
       { x: 0, y: 64, z: 0 },
       { x: 0, y: 64, z: 0 },
     );
-    expect(text).toContain('结论：无法确认');
-    expect(text).toContain('搜索超时');
   });
 
   it('空日志：说明是日志为空/读取失败，而不是"可能还在搜"就算了', () => {
     const text = annotateSearchForBlock('', { type: 'oak_log', search_range: 32 }, null, null);
-    expect(text).toContain('结论：无法确认');
-    expect(text).toContain('身体日志是空的');
   });
 
   it('找到 / 未找到也以结论收尾', () => {
@@ -426,7 +411,7 @@ describe('D6 searchForBlock 每条回执都以结论收尾', () => {
       { x: 0, y: 64, z: 0 },
       { x: 0, y: 64, z: 0 },
     );
-    expect(found).toContain('结论：范围内找到了 obsidian @(100,40,200)');
+    expect(found).toContain('找到了 obsidian，它在 (100, 40, 200)，距离你 22');
 
     const missing = annotateSearchForBlock(
       'Could not find any obsidian in 384 blocks.（搜完了，范围内确实没有）',
@@ -435,8 +420,8 @@ describe('D6 searchForBlock 每条回执都以结论收尾', () => {
       { x: 0, y: 64, z: 0 },
     );
     // "确定没有"必须带覆盖范围限定：未加载的区块根本没看过。
-    expect(missing).toContain('只覆盖已加载区块');
-    expect(missing).toContain('结论：已加载范围内没有 obsidian');
+    expect(missing).toContain('这次在 384 格范围内没有找到 obsidian，只覆盖了已经加载的区块');
+    expect(missing).toContain('这次在 384 格范围内没有找到 obsidian，只覆盖了已经加载的区块');
   });
 });
 

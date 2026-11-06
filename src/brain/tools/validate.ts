@@ -196,15 +196,13 @@ export function validateToolCall(catalog: ToolCatalog, toolName: string, args: u
  */
 export function formatSay(text: unknown): { ok: boolean; line?: string; full?: string; reason?: string } {
   if (typeof text !== 'string' || text.trim() === '') {
-    return { ok: false, reason: 'Say text must be non-empty.' };
+    return { ok: false, reason: '没有给出要说的内容，所以什么也没有发出去。' };
   }
   const chars = Array.from(text.trim());
   if (chars.length > SAY_LINE_LIMIT) {
     return {
       ok: false,
-      reason:
-        `Say 太长：${chars.length} 字，上限 ${SAY_LINE_LIMIT} 字（游戏内聊天发不出去）。` +
-        `请自己缩短到 ${SAY_LINE_LIMIT} 字以内再说一次——我不会替你截断，那样你不知道哪半句被丢了。`,
+      reason: `这段话说得太长了，一共 ${chars.length} 个字，上限是 ${SAY_LINE_LIMIT} 个字，所以没有发出去。`,
     };
   }
   return { ok: true, line: chars.join(''), full: text };

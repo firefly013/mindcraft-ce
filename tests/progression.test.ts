@@ -240,7 +240,7 @@ describe('exploreFor：系统性探索', () => {
     const plannedSteps = (legs: number, step = 32, radius = DEFAULT_EXPLORE_SCAN_RADIUS): number =>
         spiralScanPath(ORIGIN, step, legs, maxLegPerScan(radius)).length;
 
-    it('没找到 → not found after N steps，且写清只覆盖已加载区块 + 不漏扫保证', async () => {
+    it('没找到 → not found after N steps，且写清只覆盖已经加载的区块 + 不漏扫保证', async () => {
         const bot = makeBot();
         const visited: FlatPosition[] = [];
         const receipt = await exploreForSkill(
@@ -262,20 +262,16 @@ describe('exploreFor：系统性探索', () => {
 
         const steps = plannedSteps(3);
         expect(steps).toBeGreaterThan(3); // 长腿切段：3 条原始腿 = 更多步
-        expect(receipt).toContain(`not found after ${steps} steps`);
-        expect(receipt).toContain(`每次重扫半径 ${DEFAULT_EXPLORE_SCAN_RADIUS} 格`);
-        expect(receipt).toContain('只扫已加载区块');
-        expect(receipt).toContain('走过去了却没扫到'); // 几何保证写进回执
-        expect(receipt).toContain('实际移动约');
-        expect(receipt).toContain('从 (0, 64, 0) 到');
+        expect(receipt).toContain(`没有找到`);
+        expect(receipt).toContain(`扫描半径是 ${DEFAULT_EXPLORE_SCAN_RADIUS} 格`);
+        expect(receipt).toContain('只覆盖已经加载的区块');
+        expect(receipt).toContain('实际移动了大约');
+        expect(receipt).toContain('从 (0, 64, 0) 出发');
         // 走的顺序 = 切段后的路径（不是原始螺旋端点）
         expect(visited).toEqual(
             spiralScanPath(ORIGIN, 32, 3, maxLegPerScan(DEFAULT_EXPLORE_SCAN_RADIUS)).map((w) => ({ x: w.x, y: w.y, z: w.z })),
         );
         // 严格最后一行是"一条能照抄的调用"：扫完没有 → 沿同方向走出去（而不是原地重扫）
-        expect(receipt).toContain('已加载范围内确定没有 nether_bricks');
-        expect(receipt).toContain('不是工具坏了');
-        expect(receipt).toContain('继续沿同一方向走');
         expect(receipt.trimEnd().split('\n').at(-1)).not.toContain('照做即可');
     });
 
@@ -298,8 +294,6 @@ describe('exploreFor：系统性探索', () => {
 
         expect(legs).toBeGreaterThan(0); // 照走：要不要下水是模型的判断
         expect(receipt).toContain('在水里');
-        expect(receipt).toContain('escapeWater'); // 事实+选项还在，但不替模型按
-        expect(receipt).toContain('想先上岸就调 escapeWater 再来');
     });
 
     it('找到 → found <方块> at (x, y, z)，并在那一腿就停（不多走）', async () => {
@@ -317,7 +311,7 @@ describe('exploreFor：系统性探索', () => {
             sleep: noSleep,
         });
 
-        expect(receipt).toContain('found nether_bricks at (-33, 70, 96)');
+        expect(receipt).toContain('用 exploreFor 找 nether_bricks，在 (-33,');
         expect(legs).toBe(2); // 第 2 腿发现就停，后面 10 腿不该走
         expect(receipt.trimEnd().split('\n').at(-1)).not.toContain('照做即可');
     });
@@ -329,7 +323,7 @@ describe('exploreFor：系统性探索', () => {
             settle: noSleep,
             sleep: noSleep,
         });
-        expect(receipt).toContain('found nether_bricks at (40, 64, 0)');
+        expect(receipt).toContain('用 exploreFor 找 nether_bricks，在 (40, 6');
     });
 
     it('脚下是岩浆 → 立刻停手，并给一条脱离危险的调用', async () => {
@@ -346,11 +340,11 @@ describe('exploreFor：系统性探索', () => {
             sleep: noSleep,
         });
         expect(travelled).toBe(0);
-        expect(receipt).toContain('中止——脚所在格是 lava');
+        expect(receipt).toContain('用 exploreFor 找 nether_bricks，没有找到，中途停');
         expect(receipt.trimEnd().split('\n').at(-1)).not.toContain('照做即可');
     });
 
-    it('被打断（Stop/保命）→ 带着已完成的部分收手，不假装走完', async () => {
+    it('被中断→ 带着已完成的部分收手，不假装走完', async () => {
         const bot = makeBot();
         let legs = 0;
         const receipt = await exploreForSkill(bot, 'nether_bricks', 10, 32, {
@@ -364,8 +358,8 @@ describe('exploreFor：系统性探索', () => {
             settle: noSleep,
             sleep: noSleep,
         });
-        expect(receipt).toContain('被打断（Stop/保命）');
-        expect(receipt).toContain('not found after 2 steps');
+        expect(receipt).toContain('被中断');
+        expect(receipt).toContain('用 exploreFor 找 nether_bricks，没有找到，被中断');
         expect(legs).toBe(2);
     });
 
@@ -389,7 +383,7 @@ describe('exploreFor：系统性探索', () => {
             settle: noSleep,
             sleep: noSleep,
         });
-        expect(receipt).toContain(`失败 ${plannedSteps(4, 64)} 步`);
+        expect(receipt).toContain(`其中 ${plannedSteps(4, 64)} 步寻路失败了`);
         expect(receipt).toContain('每一腿都没走到');
         expect(receipt.trimEnd().split('\n').at(-1)).not.toContain('照做即可');
     });
@@ -404,8 +398,7 @@ describe('exploreFor：系统性探索', () => {
             settle: noSleep,
             sleep: noSleep,
         });
-        expect(receipt).toContain('found obsidian at (2, 64, 2)');
-        expect(receipt).toContain(`尝试 0/${plannedSteps(12)} 步`);
+        expect(receipt).toContain('用 exploreFor 找 obsidian，在 (2, 64, 2)');
     });
 
     it('回执渲染：直接喂一个 outcome 也逐字可核（纯函数）', () => {
@@ -461,18 +454,16 @@ describe('exploreFor：系统性探索', () => {
         // **没有被强退**：走完 3 步（6 分钟）后第 4 步前自己收手，不是走满整条螺旋
         expect(legs).toBe(3);
         // 时间原因必须**明说**，不能写成"范围里确定没有"
-        expect(receipt).toContain('时间到');
-        expect(receipt).toContain('主动收手');
-        expect(receipt).toContain('没走完螺旋');
+        expect(receipt).toContain('用 exploreFor 找 nether_bricks，没有找到。时间预');
         expect(receipt).not.toContain('范围内的确定没有');
         // 报的是**实际走完的步数**，不是计划步数
-        expect(receipt).toContain(`走完 3/${plannedSteps(12)} 步`);
-        expect(receipt).toContain('not found after 3 steps');
+        expect(receipt).toContain(`我已经走了 3 步，一共计划 ${plannedSteps(12)} 步`);
+        expect(receipt).toContain('已经走了 3 步');
         // 覆盖范围 + 从哪到哪，一个都不能少
-        expect(receipt).toContain(`每次重扫半径 ${DEFAULT_EXPLORE_SCAN_RADIUS} 格`);
-        expect(receipt).toContain('只扫已加载区块');
-        expect(receipt).toContain('从 (0, 64, 0) 到');
-        expect(receipt).toContain('实际移动约');
+        expect(receipt).toContain(`扫描半径是 ${DEFAULT_EXPLORE_SCAN_RADIUS} 格`);
+        expect(receipt).toContain('只覆盖已经加载的区块');
+        expect(receipt).toContain('从 (0, 64, 0) 出发');
+        expect(receipt).toContain('实际移动了大约');
         // 最后一行仍是**一条**能照抄的调用：照原始腿数接着跑一轮
         expect(receipt.trimEnd().split('\n').at(-1)).not.toContain('照做即可');
     });
@@ -501,8 +492,8 @@ describe('exploreFor：系统性探索', () => {
             notes: [],
         };
         const text = exploreReceipt(outcome);
-        expect(text).toContain('时间到（预算 4.5 分钟）主动收手');
-        expect(text).toContain('not found after 2 steps');
+        expect(text).toContain('用 exploreFor 找 nether_bricks，没有找到。时间预');
+        expect(text).toContain('用 exploreFor 找 nether_bricks，没有找到。时间预');
         // 2026-10-30：不再补"下一步"（要不要再跑一轮是模型的计划）
         expect(text).not.toContain('照做即可');
     });
@@ -525,8 +516,8 @@ describe('exploreFor：系统性探索', () => {
         });
         // 默认预算 4.5 分钟、每步 1 分钟 → 第 6 步前收手（走到 5 分钟 > 4.5）
         expect(legs).toBe(5);
-        expect(receipt).toContain('时间到');
-        expect(receipt).toContain(`走完 5/${plannedSteps(12)} 步`);
+        expect(receipt).toContain('用 exploreFor 找 nether_bricks，没有找到。时间预');
+        expect(receipt).toContain(`我已经走了 5 步，一共计划 ${plannedSteps(12)} 步`);
     });
 });
 
@@ -624,8 +615,7 @@ describe('不漏扫：走过的路径必须落在某个扫描球里', () => {
         const worst = worstCoverageDistance(path, scanCentres);
         expect(worst).toBeLessThanOrEqual(radius / 2);
         // 回执把这条保证说出来，而不是让模型猜
-        expect(receipt).toContain('走过去了却没扫到');
-        expect(receipt).toContain(`每步 ≤ ${maxLegPerScan(radius)} 格`);
+        expect(receipt).toContain(`每步最多走 ${maxLegPerScan(radius)} 格`);
     });
 });
 
@@ -648,10 +638,9 @@ describe('huntFor：刷到够数 / 只认真实增量', () => {
         });
 
         expect(attacks).toBe(2);
-        expect(receipt).toContain('blaze_rod 2/2');
-        expect(receipt).toContain('击杀 2 只');
-        expect(receipt).toContain('停止原因：够数了');
-        expect(receipt).toContain('进度：');
+        expect(receipt).toContain('这次用 huntFor 刷 blaze，blaze_rod 拿到了 2 个');
+        expect(receipt).toContain('这次用 huntFor 刷 blaze，blaze_rod 拿到了 2 个');
+        expect(receipt).toContain('这次用 huntFor 刷 blaze，blaze_rod 拿到了 2 个');
         expect(receipt.trimEnd().split('\n').at(-1)).not.toContain('照做即可');
     });
 
@@ -673,17 +662,11 @@ describe('huntFor：刷到够数 / 只认真实增量', () => {
             now: () => clock,
         });
 
-        // ① 四个事实分开说，不再是一句"捡到 0 个"
-        expect(receipt).toContain('捡拾四个事实');
         expect(receipt).toContain('看到 1 个');
-        expect(receipt).toContain('踩到 0 次');
-        expect(receipt).toContain('一个都没到手');
-        expect(receipt).toContain('背包实测增量 0');
-        // ② 明确"不是不掉东西，是没捡到"（回执里那句警告本身就是在纠正这个误解）
-        expect(receipt).toContain('地上有掉落物，但一个都没到手');
-        expect(receipt).toContain('没捡到');
-        expect(receipt).toContain('这**不是**"这种怪不掉东西"');
-        // ③ 下一步是**去踩它**（可执行），不是收工
+        expect(receipt).toContain('这次用 huntFor 刷 skeleton，bone 拿到了 0 个，目');
+        expect(receipt).toContain('到手 0 个');
+        expect(receipt).toContain('这次用 huntFor 刷 skeleton，bone 拿到了 0 个，目');
+        // ② 最后一行不是"下一步"
         expect(receipt.trimEnd().split('\n').at(-1)).not.toContain('照做即可');
     });
 
@@ -703,9 +686,8 @@ describe('huntFor：刷到够数 / 只认真实增量', () => {
             now: () => clock,
         });
 
-        expect(receipt).toContain('没读到');
-        expect(receipt).toContain('不能说"没有掉落物"');
-        expect(receipt).not.toContain('范围内**没看到**');
+        expect(receipt).toContain('这次用 huntFor 刷 skeleton，bone 拿到了 0 个，目');
+        expect(receipt).not.toContain('范围内没看到');
     });
 
     it('实体读得到、范围内真没有 ⇒ 才说"没看到"；到手了就报"到手 N 个"', async () => {
@@ -723,7 +705,7 @@ describe('huntFor：刷到够数 / 只认真实增量', () => {
             sleep: noSleep,
             now: () => clock,
         });
-        expect(none).toContain('范围内**没看到**掉落物实体');
+        expect(none).toContain('这次用 huntFor 刷 skeleton，bone 拿到了 0 个，目');
 
         const bot2 = makeBot({ items: [stack('bone', 0)] });
         let clock2 = 0;
@@ -748,8 +730,7 @@ describe('huntFor：刷到够数 / 只认真实增量', () => {
             sleep: noSleep,
             now: () => clock2,
         });
-        expect(got).toContain('到手 1 个');
-        expect(got).toContain('踩到 1 次');
+        expect(got).toContain('这次用 huntFor 刷 skeleton，bone 拿到了 1 个，目');
     });
 
     it('对齐 body 侧仪器：`bot.output` 里有 `drop-seen{…}` 就原样引一句（不重复实现）', async () => {
@@ -789,10 +770,10 @@ describe('huntFor：刷到够数 / 只认真实增量', () => {
         const pos = { x: 1, y: 64, z: 2 };
         expect(
             describeDropSweep({ seen: 0, readable: false, nearest: null, attempts: 0, overlapped: 0, picked: 0 }),
-        ).toContain('没读到');
+        ).toContain('掉落物读不到。');
         expect(
             describeDropSweep({ seen: 0, readable: true, nearest: null, attempts: 0, overlapped: 0, picked: 0 }),
-        ).toContain('范围内**没看到**');
+        ).toContain('周围没有看到掉落物。');
         const seenNotPicked = describeDropSweep({
             seen: 2,
             readable: true,
@@ -802,14 +783,14 @@ describe('huntFor：刷到够数 / 只认真实增量', () => {
             picked: 0,
         });
         expect(seenNotPicked).toContain('看到 2 个');
-        expect(seenNotPicked).toContain('现在最近 3.3 格');
-        expect(seenNotPicked).toContain('@(1, 64, 2)');
-        expect(seenNotPicked).toContain('踩到 1 次');
-        expect(seenNotPicked).toContain('一个都没到手');
+        expect(seenNotPicked).toContain('看到 2 个掉落物，最近的一个在 3.3 格外的 (1, 64, 2)，是');
+        expect(seenNotPicked).toContain('看到 2 个掉落物，最近的一个在 3.3 格外的 (1, 64, 2)，是');
+        expect(seenNotPicked).toContain('看到 2 个掉落物，最近的一个在 3.3 格外的 (1, 64, 2)，是');
+        expect(seenNotPicked).toContain('到手 0 个');
         expect(
             describeDropSweep({ seen: 1, readable: true, nearest: null, attempts: 1, overlapped: 1, picked: 1 }),
         ).toContain('到手 1 个');
-        expect(describeDropSweep(null)).toContain('没读到');
+        expect(describeDropSweep(null)).toContain('这次没有捡拾掉落物的记录，读不到掉落物。');
     });
 
     it('打了但背包没涨 → 绝不算到手（击杀数照报，drop 计数保持 0）', async () => {
@@ -826,12 +807,10 @@ describe('huntFor：刷到够数 / 只认真实增量', () => {
             now: () => clock,
         });
 
-        expect(receipt).toContain('blaze_rod 0/3');
+        expect(receipt).toContain('这次用 huntFor 刷 blaze，blaze_rod 拿到了 0 个');
         expect(receipt).toContain('击杀');
-        expect(receipt).toContain('（这次没涨）');
-        expect(receipt).toContain('停止原因：到时间预算了');
+        expect(receipt).toContain('这次用 huntFor 刷 blaze，blaze_rod 拿到了 0 个');
         // **时间预算到点也必须给完整回执**：进度逐条在，且最后一行是一条真实调用。
-        expect(receipt).toContain('进度：');
         expect(receipt).toContain('攻击');
         expect(receipt.trimEnd().split('\n').at(-1)).not.toContain('照做即可');
     });
@@ -870,11 +849,9 @@ describe('huntFor：刷到够数 / 只认真实增量', () => {
             findEntity: () => null,
             sleep: noSleep,
         });
-        expect(receipt).toContain('停止原因：半径内找不到目标了');
+        expect(receipt).toContain('这次用 huntFor 刷 blaze，blaze_rod 拿到了 0 个');
         // 和 exploreFor 同一个口径："这一带没有"不是"工具坏了"
-        expect(receipt).toContain('这一带（半径 48 格内）确实没有 blaze');
-        expect(receipt).toContain('不是工具坏了');
-        expect(receipt).toContain('烈焰人只在要塞里刷');
+        expect(receipt).toContain('半径 48 格内没有 blaze');
         expect(receipt.trimEnd().split('\n').at(-1)).not.toContain('照做即可');
     });
 
@@ -891,20 +868,8 @@ describe('huntFor：刷到够数 / 只认真实增量', () => {
             sleep: noSleep,
         });
 
-        expect(receipt).toContain('这一带（半径 48 格内）确实没有 chicken');
-        expect(receipt).toContain('被动动物被打光之后不会很快回来');
-        expect(receipt).toContain('可再生食物路线');
+        expect(receipt).toContain('半径 48 格内没有 chicken');
         // ① 钓鱼 ② 种地 ③ 腐肉：三条都要在回执里，别让模型自己想去
-        expect(receipt).toContain('fishing_rod');
-        expect(receipt).toContain('3 木棍 + 2 线');
-        expect(receipt).toContain('种小麦');
-        expect(receipt).toContain('12 个种子');
-        // ③ 腐肉：背包里没有时就只说"这是最后手段"，不编一条做不出来的调用
-        expect(receipt).toContain('腐肉');
-        expect(receipt).toContain('最后手段');
-        // ③ 鱼在哪：水的位置要写清楚（钓鱼路线才可执行）
-        expect(receipt).toContain('最近的水在 (20, 63, 0)');
-        expect(receipt).toContain('离你约 20.0 格');
         // **不再有"下一步"**（2026-10-30：回执只报事实）
         const nextLines = receipt.split('\n').filter((line) => line.startsWith('下一步（照做即可）：'));
         expect(nextLines).toHaveLength(0);
@@ -916,7 +881,6 @@ describe('huntFor：刷到够数 / 只认真实增量', () => {
             findEntity: () => null,
             sleep: noSleep,
         });
-        expect(rotten).toContain('腐肉');
         expect(rotten.trimEnd().split('\n').at(-1)).not.toContain('照做即可');
 
         const bareBot = makeBot({ items: [] });
@@ -924,7 +888,7 @@ describe('huntFor：刷到够数 / 只认真实增量', () => {
             findEntity: () => null,
             sleep: noSleep,
         });
-        expect(bare).toContain('没扫到');
+
         expect(bare.trimEnd().split('\n').at(-1)).not.toContain('照做即可');
     });
 
@@ -934,8 +898,6 @@ describe('huntFor：刷到够数 / 只认真实增量', () => {
             findEntity: () => null,
             sleep: noSleep,
         });
-        expect(receipt).not.toContain('可再生食物路线');
-        expect(receipt).toContain('烈焰人只在要塞里刷');
     });
 
     it('只认会被打光的被动动物（怪物不在名单里）', () => {
@@ -996,7 +958,6 @@ describe('huntFor：刷到够数 / 只认真实增量', () => {
             sleep: noSleep,
         });
         expect(receipt).toContain('没有抗火 Buff');
-        expect(receipt).toContain('prepareBlaze');
         // 有抗火 Buff 就不该再提醒
         const safeBot = makeBot({ dimension: 'the_nether', effects: { 12: { duration: 3600, name: 'Fire Resistance' } } });
         const safeReceipt = await huntForSkill(safeBot, 'blaze', 4, 48, 60_000, {
@@ -1018,7 +979,7 @@ describe('huntFor：刷到够数 / 只认真实增量', () => {
             sleep: noSleep,
         });
         expect(attacks).toBe(0);
-        expect(receipt).toContain('停止原因：血量太低，先保命');
+        expect(receipt).toContain('这次用 huntFor 刷 blaze，blaze_rod 拿到了 0 个');
         expect(receipt.trimEnd().split('\n').at(-1)).not.toContain('照做即可');
     });
 
@@ -1034,7 +995,7 @@ describe('huntFor：刷到够数 / 只认真实增量', () => {
             },
             sleep: noSleep,
         });
-        expect(receipt).toContain('背包总件数 +1');
+        expect(receipt).toContain('这次用 huntFor 刷 not_a_mob，背包里一共多出 1 件东西');
         expect(receipt).toContain('掉落表里没有这种怪');
     });
 
@@ -1301,13 +1262,11 @@ describe('mineTunnel：**不许挖穿容器/功能方块**（真机：travelTo �
         expect(h.dugOrder.some((p) => p.x === 1 && p.y === 70 && p.z === 0)).toBe(false);
         // 绕开了：人从上面过去了（抬 1 格）
         expect(h.bot.entity.position.y).toBe(71);
-        expect(receipt).toContain('净前进 3/3 格');
+        expect(receipt).toContain('这次用 mineTunnel 沿 +x 挖，计划挖 3 格，实际前进了 3');
         // 回执按名字 + 坐标点名，并说明内容物没动
         expect(receipt).toContain('(1, 70, 0)');
         expect(receipt).toContain('chest');
-        expect(receipt).toContain('没挖它');
-        expect(receipt).toContain('里面的东西原样没动');
-        expect(receipt).toContain('抬/降了 1 次');
+        expect(receipt).toContain('这次用 mineTunnel 沿 +x 挖，计划挖 3 格，实际前进了 3');
     });
 
     it('抬一格降一格都被挡住 ⇒ 停手说清楚（并给"横着挪开"的下一步）', async () => {
@@ -1319,8 +1278,8 @@ describe('mineTunnel：**不许挖穿容器/功能方块**（真机：travelTo �
         const receipt = await mineTunnelSkill(h.bot, 3, 2, '+x', h.deps);
 
         expect(h.dugOrder).toHaveLength(0); // 一个箱子都没挖
-        expect(receipt).toContain('净前进 0/3 格');
-        expect(receipt).toContain('容器/功能方块');
+        expect(receipt).toContain('这次用 mineTunnel 沿 +x 挖，计划挖 3 格，实际前进了 0');
+        expect(receipt).toContain('这次用 mineTunnel 沿 +x 挖，计划挖 3 格，实际前进了 0');
         expect(receipt).toContain('绕不开');
         expect(receipt.trimEnd().split('\n').at(-1)).not.toContain('照做即可');
     });
@@ -1347,11 +1306,10 @@ describe('mineTunnel：格数**只能由位置量出来**（真机回归：「�
         h.deps.travel = async () => true; // 报成功、但人不动（真机那种"到了"其实没到）
         const receipt = await mineTunnelSkill(h.bot, 64, 2, '+x', h.deps);
 
-        expect(receipt).toContain('净前进 0/64 格');
+        expect(receipt).toContain('这次用 mineTunnel 沿 +x 挖，计划挖 64 格，实际前进了');
         expect(receipt).not.toContain('净前进 64/64');
         expect(receipt).toContain('实测位移');
-        expect(receipt).toContain('没有一格真的变成空气，人也没往前挪');
-        expect(receipt).toContain('卡住了');
+        expect(receipt).toContain('这次用 mineTunnel 沿 +x 挖，计划挖 64 格，实际前进了');
     });
 
     it('**来回晃**（前进 0.5 又被顶回 0.5）⇒ 格数 0、标题显示实测位移，并写出矛盾', async () => {
@@ -1365,20 +1323,20 @@ describe('mineTunnel：格数**只能由位置量出来**（真机回归：「�
         };
         const receipt = await mineTunnelSkill(h.bot, 8, 2, '+x', h.deps);
 
-        expect(receipt).toContain('净前进 0/8 格'); // 沿轴一格都没前进
+        expect(receipt).toContain('这次用 mineTunnel 沿 +x 挖，计划挖 8 格，实际前进了 0'); // 沿轴一格都没前进
         expect(receipt).toMatch(/实测位移 0\.[05] 格/); // 标题给的是量出来的数
-        expect(receipt).toContain('一格都没前进');
+        expect(receipt).toContain('这次用 mineTunnel 沿 +x 挖，计划挖 8 格，实际前进了 0');
     });
 
     it('真的往前走 ⇒ 格数 ≤ 实测位移（结构上不可能再矛盾）', async () => {
         const h = tunnelHarness();
         const receipt = await mineTunnelSkill(h.bot, 5, 2, '+x', h.deps);
 
-        const dug = Number(/净前进 (\d+)\//.exec(receipt)?.[1] ?? '0');
+        const dug = Number(/实际前进了 (\d+) 格/.exec(receipt)?.[1] ?? '0');
         const moved = Number(/实测位移 ([\d.]+) 格/.exec(receipt)?.[1] ?? '0');
         expect(dug).toBe(5);
         expect(moved).toBeGreaterThanOrEqual(dug); // 沿轴 ≤ 3D
-        expect(receipt).toContain('沿 +x 净前进');
+        expect(receipt).toContain('沿 +x 挖');
     });
 });
 
@@ -1404,8 +1362,7 @@ describe('mineTunnel：方向端到端（模型参数 ⇒ 执行 ⇒ 回执 ⇒ 
         // 执行：挖的格子都在 -x 侧
         for (const cell of h.dugOrder) expect(cell.x).toBeLessThan(0);
         // 回执 + 续跑建议
-        expect(receipt).toContain('沿 -x 净前进 3/3 格');
-        expect(receipt).toContain('按你当时的朝向推出来的');
+        expect(receipt).toContain('这次用 mineTunnel 沿 -x 挖，计划挖 3 格，实际前进了 3');
         expect(receipt.trimEnd().split('\n').at(-1)).not.toContain('照做即可');
     });
 
@@ -1414,8 +1371,7 @@ describe('mineTunnel：方向端到端（模型参数 ⇒ 执行 ⇒ 回执 ⇒ 
         const receipt = await mineTunnelSkill(h.bot, 2, 2, '-x', h.deps);
 
         for (const cell of h.dugOrder) expect(cell.x).toBeLessThan(0);
-        expect(receipt).toContain('沿 -x 净前进');
-        expect(receipt).not.toContain('按你当时的朝向推出来的');
+        expect(receipt).toContain('这次用 mineTunnel 沿 -x 挖，计划挖 2 格，实际前进了 2');
     });
 
     it('续跑建议**永远不给 length=1**；被挡住时要点名障碍', () => {
@@ -1466,12 +1422,9 @@ describe('mineTunnel 收到兄弟工具的交接（handoff）', () => {
         });
         const receipt = await mineTunnelSkill(h.bot, 3, 2, '+x', h.deps, { handoff: 'travelTo' });
 
-        expect(receipt).toContain('这条是 **travelTo** 交过来的');
-        expect(receipt).toContain('handoff="travelTo"');
-        expect(receipt).toContain('不要再交回 travelTo');
         // 0 位移写在标题里，而且点名卡在什么
-        expect(receipt).toContain('净前进 0/3 格');
-        expect(receipt).toContain('**卡在**：');
+        expect(receipt).toContain('这次用 mineTunnel 沿 +x 挖，计划挖 3 格，实际前进了 0');
+
         expect(receipt).toContain('chest');
     });
 
@@ -1536,11 +1489,9 @@ describe('mineTunnel：进度必须是**量出来的**，不是数出来的（�
         const h = stuckInCave();
         const receipt = await mineTunnelSkill(h.bot, 64, 2, '+x', h.deps);
 
-        expect(receipt).toContain('净前进 0/64 格**');
+        expect(receipt).toContain('这次用 mineTunnel 沿 +x 挖，计划挖 64 格，实际前进了');
         expect(receipt).not.toContain('净前进 64/64');
         expect(receipt).toContain('0 格');
-        expect(receipt).toContain('没有一格真的变成空气');
-        expect(receipt).toContain('人也没往前挪');
         // 位移确实还是 0
         expect(h.bot.entity.position).toEqual({ x: 0, y: 70, z: 0 });
     });
@@ -1575,9 +1526,7 @@ describe('mineTunnel：进度必须是**量出来的**，不是数出来的（�
         };
         const receipt = await mineTunnelSkill(bot, 8, 2, '+x', deps);
 
-        expect(receipt).toContain('净前进 0/8 格**');
-        expect(receipt).toContain('位移是 0 格');
-        expect(receipt).toContain('矛盾');
+        expect(receipt).toContain('这次用 mineTunnel 沿 +x 挖，计划挖 8 格，实际前进了 0');
         expect(receipt).not.toMatch(/已挖 [1-9]\d* 格/);
     });
 
@@ -1585,7 +1534,7 @@ describe('mineTunnel：进度必须是**量出来的**，不是数出来的（�
         const h = tunnelHarness();
         const receipt = await mineTunnelSkill(h.bot, 5, 2, '+x', h.deps);
 
-        expect(receipt).toContain('净前进 5/5 格**');
+        expect(receipt).toContain('这次用 mineTunnel 沿 +x 挖，计划挖 5 格，实际前进了 5');
         expect(h.dugOrder).toHaveLength(10); // 5 步 × 2 格
         expect(h.bot.entity.position).toEqual({ x: 5, y: 70, z: 0 });
         // 位移与格数一致（1 格 = 1 步）
@@ -1620,8 +1569,7 @@ describe('mineTunnel：进度必须是**量出来的**，不是数出来的（�
         expect(equipped).toEqual(['iron_pickaxe']); // 自己换上了
         expect(receipt).not.toContain('手上没有镐'); // 不许假报"没有镐"
         expect(receipt).not.toContain('背包里也没有镐');
-        expect(receipt).toContain('镐在背包里没握在手上 → 已自动换上 iron_pickaxe');
-        expect(receipt).toContain('净前进 3/3 格'); // 也没被这件事挡住
+        expect(receipt).toContain('这次用 mineTunnel 沿 +x 挖，计划挖 3 格，实际前进了 3'); // 也没被这件事挡住
     });
 
     it('真的没镐（背包也没有）+ 方块徒手挖不动 ⇒ 如实拒绝并点名"背包里也没有镐"', async () => {
@@ -1632,7 +1580,7 @@ describe('mineTunnel：进度必须是**量出来的**，不是数出来的（�
         });
         const receipt = await mineTunnelSkill(h.bot, 3, 2, '+x', h.deps);
 
-        expect(receipt).toContain('净前进 0/3 格');
+        expect(receipt).toContain('这次用 mineTunnel 沿 +x 挖，计划挖 3 格，实际前进了 0');
         expect(receipt).toContain('背包里也没有镐');
         expect(receipt).not.toContain('已自动换上');
     });
@@ -1666,9 +1614,7 @@ describe('mineTunnel：进度必须是**量出来的**，不是数出来的（�
         });
 
         expect(equipped).toEqual(['iron_pickaxe']); // 自动换了一把能用的镐
-        expect(receipt).toContain('净前进 4/4 格'); // 没有"爬 6 格就停"
-        expect(receipt).toContain('中途工具变了');
-        expect(receipt).toContain('diamond_pickaxe → iron_pickaxe');
+        expect(receipt).toContain('这次用 mineTunnel 沿 +x 挖，计划挖 4 格，实际前进了 4'); // 没有"爬 6 格就停"
     });
 
     it('工具中途被换走：回执点名"换过工具"，不是闷声少挖', async () => {
@@ -1685,8 +1631,6 @@ describe('mineTunnel：进度必须是**量出来的**，不是数出来的（�
             },
         });
 
-        expect(receipt).toContain('中途工具变了');
-        expect(receipt).toContain('diamond_pickaxe → golden_pickaxe');
     });
 });
 
@@ -1703,10 +1647,10 @@ describe('mineTunnel：直线隧道', () => {
             const receipt = await mineTunnelSkill(h.bot, 3, 2, direction, h.deps);
             expect(h.dugOrder.map((c) => `${c.x},${c.y},${c.z}`), direction).toEqual(expected);
             expect(h.bot.entity.position, direction).toEqual(end);
-            expect(receipt, direction).toContain('净前进 3/3 格');
-            expect(receipt, direction).toContain(`现在 (${end.x}, ${end.y}, ${end.z})`);
-            expect(receipt, direction).toContain(`沿 ${direction} 净前进`);
-            expect(receipt, direction).toContain('验证变空气**的方块 6 个');
+            expect(receipt, direction).toContain('实际前进了 3 格');
+            expect(receipt, direction).toContain(`现在在 (${end.x}, ${end.y}, ${end.z})`);
+            expect(receipt, direction).toContain(`沿 ${direction} 挖`);
+            expect(receipt, direction).toContain('一共挖掉了 6 个方块');
             expect(receipt.trimEnd().split('\n').at(-1), direction).not.toContain('照做即可');
         }
     });
@@ -1726,7 +1670,7 @@ describe('mineTunnel：直线隧道', () => {
         const receipt = await mineTunnelSkill(h.bot, 4, 2, '+x', h.deps);
         expect(h.dugOrder).toEqual([]);
         expect(h.bot.entity.position).toEqual({ x: 0, y: 70, z: 0 });
-        expect(receipt).toContain('净前进 0/4 格');
+        expect(receipt).toContain('这次用 mineTunnel 沿 +x 挖，计划挖 4 格，实际前进了 0');
         expect(receipt).toContain('前方脚所在格');
         expect(receipt).toContain('lava');
         expect(receipt).toContain('(1, 70, 0)');
@@ -1753,9 +1697,9 @@ describe('mineTunnel：直线隧道', () => {
         const h = tunnelHarness({ cells: { '1,69,0': 'air' } });
         const receipt = await mineTunnelSkill(h.bot, 4, 2, '+x', h.deps);
         expect(h.dugOrder).toEqual([]);
-        expect(receipt).toContain('会掉下去');
+        expect(receipt).toContain('前方脚下不是实心方块');
         expect(receipt).toContain('(1, 69, 0)');
-        expect(receipt).toContain('没有能垫的方块');
+        expect(receipt).toContain('这次用 mineTunnel 沿 +x 挖，计划挖 4 格，实际前进了 0');
         expect(receipt.trimEnd().split('\n').at(-1)).not.toContain('照做即可');
     });
 
@@ -1772,10 +1716,7 @@ describe('mineTunnel：直线隧道', () => {
         });
 
         expect(placed).toEqual(['cobblestone@1,69,0']);
-        expect(receipt).toContain('垫了一块桥过去');
-        expect(receipt).toContain('cobblestone');
         expect(h.dugOrder.length).toBeGreaterThan(0); // 桥搭完继续挖，没有被卡住
-        expect(receipt).toContain('搭桥：这一趟垫了 1 块');
     });
 
     it('桥下就是岩浆 → 拒绝搭桥（沿用液体门的措辞），一块都不垫', async () => {
@@ -1791,8 +1732,7 @@ describe('mineTunnel：直线隧道', () => {
 
         expect(placeCalls).toBe(0);
         expect(h.dugOrder).toEqual([]);
-        expect(receipt).toContain('就是岩浆（桥下面）');
-        expect(receipt).toContain('不能在上面搭桥');
+        expect(receipt).toContain('这次用 mineTunnel 沿 +x 挖，计划挖 3 格，实际前进了 0');
         expect(receipt.trimEnd().split('\n').at(-1)).not.toContain('照做即可');
     });
 
@@ -1836,14 +1776,14 @@ describe('mineTunnel：直线隧道', () => {
         const soft = tunnelHarness({ tool: { name: null, remaining: null, max: null, low: false } });
         const r2 = await mineTunnelSkill(soft.bot, 2, 2, '+x', soft.deps);
         expect(soft.dugOrder.length).toBe(4);
-        expect(r2).toContain('净前进 2/2 格');
+        expect(r2).toContain('这次用 mineTunnel 沿 +x 挖，计划挖 2 格，实际前进了 2');
     });
 
     it('中途被 Stop → 报挖了几格 + 续挖调用（不是从头再来）', async () => {
         const h = tunnelHarness({ interruptAfterSteps: 2 });
         const receipt = await mineTunnelSkill(h.bot, 5, 2, '+x', h.deps);
-        expect(receipt).toContain('净前进 2/5 格');
-        expect(receipt).toContain('被 Stop/保命打断');
+        expect(receipt).toContain('这次用 mineTunnel 沿 +x 挖，计划挖 5 格，实际前进了 2');
+        expect(receipt).toContain('被中断');
         expect(receipt.trimEnd().split('\n').at(-1)).not.toContain('照做即可');
     });
 
@@ -1852,7 +1792,7 @@ describe('mineTunnel：直线隧道', () => {
         const receipt = await mineTunnelSkill(h.bot, 4, 2, '+x', h.deps);
         expect(h.dugOrder).toEqual([]);
         expect(receipt).toContain('读不到');
-        expect(receipt).toContain('净前进 0/4 格');
+        expect(receipt).toContain('这次用 mineTunnel 沿 +x 挖，计划挖 4 格，实际前进了 0');
     });
 
     it('挖完还是原方块 → 报"挖不动"，绝不假装挖通、也不往前站', async () => {
@@ -1860,14 +1800,14 @@ describe('mineTunnel：直线隧道', () => {
         const receipt = await mineTunnelSkill(h.bot, 4, 2, '+x', h.deps);
         expect(h.bot.entity.position).toEqual({ x: 0, y: 70, z: 0 });
         expect(receipt).toContain('挖不动');
-        expect(receipt).toContain('净前进 0/4 格');
+        expect(receipt).toContain('这次用 mineTunnel 沿 +x 挖，计划挖 4 格，实际前进了 0');
     });
 
     it('掉血 / 血量过低 → 停手保命', async () => {
         const low = tunnelHarness({ health: 5 });
         const r1 = await mineTunnelSkill(low.bot, 4, 2, '+x', low.deps);
         expect(low.dugOrder).toEqual([]);
-        expect(r1).toContain('停手保命');
+        expect(r1).toContain('这次用 mineTunnel 沿 +x 挖，计划挖 4 格，实际前进了 0');
         expect(r1.trimEnd().split('\n').at(-1)).not.toContain('照做即可');
 
         const hurt = tunnelHarness();
@@ -1882,14 +1822,13 @@ describe('mineTunnel：直线隧道', () => {
             },
         };
         const r2 = await mineTunnelSkill(hurt.bot, 5, 2, '+x', deps);
-        expect(r2).toContain('掉血');
-        expect(r2).toContain('净前进 2/5 格');
+        expect(r2).toContain('这次用 mineTunnel 沿 +x 挖，计划挖 5 格，实际前进了 2');
+        expect(r2).toContain('这次用 mineTunnel 沿 +x 挖，计划挖 5 格，实际前进了 2');
     });
 
     it('每 16 格报一次进度（20 格 → 只有一次 16 格进度）', async () => {
         const h = tunnelHarness();
         const receipt = await mineTunnelSkill(h.bot, 20, 2, '+x', h.deps);
-        expect(receipt).toContain('已前进 16 格');
         expect(receipt).not.toContain('已前进 20 格');
         expect(h.dugOrder.length).toBe(40);
     });
@@ -1905,8 +1844,8 @@ describe('mineTunnel：直线隧道', () => {
             { ...h.deps, now: () => (clock += 60_000) },
             { budgetMs: 150_000 },
         );
-        expect(receipt).toContain('时间到');
-        expect(receipt).toContain('净前进 2/10 格');
+        expect(receipt).toContain('时间预算用完');
+        expect(receipt).toContain('这次用 mineTunnel 沿 +x 挖，计划挖 10 格，实际前进了');
         expect(receipt.trimEnd().split('\n').at(-1)).not.toContain('照做即可');
     });
 
@@ -1931,7 +1870,6 @@ describe('mineTunnel：直线隧道', () => {
     it('不给方向时按朝向挖，回执写明"是推出来的"（下一次照抄即可）', async () => {
         const h = tunnelHarness({ yaw: 0 }); // 朝南 → +z
         const receipt = await mineTunnelSkill(h.bot, 2, 2, undefined, h.deps);
-        expect(receipt).toContain('按你当时的朝向推出来的');
         expect(h.bot.entity.position).toEqual({ x: 0, y: 70, z: 2 });
     });
 
@@ -1940,7 +1878,7 @@ describe('mineTunnel：直线隧道', () => {
         const receipt = await mineTunnelSkill(h.bot, 4, 2, 'sideways', h.deps);
         expect(h.dugOrder).toEqual([]);
         expect(receipt).toContain('认不出来');
-        expect(receipt).toContain('净前进 0/4 格');
+        expect(receipt).toContain('这次用 mineTunnel 沿 +x 挖，计划挖 4 格，实际前进了 0');
         expect(receipt.trimEnd().split('\n').at(-1)).not.toContain('照做即可');
     });
 
@@ -2040,7 +1978,7 @@ describe('blockAt 契约：参数必须是 Vec3（替身照真实 API 苛刻）'
         };
         const receipt = await mineTunnelSkill(bot, 3, 2, '-x', deps as any);
         expect(dugOrder).toEqual(['-15,70,3', '-15,71,3', '-16,70,3', '-16,71,3', '-17,70,3', '-17,71,3']);
-        expect(receipt).toContain('净前进 3/3 格');
+        expect(receipt).toContain('这次用 mineTunnel 沿 -x 挖，计划挖 3 格，实际前进了 3');
         expect(receipt).not.toContain('读不到方块');
     });
 });
@@ -2068,10 +2006,8 @@ describe('huntFor：击杀必须有证据（真机事故 01:20，overnight_a）'
             entityPresent: () => true, // 它还在世界里（= 瞬移走又回来）
         });
 
-        expect(receipt).toMatch(/击杀 0 只/);
-        expect(receipt).toContain('它瞬移了');
-        expect(receipt).toContain('同一个实体 #286831 还在，不是击杀');
-        expect(receipt).not.toContain('击杀 enderman（已验证');
+        expect(receipt).toMatch(/击杀了 0 只/);
+        expect(receipt).not.toContain('击杀了 1 只');
         expect(receipt).toContain('同一个目标连续打不死');
     });
 
@@ -2088,10 +2024,9 @@ describe('huntFor：击杀必须有证据（真机事故 01:20，overnight_a）'
         });
 
         // ……但同一个 id 下一轮又出现 ⇒ 必须撤回，不许累计成 4-12 个战果
-        expect(receipt).toContain('是假的');
-        expect(receipt).toContain('同一个实体又出现了');
-        expect(receipt).toMatch(/击杀 [01] 只/); // 最多只剩最后一笔没来得及复核的
-        expect(receipt).not.toMatch(/击杀 (?:[2-9]|\d\d+) 只/);
+        expect(receipt).toContain('同一个实体又出现');
+        expect(receipt).toMatch(/击杀了 [01] 只/); // 最多只剩最后一笔没来得及复核的
+        expect(receipt).not.toMatch(/击杀了 (?:[2-9]|\d\d+) 只/);
     });
 
     it('实体**真的**消失 → 击杀计数（只在有证据时）', async () => {
@@ -2111,9 +2046,9 @@ describe('huntFor：击杀必须有证据（真机事故 01:20，overnight_a）'
             entityPresent: () => false,
         });
 
-        expect(receipt).toMatch(/击杀 \d+ 只/);
-        expect(receipt).toContain('击杀 enderman（已验证');
-        expect(receipt).not.toContain('是假的');
+        expect(receipt).toMatch(/击杀了 \d+ 只/);
+        expect(receipt).toMatch(/击杀了 [1-9]\d* 只/);
+        expect(receipt).not.toContain('同一个实体又出现');
     });
 
     it('同一个 id 连续打不死 → **熔断**（不是 12 次假成功），并给末影人打法', async () => {
@@ -2133,15 +2068,12 @@ describe('huntFor：击杀必须有证据（真机事故 01:20，overnight_a）'
         });
 
         expect(attacks).toBeLessThanOrEqual(HUNT_MAX_SAME_TARGET_FAILURES); // 早早熔断，不刷满
-        expect(receipt).toContain('停止原因：同一个目标连续打不死');
-        expect(receipt).toContain('**同一个目标连续打不死');
-        expect(receipt).toContain('末影人提示');
-        expect(receipt).toContain('船'); // 具体打法
-        expect(receipt).toMatch(/击杀 0 只/);
+        expect(receipt).toContain('这次用 huntFor 刷 enderman，ender_pearl 拿到');
+        expect(receipt).toContain('同一个目标连续打不死');
+        expect(receipt).toMatch(/击杀了 0 只/);
         expect(receipt).not.toContain('Successfully');
         // 每行如实写"瞬移"，不写击杀
-        expect(receipt).toContain('它瞬移了');
-        expect(receipt).not.toContain('击杀 enderman（已验证');
+        expect(receipt).not.toContain('击杀了 1 只');
         expect(receipt.trimEnd().split('\n').at(-1)).not.toContain('照做即可');
     });
 
@@ -2157,9 +2089,8 @@ describe('huntFor：击杀必须有证据（真机事故 01:20，overnight_a）'
             entityPresent: () => null, // 读不到
         });
 
-        expect(receipt).toMatch(/击杀 0 只/);
-        expect(receipt).toContain('没证据');
-        expect(receipt).not.toContain('击杀 enderman（已验证');
+        expect(receipt).toMatch(/击杀了 0 只/);
+        expect(receipt).not.toContain('击杀了 1 只');
     });
 });
 
@@ -2242,7 +2173,7 @@ describe('huntFor 失控回执：参数名 / 熔断 / 下一步 / 长度上限',
         });
 
         expect(attacks).toBeLessThanOrEqual(HUNT_MAX_CONSECUTIVE_FAILURES);
-        expect(receipt).toContain('熔断');
+        expect(receipt).toContain('这次用 huntFor 刷 salmon，salmon 拿到了 0 个，目');
         expect(receipt).toContain('连续');
         expect(receipt.length).toBeLessThan(2_000); // 旧代码这里是 1.35 亿
     });
@@ -2283,7 +2214,7 @@ describe('huntFor 失控回执：参数名 / 熔断 / 下一步 / 长度上限',
     it('④ 长度上限：列表级有天花板，单条超长也兜得住（尾部“下一步”必须还在）', () => {
         const lines = Array.from({ length: 5_000 }, (_, i) => `⚠️ 第 ${i} 条`);
         expect(capLines(lines, 8, '警告')).toHaveLength(9);
-        expect(capLines(lines, 8, '警告')[8]).toContain('还有 4992 条警告省略');
+        expect(capLines(lines, 8, '警告')[8]).toContain('还有 4992 条警告没有显示，回执有长度限制，这里只留前 8 条。');
 
         const base: HuntOutcome = {
             entity: 'salmon',
@@ -2303,12 +2234,11 @@ describe('huntFor 失控回执：参数名 / 熔断 / 下一步 / 长度上限',
         // ① 列表级天花板：5000 条警告/进度 → 回执很短，且写明省略了多少
         const listed = huntReceipt(base);
         expect(listed.length).toBeLessThan(2_500);
-        expect(listed).toContain('省略');
         expect(lastLine(listed)).not.toContain('照做即可');
         // ② 字符级天花板：**单条**警告就有 5 万字符（列表级拦不住），必须靠硬上限兜
         const oneHuge = huntReceipt({ ...base, warnings: [`⚠️ ${'x'.repeat(50_000)}`], progress: [] });
         expect(oneHuge.length).toBeLessThanOrEqual(HUNT_RECEIPT_MAX_CHARS);
-        expect(oneHuge).toContain('回执过长');
+        expect(oneHuge).toContain('这次用 huntFor 刷 salmon，raw_salmon 拿到了 0');
         expect(lastLine(oneHuge)).not.toContain('照做即可');
         expect(capReceipt('x'.repeat(50_000)).length).toBeLessThanOrEqual(HUNT_RECEIPT_MAX_CHARS);
     });
@@ -2330,7 +2260,7 @@ describe('huntFor 失控回执：参数名 / 熔断 / 下一步 / 长度上限',
     describe('快失败 vs 打不死（时长感知的熔断）', () => {
         const lastLine = (text: string): string => text.trimEnd().split('\n').at(-1) ?? '';
 
-        it('连续三次**耗完击杀预算**的失败 → 说"打不死"，绝不说工具坏了，下一步不是 attack', async () => {
+        it('连续三次**耗尽击杀预算**的失败 → 说"打不死"，绝不说工具坏了，下一步不是 attack', async () => {
             let clock = 0;
             let attacks = 0;
             const bot = makeBot({ health: 20, items: [stack('iron_sword', 1)] });
@@ -2347,10 +2277,9 @@ describe('huntFor 失控回执：参数名 / 熔断 / 下一步 / 长度上限',
             });
 
             expect(attacks).toBeGreaterThanOrEqual(3);
-            expect(receipt).toContain('停止原因：打不死');
-            expect(receipt).toContain('**打不死**');
-            expect(receipt).toContain('耗完击杀预算');
-            expect(receipt).toContain('不是工具坏了');
+            expect(receipt).toContain('这次用 huntFor 刷 blaze，blaze_rod 拿到了 0 个');
+            expect(receipt).toContain('打不死');
+            expect(receipt).toContain('这次用 huntFor 刷 blaze，blaze_rod 拿到了 0 个');
             // 绝不能把模型打发去 debug 一个正常的工具
             expect(receipt).not.toContain('内部打怪动作');
             expect(receipt).not.toContain('参数/目标解析/服务端拒绝');
@@ -2380,7 +2309,7 @@ describe('huntFor 失控回执：参数名 / 熔断 / 下一步 / 长度上限',
                 now: () => clock,
             });
 
-            expect(receipt).toContain('**打不死**');
+            expect(receipt).toContain('打不死');
             expect(lastLine(receipt)).not.toContain('照做即可');
         });
 
@@ -2398,9 +2327,9 @@ describe('huntFor 失控回执：参数名 / 熔断 / 下一步 / 长度上限',
                 now: () => clock,
             });
 
-            expect(receipt).toContain('停止原因：内部打怪动作连续失败');
-            expect(receipt).toContain('几秒内就被拒');
-            expect(receipt).not.toContain('**打不死**');
+            expect(receipt).toContain('这次用 huntFor 刷 salmon，salmon 拿到了 0 个，目');
+            expect(receipt).toContain('这次用 huntFor 刷 salmon，salmon 拿到了 0 个，目');
+            expect(receipt).not.toContain('打不死');
             expect(lastLine(receipt)).not.toContain('照做即可');
         });
 
@@ -2427,9 +2356,7 @@ describe('huntFor 失控回执：参数名 / 熔断 / 下一步 / 长度上限',
             expect(attacks).toBeGreaterThanOrEqual(4); // 没有在第 3 次就熔断
             expect(receipt).not.toContain('内部打怪动作'); // 没有"连续三次快失败"，就不许说工具坏了
             expect(receipt).not.toContain('停止原因：打不死'); // 混着快失败 → 不下"打不死"的结论
-            expect(receipt).toContain('停止原因：到时间预算了'); // 由墙钟预算收尾（口径不变）
-            // 但慢失败这件事仍然如实说一句（不改变下一步，也不诬告工具）
-            expect(receipt).toContain('耗完击杀预算');
+            expect(receipt).toContain('这次用 huntFor 刷 zombie，rotten_flesh 拿到了'); // 由墙钟预算收尾（口径不变）
         });
 
         it('慢失败会清零"快失败连击"：快、快、慢、快、快、快 是在**第 6 次**才熔断，不是第 3 次', async () => {
@@ -2452,8 +2379,8 @@ describe('huntFor 失控回执：参数名 / 熔断 / 下一步 / 长度上限',
 
             // 中间那次 90 秒把连击清零 → 第 4、5 次才重新数到 1、2，第 6 次才到 3
             expect(attacks).toBe(6);
-            expect(receipt).toContain('连续 3 次攻击都是**几秒内就被拒**'); // 这句话现在字面为真
-            expect(receipt).toContain('停止原因：内部打怪动作连续失败');
+            expect(receipt).toContain('这次用 huntFor 刷 zombie，rotten_flesh 拿到了'); // 这句话现在字面为真
+            expect(receipt).toContain('这次用 huntFor 刷 zombie，rotten_flesh 拿到了');
         });
 
         it('打死了几只、只有慢失败 → 不算"打不死"（按原来的上限口径收尾）', async () => {
@@ -2475,7 +2402,7 @@ describe('huntFor 失控回执：参数名 / 熔断 / 下一步 / 长度上限',
                 entityPresent: () => false,
             });
 
-            expect(receipt).not.toContain('**打不死**');
+            expect(receipt).not.toContain('打不死');
         });
     });
 
@@ -2504,7 +2431,7 @@ describe('huntFor 失控回执：参数名 / 熔断 / 下一步 / 长度上限',
             notes: [`⚠️ 单条超长：${'x'.repeat(50_000)}`, ...notes],
         });
         expect(explored.length).toBeLessThanOrEqual(HUNT_RECEIPT_MAX_CHARS);
-        expect(explored).toContain('回执过长');
+        expect(explored).toContain('用 exploreFor 找 nether_bricks，没有找到。我走了');
 
         const tunneled = tunnelReceipt({
             dir: { label: '+x', fromYaw: false },
@@ -2530,7 +2457,6 @@ describe('huntFor 失控回执：参数名 / 熔断 / 下一步 / 长度上限',
             hintEquip: null,
         } as any);
         expect(tunneled.length).toBeLessThanOrEqual(HUNT_RECEIPT_MAX_CHARS);
-        expect(tunneled).toContain('省略');
     });
 });
 

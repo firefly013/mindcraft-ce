@@ -220,10 +220,7 @@ export function dangerousWaterRefusal(
   if (deepWaterAllowed(bot)) return null;
   const cls = classifyWaterAt(blockAtFrom(bot), Math.floor(x), Math.floor(y), Math.floor(z));
   if (!cls.dangerous) return null;
-  return (
-    `默认不允许${verb}那片水里（${cls.reason}）。` +
-    `要做得先授权：allowDangerousOps(5, "原因", "enter_deep_water")。`
-  );
+  return `这次要${verb}的目标点在水里，${cls.reason}。这一步需要先拿到 enter_deep_water 授权，现在没有授权，所以没有做。`;
 }
 
 /**

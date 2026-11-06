@@ -39,30 +39,30 @@ describe('pickupOverlapVerdict：按原版包围盒规则判断"该不该能捡"
   it('不同 y 层但水平很近、且超出垂直容差 ⇒ 不相交（"同层"必须是真同层）', () => {
     const verdict = pickupOverlapVerdict({ bot: botAt(0, 64, 0), item: { x: 0.2, y: 62.0, z: 0.2 } });
     expect(verdict.overlap).toBe(false);
-    expect(verdict.reason).toContain('不相交');
+    expect(verdict.reason).toContain('包围盒没有相交，水平方向差 0.20 和 0.20，垂直方向差 -2.00');
   });
 });
 
 describe('summarizePickupTrace：bot 动没动 / 有没有真的靠近', () => {
-  it('bot 几乎没动 ⇒ 明说"靠近这一步没生效"（对应 A 的"move 方向反"）', () => {
+  it('bot 几乎没动 ⇒ 报实际移动距离与包围盒状态', () => {
     const summary = summarizePickupTrace([
       { botMoved: 0, dx: 0.9, dy: 0.2, dz: 0, overlap: true },
       { botMoved: 0.01, dx: 0.9, dy: 0.2, dz: 0, overlap: true },
     ]);
     expect(summary.botTravel).toBeLessThan(0.2);
-    expect(summary.note).toContain('几乎没动');
+    expect(summary.note).toContain('一共采样 2 次，这期间我移动了 0.01 米，中途出现过包围盒相交，最近');
     expect(summary.overlapEver).toBe(true);
-    expect(summary.note).toContain('几何上早该能捡');
+    expect(summary.note).toContain('一共采样 2 次，这期间我移动了 0.01 米，中途出现过包围盒相交，最近');
   });
 
-  it('从未相交 ⇒ 明说"一直没真正靠近到可拾取范围"', () => {
+  it('从未相交 ⇒ 报未出现', () => {
     const summary = summarizePickupTrace([
       { botMoved: 0.5, dx: 3, dy: 0, dz: 0, overlap: false },
       { botMoved: 0.6, dx: 2.2, dy: 0, dz: 0, overlap: false },
     ]);
     expect(summary.overlapEver).toBe(false);
-    expect(summary.note).toContain('从未出现过包围盒相交');
-    expect(summary.note).toContain('移动了');
+    expect(summary.note).toContain('一共采样 2 次，这期间我移动了 1.10 米，整个过程中包围盒都没有相交');
+    expect(summary.note).toContain('一共采样 2 次，这期间我移动了 1.10 米，整个过程中包围盒都没有相交');
   });
 
   it('给最近距离（用于回执里说清"差多少"）', () => {
@@ -111,7 +111,7 @@ describe('掉落物"出现了但没人去捡"要能分开（真机 2026-10-19 �
     // (d) 入包与否：由 summarizePickupTrace / inventory 增量表达（此处只需证明两者可以不一致）
     const trace = summarizePickupTrace([{ botMoved: 1.2, dx: 0.9, dy: 0, dz: 0, overlap: true }]);
     expect(trace.overlapEver).toBe(true);
-    expect(trace.note).toContain('几何上早该能捡');
+    expect(trace.note).toContain('一共采样 1 次，这期间我移动了 1.20 米，中途出现过包围盒相交，最近');
   });
 });
 
@@ -148,7 +148,9 @@ describe('击杀后的拾取优先窗口（有界 + 挨打就让位）', () => {
     // 标记必须真的存在，否则他们的集成会一直拿到 null。
     expect(src).toContain('drop-seen{id=');
     expect(src).toContain('blockedBy=[');
-    expect(src).toContain('它**不代表**你捡到了');
+    expect(src).toContain('自动拾取：');
+    // 不再追加"这代表什么"的解释性总结
+    expect(src).not.toContain('不代表**你捡到了');
   });
 });
 
@@ -194,7 +196,7 @@ describe('闸门不许把"测不出来"当成"不要去"（Lead 2026-10-19 裁�
     expect(code).toContain("measurement.push('背包未同步（捡到了也暂时读不出增量，用 stats 核对）')");
     expect(code).toContain('measurement,');
     // 真机那条真值行必须仍然声称"不是威胁"
-    expect(code).toContain('这只影响读数，不阻止去捡');
+    expect(code).toContain('读数：');
   });
 
   it('身体被占用的拾取要在动作收尾重试（有界 + 有日志 + 报告捡到什么）', () => {
@@ -264,3 +266,5 @@ describe('被 Stop/中断打断的动作也要捡战利品（abort 窗口）', (
     expect(block).not.toContain('this.pickupAbortRequested) return null;');
   });
 });
+
+

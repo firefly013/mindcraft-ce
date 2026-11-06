@@ -55,11 +55,11 @@ function isLongRunning(name: string, catalogue: readonly ToolDeclaration[]): boo
 /** `help [命令]`：给命令的用途和参数。查不到就直说。 */
 function describeCommand(name: string, catalogue: readonly ToolDeclaration[]): string {
   const cmd = catalogue.find((c) => c.name === name || c.name === `!${name}`);
-  if (cmd == null) return `没有这条命令：${name}。用 tools 看看有哪些。`;
+  if (cmd == null) return `没有这条命令，${name}。`;
   const lines: string[] = [cmd.name, `  ${cmd.description ?? '(没写说明)'}`];
   const params = Object.entries(cmd.params ?? {});
   if (params.length > 0) {
-    lines.push('  参数：');
+    lines.push('  参数有');
     for (const [key, def] of params) {
       const def2 = def as { type?: string; description?: string; optional?: boolean; default?: unknown };
       const tail =
@@ -192,7 +192,7 @@ async function main(): Promise<void> {
       return;
     }
     const profilePath = String(opts.args['profile'] ?? `profiles/${name}.json`);
-    let profile: Record<string, unknown> = {};
+    let profile: Record<string, unknown>;
     try {
       profile = JSON.parse(readFileSync(profilePath, 'utf8')) as Record<string, unknown>;
     } catch (error: unknown) {

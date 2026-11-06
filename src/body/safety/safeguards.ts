@@ -106,12 +106,12 @@ export function createSafeguards(): Safeguards {
     },
     describe(now) {
       const s = live(now);
-      if (s == null) return '保命程序正常（进水会自动上岸、溺水会自动上浮）';
+      if (s == null) return '保命程序运行正常';
       const left =
         s.callsLeft != null
-          ? `还剩 ${s.callsLeft} 次工具调用`
+          ? `还能用 ${s.callsLeft} 次`
           : `还剩 ${Math.max(0, Math.round(((s.expiresAt as number) - now) / 1000))} 秒`;
-      return `保命程序已关闭，${left}（原因：${s.reason}）——这段时间里出事没人救`;
+      return `保命程序已经关闭，${left}`;
     },
   };
 }

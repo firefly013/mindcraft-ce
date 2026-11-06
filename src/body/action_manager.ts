@@ -219,16 +219,10 @@ export class ActionManager {
             this.currentStartedAt = 0;
             if (TIMEOUT !== undefined) clearTimeout(TIMEOUT);
             console.error("Action triggered catch:", err);
-            // Log the full stack trace
-            console.error(err instanceof Error ? err.stack : err);
             await this.stop();
-            const errStr = String(err);
-            const errStack = err instanceof Error ? err.stack : undefined;
+            const errStr = err instanceof Error ? err.message : String(err);
 
-            const message = this.getBotOutputSummary() +
-                '!!Action threw exception!!\n' +
-                'Error: ' + errStr + '\n' +
-                'Stack trace:\n' + errStack + '\n';
+            const message = this.getBotOutputSummary() + `动作执行失败了，原始错误是 ${errStr}。`;
 
             const interrupted = this.agent.bot.interrupt_code as boolean;
             this.agent.clearBotLogs();
@@ -245,29 +239,11 @@ export class ActionManager {
         let output = bot.output as string;
         const MAX_OUT = 900;
         if (output.length > MAX_OUT) {
-            // **中段不许直接扔**（2026-10-21 实测：用 CLI 当玩家时 goToSurface 输出 2691 字符，
-            // 截断后只留首尾各 250，而"空手挖不动 stone / 没有可走的路线"这些**真正的原因正好在中段**，
-            // 玩家看到的是一个没有理由的失败）。现在：首 + **从被丢掉的中段里捞诊断行** + 尾。
-            const head = output.substring(0, Math.floor(MAX_OUT / 3));
-            const tail = output.substring(output.length - Math.floor(MAX_OUT / 3));
-            const middle = output.substring(Math.floor(MAX_OUT / 3), output.length - Math.floor(MAX_OUT / 3));
-            const diagRe = /(不能|无法|失败|没有|挖不动|够不着|拒绝|停止|不生效|错误|error|Error|fail|refus|cannot|unreach)/;
-            const diag = middle
-                .split('\n')
-                .filter((line: string) => diagRe.test(line))
-                .slice(0, 6)
-                .join('\n');
-            const skipped = middle.length - diag.length;
-            output =
-                `Action output is very long (${output.length} chars); kept head, diagnostic lines, and tail.` +
-                `\nFirst outputs:\n${head}` +
-                (diag.length > 0
-                    ? `\n...跳过的中段里与诊断相关的行（其余 ${Math.max(0, skipped)} 字符省略）:\n${diag}`
-                    : '\n...（中段没有诊断性内容）') +
-                `\nFinal outputs:\n${tail}`;
-        }
-        else {
-            output = 'Action output:\n' + output.toString();
+            // 只留头 + 尾，中间按事实报省略量；不再按关键词挑"诊断行"。
+            const head = output.substring(0, MAX_OUT - 300);
+            const tail = output.substring(output.length - 300);
+            const skipped = output.length - head.length - tail.length;
+            output = `${head}\n动作输出太长，一共 ${output.length} 字符，中间省略了 ${skipped} 字符，下面是开头和结尾。\n${tail}`;
         }
         bot.output = '';
         return output;

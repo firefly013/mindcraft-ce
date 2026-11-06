@@ -77,14 +77,12 @@ describe('planDig：采集意图（默认）', () => {
     const plan = planDig(bot({ pack: [DIAMOND_PICK] }), stone);
     expect(plan.ok).toBe(true);
     expect(plan.drops).toBe(true);
-    expect(plan.note).toContain('diamond_pickaxe');
-    expect(plan.note).toContain('会先换上');
+    expect(plan.note).toBe('');
   });
 
-  it('多把镐 ⇒ 挑档位最高的那把，并在回执里点名', () => {
+  it('多把镐 ⇒ 挑档位最高的那把，不在回执里点名（换手是执行细节）', () => {
     const plan = planDig(bot({ pack: [WOOD_PICK, IRON_PICK, DIAMOND_PICK] }), stone);
-    expect(plan.note).toContain('diamond_pickaxe');
-    expect(plan.note).not.toContain('wooden_pickaxe');
+    expect(plan.note).toBe('');
   });
 
   it('手上已经举着那把 ⇒ 回执一个字都不加', () => {
@@ -114,8 +112,8 @@ describe('planDig：采集意图（默认）', () => {
     expect(plan.ok).toBe(false);
     expect(plan.drops).toBe(false);
     expect(plan.note).toContain('没有能挖 stone 的工具');
-    // 关键：拒绝文案必须给出"下一步能照做"的出路，否则模型只会重发同一条命令
-    expect(plan.note).toContain('force=true');
+    // 回执只陈述事实：不再附"加 force=true"这类下一步。
+    expect(plan.note).not.toContain('force=true');
   });
 
   it('深板岩/黑曜石：等级不够就拒绝（黑曜石只认钻石镐）', () => {
@@ -146,7 +144,7 @@ describe('planDig：挖穿意图（force=true）', () => {
     const plan = planDig(bot(), bedrock, true);
     expect(plan.ok).toBe(false);
     expect(plan.note).toContain('挖不动');
-    expect(plan.note).toContain('force 也帮不了你');
+    expect(plan.note).not.toContain('force');
   });
 
   it('背包里有工具时 force 也放行，drops 按真实情况报 true', () => {

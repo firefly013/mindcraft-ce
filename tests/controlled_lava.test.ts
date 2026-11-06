@@ -95,14 +95,11 @@ describe('formatMakeObsidianProgress', () => {
         nextTarget: { liquid: { x: 7, y: 8, z: 9 }, stand: { x: 10, y: 11, z: 12 } },
         dangerStop: false,
       },
-      'makeObsidian 被 Stop/保命打断',
     );
-    expect(text).toContain('进度 3/10');
+    expect(text).toContain('现在已经挖到 3 块');
     expect(text).toContain('(1,2,3)');
-    expect(text).toContain('剩余水桶 2');
-    expect(text).toContain('下一块候选');
-    expect(text).toContain('(7,8,9)');
-    expect(text).toContain('(10,11,12)');
+    expect(text).toContain('背包里还剩 2 个水桶');
+    expect(text).not.toContain('下一块候选');
   });
 });
 

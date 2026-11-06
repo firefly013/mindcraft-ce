@@ -32,19 +32,16 @@ export interface ToolOutcome {
 /**
  * 工具执行结果 → 模型看到的回执文本。
  *
- * 与旧 `Agent.runTool` **逐字一致**（`MESSAGES.toolOutcome` + `outcomeText`）：
- * 回执措辞是模型学过的契约，改一个字都是改契约。
- *
- * 注意 `accepted` 也走"完成"分支——动作类工具即时回 accepted，正文就是它
- * 认领通道时给的那点信息（`{action_id, generation}` 或 `{already_running:true}`）；
+ * 只报工具名与结果：调用参数是模型自己刚发出去的，重复回显没有信息。
+ * `accepted` 也走"完成"分支——动作类工具即时回 accepted，正文就是认领标识；
  * 真正的结果以后以 L3 事件回来。
  */
-export function loopResultText(name: string, args: unknown, result: ToolOutcome): string {
+export function loopResultText(name: string, result: ToolOutcome): string {
   const outcome =
     result.status === 'rejected'
       ? `rejected: ${result.reason ?? result.code ?? 'unknown'}`
       : outcomeText(result.data);
-  return MESSAGES.toolOutcome(name, args, outcome);
+  return MESSAGES.toolOutcome(name, outcome);
 }
 
 /** 回执正文：与 `Agent.outcomeText` 逐字一致（对象 JSON 化，null/空串 → '(no output)'）。 */
@@ -131,7 +128,7 @@ export function blockedActionsHook(blocked: () => readonly string[]): HookRegist
     beforeTool: (call) => {
       const names = blocked();
       if (names.includes(call.name) || names.includes(`!${call.name}`)) {
-        return { block: `工具 ${call.name} 已被 blocked_actions 禁用。` };
+        return { block: `工具 ${call.name} 现在被 blocked_actions 禁用了。` };
       }
       return undefined;
     },

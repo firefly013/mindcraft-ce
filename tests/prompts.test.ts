@@ -28,16 +28,14 @@ describe('td/tp', () => {
 describe('MESSAGES', () => {
   it('pins every user-visible template exactly', () => {
     expect(MESSAGES.hello('Andy')).toBe('Hello world! 我是Andy');
-    expect(MESSAGES.usedMarker('stop')).toBe('*used stop*');
-    expect(MESSAGES.taskGoal('dig')).toBe('你的任务目标：dig');
-    expect(MESSAGES.taskEnded(0.5)).toBe('任务结束，得分：0.5');
-    expect(MESSAGES.taskEnded('timeout')).toBe('任务结束，得分：timeout');
-    expect(MESSAGES.actionTimeout(3)).toBe('动作超时（3 分钟），正在强制停止。');
+    expect(MESSAGES.taskGoal('dig')).toBe('你的任务目标是 dig');
+    expect(MESSAGES.taskEnded(0.5)).toBe('任务结束了，得分是 0.5。');
+    expect(MESSAGES.taskEnded('timeout')).toBe('任务结束了，得分是 timeout。');
+    expect(MESSAGES.actionTimeout(3)).toBe('这次动作超时了，3 分钟没有跑完。');
     expect(MESSAGES.death('x:1', 'overworld', 'boom', 'dirt×1')).toBe(
-      "你死在了overworld维度 x:1。死因（临终消息）：'boom'。" +
-        "死亡点已存为 'last_death_position'，想回去可以找它。" +
-        "死亡瞬间身上带着（掉落清单，回去捡可得）：dirt×1。" +
-        '之前的动作已停止，你已重生。',
+      "你死在overworld维度，坐标是 x:1。临终消息里写的原因是 'boom'。" +
+        '死亡时身上带着 dirt×1。' +
+        '你已经重生了。',
     );
     expect(MESSAGES.modelUnsupported).toBe(
       '我的模型不支持原生工具调用，换个 OpenAI 兼容模型再试。',
@@ -46,21 +44,13 @@ describe('MESSAGES', () => {
     expect(MESSAGES.exiting).toBe('退出中。');
   });
 
-  it('renders a tool outcome line with args, truncation and empty-output marker', () => {
-    expect(MESSAGES.toolOutcome('goToPlayer', { player_name: 'steve' }, 'done')).toBe(
-      '工具 goToPlayer {"player_name":"steve"} → done',
+  it('renders a tool outcome line without echoing the model’s own args', () => {
+    // 参数是模型刚发出去的，重复回显没有信息；只报工具名与结果。
+    expect(MESSAGES.toolOutcome('goToPlayer', 'done')).toBe(
+      '调用 goToPlayer 之后，返回的内容是 done',
     );
-    // 空输出有个明确的占位，不是空白。
-    expect(MESSAGES.toolOutcome('stats', {}, '')).toBe('工具 stats {} → (无输出)');
-    // 无法序列化（循环引用）与 undefined 都退化成 {}，绝不抛错。
-    const circular: Record<string, unknown> = {};
-    circular['self'] = circular;
-    expect(MESSAGES.toolOutcome('x', circular, 'ok')).toBe('工具 x {} → ok');
-    expect(MESSAGES.toolOutcome('x', undefined, 'ok')).toBe('工具 x {} → ok');
-    // 超长参数截断并标记。
-    const long = MESSAGES.toolOutcome('x', { blob: 'y'.repeat(900) }, 'ok');
-    expect(long).toContain('[截断]');
-    expect(long.length).toBeLessThan(600);
+    // 空输出有个明确的说法，不是空白。
+    expect(MESSAGES.toolOutcome('stats', '')).toBe('调用 stats 之后，没有返回任何内容。');
   });
 });
 

@@ -37,7 +37,7 @@ export function formatEventEntry(entry: EventEntry): string {
     body = '[unserializable]';
   }
   if (body.length > ENTRY_LIMIT) {
-    body = `${body.slice(0, ENTRY_LIMIT)}…[truncated ${body.length - ENTRY_LIMIT} chars]`;
+    body = `${body.slice(0, ENTRY_LIMIT)}……内容太长，中间截掉了 ${body.length - ENTRY_LIMIT} 个字符，原文一共 ${body.length} 个字符……`;
   }
   return `${head} ${body}`;
 }
@@ -46,13 +46,12 @@ export function formatEventEntry(entry: EventEntry): string {
  * 唤醒标记：**只报"本轮新到的事件是哪些序号"**，正文不再重发。
  *
  * 事件的正文现在由 `History.addEvent()` 记进历史（每个事件恰好一次），
- * 这里只回答"我为什么被叫醒"。以前这里整段重发 payload，结果是同一条
- * 玩家消息在同一请求里出现两次（历史里一次、`## 事件` 里一次）。
+ * 这里只回答"我为什么被叫醒"。
  */
 export function renderEvents(entries: readonly EventEntry[] | null | undefined): string {
   if (!Array.isArray(entries) || entries.length === 0) return '';
   const ids = entries.map((entry) => (entry.seq == null ? '#?' : `#${entry.seq}`)).join(' ');
-  return `## 本轮新事件\n${ids}\n（正文已记在上面的历史里，按序号找；不用重复叙述。）`;
+  return `## 本轮新事件\n${ids}`;
 }
 
 /**
@@ -91,7 +90,7 @@ export function renderEventText(kind: string, level: number, payload: unknown): 
     body = '[unserializable]';
   }
   if (body.length > ENTRY_LIMIT) {
-    body = `${body.slice(0, ENTRY_LIMIT)}…[truncated ${body.length - ENTRY_LIMIT} chars]`;
+    body = `${body.slice(0, ENTRY_LIMIT)}……内容太长，中间截掉了 ${body.length - ENTRY_LIMIT} 个字符，原文一共 ${body.length} 个字符……`;
   }
   return `[事件] ${kind}/L${level} ${body}`;
 }

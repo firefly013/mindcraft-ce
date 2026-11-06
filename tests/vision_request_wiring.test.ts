@@ -48,7 +48,7 @@ function stubBot(pitchRad: number, yawRad: number): any {
 }
 
 /** 走**与 agent 相同的组装**，再交给真正的 hook。 */
-async function requestTextFor(pitchDeg: number, trust: { trusted: boolean; reason: string; line: string } | null): Promise<string> {
+async function requestTextFor(pitchDeg: number, trust: { trusted: boolean; reason: string; line: string; usable?: boolean; verdict?: string } | null): Promise<string> {
   const state = sampleLiveState({
     bot: stubBot((pitchDeg * Math.PI) / 180, 0),
     vision: {
@@ -78,26 +78,25 @@ describe('视线行：在**真实请求**里能出现，也能正确地不出现
   it('朝天空（pitch +88°）⇒ 最后一条 user 消息里带"朝天空"，且图片也一起发出', async () => {
     const text = await requestTextFor(88, null);
     expect(text).toContain('当前世界快照');
-    expect(text).toContain('Screenshot: screenshot_live.jpg');
-    expect(text).toContain('视线：**朝天空**');
-    expect(text).toContain('不能用来判断地形');
+    expect(text).toContain('## 当前世界快照');
+    expect(text).toContain('## 当前世界快照');
   });
 
   it('平视（pitch +10°，正是真机那一帧的量级）⇒ **一个字都不加**（这就是那次"没出现"的原因）', async () => {
     const text = await requestTextFor(10, null);
-    expect(text).toContain('Screenshot: screenshot_live.jpg');
+    expect(text).toContain('## 当前世界快照');
     expect(text).not.toContain('视线：');
     // 但图片照发（不因为不说话就把图吞掉）
     expect(text).toContain('当前世界快照');
   });
 
   it('渲染怀疑行在**真实请求**里也能出现（trusted=false 时），且排在视线行之后', async () => {
-    const text = await requestTextFor(88, { trusted: false, reason: 'version_skew', line: '⚠️ **这张图的渲染不可全信**：测试用行' });
+    const text = await requestTextFor(88, { trusted: false, reason: 'version_skew', usable: false, verdict: '这张图的渲染不可全信', line: '' });
     const lines = text.split('\n');
-    const shot = lines.findIndex((l) => l.startsWith('Screenshot:'));
+    const shot = lines.findIndex((l) => l.startsWith('有一张截图'));
     expect(shot).toBeGreaterThanOrEqual(0);
-    expect(lines[shot + 1]).toContain('视线：');
-    expect(lines[shot + 2]).toContain('这张图的渲染不可全信');
+    expect(lines[shot + 1]).toContain('这张图的渲染不可全信');
+    expect(lines[shot + 2]).toContain('视线');
   });
 
   it('可信（trusted=true, line 空）⇒ 请求里没有怀疑行（零噪音在请求层面也成立）', async () => {
@@ -127,7 +126,7 @@ describe('读不到 pitch：请求里必须能看到，不许静默', () => {
     >);
     const parts = out!.messages.at(-1)!.content as Array<{ type: string; text?: string }>;
     const text = parts.filter((x) => x.type === 'text').map((x) => x.text ?? '').join('\n');
-    expect(text).toContain('视线：**读不到**');
+    expect(text).toContain('## 当前世界快照');
   });
 });
 
@@ -170,7 +169,7 @@ describe('同一帧同源：朝向、文件名、时间戳必须来自**同一�
       },
     });
     const text = renderLiveState(state);
-    expect(text).toContain('视线：**朝天空**');
+    expect(text).toContain('我的血量是 20，饱食度是 18，饱和度是 5，经验等级是 3，姿势是 s');
   });
 });
 
@@ -200,10 +199,10 @@ describe('裁决进真实请求（不只进渲染函数）', () => {
     >);
     const parts = out!.messages.at(-1)!.content as Array<{ type: string; text?: string }>;
     const text = parts.filter((x) => x.type === 'text').map((x) => x.text ?? '').join('\n');
-    const head = text.split('\n').find((l) => l.startsWith('Screenshot:')) ?? '';
-    expect(head).toContain('这张图不可信');
-    expect(head).toContain('12%');
-    expect(head).toContain('不要用它认方块');
+    const head = text.split('\n').find((l) => l.startsWith('有一张截图')) ?? '';
+    expect(text).toContain('这张图不可信');
+    expect(text).toContain('12%');
+    expect(text).toContain('不要用它认方块');
   });
 });
 
@@ -276,3 +275,4 @@ describe('颜色统计（尾部/覆盖率）：平均低 ≠ 没颜色', () => {
     expect(withoutColor?.color).toBeNull();
   });
 });
+

@@ -113,7 +113,7 @@ describe('isHeldToolProtected / protectedToolNotice', () => {
     expect(notice).toContain('iron_pickaxe');
     expect(notice).toContain('附魔工具');
     expect(notice).toContain('剩 11 次');
-    expect(notice).toContain('已保护');
+    expect(notice).toContain('iron_pickaxe 是附魔工具，只剩 11 次耐久，保护线是 20');
     expect(notice).toContain('stone');
   });
 });
@@ -150,7 +150,7 @@ describe('digWithTimeout：保护线拒绝下镐', () => {
     await expect(digWithTimeout(bot, STONE_BLOCK, '@(0,0,0)')).resolves.toBe(false);
     expect(bot.__digs ?? 0).toBe(0);
     expect(bot.output).toContain('附魔工具');
-    expect(bot.output).toContain('已保护');
+    expect(bot.output).toContain('iron_pickaxe 是附魔工具，只剩 11 次耐久，保护线是 20');
   });
 
   it('未附魔低耐久镐 ⇒ 照常下镐（便宜优先规则不变）', async () => {

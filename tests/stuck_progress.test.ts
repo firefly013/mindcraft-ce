@@ -23,7 +23,7 @@ describe('亚方块下降不是卡死', () => {
     expect(verdict.kind).not.toBe('stuck');
     expect(verdict.kind).toBe('none');
   });
-  it('只有亚方块下降（done 未变）⇒ moving-slow，文案「不是卡住，是慢」且含实测格数', () => {
+  it('只有亚方块下降（done 未变）⇒ moving-slow，含实测格数', () => {
     const verdict = evaluateStuck({
       actionRunning: true,
       positionChanged: false,
@@ -33,13 +33,12 @@ describe('亚方块下降不是卡死', () => {
       progress,
     });
     expect(verdict.kind).toBe('moving-slow');
-    expect(verdict.message).toContain('不是卡住，是慢');
-    expect(verdict.message).toContain('0.6');
+    expect(verdict.message).toContain('下降了 0.6 格');
   });
 });
 
 describe('真停：三个信号都没有才报卡死', () => {
-  it('位置/高度/进度都没变 67 秒 ⇒ stuck，且文案是"不是挖慢，是真停了"+进度未变', () => {
+  it('位置/高度/进度都没变 67 秒 ⇒ stuck，报进度未变与坐标未动', () => {
     const verdict = evaluateStuck({
       actionRunning: true,
       positionChanged: false,
@@ -49,8 +48,8 @@ describe('真停：三个信号都没有才报卡死', () => {
       progress,
     });
     expect(verdict.kind).toBe('stuck');
-    expect(verdict.message).toContain('不是挖慢，是真停了');
-    expect(verdict.message).toContain('进度 3/32');
+    expect(verdict.message).toContain('过去 67 秒里，一格都没挖掉，一步也没走，向下挖的进度停在 3 个，一共');
+    expect(verdict.message).toContain('过去 67 秒里，一格都没挖掉，一步也没走，向下挖的进度停在 3 个，一共');
     expect(verdict.message).not.toContain('卡住');
   });
   it('进度在涨但坐标不动（原地重挖同一格）⇒ 不报卡死', () => {

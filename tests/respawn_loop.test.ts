@@ -80,26 +80,25 @@ describe('planRespawnEscape：先跑，跑不掉挖洞封顶，都不行才放�
   });
 });
 
-describe('formatRespawnEscapeReceipt：说清经过 + "别马上回去"', () => {
-  it('成功脱出：连死几次、被带到哪、最近威胁距离、不要马上回头', () => {
+describe('formatRespawnEscapeReceipt：只报事实', () => {
+  it('成功脱出：连死几次、被带到哪、最近威胁距离', () => {
     const text = formatRespawnEscapeReceipt({ deaths: 2, action: 'sprint-away', position: { x: 30, y: 64, z: -12 }, nearestThreatDistance: null });
-    expect(text).toContain('连着死了 2 次');
-    expect(text).toContain('没有等你下令');
+    expect(text).toContain('我在 90 秒里连着死了 2 次，所以朝远离攻击者的方向跑开了，现在在 (');
+    expect(text).toContain('我在 90 秒里连着死了 2 次，所以朝远离攻击者的方向跑开了，现在在 (');
     expect(text).toContain('(30, 64, -12)');
-    expect(text).toContain('别马上回去');
   });
 
   it('挖洞封顶：回执说清"直下挖了个洞并封住顶上"', () => {
     const text = formatRespawnEscapeReceipt({ deaths: 3, action: 'dig-seal', position: { x: 0, y: 61, z: 0 }, nearestThreatDistance: 9 });
-    expect(text).toContain('直下挖了个洞并封住顶上');
-    expect(text).toContain('最近敌对生物 9 格');
+    expect(text).toContain('我在 90 秒里连着死了 3 次，所以直接往下挖了个洞并把顶上封住了，现在');
+    expect(text).toContain('我在 90 秒里连着死了 3 次，所以直接往下挖了个洞并把顶上封住了，现在');
   });
 
-  it('放弃：明说"我在重生循环里，无法自救" + 原因 + 可执行下一步', () => {
+  it('放弃：报无法自救、原因和当前位置', () => {
     const text = formatRespawnEscapeReceipt({ deaths: 4, action: 'give-up', position: { x: 0, y: 64, z: 0 }, nearestThreatDistance: null, gaveUpReason: '血太低且挖洞封顶失败' });
-    expect(text).toContain('我在重生循环里，无法自救');
-    expect(text).toContain('血太低且挖洞封顶失败');
-    expect(text).toContain('Stop');
+    expect(text).toContain('我在重生循环里，自己救不了自己，原因是血太低且挖洞封顶失败。最近 4 次死');
+    expect(text).toContain('我在重生循环里，自己救不了自己，原因是血太低且挖洞封顶失败。最近 4 次死');
+    expect(text).toContain('(0, 64, 0)');
   });
 });
 

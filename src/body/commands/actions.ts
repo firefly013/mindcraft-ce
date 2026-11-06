@@ -83,38 +83,12 @@ function runAsAction (actionFn: AgentActionFn, timeout = DEFAULT_ACTION_TIMEOUT_
         };
         const code_return = await agent.actions.runAction(`action:${actionLabel}`, actionFnWithAgent, { timeout });
         if (code_return.interrupted && !code_return.timedout) {
-            // **被中断也要给结论。** 以前这里直接 `return;`（回执是空串），大脑
-            // 只能补一句"没有得到明确结论，不能确认是否找到"——模型连续两次
-            // 收到一模一样的废话，既不知道是被谁打断、也不知道该不该重试
-            // （Feedback #42）。中断原因（body 侧 `interrupt_code`）就是结论本身：
-            // "搜索没做完，因为 Stop/保命反射抢走了身体"。
-            const logs = String(code_return.message ?? '').trim();
-            const tail = logs === '' ? '' : `\n中断前的日志：${logs.split('\n').slice(-4).join(' / ')}`;
-            // **必须指出是谁打断的，不许列清单**（Lead 2026-10-21：用 CLI 驱动
-            // `collectBlocks` 被中断，回执写"Stop / 保命反射 / autoPickup 抢走了身体"——
-            // 三个候选等于零信息，模型只能盲试同一条命令）。
-            // body 侧在真正置 `interrupt_code` 的地方留下 `__interruptReason`，
-            // 这里直接读；没记录就**如实说没记录**，不再假装知道。
+            // 中断只报是谁打断的；没记录就如实说没记录。
             const who = String((agent.bot as any)?.__interruptReason ?? '').trim();
-            const whoText = who === '' ? '原因未记录（这是已知缺口，不是你的错）' : who;
-            return (
-                `${actionLabel}：**被中断**（${whoText}），没有做完，也没有结论。` +
-                `通道已经释放，可以开始下一个动作。${tail}`
-            );
+            return `这次动作被中断了，${who === '' ? '中断原因没有记录下来' : '打断它的是 ' + who}。`;
         }
-        // **超时时必须把"卡在哪"说出来。** 光回一句"超时"等于没说：模型不知道
-        // 是脚边被水占了、卡在方块里、还是目标根本够不着，只能瞎重试
-        // （它自述"装桶重试 6 次""同一件事重发/换招"就是这个原因）。
-        // 而身体的日志里往往已经有线索（skills 会 log 失败原因），一并带回。
         if (code_return.timedout) {
-            const why = skills.describeStuck?.(agent.bot) ?? '';
-            const logs = String(agent.bot?.output ?? '').trim();
-            const seen = logs === '' ? '' : `\n已经做了的：${logs.split('\n').slice(0, 6).join(' / ')}`;
-            return (
-                `${actionLabel}：**超时**（${timeout} 分钟没做完），已释放身体通道。` +
-                `注意：**超时 ≠ 没做成**——有些动作已经生效，请先核对状态再决定要不要重试。` +
-                `${why === '' ? '' : `\n卡住时：${why}`}${seen}`
-            );
+            return `这次动作超时了，${timeout} 分钟没有跑完。`;
         }
         return code_return.message;
     };
@@ -180,18 +154,12 @@ export const actionsList: AgentCommand[] = [
             const horizontal = Math.hypot(x - start.x, z - start.z);
             // 高差大且几乎在正上方：寻路器会一直卡壁，先垂直上行再走最后一段。
             if (dy >= 4 && horizontal <= 8) {
-                skills.log(bot, 'goToCoordinates：高差 ' + dy.toFixed(1) + ' 格、水平 ' + horizontal.toFixed(1) + ' 格，先用 pillarUp/stairUp 垂直上行。');
                 const material = skills.choosePillarMaterial(bot?.inventory?.items?.() as Array<{ name?: unknown; count?: unknown }>);
                 const climbed = material != null
                     ? await skills.pillarUp(bot, Math.ceil(dy))
                     : await skills.stairUp(bot, Math.ceil(dy));
-                if (bot.interrupt_code) {
-                    skills.log(bot, 'goToCoordinates：垂直上行被 Stop/保命打断，本次停止。');
-                    return;
-                }
-                skills.log(bot, climbed
-                    ? 'goToCoordinates：垂直上行完成，继续寻路到精确坐标。'
-                    : 'goToCoordinates：垂直上行没能完成，继续尝试普通寻路（失败会给出卡住原因）。');
+                if (bot.interrupt_code) return;
+                void climbed;
             }
             await skills.goToPosition(bot, x, y, z, closeness);
         }, 5)
@@ -205,7 +173,7 @@ export const actionsList: AgentCommand[] = [
         },
         perform: runAsAction(async (agent: any, block_type: string, range: number) => {
             if (range < 32) {
-                skills.log(agent.bot, `Minimum search range is 32.`);
+                skills.log(agent.bot, '搜索范围不到 32 格，这次只按 32 格来找。');
                 range = 32;
             }
             await skills.goToNearestBlock(agent.bot, block_type, 4, range);
@@ -274,18 +242,11 @@ export const actionsList: AgentCommand[] = [
                 const steppedBack = await skills.moveBy(bot, 'back', 2, 'walk');
                 skills.log(
                     bot,
-                    '原地扔掉 ' + num + ' 个 ' + item_name + '：起点 @(' +
+                    '丢了 ' + num + ' 个 ' + item_name + '，起点在 (' +
                         drop.x.toFixed(2) + ',' + drop.y.toFixed(2) + ',' + drop.z.toFixed(2) +
-                        ')，面朝方向前方约 1.5 格落点 @(' +
+                        ')，落点在 (' +
                         landing.x.toFixed(2) + ',' + drop.y.toFixed(2) + ',' + landing.z.toFixed(2) + ')' +
-                        (steppedBack
-                            ? '；丢完后退了 2 格（落点不变，免得自己踩到）'
-                            : '；想后退但没走动（空间不够，落点就在脚边）') +
-                        '。3 分钟内自动拾取不会主动捡它（名字/落点/实体 id 三路屏蔽，**只对你自己的进程**）；' +
-                        '但如果你自己走过去踩到，原版拾取仍会捡起。' +
-                        '**交接别靠丢东西**：真机实测队友站 0.4 米、站了 5 分钟也没捡起来' +
-                        '（队友的自动拾取不一定以它为目标，原版拾取还要身体接触）——' +
-                        '要交接就用箱子：你 useBlock(type="chest", input="…") 存进去；对方用 useBlock(type="chest") 打开就能拿走（没有 takeFromChest 这个工具）。',
+                        (steppedBack ? '，丢完后退了 2 格。' : '。'),
                 );
             }
         })
@@ -300,11 +261,6 @@ export const actionsList: AgentCommand[] = [
         // 采集可以慢（要跑好几处矿点），但 10 分钟太久——模型等到 68 秒就已经
         // 判定"卡死"了。收到 6 分钟，并且在超时时带原因回来（见 runAsAction）。
         perform: runAsAction(async (agent: any, type: string, num: number) => {
-            // **成功也要有人话回执**：skills.collectBlock 成功时什么都不 log，
-            // 而动作回执来自 bot.output——于是成功 = data:""（prober 实测：
-            // 挖完砾石回执一个字都没有，它只能靠事件流反推去了哪、挖了几块）。
-            // 前后背包对账 + 实际移动距离，让它不用猜。
-            const before: number = world.getInventoryCounts(agent.bot)[type] ?? 0;
             const start = agent.bot.entity.position.clone();
             // **按"掉落物"记账，不按"方块名"记账**（真机 2026-10-21 overnight_b：
             // 人站在 200+ 块 coal_ore 中间，三次 collectBlocks 都报「背包 0 → 0，没变化」——
@@ -312,28 +268,15 @@ export const actionsList: AgentCommand[] = [
             const dropNames = mc.getBlockDropNames(type);
             const countDrops = (): number =>
                 dropNames.reduce((sum: number, name: string) => sum + Number(world.getInventoryCounts(agent.bot)[name] ?? 0), 0);
-            const bagTotal = (): number =>
-                Object.values(world.getInventoryCounts(agent.bot)).reduce((sum: number, value) => sum + Number(value ?? 0), 0);
             const dropsBefore = countDrops();
-            const bagBefore = bagTotal();
-            const blockBefore = before;
             await skills.collectBlock(agent.bot, type, num);
-            const after: number = world.getInventoryCounts(agent.bot)[type] ?? 0;
             const moved = Math.round(start.distanceTo(agent.bot.entity.position) * 10) / 10;
             const dropGain = countDrops() - dropsBefore;
-            const bagGain = bagTotal() - bagBefore;
             skills.log(
                 agent.bot,
                 dropGain > 0
-                    ? `采集完成：${type}（掉落 ${dropNames.join('/')}）背包 ${dropsBefore} → ${dropsBefore + dropGain}（+${dropGain}），移动 ${moved} 格。`
-                    : `采集结束：${type}（掉落 ${dropNames.join('/')}）数量没变。移动 ${moved} 格——没挖到，可能目标太远或不可及。`,
-            );
-            // **逐目标证据**：请求数 / 掉落物增量 / **全背包**总增量 / 方块名计数 / 位移。
-            // 回执层靠这行区分 (a) 根本没开始挖、(b) 方块已不在、(c) 记账口径错，
-            // 而不是只写一句"没变化"。
-            skills.log(
-                agent.bot,
-                `collect-evidence{requested=${num},dropNames=${dropNames.join('/')},dropGain=${dropGain},bagGain=${bagGain},blockNameCount=${blockBefore}→${after},moved=${moved}}`,
+                    ? `采到了 ${type}，掉出 ${dropGain} 个 ${dropNames.join('、')}，背包里这些掉落从 ${dropsBefore} 个变成 ${dropsBefore + dropGain} 个，一共移动了 ${moved} 格。`
+                    : `没能采到 ${type}，${dropNames.join('、')}的数量没有变化，一共移动了 ${moved} 格。`,
             );
         }, 6)
     },
@@ -347,7 +290,7 @@ export const actionsList: AgentCommand[] = [
             const ok = await skills.placeBlock(agent.bot, type, pos.x, pos.y, pos.z);
             // 只报回读（Lead 2026-10-21 ①）：placeHere 的目标格通常就是身体所在格，
             // 放不进去是常态——回执必须说明是「身体格」，而不是含糊的「放置失败」。
-            let readBack: string | null = null;
+            let readBack: string | null;
             try {
                 const block = agent.bot.blockAt(new Vec3(cell.x, cell.y, cell.z));
                 readBack = block == null ? null : String(block.name ?? "");
@@ -374,7 +317,7 @@ export const actionsList: AgentCommand[] = [
             // 4x5 门框根本摆不出来——模型真机报过这个硬缺口（凑够黑曜石也没用）。
             const ok = await skills.placeBlock(agent.bot, type, x, y, z);
             if (!ok) {
-                skills.log(agent.bot, `没能把 ${type} 放到 (${x},${y},${z})：那一格可能不是空气，或者够不着。`);
+                skills.log(agent.bot, `没能把 ${type} 放到 (${x},${y},${z})。`);
             }
         })
     },
@@ -526,7 +469,7 @@ export const actionsList: AgentCommand[] = [
             const unknown: string[] = wanted.filter((id) => !isAuthorizable(id));
             if (unknown.length > 0) {
                 return pad(
-                    `没有这些危险操作：${unknown.join('、')}。可用的有：${DANGEROUS_OPS.map((o) => o.id).join('、')}。`,
+                    `没有这些危险操作，${unknown.join('、')}。现在能授权的是 ${DANGEROUS_OPS.map((o) => o.id).join('、')}。`,
                 );
             }
             const byCalls = typeof calls === 'number' && Number.isFinite(calls) && calls > 0;
@@ -563,16 +506,14 @@ export const actionsList: AgentCommand[] = [
             const facts = collectOverrideFacts(agent);
             const verdict = disableSafeguardsVerdict(facts);
             if (!verdict.allowed) return pad(verdict.text);
-            const honesty =
-                '\n    说明：上面那句"原因"是**你自己写的理由**，不是安全评估；关掉之后出事由你承担。';
             const byCalls = typeof calls === 'number' && Number.isFinite(calls) && calls > 0;
             if (byCalls) {
                 safeguards.suppressCalls(calls, reason, Date.now());
-                return pad(`保命程序已关闭，接下来 ${calls} 次工具调用内不介入。${safeguards.describe(Date.now())}` + honesty);
+                return pad(`保命程序已关闭，接下来 ${calls} 次工具调用内不介入。${safeguards.describe(Date.now())}`);
             }
             const mins = typeof minutes === 'number' && Number.isFinite(minutes) && minutes > 0 ? minutes : 1;
             safeguards.suppressFor(mins, reason, Date.now());
-            return pad(`保命程序已关闭 ${mins} 分钟。${safeguards.describe(Date.now())}` + honesty);
+            return pad(`保命程序已关闭 ${mins} 分钟。${safeguards.describe(Date.now())}`);
         }
     },
     // 一键恢复**两层**保护：闸门许可 + 保命程序。
@@ -588,7 +529,7 @@ export const actionsList: AgentCommand[] = [
             safeguards.release();
             const now = Date.now();
             return pad(
-                `已恢复全部保护。危险操作许可：${permits.describe(now)}。保命程序：${safeguards.describe(now)}。`,
+                `已恢复全部保护，危险操作的授权情况是${permits.describe(now)}，保命程序的情况是${safeguards.describe(now)}。`,
             );
         }
     },

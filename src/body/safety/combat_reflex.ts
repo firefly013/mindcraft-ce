@@ -406,8 +406,8 @@ export function formatCombatDecision(plan: CombatPlan): string {
     if (plan.assessment == null) return plan.reason;
     const a = plan.assessment;
     const label = plan.action === 'engage' ? '打' : plan.action === 'flee' ? '跑' : '观望';
-    const detail = a.breakdown.length > 0 ? `；${a.breakdown.join('；')}` : '';
-    return `⚔️ 判决：**${label}**——${plan.reason}${detail}`;
+    const detail = a.breakdown.length > 0 ? `，${a.breakdown.join('，')}` : '';
+    return `我判断现在应该${label}，因为${plan.reason}${detail}。`;
 }
 
 export interface CombatResultInput {
@@ -423,22 +423,22 @@ export interface CombatResultInput {
 export function formatCombatResult(result: CombatResultInput): string {
     const hp =
         result.healthBefore != null && result.healthAfter != null
-            ? `掉血 ${Math.round((result.healthBefore - result.healthAfter) * 10) / 10}，`
+            ? `，我掉了 ${Math.round((result.healthBefore - result.healthAfter) * 10) / 10} 点血`
             : '';
     const seconds = Math.round(result.ms / 100) / 10;
-    const tail = result.detail != null && result.detail !== '' ? `（${result.detail}）` : '';
+    const tail = result.detail != null && result.detail !== '' ? `，另外${result.detail}` : '';
     switch (result.outcome) {
         case 'killed':
-            return `✅ 战斗结束：击杀 ${result.targetName}，${hp}用时 ${seconds}s${tail}`;
+            return `战斗结束了，我击杀了 ${result.targetName}${hp}，一共用了 ${seconds} 秒${tail}。`;
         case 'fled':
-            return `🏃 战斗结束：放弃交战、拉开距离，${hp}用时 ${seconds}s${tail}`;
+            return `战斗结束了，我放弃交战，拉开了距离${hp}，一共用了 ${seconds} 秒${tail}。`;
         case 'target-gone':
-            return `↩️ 战斗结束：${result.targetName} 已经不在（跑了/被别的打死），${hp}用时 ${seconds}s${tail}`;
+            return `战斗结束了，${result.targetName} 已经不在${hp}，一共用了 ${seconds} 秒${tail}。`;
         case 'timeout':
-            return `⏱️ 战斗结束：${seconds}s 内没解决 ${result.targetName}，交还身体${hp}${tail}`;
+            return `战斗结束了，${seconds} 秒内没有解决 ${result.targetName}，身体还给了我${hp}${tail}。`;
         case 'aborted':
         default:
-            return `⏹️ 战斗结束：${result.targetName} 没打完就收手了，${hp}用时 ${seconds}s${tail}`;
+            return `战斗结束了，${result.targetName} 没打完我就收手了${hp}，一共用了 ${seconds} 秒${tail}。`;
     }
 }
 

@@ -93,8 +93,6 @@ export function formatSuffocationReceipt(input: {
     const pos = `(${input.position.x}, ${input.position.y}, ${input.position.z})`;
     // **别把"卡住"写成"血在掉"**：不一定在掉血（有时服务器根本不扣血），
     // 回执只报测得到的事实——身体那格是实心、以及现在血是多少。
-    const head = `**我卡在方块里**：${input.which}那格是 ${input.blockName}（当前血量 ${input.health ?? '?'}）——我在 ${pos}。`;
-    return input.broke
-        ? head + '已经把那一格挖开了；继续挖/走之前先确认脚下和头顶是空的。'
-        : head + '**挖开失败**：先 Stop 把身体拿回来，再用 mineBlock 挖脚/头那一格——别继续垫方块或往前挤。';
+    const head = `我卡在方块里，${input.which}那一格是 ${input.blockName}，血量是 ${input.health ?? '读不到'}，我在 ${pos}。`;
+    return input.broke ? head + '我已经把那一格挖开了。' : head + '我试着挖开那一格，但没有成功。';
 }

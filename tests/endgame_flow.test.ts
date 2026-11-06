@@ -187,9 +187,9 @@ describe('逐阶段：每个阶段都点名"缺什么 + 下一步做什么"', ()
         expect(advice.phase).toBe('prepare');
         expect(advice.tool).toBe('endFightStatus');
         const report = formatEndgameReport(gear, advice);
-        expect(report).toContain('缺口：');
-        expect(report).toContain('没有任何能伤龙的手段');
-        expect(report).toContain('一个方块都没有');
+        expect(report).toContain('缺口有 ');
+        expect(report).toContain('没有能伤龙的手段');
+        expect(report).toContain('方块 0 个');
         // 下一步动作也写在里面
         expect(advice.action).toContain('床');
         expect(advice.action).toContain('方块');
@@ -198,14 +198,14 @@ describe('逐阶段：每个阶段都点名"缺什么 + 下一步做什么"', ()
     it('没有弓/箭、也没有床和 TNT → 仍然是硬缺口（现在两把 bot 就是这样）', () => {
         const gear = assessEndGear({ inventory: { obsidian: 64, cooked_beef: 8 } });
         expect(gear.ok).toBe(false);
-        expect(gear.fatal.join()).toContain('没有任何能伤龙的手段');
+        expect(gear.fatal.join()).toContain('没有能伤龙的手段');
         expect(step({ gearReady: gear.ok }).phase).toBe('prepare');
     });
 
     it('没有方块 → 硬缺口（连落点都搭不出来）', () => {
         const gear = assessEndGear({ inventory: { white_bed: 4, bow: 1, arrow: 32 } });
         expect(gear.ok).toBe(false);
-        expect(gear.fatal.join()).toContain('一个方块都没有');
+        expect(gear.fatal.join()).toContain('方块 0 个');
     });
 
     it('nether_fortress（不在下界）→ enterNether，并说清为什么要粉', () => {
@@ -370,13 +370,12 @@ describe('endFightStatus 报告：读 bot 状态能把阶段推对', () => {
         expect(report).toContain('水晶 1 颗');
     });
 
-    it('在下界、没粉没要塞 → 报告直接说去 exploreFor 找 nether_bricks', () => {
+    it('在下界、没粉没要塞 → 报阶段与眼的材料（不再塞下一步动作）', () => {
         const bot = makeFakeBot({ dimension: 'minecraft:the_nether', stacks: KIT });
         const report = endgameStatusReport(bot);
         expect(report).toContain('nether_fortress');
-        expect(report).toContain('exploreFor');
-        expect(report).toContain('nether_bricks');
         expect(report).toContain('【眼的材料】');
+        expect(report).toContain('下界要塞');
     });
 
     it('在末地、水晶清完、龙还在 → 报告给床炸阶段与闸门状态', () => {
@@ -389,7 +388,7 @@ describe('endFightStatus 报告：读 bot 状态能把阶段推对', () => {
         const report = endgameStatusReport(bot);
         expect(report).toContain('fight_dragon');
         expect(report).toContain('100/200');
-        expect(report).toContain('床炸闸门');
+        expect(report).toContain('【末地通关·当前阶段】fight_dragon');
     });
 });
 

@@ -51,7 +51,7 @@ const BED_EXPLODES_IN: readonly string[] = ['the_nether', 'the_end'];
 export const DANGEROUS_OPS: readonly DangerousOp[] = Object.freeze([
   {
     id: 'pour_water',
-    what: '用桶倒水（放水 / 泼水）',
+    what: '用桶倒水',
     why: '你以前在矿洞里倒水把自己淹死过',
   },
   {
@@ -61,7 +61,7 @@ export const DANGEROUS_OPS: readonly DangerousOp[] = Object.freeze([
   },
   {
     id: 'ignite',
-    what: '主动点火（打火石）',
+    what: '主动点火',
     why: '火会烧掉基地和自己；主世界里正经需要点火只有"点地狱门"那一次',
   },
   {
@@ -73,7 +73,7 @@ export const DANGEROUS_OPS: readonly DangerousOp[] = Object.freeze([
   },
   {
     id: 'enter_deep_water',
-    what: '进入深水 / 向深水寻路',
+    what: '进入深水或者向深水寻路',
     why: '会被水冲走，也可能淹死',
   },
   {
@@ -82,7 +82,7 @@ export const DANGEROUS_OPS: readonly DangerousOp[] = Object.freeze([
     // 不并进上表的原因是它们的触发条件不是一个动作，而是一组读数（见 departure_guard /
     // reflex_override）；放进同一张表只是为了共用授权、事件和回执那一套机制。
     id: 'departure_underprepared',
-    what: '准备不足就进末地/下界',
+    what: '准备不足就进末地或者下界',
     why: '没武器、食物 ≤2 或垫脚方块 <8 时进去基本等于送死',
   },
   {
@@ -114,13 +114,9 @@ export function isDangerousHere(op: DangerousOp, ctx: OpContext): boolean {
   return op.when == null || op.when(ctx);
 }
 
-/** 给模型的拒绝文案：说清**是什么**、**为什么**、**怎么授权**。 */
-export function refuseText(op: DangerousOp, minutes = 5): string {
-  return (
-    `默认不允许${op.what}（${op.why}）。` +
-    `要做得先授权：allowDangerousOps(${minutes}, "原因")` +
-    `——只想开这一项就写 allowDangerousOps(${minutes}, "原因", "${op.id}")。`
-  );
+/** 给模型的拒绝文案：只陈述被拒绝的操作和缺哪个授权。 */
+export function refuseText(op: DangerousOp): string {
+  return `这次要做的是${op.what}，需要先拿到 ${op.id} 授权，现在没有授权，所以没有做。`;
 }
 
 export default { DANGEROUS_OPS, findOp, isAuthorizable, isDangerousHere, normalizeDimension, refuseText };

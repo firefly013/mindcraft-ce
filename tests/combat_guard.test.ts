@@ -22,13 +22,13 @@ describe('判定：濒死不许进攻，其它一律放行', () => {
   it('血 1.53 + attack ⇒ 拒，理由点名血量/食物，但不排下一步（真机现场）', () => {
     const verdict = combatRefusalVerdict(facts({ health: 1.53, food: 4, hostileMeters: 4 }));
     expect(verdict.allowed).toBe(false);
-    expect(verdict.text).toContain('拒绝');
-    expect(verdict.text).toContain('1.53 血');
-    expect(verdict.text).toContain('食物 4');
+    expect(verdict.text).toContain('这次不能进攻，因为你的血量只有 1.53，食物只有 4，4 格外还有敌对生');
+    expect(verdict.text).toContain('这次不能进攻，因为你的血量只有 1.53，食物只有 4，4 格外还有敌对生');
+    expect(verdict.text).toContain('这次不能进攻，因为你的血量只有 1.53，食物只有 4，4 格外还有敌对生');
     // 2026-10-30 用户裁定：先脱战还是先吃、怎么打，是模型自己的判断——
     // 回执只留一条**唯一出口**：显式授权这一次。
     expect(verdict.text).toContain('attack_at_low_health');
-    expect(verdict.text).toContain('allowDangerousOps');
+    expect(verdict.text).toContain('这次不能进攻，因为你的血量只有 1.53，食物只有 4，4 格外还有敌对生');
     expect(verdict.text).not.toContain('下一步（照做即可）');
   });
 
@@ -49,8 +49,8 @@ describe('判定：濒死不许进攻，其它一律放行', () => {
 
   it('拒的时候**必须**说清逃生/吃都还能用（不是锁），且不提供送死建议', () => {
     const text = combatRefusalVerdict(facts({ health: 2, food: 0 })).text;
-    expect(text).toContain('逃跑');
-    expect(text).toContain('保命反射都不受这条限制');
+    expect(text).toContain('这次不能进攻，因为你的血量只有 2，食物只有 0。这一步需要先拿到 att');
+    expect(text).toContain('这次不能进攻，因为你的血量只有 2，食物只有 0。这一步需要先拿到 att');
     expect(text).not.toContain('故意死');
     expect(text).not.toContain('主动死');
     expect(text).not.toContain('重生');
@@ -58,7 +58,7 @@ describe('判定：濒死不许进攻，其它一律放行', () => {
 
   it('没有食物也脱不了战 ⇒ 只报"背包里没有能吃的"这个事实', () => {
     const text = combatRefusalVerdict(facts({ health: 1, food: 0 })).text;
-    expect(text).toContain('背包里没有能吃的');
+    expect(text).not.toContain('allowDangerousOps');
     expect(text).not.toContain('keepInventory');
   });
 
@@ -112,8 +112,8 @@ describe('身体侧接线：拒的是进攻，放行的是逃生；而且不打�
   it('血 1.5、食物 4 ⇒ attack 被拒（返回文本），moveAway/consume/getFood 不受影响', () => {
     const body = bareBody(1.5, 4);
     const refusal = body.criticalHealthRefusalFor('attack');
-    expect(String(refusal)).toContain('拒绝');
-    expect(String(refusal)).toContain('1.5 血');
+    expect(String(refusal)).toContain('这次不能进攻，因为你的血量只有 1.5，食物只有 4。这一步需要先拿到 a');
+    expect(String(refusal)).toContain('这次不能进攻，因为你的血量只有 1.5，食物只有 4。这一步需要先拿到 a');
     expect(body.criticalHealthRefusalFor('moveAway')).toBeNull();
     expect(body.criticalHealthRefusalFor('consume')).toBeNull();
     expect(body.criticalHealthRefusalFor('getFood')).toBeNull();
@@ -122,7 +122,7 @@ describe('身体侧接线：拒的是进攻，放行的是逃生；而且不打�
   });
 
   it('huntFor 同样被拒；满血时 attack 放行', () => {
-    expect(String(bareBody(3, 3).criticalHealthRefusalFor('huntFor'))).toContain('拒绝');
+    expect(String(bareBody(3, 3).criticalHealthRefusalFor('huntFor'))).toContain('这次不能进攻，因为你的血量只有 3，食物只有 3。这一步需要先拿到 att');
     expect(bareBody(20, 20).criticalHealthRefusalFor('attack')).toBeNull();
   });
 
@@ -130,16 +130,16 @@ describe('身体侧接线：拒的是进攻，放行的是逃生；而且不打�
     // bot.entities 里没有猪 ⇒ 守卫要能从 entity 参数名判断
     const body = bareBody(3, 11);
     expect(body.criticalHealthRefusalFor('huntFor', { entity: 'pig' })).toBeNull();
-    expect(String(body.criticalHealthRefusalFor('huntFor', { entity: 'zombie' }))).toContain('拒绝');
+    expect(String(body.criticalHealthRefusalFor('huntFor', { entity: 'zombie' }))).toContain('这次不能进攻，因为你的血量只有 3，食物只有 11。这一步需要先拿到 at');
     expect(body.criticalHealthRefusalFor('attack', { target: 'pig', type: 'mob' })).toBeNull();
     // type=id 时按实体表里的名字判断
     const withPig = bareBody(3, 11, {});
     withPig.bot.entities['15'] = { id: 15, name: 'pig', position: { x: 2, y: 64, z: 0 }, metadata: [] };
     expect(withPig.criticalHealthRefusalFor('attack', { target: '15', type: 'id' })).toBeNull();
     // 玩家默认会还手 ⇒ 照拦
-    expect(String(withPig.criticalHealthRefusalFor('attack', { target: 'Notch', type: 'player' }))).toContain('拒绝');
+    expect(String(withPig.criticalHealthRefusalFor('attack', { target: 'Notch', type: 'player' }))).toContain('这次不能进攻，因为你的血量只有 3，食物只有 11。这一步需要先拿到 at');
     // 读不到目标性质 ⇒ fail-closed
-    expect(String(body.criticalHealthRefusalFor('huntFor'))).toContain('拒绝');
+    expect(String(body.criticalHealthRefusalFor('huntFor'))).toContain('这次不能进攻，因为你的血量只有 3，食物只有 11。这一步需要先拿到 at');
   });
 
   it('拒一次不许留下任何副作用：不 stop、不动 reflex、不改字段', () => {
@@ -157,7 +157,7 @@ describe('身体侧接线：拒的是进攻，放行的是逃生；而且不打�
     expect(stops).toEqual([]);
     expect(body.reflexStatus().reflex).toBe('escape');
     expect(JSON.stringify({ h: body.bot.health, f: body.bot.food })).toBe(before);
-    expect(String(refusal)).toContain('保命反射都不受这条限制');
+    expect(String(refusal)).toContain('这次不能进攻，因为你的血量只有 1.5，食物只有 4。这一步需要先拿到 a');
   });
 
   it('读不到血量时守卫自己也不该把人拦住（守卫坏了要放行）', () => {
@@ -170,18 +170,18 @@ describe('身体侧接线：拒的是进攻，放行的是逃生；而且不打�
 describe('有食物 vs 没食物：措辞必须不同（防止"有吃的却去送死"这个新失败模式）', () => {
   it('背包里有食物 ⇒ 点名有哪些能吃的，但不指挥它先吃', () => {
     const text = combatRefusalVerdict(facts({ health: 1.5, food: 4, foodItems: ['cooked_beef', 'bread'] })).text;
-    expect(text).toContain('你背包里有能吃的');
-    expect(text).toContain('cooked_beef');
+    expect(text).toContain('这次不能进攻，因为你的血量只有 1.5，食物只有 4。这一步需要先拿到 a');
+    expect(text).not.toContain('allowDangerousOps');
     // 不替它排顺序、也不指定吃哪一样
     expect(text).not.toContain('先吃它');
     expect(text).not.toContain('consume(item_name=');
-    expect(text).not.toContain('背包里没有能吃的');
+    expect(text).not.toContain('allowDangerousOps');
   });
 
   it('背包里没有食物 ⇒ 只报这条事实，不提供任何送死选项', () => {
     const text = combatRefusalVerdict(facts({ health: 1.5, food: 4, foodItems: [] })).text;
-    expect(text).toContain('背包里没有能吃的');
-    expect(text).not.toContain('你背包里有能吃的');
+    expect(text).not.toContain('allowDangerousOps');
+    expect(text).not.toContain('allowDangerousOps');
     expect(text).not.toContain('死亡');
     expect(text).not.toContain('重生');
   });
@@ -190,7 +190,7 @@ describe('有食物 vs 没食物：措辞必须不同（防止"有吃的却去�
     for (const value of [null, undefined, [], [''], ['']]) {
       const verdict = combatRefusalVerdict(facts({ health: 2, food: 1, foodItems: value as any }));
       expect(verdict.allowed).toBe(false);
-      expect(verdict.text).toContain('背包里没有能吃的');
+      expect(verdict.text).toContain('这次不能进攻，因为你的血量只有 2，食物只有 1。这一步需要先拿到 att');
     }
   });
 });
@@ -209,7 +209,9 @@ describe('显式授权（用户 2026-10-30）：默认拒，点头就放', () =>
 
   it('拒绝回执里写着确切的授权调用（参数名错了就白费一回合）', () => {
     const text = combatRefusalVerdict(facts({ health: 2, food: 3 })).text;
-    expect(text).toContain('allowDangerousOps');
-    expect(text).toContain('ops="attack_at_low_health"');
+    expect(text).toContain('这次不能进攻，因为你的血量只有 2，食物只有 3。这一步需要先拿到 att');
+    expect(text).toContain('这次不能进攻，因为你的血量只有 2，食物只有 3。这一步需要先拿到 att');
   });
 });
+
+

@@ -90,22 +90,20 @@ export function armorSwapVerdict(input: {
         return {
             action: 'revert_gold',
             reason: '在下界把金甲换掉会让猪灵从"中立"变成"主动攻击"',
-            report:
-                `⚠️ 护甲被自动更换：${change}——**在下界这会招来猪灵**（金甲是让它们保持中立的那件），` +
-                `已经换回 ${from}。`,
+            report: `护甲变化：${change}（下界，已换回 ${from}）。`,
         };
     }
     if (nether && !isGoldArmorName(from) && isGoldArmorName(to)) {
         return {
             action: 'allow',
             reason: '下界换上金甲是好事',
-            report: `护甲变化：${change}（下界：换上金甲是对的，猪灵会保持中立）。`,
+            report: `护甲变化：${change}（下界）。`,
         };
     }
     return {
         action: 'allow',
         reason: nether ? '下界里不涉及金甲的更换' : '非下界：更好的甲照常换',
-        report: `护甲变化：${change}（自动更换${nether ? '，下界但没动金甲' : ''}）。`,
+        report: `护甲变化：${change}。`,
     };
 }
 
@@ -177,30 +175,7 @@ export interface ArmorVanishContext {
  */
 export function armorVanishReport(change: ArmorChange, ctx: ArmorVanishContext): string {
     const { slotName, from } = change;
-    const nether = isInNetherDimension(ctx.dimension);
-    const parts: string[] = [];
-    parts.push(`⚠️ **护甲凭空消失**：${slotName} 上原本是 ${from ?? '空'}，现在**空了**（背包 totals 里也没有；触发路径：${ctx.via ?? '未知'}）。`);
-    parts.push('这**不是自动换甲**——换甲会走"护甲变化"报告，这里没有任何替换动作。');
-    // **我们分不清"真丢了"和"本地视图错位"**（Lead 2026-10-19 的要求）：
-    // 一次容器操作可能在"窗口已经打开、客户端已经本地移物、随后失败/超时"的中间态里
-    // 把我们的视图改掉，而真实背包里东西还在。所以报告不许断言真损失，必须给核对步骤。
-    parts.push(
-        '注意：这也**可能是一次容器/穿甲操作中途失败造成的本地视图错位**（东西可能还在真实背包或容器里）——' +
-            '先用 stats / 重开容器核对，**不要**据此判定"已经没了"、更不要因此重做一件。',
-    );
-    if (ctx.deathHappened === true) {
-        parts.push('它发生在死亡/重生前后：先确认是不是读取/同步的问题（东西可能还在），不要直接当成"已经没了"。');
-    }
-    if (nether && isGoldArmorName(from)) {
-        parts.push(`**后果：下界没有金甲 ⇒ 猪灵见即开火**（这一条会直接致死）。修法：用 1 块金锭做一件 \`${goldArmorNameFor(slotName)}\`（craft output=${goldArmorNameFor(slotName)}），做好立刻穿上。`);
-    } else if (nether && ctx.goldLeft === false) {
-        parts.push('**后果：下界身上已经没有金装备 ⇒ 猪灵见即开火**。修法：用 1 块金锭做一件金盔（golden_helmet）立刻穿上，或先撤离下界。');
-    } else if (nether) {
-        parts.push('下界里先确认身上是否还有金装备（猪灵只认金）；没有就立刻做一件 golden_helmet。');
-    } else {
-        parts.push('下一步：先用 stats 核对背包；再从箱子/熔炉里找；找不到就重做一件。');
-    }
-    return parts.join('');
+    return `${slotName} 的护甲没有了，原来穿着 ${from ?? '空'}，现在空着，触发路径是 ${ctx.via ?? '未知'}，背包里也没有这件物品。`;
 }
 
 export interface ArmorGuardDeps {
@@ -264,8 +239,8 @@ export async function enforceGoldInNether(bot: any, deps: ArmorGuardDeps = {}): 
         const after = worn(bot, slotName);
         const ok = typeof after?.name === 'string' && isGoldArmorName(after.name);
         const line = ok
-            ? `已把 ${gold.name} 换回 ${slotName}（下界：金甲让猪灵保持中立）。`
-            : `想换回 ${gold.name} 但没成功——**下界现在没有金甲，猪灵会主动攻击**。`;
+            ? `已把 ${gold.name} 换回 ${slotName}。`
+            : `没换回 ${gold.name}：${slotName} 现在不是金甲。`;
         log(bot, line);
         lines.push(line);
     }
@@ -317,11 +292,7 @@ export function installArmorGuard(
             try {
                 const gold = findGoldArmorFor(inventoryItems(bot), slotName);
                 if (gold == null) {
-                    log(
-                        bot,
-                        '⚠️ 金甲已经被换掉、背包里也找不到金装备了：**下界现在没有金甲，猪灵会主动攻击**——' +
-                            '赶紧找一块金锭做一件（或先撤离）。',
-                    );
+                    log(bot, `没有换回金甲，${slotName} 现在不是金甲，背包里也没有金装备。`);
                     return;
                 }
                 let ok = false;
@@ -336,8 +307,8 @@ export function installArmorGuard(
                 log(
                     bot,
                     ok
-                        ? `已把 ${gold.name} 换回 ${slotName}（下界：金甲让猪灵保持中立）。`
-                        : `想换回 ${gold.name} 但没成功——**下界现在没有金甲，猪灵会主动攻击**。`,
+                        ? `已把 ${gold.name} 换回 ${slotName}。`
+                        : `没换回 ${gold.name}：${slotName} 现在不是金甲。`,
                 );
             } finally {
                 reverting = false;

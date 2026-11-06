@@ -115,13 +115,13 @@ describe('E1：请求的动作就是正在跑的那个 → 幂等忽略，不催
     // 模型被事件叫醒后，常常把同一个动作再下一次
     const again = await b.runner.run('followPlayer', { player_name: 'bobo', follow_dist: 3 });
     expect(again.status).toBe('accepted');
-    expect(again.data).toMatchObject({ already_running: true });
+    expect(String(again.data)).toContain('followPlayer 还在跑，已经跑了 0 秒。');
 
     // 关键：身体通道还是它，没有被 Stop 掉
     expect(b.scheduler.currentAction()?.id).toBe('followPlayer');
-    // 而且回执里不该出现「先 Stop 再重试」这种命令
+    // 回执只报状态，不写「不用重发/先 Stop」这类命令
     expect(JSON.stringify(again.data)).not.toContain('Stop() first');
-    expect(JSON.stringify(again.data)).toContain('不用重发');
+    expect(JSON.stringify(again.data)).not.toContain('不用重发');
     b.release();
   });
 });
@@ -137,8 +137,9 @@ describe('E2：确实是另一个动作 → 说清谁在跑、跑多久，不命
     expect(other.code).toBe('ACTION_BUSY');
     expect(other.reason).toContain('followPlayer');
     expect(other.reason).toContain('秒');
-    // 「只有你确实要改做别的事时，才需要先 Stop」——交还判断，而不是命令
-    expect(other.reason).toContain('才需要先 Stop');
+    // 只报事实："通道被占用：X 已运行 N 秒"，不写怎么处置
+    expect(other.reason).toContain('followPlayer 还在跑，已经跑了 0 秒，身体通道暂时被它占着。');
+    expect(other.reason).not.toContain('Stop');
     // 在跑的动作不受影响
     expect(b.scheduler.currentAction()?.id).toBe('followPlayer');
     b.release();

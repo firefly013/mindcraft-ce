@@ -96,7 +96,7 @@ export function createUpdatePlanTool(
       if (!checked.ok) {
         return Promise.resolve({
           content: [
-            { type: 'text' as const, text: `rejected: ${checked.errors?.join('; ') ?? 'Bad arguments.'}` },
+            { type: 'text' as const, text: `rejected: ${checked.errors?.join('，') ?? 'Bad arguments.'}` },
           ],
           isError: true,
         });
@@ -105,11 +105,12 @@ export function createUpdatePlanTool(
       const snapshot = apply(given.goal, given.todos);
       const todos =
         snapshot.todos.length > 0
-          ? snapshot.todos.map((todo) => `${todo.done ? '[x]' : '[ ]'} ${todo.text}`).join('; ')
-          : 'none';
+          ? snapshot.todos.map((todo) => `${todo.done ? '[x]' : '[ ]'} ${todo.text}`).join('，')
+          : '现在没有待办';
+      const goalText = snapshot.goal == null ? '目标没有设定' : `目标是 ${snapshot.goal}`;
       return Promise.resolve({
         content: [
-          { type: 'text' as const, text: `Plan updated. Goal: ${snapshot.goal ?? 'none'}. Todos: ${todos}.` },
+          { type: 'text' as const, text: `计划已经更新，${goalText}，待办有 ${todos}。` },
         ],
       });
     },
@@ -144,7 +145,7 @@ export function createFeedbackTool(deps: FeedbackDeps): ToolRegistration {
       if (!checked.ok) {
         return Promise.resolve({
           content: [
-            { type: 'text' as const, text: `rejected: ${checked.errors?.join('; ') ?? 'Bad arguments.'}` },
+            { type: 'text' as const, text: `rejected: ${checked.errors?.join('，') ?? 'Bad arguments.'}` },
           ],
           isError: true,
         });
@@ -157,7 +158,7 @@ export function createFeedbackTool(deps: FeedbackDeps): ToolRegistration {
       try {
         const file = appendFeedback(deps.dir(), entry);
         return Promise.resolve({
-          content: [{ type: 'text' as const, text: `反馈已记录到 ${file}，谢谢，接着干活。` }],
+          content: [{ type: 'text' as const, text: `反馈已经记录到 ${file} 里了。` }],
         });
       } catch (error: unknown) {
         return Promise.resolve({
@@ -215,13 +216,13 @@ export function createGetPlacesTool(deps: PlacesDeps): ToolRegistration {
       const entries = Object.entries(places);
       const text =
         entries.length === 0
-          ? '（一个都没记住）'
-          : entries
+          ? '一个地点都还没有记住。'
+          : `记住的地点有，${entries
               .map(
                 ([name, [x, y, z]]) =>
-                  `${name}(${roundCoord(x)},${roundCoord(y)},${roundCoord(z)})`,
+                  `${name} 在 (${roundCoord(x)}, ${roundCoord(y)}, ${roundCoord(z)})`,
               )
-              .join('、');
+              .join('，')}。`;
       return { content: [{ type: 'text' as const, text }] };
     },
   });
@@ -238,10 +239,10 @@ export function createRememberHereTool(deps: PlacesDeps): ToolRegistration {
     execute: async (args: unknown) => {
       const given = (args ?? {}) as { name?: unknown };
       const name = typeof given.name === 'string' ? given.name.trim() : '';
-      if (name === '') return { content: [{ type: 'text' as const, text: '要给这个地点起个名字。' }] };
+      if (name === '') return { content: [{ type: 'text' as const, text: '这个地点还没有名字，先给它起一个。' }] };
       const here = await deps.here();
       if (here == null) {
-        return { content: [{ type: 'text' as const, text: 'Location NOT saved: 读不到当前位置。' }] };
+        return { content: [{ type: 'text' as const, text: '地点没有记住，因为读不到当前位置。' }] };
       }
       const places = await deps.read();
       places[name] = [here.x, here.y, here.z];
@@ -252,7 +253,7 @@ export function createRememberHereTool(deps: PlacesDeps): ToolRegistration {
           content: [
             {
               type: 'text' as const,
-              text: `Location NOT saved: 写入失败（${err instanceof Error ? err.message : String(err)}）。`,
+              text: `地点没有记住，因为写入失败了，错误是 ${err instanceof Error ? err.message : String(err)}。`,
             },
           ],
         };
@@ -261,7 +262,7 @@ export function createRememberHereTool(deps: PlacesDeps): ToolRegistration {
         content: [
           {
             type: 'text' as const,
-            text: `Location saved as "${name}" @(${roundCoord(here.x)},${roundCoord(here.y)},${roundCoord(here.z)})（已存进会话，重启后还在）。`,
+            text: `已经把 ${name} 记在 (${roundCoord(here.x)}, ${roundCoord(here.y)}, ${roundCoord(here.z)}) 了，这个地点已经存进会话，重启后还在。`,
           },
         ],
       };
@@ -296,7 +297,7 @@ export function createGoToRememberedPlaceTool(deps: PlacesDeps): ToolRegistratio
     execute: async (args: unknown) => {
       const given = (args ?? {}) as { name?: unknown };
       const name = typeof given.name === 'string' ? given.name.trim() : '';
-      if (name === '') return { content: [{ type: 'text' as const, text: '要给出去的地名。' }] };
+      if (name === '') return { content: [{ type: 'text' as const, text: '没有给出要去的那个地名。' }] };
       const places = await deps.read();
       const at = places[name];
       if (at == null) {
@@ -306,8 +307,8 @@ export function createGoToRememberedPlaceTool(deps: PlacesDeps): ToolRegistratio
             {
               type: 'text' as const,
               text:
-                `No location named "${name}" saved.` +
-                (known.length > 0 ? ` 记住过的有：${known.join('、')}。` : ' 而且一个地名都还没记住。'),
+                `没有记住叫 "${name}" 的地方。` +
+                (known.length > 0 ? `已经记住的有 ${known.join('、')}。` : '而且一个地名都还没有记住。'),
             },
           ],
         };

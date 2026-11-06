@@ -63,8 +63,8 @@ describe('打不还手的食物动物', () => {
         });
 
         expect(attacks).toBe(2);
-        expect(receipt).toContain('beef 2/2');
-        expect(receipt).not.toContain('停手保命');
+        expect(receipt).toContain('这次用 huntFor 刷 cow，beef 拿到了 2 个，目标是 2');
+        expect(receipt).not.toContain('血量过低');
     });
 
     it('血 4 时打僵尸**照旧收手**（会还手，门控的本意就在这）', async () => {
@@ -83,7 +83,7 @@ describe('打不还手的食物动物', () => {
         });
 
         expect(attacks).toBe(0);
-        expect(receipt).toContain('停手保命');
-        expect(receipt).toContain('血量太低');
+        expect(receipt).toContain('这次用 huntFor 刷 zombie，rotten_flesh 拿到了');
+        expect(receipt).toContain('这次用 huntFor 刷 zombie，rotten_flesh 拿到了');
     });
 });

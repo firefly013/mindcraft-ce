@@ -180,19 +180,17 @@ export function createPermits(): Permits {
       const parts: string[] = [];
       const g = grant;
       if (g != null) {
-        const scope = g.ops == null ? '全部危险操作' : g.ops.join('/');
-        // 两种模式说两种话：时间制说剩多少秒，次数制说剩几次。模型得知道
-        // 自己还剩多少"动作额度"——它要靠这个决定还要不要再多申请几个。
+        const scope = g.ops == null ? '所有危险操作' : g.ops.join('、');
         const left =
           g.callsLeft != null
-            ? `还剩 ${g.callsLeft} 次工具调用`
+            ? `还能用 ${g.callsLeft} 次`
             : `还剩 ${Math.max(0, Math.round(((g.expiresAt as number) - now) / 1000))} 秒`;
-        parts.push(`${scope} 已授权，${left}（原因：${g.reason}）`);
+        parts.push(`我已经拿到${scope}的授权，${left}`);
       } else {
-        parts.push('没有任何授权，危险操作全部禁止');
+        parts.push('我现在没有任何危险操作的授权');
       }
-      if (bypasses.size > 0) parts.push(`内部豁免 ${bypasses.size} 项（写死的保命代码）`);
-      return parts.join('；');
+      if (bypasses.size > 0) parts.push(`内部还有 ${bypasses.size} 项豁免`);
+      return parts.join('，') + '。';
     },
   };
 }

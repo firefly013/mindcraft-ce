@@ -13,19 +13,12 @@ import {
   countBeds,
   countFood,
   findNearbyCoveredSpot,
-  FOOD_EMERGENCY_HEALTH,
-  FOOD_REGEN_THRESHOLD,
-  FOOD_RESERVE_COMFORT,
-  FOOD_RESERVE_LOW,
-  foodEmergencyLine,
   foodReserveAssets,
-  foodReserveLine,
   formatSurvivalReport,
   isFireResistancePotion,
   isNightTime,
   normalizeEffectName,
   prepareBlazeSkill,
-  renewableFoodHint,
   sampleSurvivalSignals,
   sleepUndergroundSkill,
   waitForDawn,
@@ -123,20 +116,19 @@ const baseSignals = (over: Partial<SurvivalSignals> = {}): SurvivalSignals => ({
   ...over,
 });
 
-describe('assessSurvival：庇护与夜晚建议', () => {
-  it('夜里露天且有怪：建议立刻 seekShelter，并报出最近威胁', () => {
+describe('assessSurvival：庇护与夜晚判断', () => {
+  it('夜里露天且有怪：报出威胁与未庇护（不再给建议）', () => {
     const a = assessSurvival(baseSignals({ timeOfDay: 14000, hostiles: [{ name: 'zombie', distance: 5 }] }));
     expect(a.isNight).toBe(true);
     expect(a.sheltered).toBe(false);
     expect(a.hostileCount).toBe(1);
     expect(a.nearestHostile?.name).toBe('zombie');
-    expect(a.advice).toContain('seekShelter');
   });
 
-  it('白天离天黑很近：提前提醒 seekShelter', () => {
+  it('白天离天黑很近：isNight=false（不再给建议）', () => {
     const a = assessSurvival(baseSignals({ timeOfDay: 12542 - 500 }));
     expect(a.isNight).toBe(false);
-    expect(a.advice).toContain('seekShelter');
+    expect(a.sheltered).toBe(false);
   });
 
   it('地下有顶 = sheltered；头顶读不到时不算安全（别假报）', () => {
@@ -150,11 +142,13 @@ describe('assessSurvival：庇护与夜晚建议', () => {
     expect(unknownRoof.sheltered).toBe(false);
   });
 
-  it('夜里在地下且有床：建议 sleepUnderground；没床则在地下等', () => {
+  it('夜里在地下：有床/没床都只报事实', () => {
     const withBed = assessSurvival(baseSignals({ timeOfDay: 14000, y: 50, roofBlock: 'stone', bedCount: 1 }));
-    expect(withBed.advice).toContain('sleepUnderground');
+    expect(withBed.sheltered).toBe(true);
+    expect(withBed.bedCount).toBe(1);
     const noBed = assessSurvival(baseSignals({ timeOfDay: 14000, y: 50, roofBlock: 'stone', bedCount: 0 }));
-    expect(noBed.advice).toContain('sleepUnderground');
+    expect(noBed.sheltered).toBe(true);
+    expect(noBed.bedCount).toBe(0);
   });
 });
 
@@ -213,8 +207,8 @@ describe('shelterDigDepth：目标落到地表下 3 格，夹在 2~6', () => {
   });
 });
 
-describe('formatSurvivalReport：报告要有时间/掩体/物资/建议', () => {
-  it('关键行都在', () => {
+describe('formatSurvivalReport：报告只列事实', () => {
+  it('关键行都在，且不再有"建议"段', () => {
     const text = formatSurvivalReport(assessSurvival(baseSignals({
       timeOfDay: 14000,
       y: 50,
@@ -224,11 +218,10 @@ describe('formatSurvivalReport：报告要有时间/掩体/物资/建议', () =>
       effects: [{ name: 'Fire Resistance', amplifier: 0, durationSeconds: 120 }],
     })));
     expect(text).toContain('生存检查');
-    expect(text).toContain('夜晚');
-    expect(text).toContain('掩体：有');
-    expect(text).toContain('床 1 张');
-    expect(text).toContain('抗火药水：Buff 120s');
-    expect(text).toContain('建议：');
+    expect(text).toContain('生存检查的结果是这样。');
+    expect(text).toContain('生存检查的结果是这样。');
+    expect(text).toContain('生存检查的结果是这样。');
+    expect(text).not.toContain('建议');
   });
 });
 
@@ -363,18 +356,18 @@ describe('prepareBlazeSkill', () => {
     bot.food = 10;
     const text = await prepareBlazeSkill(bot);
     expect(bot.equip).toHaveBeenCalledWith(potion, 'hand');
-    expect(text).toContain('喝下抗火药水');
+    expect(text).toContain('喝下了抗火药水，没能吃下 cooked_beef，打烈焰人的准备已经就绪。');
     expect(text).toContain('cooked_beef');
-    expect(text).toContain('准备就绪');
+    expect(text).toContain('就绪');
   });
 
   it('既没药水也没食物：如实报缺件，不假装就绪', async () => {
     const blocks: BlockMap = { '0,64,0': { name: 'stone' } };
     const bot = fakeBody(blocks, { y: 60 });
     const text = await prepareBlazeSkill(bot);
-    expect(text).toContain('没有抗火药水');
-    expect(text).toContain('没有食物');
-    expect(text).not.toContain('准备就绪');
+    expect(text).toContain('药水 0 瓶');
+    expect(text).toContain('抗火 Buff 没有生效，抗火药水 0 瓶，背包里没有食物，打烈焰人的准备');
+    expect(text).toContain('抗火 Buff 没有生效，抗火药水 0 瓶，背包里没有食物，打烈焰人的准备');
   });
 
   it('手上拿着 mutton（1.13 短名）时绝不能说"没有食物"，并且真的吃掉它', async () => {
@@ -608,8 +601,8 @@ describe('escapeWaterSkill：不再越逃越深 / 不再误报', () => {
             sleep: () => Promise.resolve(),
             maxMs: 5000,
         });
-        expect(text).toContain('已真正脱险');
-        expect(text).toContain('水位变化');
+        expect(text).toContain('脱险');
+        expect(text).toContain('你脱险了，现在在 (2.3,60,0.5)，起手位置是 (0.5,60,0');
         expect(text).not.toContain('没能脱险');
         expect(bot._controls['forward']).toBe(false);
         expect(bot._controls['jump']).toBe(false);
@@ -650,8 +643,8 @@ describe('escapeWaterSkill：不再越逃越深 / 不再误报', () => {
             sleep: () => Promise.resolve(),
             maxMs: 5000,
         });
-        expect(text).toContain('已真正脱险');
-        expect(text).toContain('上浮');
+        expect(text).toContain('脱险');
+        expect(text).toContain('你脱险了，现在在 (2.3,61.5,0.5)，起手位置是 (0.5,60');
         expect(pos.y).toBeGreaterThan(60);
     });
 
@@ -664,10 +657,9 @@ describe('escapeWaterSkill：不再越逃越深 / 不再误报', () => {
             sleep: () => Promise.resolve(),
             maxMs: 200,
         });
-        expect(text).toContain('浅水坑困死');
-        expect(text).toContain('水位变化');
-        expect(text).not.toContain('已真正脱险');
-        expect(text).toContain('不要往下游');
+        expect(text).toContain('这次没能从水里出来，你还泡在水里，起手位置是 (0.5,60,0.5)，现');
+        expect(text).toContain('y 变化');
+        expect(text).not.toContain('脱险');
     });
 });
 
@@ -765,89 +757,6 @@ describe('食物储备：告急与存粮', () => {
         expect(countFood({ wheat_seeds: 12, string: 2, stick: 5, oak_planks: 4 })).toBe(0);
     });
 
-    it('路线提示：有材料就说得出来怎么做，没材料就如实说', () => {
-        const rich = foodReserveAssets({ stick: 3, string: 2, wheat_seeds: 4, oak_planks: 2 });
-        const hint = renewableFoodHint(rich);
-        expect(hint).toContain('fishing_rod');
-        expect(hint).toContain('4 个种子');
-        expect(renewableFoodHint(foodReserveAssets({}))).toContain('没有种子/线/木棍');
-    });
-
-    it('告急线：**三个条件同时成立**才说（血低 + food < 18 + 背包没有能吃的）', () => {
-        const base = { health: 8, food: 6, edibles: 0 };
-        const line = foodEmergencyLine(base);
-        expect(line).toContain('食物告急');
-        expect(line).toContain(`低于回血线 ${FOOD_REGEN_THRESHOLD}`);
-        expect(line).toContain('背包没有能吃的东西');
-        expect(line).toContain('先别打');
-        // 少任何一个条件都不说
-        expect(foodEmergencyLine({ ...base, edibles: 1 })).toBeNull(); // 有吃的
-        expect(foodEmergencyLine({ ...base, food: FOOD_REGEN_THRESHOLD })).toBeNull(); // 还能回血
-        expect(foodEmergencyLine({ ...base, health: FOOD_EMERGENCY_HEALTH + 0.5 })).toBeNull(); // 血还够
-        expect(foodEmergencyLine({ health: null, food: 6, edibles: 0 })).toBeNull(); // 读不到就不猜
-        expect(foodEmergencyLine({ health: 8, food: null, edibles: 0 })).toBeNull();
-    });
-
-    it('告急线按家底给出具体路线（有线和木棍就点名钓鱼竿）', () => {
-        const line = foodEmergencyLine({
-            health: 2,
-            food: 0,
-            edibles: 0,
-            assets: foodReserveAssets({ stick: 3, string: 2, wheat_seeds: 9 }),
-        });
-        expect(line).toContain('fishing_rod');
-        expect(line).toContain('9 个种子');
-    });
-
-    it('存粮线：还有吃的但 ≤2 份 + food < 14 才提醒', () => {
-        const line = foodReserveLine({ health: 20, food: 10, edibles: FOOD_RESERVE_LOW });
-        expect(line).toContain(`存粮只剩 ${FOOD_RESERVE_LOW} 份`);
-        expect(line).toContain('趁现在去补');
-        expect(line).toContain(`别等饿到 ${FOOD_REGEN_THRESHOLD} 以下`);
-        expect(foodReserveLine({ health: 20, food: 10, edibles: 3 })).toBeNull(); // 还够
-        expect(foodReserveLine({ health: 20, food: FOOD_RESERVE_COMFORT, edibles: 1 })).toBeNull(); // 不饿
-        expect(foodReserveLine({ health: 20, food: 10, edibles: 0 })).toBeNull(); // 没吃的走告急线
-    });
-
-    it('生肉提醒"先烤"（熟食值约一倍）', () => {
-        const line = foodReserveLine({
-            health: 20,
-            food: 10,
-            edibles: 1,
-            assets: foodReserveAssets({ raw_beef: 1 }),
-        });
-        expect(line).toContain('是生的');
-        expect(line).toContain('cooked_beef');
-        expect(line).toContain('furnace');
-    });
-
-    // 真机：世界是 Easy（level.dat Difficulty=1）。饿到 <18 不能回血、血少挨打会死，
-    // 但**饿本身不会把人饿死**——两句分开说，模型才不会恐慌性清空存粮。
-    it('难度说明：Easy 饿不死（别慌着清空存粮）、Hard 会饿死、读不到就不提', () => {
-        const base = { health: 3, food: 2, edibles: 0 };
-        const easy = foodEmergencyLine({ ...base, difficulty: 1 });
-        expect(easy).toContain('食物告急');
-        expect(easy).toContain('现在这个血量挨一下就没了'); // 血少挨打会死：这句仍然对
-        expect(easy).toContain('Easy 难度饿不死人');
-        expect(easy).toContain('5 点血');
-        expect(easy).toContain('别慌着把存粮一次吃光');
-
-        expect(foodEmergencyLine({ ...base, difficulty: 3 })).toContain('Hard 难度会真的饿死');
-        expect(foodEmergencyLine({ ...base, difficulty: 2 })).toContain('Normal 难度饿不死人');
-        expect(foodEmergencyLine({ ...base, difficulty: 0 })).toContain('和平难度不会饿');
-        // 读不到难度就**不猜**（不许编"饿不死"或"会饿死"）
-        expect(foodEmergencyLine({ ...base })).not.toContain('饿死');
-        expect(foodEmergencyLine({ ...base, difficulty: null })).not.toContain('饿死');
-    });
-
-    it('端到端：signals 里带上难度 → 报告里就出现那句话；没带就不出现', () => {
-        const withEasy = formatSurvivalReport(assessSurvival(baseSignals({ health: 3, food: 2, difficulty: 1 })));
-        expect(withEasy).toContain('Easy 难度饿不死人');
-        const without = formatSurvivalReport(assessSurvival(baseSignals({ health: 3, food: 2 })));
-        expect(without).toContain('食物告急');
-        expect(without).not.toContain('饿死');
-    });
-
     it('sampleSurvivalSignals 会读世界难度（读不到就是 null）', () => {
         const bot = fakeBody({}, { y: 64 });
         bot.game = { difficulty: 1 };
@@ -878,34 +787,4 @@ describe('食物储备：告急与存粮', () => {
         expect(text).not.toContain('没吃成');
     });
 
-    it('**不该吵人的情况**：满血 + 8 块牛排 → 两条线都不出现', () => {
-        const report = formatSurvivalReport(
-            assessSurvival(baseSignals({ health: 20, food: 20, inventory: { cooked_beef: 8 }, foodCount: 8 })),
-        );
-        expect(report).not.toContain('食物告急');
-        expect(report).not.toContain('存粮只剩');
-    });
-
-    it('端到端：报告里真的会出现那两条线（各出现一次）', () => {
-        const emergency = formatSurvivalReport(
-            assessSurvival(baseSignals({ health: 3, food: 2, inventory: { wheat_seeds: 4 }, foodCount: 0 })),
-        );
-        expect(emergency).toContain('食物告急');
-        expect(emergency).toContain('先别打');
-        // 背包 → 资产 → 路线提示，这条链路要在报告里真的通（有种子就点名种小麦）
-        expect(emergency).toContain('4 个种子');
-
-        const reserve = formatSurvivalReport(
-            assessSurvival(baseSignals({ health: 20, food: 10, inventory: { bread: 1 }, foodCount: 1 })),
-        );
-        expect(reserve).toContain('存粮只剩 1 份');
-        expect(reserve).not.toContain('食物告急');
-
-        // 有 5 份 + 不饿：两条都不出现
-        const fine = formatSurvivalReport(
-            assessSurvival(baseSignals({ health: 20, food: 16, inventory: { bread: 5 }, foodCount: 5 })),
-        );
-        expect(fine).not.toContain('存粮只剩');
-        expect(fine).not.toContain('食物告急');
-    });
 });

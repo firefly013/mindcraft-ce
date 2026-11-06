@@ -55,11 +55,12 @@ describe('危险操作注册表', () => {
     expect(isAuthorizable('')).toBe(false);
   });
 
-  it('refuseText 带上"是什么/为什么/怎么授权"', () => {
-    const t = refuseText(op('pour_water'), 5);
+  it('refuseText 只报不允许 + 未授权 op', () => {
+    const t = refuseText(op('pour_water'));
+    expect(t).toContain('这次要做的是用桶倒水，需要先拿到 pour_water 授权，现在没有授权');
     expect(t).toContain('倒水');
-    expect(t).toContain('allowDangerousOps(5');
-    expect(t).toContain('"pour_water"');
+    expect(t).toContain('这次要做的是用桶倒水，需要先拿到 pour_water 授权，现在没有授权');
+    expect(t).not.toContain('allowDangerousOps');
   });
 
   it('每个 op 的 id 唯一', () => {
@@ -150,30 +151,30 @@ describe('许可', () => {
     expect(p.isAllowed('definitely_not_registered', dry, T0).allowed).toBe(true);
   });
 
-  it('describe 说清现状（授权对象/剩余时间/原因）', () => {
+  it('describe 说清现状（授权对象/剩余时间）', () => {
     const p = createPermits();
-    expect(p.describe(T0)).toContain('没有任何授权');
+    expect(p.describe(T0)).toContain('我现在没有任何危险操作的授权。');
     p.grant(['ignite'], 2, '点地狱门', T0);
     const text = p.describe(T0 + 30_000);
     expect(text).toContain('ignite');
-    expect(text).toContain('点地狱门');
+    expect(text).toContain('还剩 90 秒');
     expect(text).toContain('90 秒');
   });
 
   it('describe 清掉过期的豁免票——不清的话模型会以为自己还豁免着', () => {
     const p = createPermits();
     p.bypassFor('enter_deep_water', 1000, '溺水自救', T0);
-    expect(p.describe(T0)).toContain('内部豁免 1 项');
+    expect(p.describe(T0)).toContain('我现在没有任何危险操作的授权，内部还有 1 项豁免。');
     const later = p.describe(T0 + 1000);
     expect(later).not.toContain('内部豁免');
-    expect(later).toContain('没有任何授权');
+    expect(later).toContain('我现在没有任何危险操作的授权。');
   });
 
   it('describe 也清掉过期的授权（进 Live State 的必须是现在时）', () => {
     const p = createPermits();
     p.grant(null, 1, '浇黑曜石', T0);
-    expect(p.describe(T0)).toContain('已授权');
-    expect(p.describe(T0 + 60_000)).toContain('没有任何授权');
+    expect(p.describe(T0)).toContain('我已经拿到所有危险操作的授权，还剩 60 秒。');
+    expect(p.describe(T0 + 60_000)).toContain('我现在没有任何危险操作的授权。');
   });
 });
 
@@ -195,3 +196,4 @@ describe('opContextFor', () => {
     expect(opContextFor({ entity: { metadata: 'x' } }).onFire).toBe(false);
   });
 });
+

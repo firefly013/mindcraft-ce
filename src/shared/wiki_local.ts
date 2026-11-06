@@ -116,7 +116,7 @@ export function renderLocalWikiAnswer(input: WikiLocalInput): string {
     const lines: string[] = [];
 
     const why = input.why != null && input.why !== '' ? input.why : '网络查询没成功';
-    lines.push(`searchWiki 没拿到 wiki 内容（${why}）。以下是${LOCAL_WIKI_LABEL}：`);
+    lines.push(`searchWiki 没有拿到 wiki 内容，${why}。下面是${LOCAL_WIKI_LABEL}。`);
 
     const kinds: string[] = [];
     if (input.item != null) kinds.push('物品');
@@ -135,7 +135,7 @@ export function renderLocalWikiAnswer(input: WikiLocalInput): string {
         const hardness = num(input.block.hardness);
         if (hardness != null) blockBits.push(`硬度 ${hardness}`);
         if (input.block.diggable === false) blockBits.push('不可破坏');
-        if (blockBits.length > 0) lines.push('- 方块属性：' + blockBits.join('，') + '。');
+        if (blockBits.length > 0) lines.push('方块属性有 ' + blockBits.join('，') + '。');
     }
 
     const recipes = (input.recipes ?? []).filter((r) => r != null);
@@ -145,9 +145,9 @@ export function renderLocalWikiAnswer(input: WikiLocalInput): string {
                 .filter(([n, c]) => n !== '' && num(c) != null && (c as number) > 0)
                 .map(([n, c]) => `${c} 个 ${display(n)}（${n}）`);
             const count = num(meta?.craftedCount) ?? 1;
-            return `${parts.join(' + ')} → ${count} 个 ${shown}（工作台）`;
+            return `合成 ${count} 个 ${shown} 需要 ${parts.join(' 和 ')}，要用工作台。`;
         });
-        lines.push('- 合成：' + rendered.join('；或 ') + '。');
+        lines.push('合成配方是 ' + rendered.join('，或者 ') + '。');
     } else if (input.item != null) {
         lines.push(
             '- 本地配方表里没有它的合成配方：要么只能靠打怪/挖矿/交易/熔炉拿到，' +

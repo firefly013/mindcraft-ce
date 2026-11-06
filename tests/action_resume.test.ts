@@ -143,7 +143,7 @@ describe('auto：原样重发', () => {
     expect(h.scheduler.currentAction()?.id).toBe('travelTo');
     const notice = h.resumeNotices.find((n) => n.resumed);
     expect(notice).toBeTruthy();
-    expect(notice?.detail).toContain('已替你续做 travelTo');
+    expect(notice?.detail).toContain('已经替你接着做 travelTo');
     expect(notice?.call_id).toMatch(/^travelTo#/);
   });
 
@@ -192,7 +192,8 @@ describe('checkpoint：按进度折算参数', () => {
     expect(h.calls).toHaveLength(1);
     const notice = h.resumeNotices.find((n) => !n.resumed);
     expect(notice?.detail).toContain('目标已经完成');
-    expect(notice?.detail).toContain('8/8');
+    expect(notice?.detail).toContain('已经收集了 8 个');
+    expect(notice?.detail).toContain('目标是 8 个');
   });
 
   it('进度读不到（背包还没同步）→ 不猜，不续做', async () => {
@@ -203,7 +204,7 @@ describe('checkpoint：按进度折算参数', () => {
     await h.runner.resumeInterrupted();
 
     expect(h.calls).toHaveLength(1);
-    expect(h.resumeNotices.find((n) => !n.resumed)?.detail).toContain('进度读不到');
+    expect(h.resumeNotices.find((n) => !n.resumed)?.detail).toContain('collectBlocks 被打断了，读不到当前进度，所以没有接着做。');
   });
 
   it('掉落物换算：挖 stone 的进度按 cobblestone 数', async () => {
@@ -303,7 +304,7 @@ describe('checkpoint：距离型动作按"原始终点"续做', () => {
     h.scheduler.endEmergency();
     await h.runner.resumeInterrupted();
     expect(h.calls).toHaveLength(1);
-    expect(h.resumeNotices.find((n) => !n.resumed)?.detail).toContain('进度读不到');
+    expect(h.resumeNotices.find((n) => !n.resumed)?.detail).toContain('digDown 被打断了，读不到当前进度，所以没有接着做。');
   });
 
   it('方向词表与身体侧一致（east=+x / north=-z / forward 认不出来）', () => {
@@ -323,8 +324,9 @@ describe('不续做的情形', () => {
     h.scheduler.endEmergency();
     await h.runner.resumeInterrupted();
     expect(h.calls).toHaveLength(1);
-    // 中断回执如实说明"不会自动续做"
-    expect(String(h.notices.at(-1)?.result.data ?? '')).toContain('不会自动续做');
+    // 中断回执只报被中断，不再写"不会自动续做"这类机制说明
+    expect(String(h.notices.at(-1)?.result.data ?? '')).toContain('动作被中断了');
+    expect(String(h.notices.at(-1)?.result.data ?? '')).toContain('保命反射抢走了身体');
   });
 
   it('模型按了 Stop → 放弃续做', async () => {
@@ -357,7 +359,7 @@ describe('不续做的情形', () => {
     expect(h.scheduler.startAction('jump', {}).accepted).toBe(true);
     await h.runner.resumeInterrupted();
     expect(h.calls).toHaveLength(1);
-    expect(h.resumeNotices.find((n) => !n.resumed)?.detail).toContain('通道已经被别的动作占用');
+    expect(h.resumeNotices.find((n) => !n.resumed)?.detail).toContain('身体通道被占着');
   });
 
   it('模型中途发了新动作 → 旧的续做意图作废', async () => {

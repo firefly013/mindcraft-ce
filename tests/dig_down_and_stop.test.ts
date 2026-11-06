@@ -116,7 +116,7 @@ describe('digDown 自身提前停', () => {
     const bot = fakeBot({}, true);
     const ok = await digDown(bot, 5);
     expect(ok).toBe(false);
-    expect(bot.output).toContain('Stop was requested');
+    expect(bot.output).toContain('被 Stop 打断了，已经挖了 0 格，目标是 5 格。');
   });
 });
 

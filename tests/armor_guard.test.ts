@@ -39,7 +39,7 @@ function armorBot(options: { dimension?: string; worn?: Record<string, string | 
         output: '',
         game: { dimension: options.dimension ?? 'the_nether' },
         inventory,
-        equip: async (item: any, destination: string) => {
+        equip: (item: any, destination: string) => {
             equipped.push({ name: item.name, destination });
             // 真的把槽位换掉（和 mineflayer 一样），并把换下来的放回背包
             const index = Number(Object.keys(ARMOR_SLOTS).find((key) => ARMOR_SLOTS[Number(key)] === destination));
@@ -112,7 +112,7 @@ describe('护甲判据（纯函数）', () => {
         });
         expect(swap.action).toBe('revert_gold');
         expect(swap.report).toContain('golden_helmet → iron_helmet');
-        expect(swap.report).toContain('招来猪灵');
+        expect(swap.report).toContain('已换回 golden_helmet');
         expect(swap.reason).toContain('中立');
 
         const upgrade = armorSwapVerdict({
@@ -122,7 +122,7 @@ describe('护甲判据（纯函数）', () => {
             to: 'golden_helmet',
         });
         expect(upgrade.action).toBe('allow');
-        expect(upgrade.report).toContain('换上金甲是对的');
+        expect(upgrade.report).toContain('iron_helmet → golden_helmet');
 
         // 下界里不涉及金甲的更换照常放行，但**必须报告**
         const neutral = armorSwapVerdict({
@@ -173,8 +173,8 @@ describe('护甲守卫（行为）', () => {
 
         expect(h.wornAt('head')).toBe('golden_helmet'); // 金甲保住了
         expect(h.equipped.map((e) => e.name)).toContain('golden_helmet');
-        expect(h.bot.output).toContain('招来猪灵'); // 而且**不是静默**
-        expect(h.bot.output).toContain('已经换回 golden_helmet');
+        expect(h.bot.output).toContain('护甲变化'); // 而且**不是静默**
+        expect(h.bot.output).toContain('已换回 golden_helmet');
     });
 
     it('下界里金甲被换掉、背包里也没有金装备了 ⇒ **大声说**（不许静默地失去中立）', async () => {
@@ -188,8 +188,8 @@ describe('护甲守卫（行为）', () => {
         h.simulateSwap(5, 'iron_helmet', { keepOldInPack: false });
         await new Promise((resolve) => setTimeout(resolve, 0));
 
-        expect(h.bot.output).toContain('招来猪灵');
-        expect(h.bot.output).toContain('猪灵会主动攻击');
+        expect(h.bot.output).toContain('护甲变化：head golden_helmet → iron_helmet');
+        expect(h.bot.output).toContain('背包里也没有金装备');
         expect(h.wornAt('head')).toBe('iron_helmet'); // 换不回来是事实，但说出来了
     });
 
@@ -206,7 +206,7 @@ describe('护甲守卫（行为）', () => {
         expect(h.wornAt('head')).toBe('iron_helmet'); // 没被换回去
         expect(h.equipped).toHaveLength(0); // 守卫没有插手
         expect(h.bot.output).toContain('护甲变化');
-        expect(h.bot.output).not.toContain('招来猪灵');
+        expect(h.bot.output).not.toContain('换回');
     });
 
     it('任何护甲变化都**不许静默**：主世界/末地/下界的换甲都会留一行', async () => {
@@ -228,7 +228,7 @@ describe('护甲守卫（行为）', () => {
         });
         // 模拟插件自己挂上去的 equipAll（就是它会把金甲换成铁甲）
         h.bot.armorManager = {
-            equipAll: async () => {
+            equipAll: () => {
                 h.simulateSwap(5, 'iron_helmet');
             },
         };
@@ -252,16 +252,16 @@ describe('护甲守卫（行为）', () => {
         const lines = await enforceGoldInNether(h.bot);
         expect(lines).toHaveLength(1);
         expect(h.wornAt('head')).toBe('golden_helmet');
-        expect(h.bot.output).toContain('金甲让猪灵保持中立');
+        expect(h.bot.output).toContain('已把 golden_helmet 换回 head');
     });
 
     it('`equip` 说成功但槽位没变 ⇒ **不许说"已换回"**（证据不是返回值）', async () => {
         const h = armorBot({ dimension: 'the_nether', worn: { head: 'iron_helmet' }, items: [stack('golden_helmet')] });
         // equip 返回 true 但什么都没穿上（真实世界里的"点了没反应"）
-        const lines = await enforceGoldInNether(h.bot, { equip: async () => true });
+        const lines = await enforceGoldInNether(h.bot, { equip: () => Promise.resolve(true) });
         expect(h.wornAt('head')).toBe('iron_helmet');
-        expect(lines[0]).toContain('没成功');
-        expect(lines[0]).toContain('猪灵会主动攻击');
+        expect(lines[0]).toContain('没换回');
+        expect(lines[0]).toContain('head 现在不是金甲');
         expect(lines[0]).not.toContain('已把');
     });
 

@@ -99,13 +99,13 @@ export function corridorThreatVerdict(input: {
     const list = creepers
         .map(
             (creeper) =>
-                `creeper@(${Math.round(creeper.x)}, ${Math.round(creeper.z)}) 离直线 ${creeper.offLine.toFixed(1)} 格`,
+                `有几只在 (${Math.round(creeper.x)}, ${Math.round(creeper.z)})，离这条直线 ${creeper.offLine.toFixed(1)} 格`,
         )
-        .join('、');
+        .join('，');
     const head =
-        `直线走廊（${Math.round(input.from.x)}, ${Math.round(input.from.z)} → ` +
-        `${Math.round(input.to.x)}, ${Math.round(input.to.z)}）${CORRIDOR_WARN_RADIUS} 格内有 ${creepers.length} 只苦力怕：${list}。` +
-        `**这是直线，不是你实际会走的路线**——寻路器会绕障碍，路线可能不同。你血 ${health}，炸一下就没。`;
+        `从 (${Math.round(input.from.x)}, ${Math.round(input.from.z)}) 到 ` +
+        `(${Math.round(input.to.x)}, ${Math.round(input.to.z)}) 的直线走廊 ` +
+        `${CORRIDOR_WARN_RADIUS} 格内发现了 ${creepers.length} 只苦力怕，${list}。你的血量是 ${health}。`;
     const blockers = creepers.filter((creeper) => creeper.offLine <= CORRIDOR_BLOCK_RADIUS);
     if (blockers.length === 0) {
         return { proceed: true, creepersNear: creepers.length, message: head };
@@ -113,10 +113,6 @@ export function corridorThreatVerdict(input: {
     return {
         proceed: false,
         creepersNear: creepers.length,
-        message:
-            head +
-            `其中 ${blockers.length} 只离直线 ≤${CORRIDOR_BLOCK_RADIUS} 格，走过去大概率就是贴脸。` +
-            '要过先侧移出走廊：用 goToCoordinates 走到旁边 6~10 格、看得见的一格实地上（别给直线上的点），' +
-            '从那里再接近目标。',
+        message: head + `其中 ${blockers.length} 只离这条直线不到 ${CORRIDOR_BLOCK_RADIUS + 1} 格。`,
     };
 }

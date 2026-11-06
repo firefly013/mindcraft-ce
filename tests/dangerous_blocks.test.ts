@@ -123,7 +123,7 @@ describe('teleportRefusal', () => {
     const text = teleportRefusal(bot, 5, 64, 5);
     expect(text).not.toBeNull();
     expect(text).toContain('2 格深');
-    expect(text).toContain('allowDangerousOps');
+    expect(text).toContain('这次要传送到的目标点在水里，这里的水有 2 格深，可能没过头顶。这一步需要');
   });
 
   it('传给没 blockAt 的 bot → 不炸，放行', () => {

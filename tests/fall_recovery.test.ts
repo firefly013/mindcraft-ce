@@ -70,15 +70,15 @@ describe('planFallRecovery：岩浆/水要试，虚空/读不到要保守', () =
     const plan = planFallRecovery({ ...base, medium: 'unknown', mediumAtY: null, mediumName: null });
     expect(plan.rung).toBe('brake');
     expect(plan.text).toContain('读不到');
-    expect(plan.text).toContain('保守');
+    expect(plan.text).toContain('只刹车');
   });
 
   it('岩浆 + 没有安全落点 + 没桶 ⇒ 刹车 + 诚实说"试过了、确实没有可落脚处"', () => {
     const plan = planFallRecovery({ ...base, safeLanding: null, hasWaterBucket: false, dropDistance: 39 });
     expect(plan.rung).toBe('brake');
-    expect(plan.text).toContain('没有可落脚的安全点');
+    expect(plan.text).toContain('我正在往下掉，下方是岩浆，y=25 那一格读到的方块是 lava，没有能落');
     expect(plan.text).toContain('没有水桶');
-    expect(plan.text).toContain('已经试过');
+    expect(plan.text).toContain('我正在往下掉，下方是岩浆，y=25 那一格读到的方块是 lava，没有能落');
   });
 
   it('岩浆 + 没落点 + 有桶 + 还有高度 ⇒ 水桶 MLG 档', () => {
@@ -97,7 +97,7 @@ describe('planFallRecovery：岩浆/水要试，虚空/读不到要保守', () =
     const plan = planFallRecovery({ ...base, onSolidGround: true });
     expect(plan.rung).toBe('brake');
     expect(plan.target).toBeNull();
-    expect(plan.text).toContain('不触发');
+    expect(plan.text).toContain('实心地面');
   });
 });
 
@@ -121,7 +121,10 @@ describe('同一条刹车回执不许每 tick 重播（真机审计：B 里 152 
 
   it('回执里带"第几次/已持续多久"，所以少说不等于丢掉信息', () => {
     const src = readFileSync(join(process.cwd(), 'src', 'body', 'mineflayer_body.ts'), 'utf8');
-    expect(src).toContain('第 ${this.fallBrakeNotices} 次刹车');
+    expect(src).toContain('第 ${this.fallBrakeNotices} 次，已持续');
     expect(src).toContain('shouldEmitFallNotice(this.lastFallNotice');
   });
 });
+
+
+

@@ -13,7 +13,7 @@ export function shouldEmitProgress(lastEmitAt: number, now: number, intervalMs =
     return lastEmitAt <= 0 || now - lastEmitAt >= intervalMs;
 }
 
-/** 进度行（机器可读 + 人话）：`挖第 2/4 块 · 已用 12 秒 · 还剩 2 个目标 · 离目标 1.7 格`。 */
+/** 进度行（机器可读 + 人话）：`挖矿已经完成 2 个，一共 4 个，已经用了 12 秒，还剩 2 个目标，离目标还有 1.7 格。` */
 export function formatProgressLine(input: {
     label: string;
     done: number;
@@ -23,12 +23,13 @@ export function formatProgressLine(input: {
     distance?: number | null;
 }): string {
     const elapsed = Math.max(0, Math.round(input.elapsedMs / 1000));
-    const parts = [`${input.label}第 ${input.done}/${input.total} 个`, `已用 ${elapsed} 秒`];
+    const label = String(input.label).trim();
+    const parts = [`${label}已经完成 ${input.done} 个，一共 ${input.total} 个`, `已经用了 ${elapsed} 秒`];
     if (input.remaining != null) parts.push(`还剩 ${input.remaining} 个目标`);
     if (input.distance != null && Number.isFinite(input.distance)) {
-        parts.push(`离目标 ${Math.round(input.distance * 10) / 10} 格`);
+        parts.push(`离目标还有 ${Math.round(input.distance * 10) / 10} 格`);
     }
-    return parts.join(' · ');
+    return `${parts.join('，')}。`;
 }
 
 /** 到上限时的收尾话（说清完成到哪、剩什么，而不是"卡住了"）。 */
@@ -41,9 +42,10 @@ export function formatTimeoutSummary(input: {
 }): string {
     const elapsed = Math.max(0, Math.round(input.elapsedMs / 1000));
     const left = input.remaining ?? Math.max(0, input.total - input.done);
+    const label = String(input.label).trim();
     return (
-        `${input.label}到 ${elapsed} 秒上限：已完成 ${input.done}/${input.total} 个，` +
-        `还剩 ${left} 个没做——这是到时间上限，不是失败；可以直接再发一次同样的调用继续，进度不会丢。`
+        `${label}这次到了 ${elapsed} 秒的时间上限，已经完成 ${input.done} 个，一共 ${input.total} 个，` +
+        `还剩 ${left} 个没做。`
     );
 }
 
@@ -114,7 +116,7 @@ export function evaluateStuck(input: {
         const side = input.yChanged > 0 ? '上升' : '下降';
         return {
             kind: 'moving-slow',
-            message: `${Math.round(input.seconds)} 秒里${side}了 ${Math.abs(input.yChanged).toFixed(1)} 格（不是卡住，是慢）——继续。`,
+            message: `过去 ${Math.round(input.seconds)} 秒里，它${side}了 ${Math.abs(input.yChanged).toFixed(1)} 格。`,
             signals: ['y-delta'],
         };
     }
@@ -123,11 +125,11 @@ export function evaluateStuck(input: {
     if (input.seconds < threshold) return { kind: 'none', message: '', signals: [] };
     const progressText =
         input.progress != null
-            ? `进度 ${input.progress.done}/${input.progress.total}（${input.progress.label}）`
-            : '没有进度输出';
+            ? `${input.progress.label}的进度停在 ${input.progress.done} 个，一共 ${input.progress.total} 个`
+            : '这段时间也没有进度输出';
     return {
         kind: 'stuck',
-        message: `${Math.round(input.seconds)} 秒里一格没挖掉/一步没走（${progressText} 未变，坐标也没动）——**不是挖慢，是真停了**。`,
+        message: `过去 ${Math.round(input.seconds)} 秒里，一格都没挖掉，一步也没走，${progressText}，坐标也没有变化。`,
         signals: ['position', 'progress', 'y-delta'],
     };
 }

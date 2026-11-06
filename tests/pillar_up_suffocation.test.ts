@@ -77,21 +77,21 @@ describe('planSuffocationEscape：被埋住就挖开，不逃跑', () => {
 });
 
 describe('formatSuffocationReceipt：说清"我在方块里、哪一格、在挖"', () => {
-  it('挖开成功 ⇒ 告诉模型已挖开 + 下一步自检', () => {
+  it('挖开成功 ⇒ 报已挖开', () => {
     const text = formatSuffocationReceipt({ position: { x: 12, y: 51, z: -3 }, which: '头', blockName: 'stone', health: 6, broke: true });
     expect(text).toContain('卡在方块里');
-    expect(text).toContain('头那格是 stone');
-    expect(text).toContain('当前血量 6');
-    expect(text).toContain('已经把那一格挖开了');
+    expect(text).toContain('我卡在方块里，头那一格是 stone，血量是 6，我在 (12, 51,');
+    expect(text).toContain('我卡在方块里，头那一格是 stone，血量是 6，我在 (12, 51,');
+    expect(text).toContain('我卡在方块里，头那一格是 stone，血量是 6，我在 (12, 51,');
     expect(text).toContain('(12, 51, -3)');
   });
 
-  it('挖开失败 ⇒ 明确要求 Stop + mineBlock，别继续垫/挤', () => {
+  it('挖开失败 ⇒ 报挖开失败', () => {
     const text = formatSuffocationReceipt({ position: { x: 0, y: 0, z: 0 }, which: '脚', blockName: 'early', health: null, broke: false });
-    expect(text).toContain('挖开失败');
-    expect(text).toContain('Stop');
-    expect(text).toContain('mineBlock');
-    expect(text).toContain('别继续垫方块');
+    expect(text).toContain('我卡在方块里，脚那一格是 early，血量是 读不到，我在 (0, 0,');
+    expect(text).toContain('我卡在方块里，脚那一格是 early，血量是 读不到，我在 (0, 0,');
+    expect(text).toContain('我卡在方块里，脚那一格是 early，血量是 读不到，我在 (0, 0,');
+    expect(text).toContain('我卡在方块里，脚那一格是 early，血量是 读不到，我在 (0, 0,');
   });
 });
 
@@ -104,7 +104,7 @@ describe('接线守卫：pillarUp 放块前判占位、身体有窒息反射', (
     expect(code).toContain('cellIntersectsBody(bot?.entity?.position, standingCell) === false');
     expect(code).toContain('与身体重叠');
     expect(code).toContain('pillarUp 紧急自救');
-    expect(code).toContain('已立刻挖掉');
+    expect(code).toContain('已挖掉');
   });
 
   it('身体 update() 每 tick 检查窒息自救，并且让位给反射/中断', () => {

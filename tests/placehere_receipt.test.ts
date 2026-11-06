@@ -9,28 +9,28 @@ import { formatPlaceHereReceipt } from '../src/body/library/placement_guard.js';
 
 const target = { x: 10, y: 64, z: 20 };
 
-describe('身体格：一次说清 + 两条替代', () => {
-  it('目标就是身体格 ⇒ 明说"我现在站的位置"，给 pillarUp/placeBlock 两条路，不出现"Placed"', () => {
+describe('身体格：只报事实', () => {
+  it('目标就是身体格 ⇒ 报"没做到"与占用事实，不出现"Placed"', () => {
     const text = formatPlaceHereReceipt({ ok: false, target, expected: 'torch', readBack: 'air', bodyCell: true });
-    expect(text).toContain('就是我现在站的位置');
-    expect(text).toContain('占位守卫');
-    expect(text).toContain('pillarUp');
-    expect(text).toContain('placeBlock');
+    expect(text).toContain('没能放下，(10,64,20) 正是我脚和头所在的那一格，回读到的方块是');
+    expect(text).toContain('没能放下，(10,64,20) 正是我脚和头所在的那一格，回读到的方块是');
+    expect(text).toContain('air');
     expect(text).not.toContain('Placed');
   });
 });
 
 describe('非身体格：回读确认才算成功', () => {
-  it('回读匹配 ⇒ "回读确认"', () => {
+  it('回读匹配 ⇒ 已放置 + 回读值', () => {
     const text = formatPlaceHereReceipt({ ok: true, target, expected: 'torch', readBack: 'torch', bodyCell: false });
-    expect(text).toContain('回读确认');
+    expect(text).toContain('这个方块已经放在 (10,64,20)，回读到的方块是 torch。');
+    expect(text).toContain('这个方块已经放在 (10,64,20)，回读到的方块是 torch。');
     expect(text).toContain('10,64,20');
   });
-  it('回读不匹配 ⇒ "没有生效" + 实测读到的名字（不说成功）', () => {
+  it('回读不匹配 ⇒ "没做到" + 实测读到的名字（不说成功）', () => {
     const text = formatPlaceHereReceipt({ ok: true, target, expected: 'torch', readBack: 'air', bodyCell: false });
-    expect(text).toContain('没有生效');
+    expect(text).toContain('没能放下，(10,64,20) 回读到的方块是 air，我本来想放的是 t');
     expect(text).toContain('air');
-    expect(text).not.toContain('回读确认');
+    expect(text).not.toContain('已放置');
   });
   it('读不到 ⇒ 如实说读不到，不猜', () => {
     const text = formatPlaceHereReceipt({ ok: false, target, expected: 'torch', readBack: null, bodyCell: false });

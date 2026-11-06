@@ -81,7 +81,7 @@ describe('播报节奏：进入状态立刻说，之后最多每 45 秒一次', 
     expect(src).toContain('unrecoverableVerdict({');
     expect(src).toContain('elapsedSec,');
     // 建议写进 output，而不是变成拒绝：动作入口里没有针对它的 return/false
-    const adviceBlock = src.slice(src.indexOf('checkUnrecoverableState(): void'), src.indexOf('private async writeAdvice'));
+    const adviceBlock = src.slice(src.indexOf('checkUnrecoverableState(): void'), src.indexOf('private writeAdvice'));
     expect(adviceBlock).not.toContain('stopAll');
     expect(adviceBlock).not.toContain('abortReflexes');
     expect(adviceBlock).not.toContain('return false');

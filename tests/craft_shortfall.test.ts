@@ -33,8 +33,8 @@ describe('(a) A 的钻石镐：6 钻 + 1 木板，缺工作台/木板/原木', (
     const names = plan.missing.map((entry) => entry.item);
     expect(names.some((name) => name.includes('crafting_table'))).toBe(true);
     expect(names).toContain('oak_log');
-    expect(plan.text).toContain('差的是');
-    expect(plan.text).toContain('你有 1 个');
+    expect(plan.text).toContain('材料还不够，crafting_table 需要 1 个，你现在有 0 个，');
+    expect(plan.text).toContain('材料还不够，crafting_table 需要 1 个，你现在有 0 个，');
   });
   it('镐本身材料够（钻石/木棍都能从背包凑）⇒ 只报工作台链', () => {
     const plan = planCraftShortfall({
@@ -104,6 +104,6 @@ describe('接线：craft 失败时追加缺口（不是门，不阻止行动）'
   it('生产包装不抛错；有配方数据时给出「差的是」一行，无数据时返回空串（不瞎报）', () => {
     const bot = { inventory: { items: () => [{ name: 'diamond', count: 6 }] } };
     const note = describeCraftShortfallForBot(bot, 'diamond_pickaxe');
-    if (note !== '') expect(note).toContain('差的是');
+    if (note !== '') expect(note).toContain('材料还不够，diamond_pickaxe 需要 1 个，你现在有 0 个');
   });
 });

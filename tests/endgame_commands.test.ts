@@ -2,22 +2,20 @@
  * 末地命令接线层的测试（不连 MC 服务端、不烧 token）。
  *
  * 这里钉三件事：
- * 1) **接线正确**：registry 里能查到 9 条命令，kind 与超时标记对得上；
- * 2) **门禁安全**：命令全部无参数——`scripts/check-prompts.ts` 只扫
- *    actions/queries/interact，新文件里带参数会被判 SCHEMA PARAM WITHOUT PROMPT TEXT；
+ * 1) **接线正确**：registry 里能查到 10 条命令，kind 与超时标记对得上；
+ * 2) **参数接线**：`drinkPotion(potion)` / `reviveDragon(spots)` 这类参数必须
+ *    真的从工具调用传进实现（参数名要对齐 schema 与提示词）；
  * 3) **命令真的干活**：用假 agent（actions.runAction 立即执行）跑一遍，核对它写进
- *    bot.output 的回执——模型的工具回执就是从 bot.output 来的。
+ *    bot.output 的回执——模型的工具结果就是从 bot.output 来的。
  */
 import { describe, expect, it } from 'vitest';
 import { findCommand, toolDeclarations, toolNames } from '../src/body/commands/registry.js';
 import { ENDGAME_TOOL_TEXT, endgameActionList, endgameQueryList } from '../src/body/commands/endgame.js';
-import { choosePotionToDrink, type EffectInfo, type PotionStock } from '../src/body/library/endgame.js';
 import { executeToolCall } from '../src/body/commands/execute.js';
 import { TOOL_TEXT } from '../src/shared/prompts.js';
 import {
     countEyesOfEnder,
     crystalToolKit,
-    drinkPotionsByPriority,
     throwHeldSkill,
 } from '../src/body/library/endgame_routine.js';
 
@@ -126,7 +124,7 @@ function makeFakeAgent(bot: any, runActionResult: any = { message: 'ACTION-DONE'
     };
 }
 
-describe('接线：registry 里的 9 条末地命令', () => {
+describe('接线：registry 里的 10 条末地命令', () => {
     it('全部注册进来了，名字与顺序稳定', () => {
         const names = toolNames();
         for (const tool of ENDGAME_TOOLS) expect(names).toContain(tool);
@@ -164,12 +162,13 @@ describe('接线：registry 里的 9 条末地命令', () => {
     });
 
     it('**每个参数都有提示词文案**（否则 check-prompts 会报 SCHEMA PARAM WITHOUT PROMPT TEXT）', () => {
-        // 末地工具默认无参数；`reviveDragon(spots)` 是唯一例外（人能直接指定四个格子）。
         // 真正的不变式不是"没有参数"，而是"**schema 里有的参数，TOOL_TEXT 里必须有说明**"
         // —— 这正是 `npm run check:prompts` 第 1b 轮在查的东西。
+        // 现在带参数的末地工具：drinkPotion(potion)（指定药水 id）、reviveDragon(spots)。
+        const parameterized = new Set(['!drinkPotion', '!reviveDragon']);
         for (const command of [...endgameQueryList, ...endgameActionList]) {
             const params = Object.keys(command.params ?? {});
-            if (command.name !== '!reviveDragon') {
+            if (!parameterized.has(command.name)) {
                 expect(params, `${command.name} 不该有参数`).toEqual([]);
             }
             for (const param of params) {
@@ -183,9 +182,12 @@ describe('接线：registry 里的 9 条末地命令', () => {
                 expect((TOOL_TEXT as any)[declaration.name]?.params?.[param], `${declaration.name}.${param} 缺提示词文案`).toBeTruthy();
             }
         }
-        // spots 必须写进 schema，否则模型没法显式指定格子
+        // 参数必须写进 schema，否则模型没法显式指定
         const revive = declarations.find((d) => d.name === 'reviveDragon');
         expect(Object.keys(revive?.params ?? {})).toEqual(['spots']);
+        const drink = declarations.find((d) => d.name === 'drinkPotion');
+        expect(Object.keys(drink?.params ?? {})).toEqual(['potion']);
+        expect(drink?.params?.potion?.optional).toBeUndefined();
     });
 
     it('描述写得够长（它就是模型看到的说明书）并且都提到了关键风险', () => {
@@ -195,7 +197,8 @@ describe('接线：registry 里的 9 条末地命令', () => {
         }
         expect(ENDGAME_TOOL_TEXT.bedBombDragon.description).toContain('sleep_in_bed');
         expect(ENDGAME_TOOL_TEXT.clearEndCrystals.description).toContain('12 格');
-        expect(ENDGAME_TOOL_TEXT.drinkPotion.description).toContain('缓降');
+        expect(ENDGAME_TOOL_TEXT.drinkPotion.description).toContain('药水 id');
+        expect(ENDGAME_TOOL_TEXT.drinkPotion.params.potion).toContain('long_slow_falling');
         expect(ENDGAME_TOOL_TEXT.dodgeDragonBreath.description).toContain('20 格');
         expect(ENDGAME_TOOL_TEXT.recoverAfterDeath.description).toContain('5 分钟');
         expect(ENDGAME_TOOL_TEXT.reviveDragon.description).toContain('end_crystal');
@@ -226,7 +229,7 @@ describe('命令执行（假 agent）', () => {
         const bot = makeFakeBot({});
         await findCommand('throwHeld')?.perform(makeFakeAgent(bot));
         expect(bot.output).toContain('手上是空的');
-        expect(bot.output).toContain('equip');
+        expect(bot.output).toContain('手上是空的');
     });
 
     it('bedBombDragon 在非末地直接拒绝（不做任何危险动作）', async () => {
@@ -246,12 +249,12 @@ describe('命令执行（假 agent）', () => {
     it('超时回执说清"超时 ≠ 没做成"，被中断则安静返回', async () => {
         const bot = makeFakeBot({});
         const timedOut = makeFakeAgent(bot, { message: null, interrupted: false, timedout: true });
-        const receipt = (await findCommand('!drinkPotion')?.perform(timedOut)) as string;
+        const receipt = (await findCommand('!drinkPotion')?.perform(timedOut, 'long_slow_falling')) as string;
         expect(receipt).toContain('超时');
 
         const interrupted = makeFakeAgent(bot, { message: null, interrupted: true, timedout: false });
         // interrupted 且没超时 = 无需回执（模型自己知道它在干嘛）
-        expect(await findCommand('!drinkPotion')?.perform(interrupted)).toBeUndefined();
+        expect(await findCommand('!drinkPotion')?.perform(interrupted, 'long_slow_falling')).toBeUndefined();
     });
 
     it('每个 action 都走身体通道（runAction 的参数带 action: 前缀和超时）', async () => {
@@ -278,61 +281,30 @@ describe('命令执行（假 agent）', () => {
     });
 });
 
-describe('choosePotionToDrink（末地喝药优先级，纯函数）', () => {
-    const emptyStock: PotionStock = {
-        slow_falling: 0,
-        resistance: 0,
-        regeneration: 0,
-        healing: 0,
-        strength: 0,
-        fire_resistance: 0,
-        swiftness: 0,
-        other: 0,
-        milk: 0,
-    };
-    const stock = (overrides: Partial<PotionStock>): PotionStock => ({ ...emptyStock, ...overrides });
-    const slowFalling: EffectInfo[] = [{ name: 'slow_falling', seconds: 120, amplifier: 0 }];
-
-    it('在末地没缓降 Buff → 先喝缓降（P0，防摔死）', () => {
-        const decision = choosePotionToDrink({ stock: stock({ slow_falling: 1, resistance: 1 }), health: 20, inEnd: true });
-        expect(decision.kind).toBe('slow_falling');
-        expect(decision.reason).toContain('几十格高空');
+describe('drinkPotion 的药水 id 参数（壳不再替模型挑药）', () => {
+    it('potion 真的传到实现：给哪个 id 就只喝哪个', async () => {
+        const potion = stack('potion', 1, { nbt: { value: { Potion: 'minecraft:long_slow_falling' } } });
+        const bot = makeFakeBot({ items: [potion] });
+        const agent = makeFakeAgent(bot);
+        await executeToolCall(agent, 'drinkPotion', { potion: 'long_slow_falling' });
+        expect(bot.calls.map((c: any) => c.fn)).toEqual(['equip', 'consume']);
+        expect(bot.output).toContain('喝下 long_slow_falling');
     });
 
-    it('缓降只剩 10 秒 → 续上；还剩 120 秒 → 不动它', () => {
-        expect(choosePotionToDrink({ stock: stock({ slow_falling: 1 }), effects: [{ name: 'slow_falling', seconds: 10, amplifier: 0 }], health: 20, inEnd: true }).kind).toBe('slow_falling');
-        const fresh = choosePotionToDrink({ stock: stock({ slow_falling: 1, resistance: 1 }), effects: slowFalling, health: 20, inEnd: true });
-        expect(fresh.kind).toBe('resistance');
+    it('没有这瓶 → 报结果并列出背包里现有的药水 id', async () => {
+        const potion = stack('potion', 1, { nbt: { value: { Potion: 'minecraft:regeneration' } } });
+        const bot = makeFakeBot({ items: [potion] });
+        await executeToolCall(makeFakeAgent(bot), 'drinkPotion', { potion: 'fire_resistance' });
+        expect(bot.output).toContain("背包里没有 'fire_resistance' 药水");
+        expect(bot.output).toContain('regeneration');
+        expect(bot.calls).toHaveLength(0);
     });
 
-    it('不在末地也不在空中 → 不会乱喝缓降', () => {
-        const decision = choosePotionToDrink({ stock: stock({ slow_falling: 1 }), health: 20, inEnd: false });
-        expect(decision.kind).toBeNull();
-        expect(decision.reason).toContain('不需要喝药');
-    });
-
-    it('血量 ≤10 → 再生优先，其次治疗', () => {
-        expect(choosePotionToDrink({ stock: stock({ regeneration: 1, healing: 1 }), health: 8, inEnd: true }).kind).toBe('regeneration');
-        expect(choosePotionToDrink({ stock: stock({ healing: 1 }), health: 8, inEnd: true }).kind).toBe('healing');
-    });
-
-    it('在末地没抗性 → 喝抗性；有抗性且血够 → 不喝，并列出背包库存', () => {
-        expect(choosePotionToDrink({ stock: stock({ resistance: 1 }), effects: slowFalling, health: 20, inEnd: true }).kind).toBe('resistance');
-        const decision = choosePotionToDrink({
-            stock: stock({ resistance: 1, strength: 2 }),
-            effects: [...slowFalling, { name: 'resistance', seconds: 200, amplifier: 0 }],
-            health: 20,
-            inEnd: true,
-        });
-        expect(decision.kind).toBeNull();
-        expect(decision.reason).toContain('resistance×1');
-        expect(decision.reason).toContain('strength×2');
-    });
-
-    it('空中也算坠落风险（哪怕不在末地）', () => {
-        const decision = choosePotionToDrink({ stock: stock({ slow_falling: 1 }), health: 20, inEnd: false, airborne: true });
-        expect(decision.kind).toBe('slow_falling');
-        expect(decision.reason).toContain('空中');
+    it('drinkPotion 是必填参数：schema 里 potion 在 required 里', () => {
+        const declaration = toolDeclarations().find((d) => d.name === 'drinkPotion');
+        expect(Object.keys(declaration?.params ?? {})).toEqual(['potion']);
+        expect(declaration?.params?.potion?.optional).toBeUndefined();
+        expect((TOOL_TEXT as any).drinkPotion?.params?.potion).toBeTruthy();
     });
 });
 
@@ -348,21 +320,6 @@ describe('routine 里的几个计数器/技能', () => {
         expect(kit.pickaxe).toBe(true);
         expect(kit.tnt).toBe(2);
         expect(crystalToolKit(makeFakeBot({ stacks: [stack('stone', 1)] }))).toEqual({ bow: null, arrows: 0, pickaxe: false, tnt: 0 });
-    });
-
-    it('drinkPotionsByPriority 在末地会真的把缓降 equip 到手上喝掉', async () => {
-        const potion = stack('potion', 1, { nbt: { value: { Potion: 'minecraft:long_slow_falling' } } });
-        const bot = makeFakeBot({ dimension: 'the_end', items: [potion], health: 20, onGround: true });
-        const receipt = await drinkPotionsByPriority(bot);
-        expect(receipt).toContain('喝了 slow_falling');
-        expect(bot.calls.map((c: any) => c.fn)).toEqual(['equip', 'consume']);
-    });
-
-    it('背包里想喝的药没有 → 明说没有，不静默成功', async () => {
-        const bot = makeFakeBot({ dimension: 'the_end', items: [], health: 20 });
-        const receipt = await drinkPotionsByPriority(bot);
-        expect(receipt).toContain('不需要喝药');
-        expect(bot.calls).toHaveLength(0);
     });
 
     it('throwHeldSkill：下坠时会把珍珠往脚下扔（瞄准点低于脚下）', async () => {
@@ -390,6 +347,6 @@ describe('routine 里的几个计数器/技能', () => {
             bot.calls.push({ fn: 'activateItem' });
         };
         const receipt = await throwHeldSkill(bot);
-        expect(receipt).toContain('手里数量没变');
+        expect(receipt).toContain('没做到 throwHeld，ender_pearl 没有扔出去。');
     });
 });

@@ -138,7 +138,7 @@ describe('UpdatePlan 旧格式兼容', () => {
     const result = await tool.execute(prepared as never, {} as never, {} as never);
     expect(applied).toEqual({ goal: '造房子', todos: [{ text: '砍树', done: false }] });
     expect(result.content).toEqual([
-      { type: 'text', text: 'Plan updated. Goal: 造房子. Todos: [ ] 砍树.' },
+      { type: 'text', text: '计划已经更新，目标是 造房子，待办有 [ ] 砍树。' },
     ]);
   });
 
@@ -213,7 +213,7 @@ describe('Feedback', () => {
       {} as never,
     );
     expect(result.isError).toBeUndefined();
-    expect(JSON.stringify(result.content)).toContain('反馈已记录到');
+    expect(JSON.stringify(result.content)).toContain('[{"type":"text","text":"反馈已经记录到 C:\\\\U');
 
     const lines = readFileSync(join(dir, 'feedback.jsonl'), 'utf8').trim().split('\n');
     expect(lines).toHaveLength(1);

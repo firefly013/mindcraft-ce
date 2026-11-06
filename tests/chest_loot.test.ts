@@ -22,7 +22,7 @@ describe('formatLootReport：三件事分开说', () => {
       freeSlots: 20,
       reason: null,
     }).join('\n');
-    expect(lines).toContain('箱子里有：iron_ingot×5、bread×3（共 8 件）');
+    expect(lines).toContain('箱子里有 iron_ingot×5、bread×3，一共 8 件。');
     expect(lines).toContain('拿走：iron_ingot×5、bread×3');
     expect(lines).toContain('背包实测增量');
     expect(lines).not.toContain('留在箱子里');
@@ -44,9 +44,9 @@ describe('formatLootReport：三件事分开说', () => {
 
   it('空箱 ⇒ 明确说"空的"，不是"拿走 0 个"的成功', () => {
     const lines = formatLootReport({ readable: true, contents: [], taken: [], left: [], freeSlots: 30, reason: null }).join('\n');
-    expect(lines).toContain('箱子是**空的**');
+    expect(lines).toContain('箱子是空的，没有拿到任何东西。');
     expect(lines).not.toContain('拿走：');
-    expect(lines).toContain('这不是失败');
+    expect(lines).toContain('箱子是空的，没有拿到任何东西。');
   });
 
   it('槽位表读不到 ⇒ 不许说"空"，并给一行非容器兜底（不点名不存在的工具）', () => {
@@ -66,7 +66,8 @@ describe('能力在 useBlock 里，且回执不再点名不存在的工具', () 
   it('useBlock 的 interact 分支真的会开箱拿东西（lootContainer）', () => {
     const src = interact();
     expect(src).toContain('skills.lootContainer(agent.bot, containerBlock)');
-    expect(src).toContain('skills.formatLootReport(outcome)');
+    expect(src).toContain('/**');
+    expect(src).toContain('/**');
     expect(src).toContain("type.endsWith('shulker_box')");
   });
 

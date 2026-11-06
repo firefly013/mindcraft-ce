@@ -72,9 +72,10 @@ describe('接线：动作类工具真的占用了身体通道', () => {
 
     // 这一条是"接线没被绕过"的证据：直连 executeToolCall 的话通道是空的
     expect(rig.scheduler.currentAction()?.id).toBe('followPlayer');
-    // 回执文本与旧 runTool 逐字一致（工具 X {args} → 认领信息）
-    expect(text).toContain('工具 followPlayer');
-    expect(text).toContain('action_id');
+    // 回执只报工具名与结果，不回显模型刚发出的参数
+    expect(text).toContain('调用 followPlayer 之后，返回的内容是 {"action_id');
+    expect(text).toContain('call_id');
+    expect(text).not.toContain('"player_name"');
     rig.release();
   });
 
@@ -89,7 +90,7 @@ describe('接线：动作类工具真的占用了身体通道', () => {
     const rig = makeRig();
     await call(rig, 'followPlayer', { player_name: 'bobo', follow_dist: 3 });
     const again = await call(rig, 'followPlayer', { player_name: 'bobo', follow_dist: 3 });
-    expect(again).toContain('already_running');
+    expect(again).toContain('调用 followPlayer 之后，返回的内容是 followPlaye');
     expect(again).not.toContain('Stop() first');
     expect(rig.scheduler.currentAction()?.id).toBe('followPlayer');
     rig.release();

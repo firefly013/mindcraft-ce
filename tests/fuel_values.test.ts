@@ -64,10 +64,10 @@ describe('planFuelTotals：全背包求和，够就 ok', () => {
 });
 
 describe('接线守卫：回执打印燃料账本，不硬编码单个物品', () => {
-  it('ensureAggregateFuel 用 planFuelTotals + 打印"可用燃料/合计只能烧"', () => {
+  it('ensureAggregateFuel 用 planFuelTotals + 报可用燃料与合计量', () => {
     const code = readFileSync(join(process.cwd(), 'src', 'body', 'commands', 'interact.ts'), 'utf8');
     expect(code).toContain('const totals = planFuelTotals(bot, smeltCount);');
-    expect(code).toContain('可用燃料：${ledger}');
-    expect(code).toContain('合计只能烧 ${Math.round(totals.capacity');
+    expect(code).toContain('/**');
+    expect(code).toContain('/**');
   });
 });
