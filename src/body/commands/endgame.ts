@@ -1,6 +1,6 @@
 /*
  * 末地通关命令：查询 `!endFightStatus` + 动作 `!enterEnd` / `!clearEndCrystals` /
- * `!bedBombDragon` / `!dodgeDragonBreath` / `!drinkPotion` / `!drinkMilk` /
+ * `!bedBombDragon` / `!dodgeDragonBreath` / `!drinkPotion` /
  * `!recoverAfterDeath` / `!throwHeld`。
  *
  * **本文件是自包含的**（和 `commands/survival.ts` 同一套路）：描述文本在下面
@@ -60,11 +60,6 @@ export const ENDGAME_TOOL_TEXT: Record<string, { description: string; params: Re
         params: {
             potion: '完整药水 id，例如 healing / strong_healing / long_slow_falling / fire_resistance。',
         },
-    },
-    drinkMilk: {
-        description:
-            '喝牛奶桶：**立刻清掉自己身上的全部状态效果**。① 会把你刚喝的缓降/再生/抗性一起清掉，所以只在"中了负面效果"（中毒、虚弱、缓慢…）时用，别当疗伤药；② **不能灭火**——着火了要下水或踩水。没有牛奶桶会明确告诉你。',
-        params: {},
     },
     recoverAfterDeath: {
         description:
@@ -194,14 +189,6 @@ export const endgameActionList: AgentCommand[] = [
         },
         perform: runEndgameAction('drinkPotion', 2, (agent, potion) =>
             logReceipt(agent, () => endgame.drinkPotionById(agent.bot, potion)),
-        ),
-    },
-    {
-        name: '!drinkMilk',
-        description: DESCRIPTION('drinkMilk'),
-        params: {},
-        perform: runEndgameAction('drinkMilk', 2, (agent) =>
-            logReceipt(agent, () => endgame.drinkMilk(agent.bot)),
         ),
     },
     {

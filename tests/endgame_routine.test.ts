@@ -10,7 +10,6 @@ import {
     countPotionsById,
     crystalToolKit,
     detectPodiumTrench,
-    drinkMilk,
     drinkPotionById,
     endgameStatusReport,
     endgameToolSpecs,
@@ -276,14 +275,6 @@ describe('drinkPotionById（按完整药水 id 喝药，不猜效果、不挑优
         expect(bot.calls).toHaveLength(0);
     });
 
-    it('equip/consume 抛异常 → 吞掉并返回失败结果（不能让一条命令炸掉整个循环）', async () => {
-        const bot = makeFakeBot({ items: [stack('milk_bucket', 1)] });
-        bot.equip = () => {
-            throw new Error('boom');
-        };
-        expect(await drinkMilk(bot)).toContain('喝牛奶没有成功，错误是 boom。');
-    });
-
     it('背包里那叠数量没变 → 只报"不能确认喝下"，不谎报成功', async () => {
         const potion = stack('potion', 1, { nbt: { value: { Potion: 'minecraft:long_slow_falling' } } });
         const bot = makeFakeBot({ items: [potion] });
@@ -300,14 +291,6 @@ describe('drinkPotionById（按完整药水 id 喝药，不猜效果、不挑优
         const bot = makeFakeBot({ items: potions });
         expect(await drinkPotionById(bot, 'long_slow_falling')).toContain('剩 1 瓶');
         expect(countPotionsById(bot, 'long_slow_falling')).toBe(1);
-    });
-
-    it('喝牛奶：成功/没有都只报结果', async () => {
-        const bot = makeFakeBot({ items: [stack('milk_bucket', 1)] });
-        expect(await drinkMilk(bot)).toContain('喝下牛奶');
-        const empty = makeFakeBot({ items: [stack('stone', 1)] });
-        expect(await drinkMilk(empty)).toContain('没有喝到牛奶');
-        expect(empty.calls).toHaveLength(0);
     });
 
     it('pickBedItemName 只认床，不认 bedrock', () => {
@@ -960,8 +943,8 @@ describe('掩体判据：火把/栅栏/铁栏杆/台阶都不算掩体（会死�
 });
 
 describe('给 Lead 的接线清单（工具声明）', () => {
-    it('10 条工具、名字唯一、action 都有超时上限（不许再写 -1）', () => {
-        expect(endgameToolSpecs).toHaveLength(10);
+    it('9 条工具、名字唯一、action 都有超时上限（不许再写 -1）', () => {
+        expect(endgameToolSpecs).toHaveLength(9);
         const names = endgameToolSpecs.map((spec) => spec.name);
         expect(new Set(names).size).toBe(names.length);
         for (const spec of endgameToolSpecs) {

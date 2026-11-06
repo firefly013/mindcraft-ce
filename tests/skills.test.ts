@@ -825,8 +825,16 @@ describe('consume：失败也要给事实，不给堆栈', () => {
 
     await expect(consume(bot, 'mutton', NO_WAIT)).resolves.toBe(true);
     expect(bot.output).toContain('吃掉了 mutton，手上从 1 个变成 0 个，饱食度从 10 变成 2');
-    expect(bot.output).toContain('吃掉了 mutton，手上从 1 个变成 0 个，饱食度从 10 变成 2');
-    expect(bot.output).toContain('吃掉了 mutton，手上从 1 个变成 0 个，饱食度从 10 变成 2');
+  });
+
+  it('喝牛奶也走同一个 consume，回执动词是"喝掉"', async () => {
+    const bot = consumeBot({ held: [{ name: 'milk_bucket', count: 1 }] });
+    bot.consume = vi.fn(async () => {
+      bot.inventory.items()[0].count = 0;
+    });
+
+    await expect(consume(bot, 'milk_bucket', NO_WAIT)).resolves.toBe(true);
+    expect(bot.output).toContain('喝掉了 milk_bucket');
   });
 
   it('同步超时且东西还在 → "没吃成/还在手上/可重试"，且回执里没有堆栈', async () => {
@@ -899,7 +907,7 @@ describe('consume：失败也要给事实，不给堆栈', () => {
     bot.inventory.items = () => undefined;
 
     await expect(consume(bot, 'mutton', NO_WAIT)).resolves.toBe(false);
-    expect(bot.output).toContain('没法确认 mutton 吃没吃进去，饥饿值和背包数量都读不到。');
+    expect(bot.output).toContain('没法确认 mutton 有没有吃进去，饥饿值和背包数量都读不到。');
     expect(bot.output).not.toContain('吃成了');
   });
 

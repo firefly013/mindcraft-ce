@@ -113,7 +113,7 @@ export const TOOL_TEXT: Record<string, { description: string; params: Record<str
   },
   consume: {
     description:
-      '吃/喝指定物品。背包里能直接吃的只剩 ≤2 份、而你现在并不饿（food ≥ 14）时**照吃**，' +
+      '吃/喝指定物品。喝牛奶桶也用它（会清掉自己身上的全部状态效果）。背包里能直接吃的只剩 ≤2 份、而你现在并不饿（food ≥ 14）时**照吃**，' +
       '但回执会写明"这是最后几份、接下来没吃的了"——吃不吃由你决定，工具不拦。' +
       '生肉吃成后会提醒"下次先烤"（熟食值约一倍）。',
     params: { item_name: '要吃喝的物品名字。' },

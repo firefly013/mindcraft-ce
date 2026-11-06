@@ -163,15 +163,6 @@ export const endgameToolSpecs: EndgameToolSpec[] = [
         backing: '新增动作命令；纯计算在 endgame.planRecovery，执行复用 goToCoordinates / enterEnd，传送门坐标来自 enterEnd 记的 overworld_end_portal。',
     },
     {
-        name: 'drinkMilk',
-        kind: 'action',
-        description:
-            '喝牛奶桶：立刻清掉自己身上的**全部**状态效果（包括你自己刚喝的好 Buff）。不能灭火。',
-        params: {},
-        timeoutMinutes: 2,
-        backing: '调用 endgame_routine.drinkMilk（equip + consume + 数量核对）。',
-    },
-    {
         name: 'throwHeld',
         kind: 'action',
         description:
@@ -503,31 +494,6 @@ export async function drinkPotionById(bot: any, potionId: unknown): Promise<stri
         return `使用包已经发出去了，但是 ${wanted} 的数量从 ${before} 个变成 ${after} 个，没有变化，所以不能确认已经喝下。`;
     }
     return `喝下 ${wanted}（剩 ${after} 瓶）。`;
-}
-
-/** 喝牛奶：清掉全部状态效果。同样只返回结果。 */
-export async function drinkMilk(bot: any): Promise<string> {
-    const items = safeInventoryItems(bot);
-    const milk = items.find((item) => normalizeName(item?.name) === 'milk_bucket') ?? null;
-    if (milk == null) return '没有喝到牛奶：背包里没有 milk_bucket。';
-    const countMilk = (): number =>
-        safeInventoryItems(bot)
-            .filter((item) => normalizeName(item?.name) === 'milk_bucket')
-            .reduce((n, item) => n + (typeof item?.count === 'number' ? Math.max(0, item.count) : 1), 0);
-    const before = countMilk();
-    try {
-        await bot.equip(milk, 'hand');
-        await bot.consume();
-    } catch (error) {
-        return `喝牛奶没有成功，错误是 ${(error as Error)?.message ?? String(error)}。`;
-    }
-    let after = countMilk();
-    for (let attempt = 0; attempt < 2 && after >= before; attempt++) {
-        await skills.wait(bot, 250);
-        after = countMilk();
-    }
-    if (after >= before) return `使用包已经发出去了，但是牛奶的数量从 ${before} 个变成 ${after} 个，没有减少，所以不能确认已经喝下。`;
-    return `喝下牛奶（剩 ${after} 桶），全部状态效果被清空。`;
 }
 
 // ============================ 三·B、床炸的选址与掩体（都从真实世界读） ============================

@@ -3365,6 +3365,10 @@ export async function consume(bot: any, itemName: string = "", options: ConsumeO
      * await skills.eat(bot, "apple");
      **/
     const wanted = String(itemName ?? '').trim();
+    // 牛奶桶、药水这些是喝的不是吃的，回执动词跟着物品走。
+    const drinkable = /(milk_bucket|potion|honey_bottle|ominous_bottle)$/.test(wanted);
+    const verb = drinkable ? '喝' : '吃';
+    const verbDone = drinkable ? '喝掉' : '吃掉';
     const resyncMs = options.resyncMs ?? CONSUME_RESYNC_MS;
     const retryBackoffMs = options.retryBackoffMs ?? CONSUME_RETRY_BACKOFF_MS;
     const maxAttempts = Math.max(1, Math.floor(options.maxAttempts ?? CONSUME_MAX_ATTEMPTS));
@@ -3390,7 +3394,7 @@ export async function consume(bot: any, itemName: string = "", options: ConsumeO
         const advice = consumeAdvice(bot, wanted, edibles);
         log(
             bot,
-            `没吃成，背包里没有 ${wanted || '(没给物品名)'}。${describeEdibles(edibles)}` +
+            `没${verb}成，背包里没有 ${wanted || '(没给物品名)'}。${describeEdibles(edibles)}` +
                 `现在的状态是，${formatFoodState(before)}。${advice.text}`,
         );
         return false;
@@ -3457,7 +3461,7 @@ export async function consume(bot: any, itemName: string = "", options: ConsumeO
                       ? formatFoodDelta(before, after)
                       : `${countText}，饱食度读数没变，服务端可能还没同步`;
             const retryNote = retried ? `第 ${attempt - 1} 次同步超时了，${failures.join('。')}，退避之后重试成功，` : '';
-            log(bot, `${retryNote}吃掉了 ${wanted}，${how}。`);
+            log(bot, `${retryNote}${verbDone}了 ${wanted}，${how}。`);
             if (reserveWarning !== '') log(bot, reserveWarning);
             return true;
         }
@@ -3468,8 +3472,8 @@ export async function consume(bot: any, itemName: string = "", options: ConsumeO
             log(
                 bot,
                 readable
-                    ? `吃 ${wanted} 没有生效，${countText}，${formatFoodDelta(before, after)}。`
-                    : `没法确认 ${wanted} 吃没吃进去，饥饿值和背包数量都读不到。`,
+                    ? `${verb} ${wanted} 没有生效，${countText}，${formatFoodDelta(before, after)}。`
+                    : `没法确认 ${wanted} 有没有${verb}进去，饥饿值和背包数量都读不到。`,
             );
             return false;
         }

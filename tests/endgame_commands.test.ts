@@ -26,7 +26,6 @@ const ENDGAME_TOOLS = [
     'bedBombDragon',
     'dodgeDragonBreath',
     'drinkPotion',
-    'drinkMilk',
     'recoverAfterDeath',
     'throwHeld',
     'reviveDragon',
@@ -211,18 +210,6 @@ describe('命令执行（假 agent）', () => {
         const text = findCommand('endFightStatus')?.perform(makeFakeAgent(bot)) as string;
         expect(text).toContain('末地通关');
         expect(text).toContain('现状');
-    });
-
-    it('drinkMilk 会把牛奶喝掉并写回执；没有牛奶也如实说', async () => {
-        const withMilk = makeFakeBot({ items: [stack('milk_bucket', 1)] });
-        const agent = makeFakeAgent(withMilk);
-        await findCommand('drinkMilk')?.perform(agent);
-        expect(withMilk.calls.map((c: any) => c.fn)).toEqual(['equip', 'consume']);
-        expect(withMilk.output).toContain('喝下牛奶');
-
-        const without = makeFakeBot({ items: [] });
-        await findCommand('drinkMilk')?.perform(makeFakeAgent(without));
-        expect(without.output).toContain('没有喝到牛奶');
     });
 
     it('throwHeld：手里没东西时给明确指引，不许假装扔了', async () => {
