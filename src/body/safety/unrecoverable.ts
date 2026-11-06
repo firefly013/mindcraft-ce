@@ -115,8 +115,8 @@ export function unrecoverableVerdict(facts: UnrecoverableFacts): UnrecoverableVe
     return {
         unrecoverable: true,
         advice:
-            `${core}唯一还有进展的方向是**找吃的**：` +
-            '`getFood()`（附近/背包里找食物），或者往已知有食物的地方走（村庄/箱子/动物）；' +
+            `${core}现在能做的只有去找吃的，` +
+            '先确认背包里有没有能吃的（有就直接 consume），或者往已知有食物的地方走（村庄、箱子、动物）；' +
             '也可以先找个安全角落待着，别在空血时继续探索。' +
             `\n    ${honest}${tail}`,
     };

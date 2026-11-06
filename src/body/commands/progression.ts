@@ -45,7 +45,7 @@ export const PROGRESSION_TOOL_TEXT: Record<string, { description: string; params
             '**击杀也认真实证据**：只有"实体真的从世界里消失 / 血量归零"才算击杀；同一个实体 id 又出现就是**瞬移**（末影人被打就瞬移），' +
             '**不算击杀、当场把击杀数撤回**，回执会写明"它瞬移了"。同一只连续打不死会熔断，并给换打法建议（末影人：用船困住/用弓，别拼近战）。' +
             '第一个用法：huntFor(entity="blaze", want=7) 刷烈焰棒；huntFor(entity="enderman", want=12) 刷末影珍珠。' +
-            '血量掉到 6 以下、脚下有岩浆/火、被 Stop/保命打断，都会立刻收手并说清原因；在下界刷烈焰人时若没有抗火 Buff，回执会明确提醒先 prepareBlaze。',
+            '血量掉到 6 以下、脚下有岩浆/火、被 Stop/保命打断，都会立刻收手并说清原因；在下界刷烈焰人时若没有抗火 Buff，回执会明确提醒先备好抗火药水并吃饱。',
         params: {
             entity: '要刷的实体 id（英文），例如 blaze（烈焰人）、enderman（末影人）、cow/pig/chicken（食物）。也认中文俗称（烈焰人/末影人/牛/猪/鸡）。',
             want: '要几个掉落物（默认 4，1~64）。烈焰棒推荐 7（合成烈焰粉 + 酿造），末影珍珠推荐 12（12 颗眼填满传送门）。',
@@ -132,7 +132,7 @@ export const HUNT_MAX_MS_LIMIT = 5 * 60 * 1000;
 export const TUNNEL_TIMEOUT_MIN = 6;
 /**
  * `travelTo` 的命令超时（分钟）：内部预算最大 6 分钟 → 命令 7 分钟 → 脑侧保险丝 8.5 分钟。
- * 和 getFood 同一条链：**内部必须最短**，否则超时回执会把"这一趟推进了多少"吃掉。
+ * 和长动作同一条链：**内部必须最短**，否则超时回执会把"这一趟推进了多少"吃掉。
  */
 export const TRAVEL_TIMEOUT_MIN = 7;
 

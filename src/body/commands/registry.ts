@@ -65,8 +65,6 @@ const RESUME_POLICY: Readonly<Record<string, ResumePolicy>> = Object.freeze({
     moveAway: 'auto',
     exploreFor: 'auto',
     goToSurface: 'auto',
-    seekShelter: 'auto',
-    sleepUnderground: 'auto',
     searchForBlock: 'auto',
     searchForEntity: 'auto',
     // 按进度折算参数：距离型动作按"原始终点"续做（位置从身体读，见 ActionRunner）。

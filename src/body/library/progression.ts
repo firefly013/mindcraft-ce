@@ -2309,7 +2309,7 @@ export function tunnelNextAction(o: TunnelOutcome): string {
             return o.hintEquip != null ? `equip(item_name="${o.hintEquip}")` : 'stats(type="inventory")';
         case 'low_health':
         case 'damaged':
-            return 'survivalCheck';
+            return 'stats(type="body")';
         case 'bad_direction':
         case 'unreadable':
             return 'stats(type="body")';
@@ -2986,7 +2986,7 @@ export function bestPickaxeInInventory(bot: any, exclude?: string | null, exclud
 // 为什么要有（2026-10-19 的瓶颈）：这两个 bot 反复死在**长多步任务**上。
 // `mineTunnel(length=64)` 单腿很好用，但 500 格要走 ~8 腿，模型在两次调用之间会丢线
 // （overnight_b 被指到 500 格外的要塞，结果在基地待了一小时；overnight_a 走 60 格到
-// 末地门也没到）。`getFood` / `escapeWater` / `mineTunnel` 之所以有效，都是因为把多步链
+// 末地门也没到）。`escapeWater` / `mineTunnel` 之所以有效，都是因为把多步链
 // 变成了**一次调用**——travelTo 是同一个动作，用在赶路上：**模型只调一次，人往前走一大截**。
 //
 // 路线自己挑（不许模型自己算两条腿和顺序——那正是它丢的东西）：

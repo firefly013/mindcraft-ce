@@ -131,12 +131,12 @@ describe('ActionRunner 进度回执（带位置，能判断卡没卡）', () => 
     }
   });
 
-  it('站桩型动作（fish）也不许被扣"卡住"的帽子', async () => {
+  it('站桩型动作（collectBlocks）也不许被扣"卡住"的帽子', async () => {
     vi.useFakeTimers();
     try {
-      // fish 默认 3 分钟，全程不动；60 秒的进度回执以前会喊"很可能是卡住了，Stop 掉它"。
+      // collectBlocks 可以跑几分钟、期间人不动；60 秒的进度回执以前会喊"很可能是卡住了，Stop 掉它"。
       const h = runnerWithPosition([{ x: 5, y: 63, z: 5 }]);
-      await h.runner.run('fish', {});
+      await h.runner.run('collectBlocks', { type: 'stone', num: 1 });
       await vi.advanceTimersByTimeAsync(ACTION_PROGRESS_NOTICE_MS * 2 + 50);
       const text = h.notices.map((n) => String((n.result as { data?: unknown }).data)).join('\n');
       expect(text).toContain('现在在 (5.0, 63.0, 5.0)');

@@ -1,45 +1,16 @@
 /*
- * 生存安全命令：查询 `!survivalCheck` + 动作 `!seekShelter` / `!sleepUnderground` / `!prepareBlaze`。
+ * 生存命令：只保留 `!escapeWater`。
  *
- * **本文件是自包含的**：描述文本走下面 `SURVIVAL_TOOL_TEXT`，动作包装走本文件里的
- * `runSurvivalAction`，不依赖对 `actions.ts` / `registry.ts` / `prompts.ts` 的改动。
- * （项目原有的 `td()/tp()` 从 prompts.ts 读描述；为了不动共享入口，这里先自带一份，
- *  lead 接入时可原样合并进 `TOOL_TEXT`。）
- *
- * 接入方式（两行，见交付报告）：
- *   Q = queryList.concat(survivalQueryList)
- *   A = actionsList.concat(survivalActionList)
- * 并让 `toolDeclarations()` 按同样顺序把两个列表分别映成 query / action。
+ * 其余生存类工具（findFluidSource / survivalCheck / seekShelter /
+ * sleepUnderground / prepareBlaze / fish / getFood / fillBucketFromSource）
+ * 已按用户要求删除。本文件仍是自包含的：描述文本在下面，动作包装在
+ * `runSurvivalAction`，不依赖 actions.ts / registry.ts / prompts.ts 的改动。
  */
-import * as skills from '../library/skills.js';
 import * as survival from '../library/survival.js';
-import * as food from '../library/get_food.js';
 import type { AgentCommand, CommandPerform } from './actions.js';
 
 /** 工具描述与参数描述。键为去 `!` 的工具名，形状与 `TOOL_TEXT` 一致。 */
 export const SURVIVAL_TOOL_TEXT: Record<string, { description: string; params: Record<string, string> }> = {
-    survivalCheck: {
-        description:
-            '生存状态检查：一次给全「天黑还有多久 / 头顶有没有顶、算不算地下掩体 / 周围有没有敌对生物 / 有没有床和食物 / 抗火 Buff 还剩多久」，并直接给出建议。' +
-            '**进夜晚、下矿、打烈焰人之前先调它**，不要靠心算时间或翻背包。只读，不占身体通道。' +
-            '**食物两条线会直接写在报告里**（和报告打印的措辞一致）：' +
-            '① 告急——血低（≤12）+ 食物低于回血线 18 + 背包没有能吃的，三者同时成立时打印「食物告急：… → 先别打：去钓鱼或种地」，并按背包家底给具体做法（有线和木棍=能做钓鱼竿、有种子=能种小麦）；' +
-            '② 存粮——还有吃的但只剩 ≤2 份且食物 <14 时打印「存粮只剩 N 份：趁现在去补（钓鱼/打猎/种地），别等饿到 18 以下再找」；背包里有生肉时附带「先 useBlock(type="furnace", …) 烤熟再吃」。' +
-            '食物充足（≥3 份且不饿）时这两条都不出现，不会来吵。',
-        params: {},
-    },
-    seekShelter: {
-        description:
-            '找或挖一个地下庇护所。顺序：已经在有顶掩体里 → 附近找现成的有顶空间 → 往下挖 → 朝旁边掏一个 2 格高的窝。' +
-            '碰到水/岩浆/落差会停下并如实说明。**天黑前调它**把落脚点安顿好；挖好后把床和重要物资带下去。',
-        params: {},
-    },
-    sleepUnderground: {
-        description:
-            '夜晚在地下求稳：先确保有地下庇护；有床就睡到天亮，没床就在地下等到天亮，**不要在地表跟怪物打**。' +
-            '白天调它会告诉你不用睡。会占着身体通道，可能持续整夜。',
-        params: {},
-    },
     escapeWater: {
         description:
             '水中脱困：脚泡在水里、placeBlock 没有相邻支撑、placeHere 报 NoPath、digDown 又被水挡住时用它。' +
@@ -48,117 +19,9 @@ export const SURVIVAL_TOOL_TEXT: Record<string, { description: string; params: R
             '全部失败会明确报「浅水坑困死」，附坐标、水位变化和下一步建议。',
         params: {},
     },
-    findFluidSource: {
-        description:
-            '只读：在半径内找最近的**流体源方块**（水/岩浆的 level 0，能装进桶），报种类/坐标/距离。' +
-            '**流动水/岩浆不算源**：范围内只有流动的时会明确回报「没有源头，只有流动水」并指出最近流动水在哪，让模型去更远找源头。' +
-            '不走路、不占身体通道；要装桶用 fillBucketFromSource。',
-        params: {
-            type: '流体种类：water / lava / any（默认 water）。',
-            radius: '搜索半径（格，默认 32，1~128）。',
-        },
-    },
-    fillBucketFromSource: {
-        description:
-            '走到半径内最近的**源**方块旁边，用空桶装满 water_bucket / lava_bucket，并核对手上是否真的出现桶。' +
-            '**只认源方块（level 0）**：只有流动水/岩浆时会明确回报「没有源头，只有流动水」并让你去更远找，不会白装。' +
-            '失败会区分：没空桶 / 没找到源 / 只有流动 / 够不到 / 准星没对准。',
-        params: {
-            type: '流体种类：water / lava（默认 water）。',
-            radius: '搜索半径（格，默认 32，1~128）。',
-        },
-    },
-    prepareBlaze: {
-        description:
-            '打烈焰人前的准备与续 Buff：检查并喝下抗火药水、吃饱，回报「够不够、还缺什么」。' +
-            '**Buff 快没了（剩不到 45 秒）就再调一次保持不断**；没有药水会告诉你需要「烈焰粉 + 岩浆膏 + 酿造台」自制。',
-        params: {},
-    },
-    fish: {
-        description:
-            '钓鱼（**唯一可再生的食物来源**）：抛竿 → **盯着浮标判断咬钩**（速度/位置信号，不是傻等固定时间）→ 收竿 → **按背包真实增量核对**。' +
-            '钓到才算数：背包没多出鱼就说「这一竿没钓到」，绝不拿"我抛了竿"冒充"我钓到了"。' +
-            '缺竿会说清要做 fishing_rod（3 木棍 + 2 线，**必须在工作台上做**，2×2 放不下）；够不到水、竿断了、背包已经够吃（≥4 份）都会**早停**并说明。' +
-            '每一竿都有上限（默认 30 秒等不到就收），不会挂着不动。回来会报这一趟的净增量，并提醒生鱼要烤（生鳕鱼 2 点 vs 熟鳕鱼 5 点），附一条能照抄的熔炉调用。',
-        params: {
-            max_ms: '整趟时间预算（毫秒，默认 90000，10000~300000）。到点收手。',
-            max_casts: '最多抛几竿（默认 3，1~10）。',
-        },
-    },
-    getFood: {
-        description:
-            '**一条调用把"找吃的"做完**（不必自己走五步链）：① 包里有吃的且真饿 → 先吃（走 consume 的规矩，**不违反存粮规则**）；' +
-            '② 附近有被动动物 → 打猎；③ 没有就去钓鱼——**没竿会自己去弄**（打蜘蛛/挖蛛网拿线 → 在**工作台**上做竿 → 找水 → 抛竿）；' +
-            '找蛛网时**优先挑竖直距离小的那个**（少爬少挖：真机实测有个 y=28 的浅蛛网，比往下挖 80 格划算），' +
-            '扫描半径内没有就直接给已知的浅点坐标，不用你自己瞎撞；' +
-            '④ 有种子就说清种地是长期方案（小麦要 20~40 分钟，别站着等）；⑤ 最后手段腐肉（会附带饥饿效果）。' +
-            '**背包增量是唯一证据**：没多出能吃的就明说"没拿到"并告诉你卡在哪一步；停下来时给**一条**能照抄的"接着做"调用' +
-            '（再做一次 getFood 会重新盘点，自然续上）。' +
-            '**没拿到吃的时会把量到的食物分布写进回执**：附近动物的名字/坐标/距离、可采作物、最近水面、四个方向的开阔度，' +
-            '并给一条"往哪走"的调用；扫描读不到会明说"读不到"（**不等于**这一带没有）。背包已经有 ≥4 份能吃的时它**什么都不做**。',
-        params: {
-            want: '目标：背包里想有几份能吃的（默认 3，1~32）。到数就停，不会过度捕猎。',
-            max_ms: '整趟时间预算（毫秒，默认 300000，10000~360000）。到点给断点与下一步。',
-        },
-    },
 };
 
-export { SURVIVAL_POLICY } from '../../shared/survival_policy.js';
-
 const DESCRIPTION = (name: keyof typeof SURVIVAL_TOOL_TEXT): string => SURVIVAL_TOOL_TEXT[name].description;
-
-/** 归一 `findFluidSource` / `fillBucketFromSource` 的 type + radius。 */
-export function parseFluidArgs(
-    rawType: unknown,
-    rawRadius: unknown,
-): { kind: survival.FluidKind | 'any'; radius: number; error?: string } {
-    const raw = typeof rawType === 'string' ? rawType.trim().toLowerCase() : '';
-    const kind = raw === '' ? 'water' : raw;
-    if (kind !== 'water' && kind !== 'lava' && kind !== 'any') {
-        return { kind: 'water', radius: 32, error: `type 只能是 water、lava 或 any，这次收到的是 "${String(rawType)}"。` };
-    }
-    const n = typeof rawRadius === 'number' ? rawRadius : Number(rawRadius);
-    const radius = Number.isFinite(n) ? Math.max(1, Math.min(128, Math.round(n))) : 32;
-    return { kind, radius };
-}
-
-/** 归一 `fish` 的 max_ms / max_casts（越界就夹住，不报错）。 */
-export function parseFishArgs(
-    rawMaxMs: unknown,
-    rawMaxCasts: unknown,
-): { maxMs: number; maxCasts: number } {
-    const ms = typeof rawMaxMs === 'number' ? rawMaxMs : Number(rawMaxMs);
-    const casts = typeof rawMaxCasts === 'number' ? rawMaxCasts : Number(rawMaxCasts);
-    return {
-        maxMs: Number.isFinite(ms)
-            ? Math.max(10_000, Math.min(survival.FISH_MAX_MS_LIMIT, Math.round(ms)))
-            : survival.FISH_TIMEOUT_MS,
-        maxCasts: Number.isFinite(casts)
-            ? Math.max(1, Math.min(survival.FISH_MAX_CASTS_LIMIT, Math.round(casts)))
-            : survival.FISH_MAX_CASTS,
-    };
-}
-
-/**
- * `!getFood` 的命令超时（分钟）。
- * 内部预算最大 6 分钟 → 命令 7 分钟 → 保险丝 8.5 分钟（内部必须最短）。
- */
-export const GETFOOD_TIMEOUT_MIN = 7;
-
-/** 归一 `getFood` 的 want / max_ms（越界就夹住，不报错）。 */
-export function parseGetFoodArgs(
-    rawWant: unknown,
-    rawMaxMs: unknown,
-): { want: number; maxMs: number } {
-    const want = typeof rawWant === 'number' ? rawWant : Number(rawWant);
-    const ms = typeof rawMaxMs === 'number' ? rawMaxMs : Number(rawMaxMs);
-    return {
-        want: Number.isFinite(want) ? Math.max(1, Math.min(32, Math.round(want))) : food.DEFAULT_GETFOOD_WANT,
-        maxMs: Number.isFinite(ms)
-            ? Math.max(10_000, Math.min(food.GETFOOD_MAX_MS_LIMIT, Math.round(ms)))
-            : food.DEFAULT_GETFOOD_BUDGET_MS,
-    };
-}
 
 /**
  * 动作包装：走身体通道 + 超时兜底。和 `actions.ts` 的 `runAsAction` 同款语义，
@@ -187,122 +50,15 @@ function runSurvivalAction(
     return wrapped as CommandPerform;
 }
 
-/** 只读查询：生存检查（不占身体通道）。 */
-export const survivalQueryList: AgentCommand[] = [
-    {
-        name: '!findFluidSource',
-        description: DESCRIPTION('findFluidSource'),
-        params: {
-            type: { type: 'string', description: SURVIVAL_TOOL_TEXT.findFluidSource.params.type, optional: true, default: 'water' },
-            radius: { type: 'int', description: SURVIVAL_TOOL_TEXT.findFluidSource.params.radius, optional: true, default: 32, domain: [1, 128] },
-        },
-        perform: function (agent: any, type?: unknown, radius?: unknown): string {
-            const args = parseFluidArgs(type, radius);
-            if (args.error != null) return `findFluidSource 的参数不对，${args.error}`;
-            return survival.fluidSourceReport(agent.bot, args.kind, args.radius);
-        },
-    },
-    {
-        name: '!survivalCheck',
-        description: DESCRIPTION('survivalCheck'),
-        params: {},
-        perform: function (agent: any): string {
-            return survival.survivalCheckReport(agent.bot);
-        },
-    },
-];
+/** 生存查询：用户要求删除全部 8 个非 escapeWater 工具后，这里没有查询工具。 */
+export const survivalQueryList: AgentCommand[] = [];
 
-/** 占用身体通道的动作。 */
+/** 占用身体通道的生存动作：只剩 escapeWater。 */
 export const survivalActionList: AgentCommand[] = [
-    {
-        name: '!seekShelter',
-        description: DESCRIPTION('seekShelter'),
-        params: {},
-        perform: runSurvivalAction('seekShelter', 4, (agent) => survival.seekShelterSkill(agent.bot)),
-    },
-    {
-        name: '!sleepUnderground',
-        description: DESCRIPTION('sleepUnderground'),
-        params: {},
-        // 整夜等待/睡觉可能超过默认 2 分钟，给 12 分钟。
-        perform: runSurvivalAction('sleepUnderground', 12, (agent) => survival.sleepUndergroundSkill(agent.bot)),
-    },
-    {
-        name: '!prepareBlaze',
-        description: DESCRIPTION('prepareBlaze'),
-        params: {},
-        perform: runSurvivalAction('prepareBlaze', 2, (agent) => survival.prepareBlazeSkill(agent.bot)),
-    },
-    {
-        name: '!fish',
-        description: DESCRIPTION('fish'),
-        params: {
-            max_ms: {
-                type: 'float',
-                description: SURVIVAL_TOOL_TEXT.fish.params.max_ms,
-                optional: true,
-                default: survival.FISH_TIMEOUT_MS,
-                domain: [10_000, survival.FISH_MAX_MS_LIMIT],
-            },
-            max_casts: {
-                type: 'int',
-                description: SURVIVAL_TOOL_TEXT.fish.params.max_casts,
-                optional: true,
-                default: survival.FISH_MAX_CASTS,
-                domain: [1, survival.FISH_MAX_CASTS_LIMIT],
-            },
-        },
-        // 整趟最多 90 秒默认 + 收竿余量，给 3 分钟足够；超时兜底照旧。
-        perform: runSurvivalAction('fish', 3, async (agent, rawMaxMs?: unknown, rawMaxCasts?: unknown) => {
-            const args = parseFishArgs(rawMaxMs, rawMaxCasts);
-            skills.log(agent.bot, await survival.fishSkill(agent.bot, args.maxMs, args.maxCasts));
-        }),
-    },
-    {
-        name: '!getFood',
-        description: DESCRIPTION('getFood'),
-        params: {
-            want: {
-                type: 'int',
-                description: SURVIVAL_TOOL_TEXT.getFood.params.want,
-                optional: true,
-                default: food.DEFAULT_GETFOOD_WANT,
-                domain: [1, 32],
-            },
-            max_ms: {
-                type: 'float',
-                description: SURVIVAL_TOOL_TEXT.getFood.params.max_ms,
-                optional: true,
-                default: food.DEFAULT_GETFOOD_BUDGET_MS,
-                domain: [10_000, food.GETFOOD_MAX_MS_LIMIT],
-            },
-        },
-        // 内部预算 5 分钟（上限 6），命令给 7 分钟，保险丝 8.5 分钟。
-        perform: runSurvivalAction('getFood', GETFOOD_TIMEOUT_MIN, async (agent, rawWant?: unknown, rawMaxMs?: unknown) => {
-            const args = parseGetFoodArgs(rawWant, rawMaxMs);
-            skills.log(agent.bot, await food.getFoodSkill(agent.bot, args.want, args.maxMs));
-        }),
-    },
     {
         name: '!escapeWater',
         description: DESCRIPTION('escapeWater'),
         params: {},
         perform: runSurvivalAction('escapeWater', 2, (agent) => survival.escapeWaterSkill(agent.bot)),
-    },
-    {
-        name: '!fillBucketFromSource',
-        description: DESCRIPTION('fillBucketFromSource'),
-        params: {
-            type: { type: 'string', description: SURVIVAL_TOOL_TEXT.fillBucketFromSource.params.type, optional: true, default: 'water' },
-            radius: { type: 'int', description: SURVIVAL_TOOL_TEXT.fillBucketFromSource.params.radius, optional: true, default: 32, domain: [1, 128] },
-        },
-        perform: runSurvivalAction('fillBucketFromSource', 3, (agent, type?: unknown, radius?: unknown) => {
-            const args = parseFluidArgs(type, radius);
-            if (args.error != null) {
-                skills.log(agent.bot, args.error);
-                return Promise.resolve(args.error);
-            }
-            return survival.fillBucketFromSourceSkill(agent.bot, args.kind, args.radius);
-        }),
     },
 ];

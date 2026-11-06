@@ -96,7 +96,7 @@ const FOOD_VALUES: Readonly<Record<string, readonly [number, number]>> = Object.
  *
  * 真机事故（overnight_b 15:58）：`consume(mutton)` 吃的就是羊肉，而这张表里只有
  * `raw_mutton`——于是 `countFood` 数不到手上的 mutton、`pickBestFood` 给它 0 分，
- * `prepareBlaze` 会**一边拿着食物一边报"背包没有食物"**。这类"静默算错生存数值"
+ * 以前的生存检查工具会**一边拿着食物一边报"背包没有食物"**。这类"静默算错生存数值"
  * 是最贵的 bug：模型据此判断没吃的了，然后饿着肚子去打架。
  *
  * 别名在下面**展开进 `FOOD_VALUE`**（值引用同一份元组，永不漂移），所以旧调用点

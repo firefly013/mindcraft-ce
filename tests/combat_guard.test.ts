@@ -4,7 +4,7 @@
  * 现场：血 **1.53**、食物 4，模型正在 `attack(target=357368)`。反射只在挨打之后
  * 才接管，**拦不住"濒死时主动选择开打"**；而"attack 成功"的回执让它以为一切正常。
  *
- * 守卫只做一件事：**别让模型把命押在一次进攻上**。它不是锁——吃、getFood、
+ * 守卫只做一件事：**别让模型把命押在一次进攻上**。它不是锁——吃、找吃的、
  * moveAway、垫方块、逃生反射全部照旧可用。
  */
 import { describe, expect, it } from 'vitest';
@@ -88,7 +88,7 @@ describe('判定：濒死不许进攻，其它一律放行', () => {
   it('只有进攻类工具在这张名单里（逃生/吃/移动不在）', () => {
     expect(OFFENSIVE_TOOL_NAMES.has('attack')).toBe(true);
     expect(OFFENSIVE_TOOL_NAMES.has('huntFor')).toBe(true);
-    for (const safe of ['moveAway', 'consume', 'getFood', 'escapeWater', 'placeHere', 'stats', 'goToCoordinates']) {
+    for (const safe of ['moveAway', 'consume', 'searchForEntity', 'escapeWater', 'placeHere', 'stats', 'goToCoordinates']) {
       expect(OFFENSIVE_TOOL_NAMES.has(safe)).toBe(false);
     }
   });
@@ -109,14 +109,14 @@ describe('身体侧接线：拒的是进攻，放行的是逃生；而且不打�
     return body;
   };
 
-  it('血 1.5、食物 4 ⇒ attack 被拒（返回文本），moveAway/consume/getFood 不受影响', () => {
+  it('血 1.5、食物 4 ⇒ attack 被拒（返回文本），moveAway/consume/searchForEntity 不受影响', () => {
     const body = bareBody(1.5, 4);
     const refusal = body.criticalHealthRefusalFor('attack');
     expect(String(refusal)).toContain('这次不能进攻，因为你的血量只有 1.5，食物只有 4。这一步需要先拿到 a');
     expect(String(refusal)).toContain('这次不能进攻，因为你的血量只有 1.5，食物只有 4。这一步需要先拿到 a');
     expect(body.criticalHealthRefusalFor('moveAway')).toBeNull();
     expect(body.criticalHealthRefusalFor('consume')).toBeNull();
-    expect(body.criticalHealthRefusalFor('getFood')).toBeNull();
+    expect(body.criticalHealthRefusalFor('searchForEntity')).toBeNull();
     expect(body.criticalHealthRefusalFor('escapeWater')).toBeNull();
     expect(body.criticalHealthRefusalFor('placeHere')).toBeNull();
   });

@@ -27,7 +27,7 @@ describe('判定：什么时候算"无法自愈"', () => {
     expect(verdict.unrecoverable).toBe(true);
     expect(verdict.advice).toContain('无法自愈');
     expect(verdict.advice).toContain('0.38 血');
-    expect(verdict.advice).toContain('getFood');
+    expect(verdict.advice).toContain('背包里有没有能吃的');
     expect(verdict.advice).toContain('已持续 11 分钟');
     expect(verdict.advice).toContain('不是拒绝');
   });
