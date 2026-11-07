@@ -318,9 +318,9 @@ export const TOOL_TEXT: Record<string, { description: string; params: Record<str
     description: `在游戏公聊里说一句话，玩家能直接看到。想让玩家听见就调它，也可以直接说话（正文同样会发出）。超过 ${SAY_LINE_LIMIT} 字会被拒绝（报错让你自己缩短，不会替你截断），空话也会被拒绝。`,
     params: { text: `要说的话（不超过 ${SAY_LINE_LIMIT} 字）。` },
   },
-  UpdatePlan: {
-    description: '更新你自己的计划：当前目标和待办清单。整单替换，不传的字段不动，目标传空串表示清空。计划会出现在每轮的世界快照里。todos 里的中文要逐字保留，不要改写、不要替换近形字。',
-    params: { goal: '当前目标，空串清空。', todos: '待办清单（整单替换）：每项 {text, done}，done 表示已完成；中文逐字保留。' },
+  UpdateGoal: {
+    description: '更新你当前的单一目标。整单替换，不传表示不动，目标传空串表示清空。目标会出现在每轮的世界快照里，中文要逐字保留，不要改写、不要替换近形字。',
+    params: { goal: '当前目标，空串清空。' },
   },
   Feedback: {
     description: '把你遇到的不顺**立刻**反馈给我们：工具报错、报错看不懂、行为不符预期、反复被拒、缺某个能力、快照信息不对或过时。看到就写，不用攒到任务结束——测试期里这条比通关本身更重要。提完接着干活，不用等回复。',

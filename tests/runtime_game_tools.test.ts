@@ -13,7 +13,7 @@ import { buildGameTools } from '../src/brain/tools/game_tools.js';
 import { GAME_COMMANDS, toolDeclarations } from '../src/body/commands/registry.js';
 
 /** 旧广告里的控制工具（新路径下各自成型，不在这里）。 */
-const CONTROL = ['Finish', 'Stop', 'Say', 'UpdatePlan', 'Feedback'];
+const CONTROL = ['Finish', 'Stop', 'Say', 'UpdateGoal', 'Feedback'];
 
 /** 身体握手会报上来的那份声明。 */
 const DECLARATIONS = toolDeclarations();

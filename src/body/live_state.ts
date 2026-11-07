@@ -32,7 +32,6 @@ import {
   type LiveScreenshot,
   type LiveState,
 } from '../shared/live_state.js';
-import type { PlanTodo } from '../shared/plan.js';
 import { permits } from './safety/permits.js';
 import { safeguards } from './safety/safeguards.js';
 import { getVillagerProfession } from './library/world.js';
@@ -156,7 +155,6 @@ export interface SampleContext {
   bot: any;
   vision?: any;
   goal?: string | null;
-  todos?: PlanTodo[];
   currentAction?: string | null;
   /**
    * 背包数据是否已经同步过（**默认 true**，兼容老调用方）。
@@ -207,7 +205,6 @@ export function sampleLiveState(ctx: SampleContext): LiveState {
     blocksSummary: [],
     screenshot: { ref: null, unavailableReason: 'no vision data yet' },
     goal: ctx.goal ?? null,
-    todos: ctx.todos ?? [],
     dangerousOps: '（还没采样）',
     safeguards: '（还没采样）',
     players: [],

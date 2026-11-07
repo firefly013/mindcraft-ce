@@ -1213,7 +1213,7 @@ export class MineflayerBody {
     /**
      * 感知采样的**唯一入口**。
      *
-     * `goal` / `todos` **身体不知道、也不该知道**：它们是大知识（`PlanStore`
+     * `goal` **身体不知道、也不该知道**：它是大知识（`PlanStore`
      * 在大脑），由大脑在记录事件时自己填。以前靠一条 `setGoal` 把大脑的状态
      * 镜像进身体，那是"同一份事实两个持有者"——现在身体只报客观发生了什么，
      * 相关性判断留在大脑的处理里。
@@ -1222,7 +1222,6 @@ export class MineflayerBody {
         return {
             bot: this.bot,
             vision: this.vision_interpreter,
-            todos: [],
             currentAction: this.currentActionName(),
             // 裸 fixture（没有这个字段）按"已同步"兼容；真实 body 初始为 false。
             inventorySynced: this.inventorySynced !== false,

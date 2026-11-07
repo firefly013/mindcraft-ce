@@ -89,7 +89,7 @@ export function commandToTool(declaration: ToolDeclaration): OpenAITool {
  * 所以现阶段 `blocked_actions` 既不拦广告、也不拦执行；本文件与生产路径无关，
  * 只是给测试/`check:prompts` 用的参照实现。
  *
- * 末尾追加 5 个控制工具（Finish/Stop/Say/UpdatePlan/Feedback）——它们
+ * 末尾追加 5 个控制工具（Finish/Stop/Say/UpdateGoal/Feedback）——它们
  * **不住在身体里**，所以不在声明表里。与旧 `getOpenAITools` 逐字一致。
  */
 export function getOpenAITools(
@@ -131,25 +131,12 @@ export function getOpenAITools(
     tools.push({
         type: 'function',
         function: {
-            name: 'UpdatePlan',
-            description: td('UpdatePlan'),
+            name: 'UpdateGoal',
+            description: td('UpdateGoal'),
             parameters: {
                 type: 'object',
                 properties: {
-                    goal: { type: 'string', description: tp('UpdatePlan', 'goal') },
-                    todos: {
-                        type: 'array',
-                        items: {
-                            type: 'object',
-                            properties: {
-                                text: { type: 'string', description: '待办内容。' },
-                                done: { type: 'boolean', description: '是否已完成。' },
-                            },
-                            required: ['text'],
-                            additionalProperties: false,
-                        },
-                        description: tp('UpdatePlan', 'todos'),
-                    },
+                    goal: { type: 'string', description: tp('UpdateGoal', 'goal') },
                 },
                 required: [],
                 additionalProperties: false,

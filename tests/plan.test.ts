@@ -1,69 +1,47 @@
 /**
  * 计划存储契约：整单替换，不合并；空串清目标；脏数据过滤。
- * todos 是 {text,done}——模型要能标进度，纯字符串只作为旧格式兼容。
+ * 现在只维护单一 goal，没有 todos。
  */
 import { describe, expect, it } from 'vitest';
 import { PlanStore } from '../src/brain/plan.js';
 
 describe('PlanStore', () => {
   it('starts empty', () => {
-    expect(new PlanStore().snapshot()).toEqual({ goal: null, todos: [] });
+    expect(new PlanStore().snapshot()).toEqual({ goal: null });
   });
 
-  it('replaces wholesale, trims, drops empties and junk', () => {
+  it('replaces wholesale and trims', () => {
     const p = new PlanStore();
-    const snap = p.update('  build a house  ', [
-      { text: ' gather wood ', done: false },
-      { text: '  ', done: true },
-      { text: 'craft planks', done: true },
-      null as unknown as { text: string; done: boolean },
-    ]);
-    expect(snap).toEqual({
-      goal: 'build a house',
-      todos: [
-        { text: 'gather wood', done: false },
-        { text: 'craft planks', done: true },
-      ],
-    });
+    expect(p.update('  build a house  ')).toEqual({ goal: 'build a house' });
   });
 
-  it('accepts the legacy plain-string shape as not-done', () => {
+  it('undefined leaves the goal untouched', () => {
     const p = new PlanStore();
-    expect(p.update('g', ['t1']).todos).toEqual([{ text: 't1', done: false }]);
+    p.update('g1');
+    expect(p.update(undefined)).toEqual({ goal: 'g1' });
+    expect(p.update(null)).toEqual({ goal: null });
   });
 
-  it('coerces a missing/loose done flag to false', () => {
+  it('empty goal clears; snapshot returns a copy', () => {
     const p = new PlanStore();
-    expect(p.update('g', [{ text: 'a' } as unknown as { text: string; done: boolean }]).todos).toEqual([
-      { text: 'a', done: false },
-    ]);
-    expect(p.update('g', [{ text: 'b', done: 'yes' } as unknown as { text: string; done: boolean }]).todos).toEqual([
-      { text: 'b', done: false },
-    ]);
-  });
-
-  it('untouched fields stay: goal-only and todos-only updates', () => {
-    const p = new PlanStore();
-    p.update('g', [{ text: 't1', done: false }]);
-    expect(p.update('g2').todos).toEqual([{ text: 't1', done: false }]);
-    expect(p.update(undefined, [{ text: 't2', done: true }]).goal).toBe('g2');
-  });
-
-  it('empty goal clears; snapshot returns copies', () => {
-    const p = new PlanStore();
-    p.update('g', [{ text: 't', done: false }]);
+    p.update('g');
     expect(p.update('   ').goal).toBeNull();
     const s1 = p.snapshot();
-    s1.todos.push({ text: 'hack', done: false });
-    s1.todos.forEach((t) => {
-      t.text = 'mutated';
-    });
-    expect(p.snapshot().todos).toEqual([{ text: 't', done: false }]);
+    s1.goal = 'hack';
+    expect(p.snapshot().goal).toBeNull();
+  });
+
+  it('hydrate restores the goal and treats blank as empty', () => {
+    const p = new PlanStore();
+    p.hydrate('  旧目标  ');
+    expect(p.snapshot()).toEqual({ goal: '旧目标' });
+    p.hydrate('   ');
+    expect(p.snapshot()).toEqual({ goal: null });
   });
 
   it('clear wipes everything', () => {
     const p = new PlanStore();
-    p.update('g', [{ text: 't', done: false }]);
-    expect(p.clear()).toEqual({ goal: null, todos: [] });
+    p.update('g');
+    expect(p.clear()).toEqual({ goal: null });
   });
 });

@@ -26,7 +26,6 @@ import { classifyChat, noteChatRepeat } from '../shared/chat.js';
 import { EVENT_LOG_LIMIT, eventTextFor, renderEventText } from '../shared/event_stream.js';
 import { renderLiveState } from '../shared/live_state.js';
 import type { LiveState } from '../shared/live_state.js';
-import type { PlanTodoInput } from './plan.js';
 import { PlanStore } from './plan.js';
 import { KIND, LEVEL } from '../shared/events.js';
 import type { Kind, Level } from '../shared/events.js';
@@ -44,7 +43,7 @@ import {
   goToCoordinatesArgs,
   createRememberHereTool,
   createStopTool,
-  createUpdatePlanTool,
+  createUpdateGoalTool,
 } from './tools/control_tools.js';
 import { longRangeNudge, type ReceiptHint } from './tools/long_range_hint.js';
 import { EventIntake } from './runtime/events.js';
@@ -94,7 +93,7 @@ export class Agent {
     scheduler!: Scheduler;
     loopLog: Array<{ type: string; kind: string; level: number; payload: unknown }> = [];
     /**
-     * 计划（goal / todos）。**在 `name` 就绪后才建**——落盘路径要用它。
+     * 计划（单一 goal）。**在 `name` 就绪后才建**——落盘路径要用它。
      * 见 `initProfile` 里的赋值；在那之前是空的纯内存实例（还没有名字可存）。
      */
     plan: PlanStore = new PlanStore();
@@ -859,8 +858,8 @@ export class Agent {
                       ];
                     })(),
                     createStopTool(() => this.fullStop()),
-                    createUpdatePlanTool((goal, todos) => {
-                        const snapshot = this.plan.update(goal, todos as PlanTodoInput[]);
+                    createUpdateGoalTool((goal) => {
+                        const snapshot = this.plan.update(goal);
                         // **改完就写进会话文档**：计划属于这个 Pi Durable 会话，
                         // 跨重启要跟着会话回来。以前它只在内存里，重启即归零
                         // （Feedback #23：模型说遇到 5~6 次重启，每次打回原点）。
@@ -987,12 +986,11 @@ export class Agent {
             this.log.with('perception').warn({ phase: 'sample-failed', err: String(err) });
             return liveTailFromText('(世界快照取不到)');
         }
-        // **goal / todos 由大脑填**：它们是决策层的状态，身体不知道。
+        // **goal 由大脑填**：它是决策层的状态，身体不知道。
         const live = state as LiveState;
         const plan = this.plan.snapshot();
         const task = this.task as { goal?: unknown } | null;
         live.goal = plan.goal ?? (typeof task?.goal === 'string' ? task.goal : null);
-        live.todos = plan.todos;
         return liveTailFromText(renderLiveState(live));
     }
 
@@ -1005,7 +1003,7 @@ export class Agent {
         if (wiring == null) return; // 运行时还没装配好，等下次更新再存。
         const snapshot = this.plan.snapshot();
         void wiring.state
-            .setPlan({ goal: snapshot.goal, todos: snapshot.todos })
+            .setPlan({ goal: snapshot.goal })
             .catch((err: unknown) => {
                 this.log.with('plan').warn({ phase: 'persist-failed', err: String(err) });
             });
@@ -1015,16 +1013,16 @@ export class Agent {
      * 启动时把会话里存着的计划取回来。
      *
      * 这是"重启后接着干"的另一半：光有会话历史不够，模型还得拿回它自己维护的
-     * goal / todos——否则历史里写着"我定好计划了"，而计划是空的。
+     * goal——否则历史里写着"我定好计划了"，而计划是空的。
      */
     private async restorePlan(): Promise<void> {
         const wiring = this.wiring;
         if (wiring == null) return;
         try {
             const stored = await wiring.state.plan();
-            if (stored.goal == null && stored.todos.length === 0) return;
-            this.plan.hydrate(stored.goal, stored.todos);
-            console.log(`Restored plan from session: goal=${String(stored.goal)} todos=${stored.todos.length}`);
+            if (stored.goal == null) return;
+            this.plan.hydrate(stored.goal);
+            console.log(`Restored plan from session: goal=${String(stored.goal)}`);
         } catch (err: unknown) {
             this.log.with('plan').warn({ phase: 'restore-failed', err: String(err) });
         }
@@ -1183,7 +1181,7 @@ export class Agent {
     /**
      * "这个工具不是干这件事的"提醒（`mineTunnel` → 远目标 ⇒ 用 `travelTo`）。
      *
-     * 依赖：plan（goal/todos，大脑侧）＋ places（地名→坐标，会话文档）＋ 当前位置（身体采样）。
+     * 依赖：plan（单一 goal，大脑侧）＋ places（地名→坐标，会话文档）＋ 当前位置（身体采样）。
      * **任何一步读不到就返回 null**——宁可不提醒，也不指错地方、更不能因为提醒把回执搞坏。
      *
      * 另外它是**交接循环的闸门**：如果这次调用带着 `handoff="travelTo"`（是 travelTo 把它
@@ -1193,7 +1191,7 @@ export class Agent {
     private async longRangeHint(name: string, args?: Record<string, unknown>): Promise<ReceiptHint | null> {
         try {
             const plan = this.plan.snapshot();
-            const planText = [plan.goal ?? '', ...plan.todos.map((todo) => todo.text)].join(' ');
+            const planText = plan.goal ?? '';
             const places = await this.placesDeps().read();
             const live = (await this.body?.sample()) as { position?: { x?: number; z?: number } } | null;
             const p = live?.position;

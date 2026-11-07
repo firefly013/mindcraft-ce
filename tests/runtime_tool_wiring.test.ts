@@ -120,7 +120,6 @@ describe('C3：stats 与每轮尾巴同源', () => {
       food: 18,
     },
     goal: '造房子',
-    todos: [{ text: '砍树', done: true }],
   };
 
   it('同一份采样：尾巴里**逐字包含** stats 的正文', () => {

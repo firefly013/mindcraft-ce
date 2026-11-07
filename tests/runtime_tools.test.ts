@@ -98,7 +98,7 @@ describe('schema 等价：全部命令工具', () => {
     // 数字只会腐坏，测不出真问题。
     expect(ALL_TOOLS.length).toBeGreaterThan(0);
     const advertised = getOpenAITools(ALL_TOOLS).map((tool) => tool.function.name);
-    const control = ['Finish', 'Stop', 'Say', 'UpdatePlan', 'Feedback'];
+    const control = ['Finish', 'Stop', 'Say', 'UpdateGoal', 'Feedback'];
     expect(ALL_TOOLS.map((tool) => tool.name)).toEqual(
       advertised.filter((name) => !control.includes(name)),
     );

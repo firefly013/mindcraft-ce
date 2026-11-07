@@ -78,7 +78,6 @@ export async function migrateLegacyState(
     if (wantPlan && legacy.plan != null) {
       const doc = await tx.doc(PlanDoc, conversationId);
       doc.goal = legacy.plan.goal ?? null;
-      doc.todos = legacy.plan.todos ?? [];
       migrated.plan = true;
     }
   }, context);

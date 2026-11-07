@@ -9,7 +9,7 @@
  * 提示词里在教模型用这些工具，改集合就是改契约。
  *
  * 控制类工具不在这里：`Say` 由 `openBotRuntime` 自动装（它要写 `mc.say` entry），
- * `Stop` / `UpdatePlan` / `Feedback` 在 `control_tools.ts` 里各自成型。
+ * `Stop` / `UpdateGoal` / `Feedback` 在 `control_tools.ts` 里各自成型。
  */
 import type { ToolRegistration } from '@earendil-works/pi-durable';
 import type { ToolDeclaration } from '../../shared/tools.js';

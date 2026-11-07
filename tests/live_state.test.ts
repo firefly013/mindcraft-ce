@@ -280,7 +280,6 @@ describe('renderLiveState', () => {
         bot: stubBot(),
         vision: { lastScreenshot: { file: 's.jpg', takenAt: Date.now() } },
         goal: 'build a house',
-        todos: [{ text: 'gather wood', done: false }],
         currentAction: 'action:collectBlocks',
       }),
     );

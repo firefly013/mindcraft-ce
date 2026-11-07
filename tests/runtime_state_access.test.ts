@@ -48,7 +48,7 @@ describe('状态门面', () => {
     const { session, access } = await openAccess(tempDir());
     expect(await access.memory()).toBe('');
     expect(await access.places()).toEqual({});
-    expect(await access.plan()).toEqual({ goal: null, todos: [] });
+    expect(await access.plan()).toEqual({ goal: null });
     await session.close();
   });
 
@@ -57,30 +57,24 @@ describe('状态门面', () => {
     const first = await openAccess(baseDir);
     await first.access.setMemory('家在北边');
     await first.access.setPlaces({ home: [10, 64, -20] });
-    await first.access.setPlan({ goal: '造房子', todos: [{ text: '砍树', done: true }] });
+    await first.access.setPlan({ goal: '造房子' });
     await first.session.close();
 
     const second = await openAccess(baseDir);
     expect(await second.access.memory()).toBe('家在北边');
     expect(await second.access.places()).toEqual({ home: [10, 64, -20] });
-    expect(await second.access.plan()).toEqual({
-      goal: '造房子',
-      todos: [{ text: '砍树', done: true }],
-    });
+    expect(await second.access.plan()).toEqual({ goal: '造房子' });
     await second.session.close();
   });
 
-  it('plan() 返回深拷贝：改快照不反噬存储', async () => {
+  it('plan() 返回拷贝：改快照不反噬存储', async () => {
     const { session, access } = await openAccess(tempDir());
-    await access.setPlan({ goal: 'g', todos: [{ text: 't', done: false }] });
+    await access.setPlan({ goal: 'g' });
 
     const snapshot = await access.plan();
-    snapshot.todos.push({ text: 'x', done: true });
-    const head = snapshot.todos[0];
-    if (head != null) head.text = 'MUTATED';
     snapshot.goal = 'MUTATED';
 
-    expect(await access.plan()).toEqual({ goal: 'g', todos: [{ text: 't', done: false }] });
+    expect(await access.plan()).toEqual({ goal: 'g' });
     await session.close();
   });
 
@@ -93,12 +87,12 @@ describe('状态门面', () => {
     await session.close();
   });
 
-  it('setPlan 不共享调用方的 todos 对象', async () => {
+  it('setPlan 只保留目标，不共享调用方的对象', async () => {
     const { session, access } = await openAccess(tempDir());
-    const todos = [{ text: 't', done: false }];
-    await access.setPlan({ goal: null, todos });
-    todos.push({ text: 'later', done: true });
-    expect((await access.plan()).todos).toHaveLength(1);
+    const plan = { goal: 'g' };
+    await access.setPlan(plan);
+    plan.goal = 'later';
+    expect(await access.plan()).toEqual({ goal: 'g' });
     await session.close();
   });
 });

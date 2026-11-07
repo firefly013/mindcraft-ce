@@ -66,7 +66,6 @@ describe('SQLite 会话持久化', () => {
       places.places = { home: [10, 64, -20] };
       const plan = await tx.doc(PlanDoc, id);
       plan.goal = '造房子';
-      plan.todos = [{ text: '砍树', done: true }];
     }, ctx);
     await first.close();
     expect(existsSync(first.dbPath)).toBe(true);
@@ -78,10 +77,7 @@ describe('SQLite 会话持久化', () => {
     expect(await second.harness.snapshot(PlacesDoc, id, ctx)).toEqual({
       places: { home: [10, 64, -20] },
     });
-    expect(await second.harness.snapshot(PlanDoc, id, ctx)).toEqual({
-      goal: '造房子',
-      todos: [{ text: '砍树', done: true }],
-    });
+    expect(await second.harness.snapshot(PlanDoc, id, ctx)).toEqual({ goal: '造房子' });
     await second.close();
   });
 
@@ -118,10 +114,7 @@ describe('旧存档迁移', () => {
     expect(await session.harness.snapshot(PlacesDoc, id, ctx)).toEqual({
       places: { mine: [1, 2, 3] },
     });
-    expect(await session.harness.snapshot(PlanDoc, id, ctx)).toEqual({
-      goal: 'g',
-      todos: [{ text: 't', done: false }],
-    });
+    expect(await session.harness.snapshot(PlanDoc, id, ctx)).toEqual({ goal: 'g' });
     await session.close();
   });
 
@@ -137,7 +130,7 @@ describe('旧存档迁移', () => {
     const result = await migrateLegacyState(
       session.harness,
       id,
-      { memory: 'OLD', places: { a: [0, 0, 0] }, plan: { goal: 'old', todos: [] } },
+      { memory: 'OLD', places: { a: [0, 0, 0] }, plan: { goal: 'old' } },
       ctx,
     );
 

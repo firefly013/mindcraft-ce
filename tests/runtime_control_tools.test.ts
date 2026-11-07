@@ -1,9 +1,8 @@
 /**
  * P4：5 个控制工具的等价性与行为。
  *
- * 关键一条是**集成**验证：`UpdatePlan` 的旧格式兼容靠 pi-durable 的
- * `prepareArguments` 实现，必须证明它真的被 ToolTask 调用了——否则"广告严格、
- * 执行兼容"只是纸面设计。
+ * 关键一条是**集成**验证：`UpdateGoal` 走 pi-durable 的 ToolTask，
+ * 必须证明 `prepareArguments` 真的被调用、apply 收到的是目标字符串。
  */
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -12,14 +11,14 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { BACKGROUND_CONTEXT } from '@earendil-works/chord/context';
 import { createModels } from '@earendil-works/pi-ai';
 import { fauxAssistantMessage, fauxProvider, fauxToolCall } from '@earendil-works/pi-ai/providers/faux';
-import type { PlanSnapshot, PlanTodoInput } from '../src/brain/plan.js';
+import type { PlanSnapshot } from '../src/brain/plan.js';
 import { getOpenAITools } from '../src/brain/tools/advertise.js';
 import { toolDeclarations } from '../src/body/commands/registry.js';
 import {
   createFeedbackTool,
   createStopTool,
-  createUpdatePlanTool,
-  normalizeUpdatePlanArguments,
+  createUpdateGoalTool,
+  normalizeUpdateGoalArguments,
 } from '../src/brain/tools/control_tools.js';
 import { createSayTool } from '../src/brain/runtime/loop.js';
 import type { ResolvedProvider } from '../src/brain/runtime/provider.js';
@@ -53,7 +52,7 @@ function toJson(schema: unknown): Record<string, unknown> {
   return out;
 }
 
-const emptyPlan = (): PlanSnapshot => ({ goal: null, todos: [] });
+const emptyPlan = (): PlanSnapshot => ({ goal: null });
 
 function buildControlTools() {
   // 只有 4 个：`Finish` 已按决策移除（自然的 ReAct 循环里"不再调工具"就是收尾），
@@ -61,7 +60,7 @@ function buildControlTools() {
   return [
     createStopTool(() => undefined),
     createSayTool(),
-    createUpdatePlanTool(emptyPlan),
+    createUpdateGoalTool(emptyPlan),
     createFeedbackTool({ dir: () => '', plan: () => null, historyTail: () => [] }),
   ];
 }
@@ -70,11 +69,11 @@ describe('控制工具与旧广告一致', () => {
   const oldTools = new Map(getOpenAITools(toolDeclarations()).map((tool) => [tool.function.name, tool.function]));
 
   it('旧广告里有 5 个控制工具，我们只实现 4 个（Finish 已移除）', () => {
-    for (const name of ['Finish', 'Stop', 'Say', 'UpdatePlan', 'Feedback']) {
+    for (const name of ['Finish', 'Stop', 'Say', 'UpdateGoal', 'Feedback']) {
       expect(oldTools.has(name)).toBe(true);
     }
     const implemented = buildControlTools().map((tool) => tool.name);
-    expect(implemented).toEqual(['Stop', 'Say', 'UpdatePlan', 'Feedback']);
+    expect(implemented).toEqual(['Stop', 'Say', 'UpdateGoal', 'Feedback']);
     expect(implemented).not.toContain('Finish');
   });
 
@@ -101,50 +100,33 @@ describe('Stop', () => {
   });
 });
 
-describe('UpdatePlan 旧格式兼容', () => {
-  it('纯字符串 todo 折算为未完成', () => {
-    expect(normalizeUpdatePlanArguments({ todos: ['砍树', '放石头'] })).toEqual({
-      todos: [
-        { text: '砍树', done: false },
-        { text: '放石头', done: false },
-      ],
-    });
+describe('UpdateGoal 行为', () => {
+  it('多余键原样透传，交给 validateUpdateGoal 报错（不静默吞掉）', () => {
+    expect(normalizeUpdateGoalArguments({ goal: 'g', bogus: 1 })).toEqual({ goal: 'g', bogus: 1 });
   });
 
-  it('done 缺省不补字段；非对象项被丢弃', () => {
-    expect(normalizeUpdatePlanArguments({ todos: [{ text: 'a' }, null, 7] })).toEqual({
-      todos: [{ text: 'a' }],
+  it('prepareArguments + execute 配对：apply 收到目标字符串', async () => {
+    let applied: string | null | undefined | undefined;
+    const tool = createUpdateGoalTool((goal) => {
+      applied = goal;
+      return { goal: goal ?? null };
     });
-  });
-
-  it('多余键原样透传，交给 validateUpdatePlan 报错（不静默吞掉）', () => {
-    expect(normalizeUpdatePlanArguments({ goal: 'g', bogus: 1 })).toEqual({ goal: 'g', bogus: 1 });
-  });
-
-  it('prepareArguments + execute 配对：apply 收到归一后的 todos', async () => {
-    let applied: { goal: string | null | undefined; todos: PlanTodoInput[] | null | undefined } | null =
-      null;
-    // 摘要文本来自 apply **返回的快照**，不是入参——桩要如实回映。
-    const tool = createUpdatePlanTool((goal, todos) => {
-      applied = { goal, todos };
-      return {
-        goal: goal ?? null,
-        todos: (todos ?? []).map((todo) =>
-          typeof todo === 'string' ? { text: todo, done: false } : { text: todo.text, done: todo.done === true },
-        ),
-      };
-    });
-    const prepared = tool.prepareArguments?.({ goal: '造房子', todos: ['砍树'] });
+    const prepared = tool.prepareArguments?.({ goal: '造房子' });
     const result = await tool.execute(prepared as never, {} as never, {} as never);
-    expect(applied).toEqual({ goal: '造房子', todos: [{ text: '砍树', done: false }] });
-    expect(result.content).toEqual([
-      { type: 'text', text: '计划已经更新，目标是 造房子，待办有 [ ] 砍树。' },
-    ]);
+    expect(applied).toBe('造房子');
+    expect(result.content).toEqual([{ type: 'text', text: '目标已经更新，现在的目标是 造房子。' }]);
+  });
+
+  it('旧字段 todos 现在按未知属性拒绝', async () => {
+    const tool = createUpdateGoalTool(emptyPlan);
+    const result = await tool.execute({ goal: 'g', todos: ['砍树'] } as never, {} as never, {} as never);
+    expect(result.isError).toBe(true);
+    expect(JSON.stringify(result.content)).toContain("unknown property 'todos'");
   });
 
   it('非法入参回 isError，不调用 apply', async () => {
     let called = false;
-    const tool = createUpdatePlanTool(() => {
+    const tool = createUpdateGoalTool(() => {
       called = true;
       return emptyPlan();
     });
@@ -155,8 +137,8 @@ describe('UpdatePlan 旧格式兼容', () => {
   });
 });
 
-describe('UpdatePlan 走真实 ToolTask（证明 prepareArguments 被调用）', () => {
-  it('模型给纯字符串 todos，apply 收到的是归一后的对象', async () => {
+describe('UpdateGoal 走真实 ToolTask（证明 prepareArguments 被调用）', () => {
+  it('模型给的 goal 原样进入 apply', async () => {
     const faux = fauxProvider({ models: [{ id: 'mc-test' }] });
     const models = createModels();
     models.setProvider(faux.provider);
@@ -171,9 +153,9 @@ describe('UpdatePlan 走真实 ToolTask（证明 prepareArguments 被调用）',
       contextWindow: model.contextWindow,
     };
 
-    const applied: Array<{ goal: unknown; todos: unknown }> = [];
-    const updatePlan = createUpdatePlanTool((goal, todos) => {
-      applied.push({ goal, todos });
+    const applied: Array<string | null | undefined> = [];
+    const updateGoal = createUpdateGoalTool((goal) => {
+      applied.push(goal);
       return emptyPlan();
     });
 
@@ -183,18 +165,17 @@ describe('UpdatePlan 走真实 ToolTask（证明 prepareArguments 被调用）',
       baseDir: tempDir(),
       systemPrompt: () => 'SYS',
       liveTail: () => '',
-      tools: [updatePlan],
+      tools: [updateGoal],
     });
 
-    // 模型按旧格式（纯字符串）给 todos
     faux.setResponses([
-      fauxAssistantMessage([fauxToolCall('UpdatePlan', { goal: '挖矿', todos: ['找矿洞'] })], {
+      fauxAssistantMessage([fauxToolCall('UpdateGoal', { goal: '挖矿' })], {
         stopReason: 'toolUse',
       }),
     ]);
-    await (await runtime.submit('定个计划')).wait(ctx);
+    await (await runtime.submit('定个目标')).wait(ctx);
 
-    expect(applied).toEqual([{ goal: '挖矿', todos: [{ text: '找矿洞', done: false }] }]);
+    expect(applied).toEqual(['挖矿']);
     await runtime.close();
   });
 });
@@ -204,7 +185,7 @@ describe('Feedback', () => {
     const dir = tempDir();
     const tool = createFeedbackTool({
       dir: () => dir,
-      plan: () => ({ goal: '造房子', todos: [{ text: '砍树', done: true }] }),
+      plan: () => ({ goal: '造房子' }),
       historyTail: () => [{ role: 'user', content: '你好' }],
     });
     const result = await tool.execute(
@@ -213,14 +194,14 @@ describe('Feedback', () => {
       {} as never,
     );
     expect(result.isError).toBeUndefined();
-    expect(JSON.stringify(result.content)).toContain('[{"type":"text","text":"反馈已经记录到 C:\\\\U');
+    expect(JSON.stringify(result.content)).toContain('反馈已经记录到');
 
     const lines = readFileSync(join(dir, 'feedback.jsonl'), 'utf8').trim().split('\n');
     expect(lines).toHaveLength(1);
     const entry = JSON.parse(lines[0] as string) as Record<string, unknown>;
     expect(entry['title']).toBe('标题');
     expect(entry['body']).toBe('正文');
-    expect(entry['plan']).toEqual({ goal: '造房子', todos: [{ text: '砍树', done: true }] });
+    expect(entry['plan']).toEqual({ goal: '造房子' });
     expect(entry['recent']).toEqual([{ role: 'user', summary: '你好' }]);
   });
 

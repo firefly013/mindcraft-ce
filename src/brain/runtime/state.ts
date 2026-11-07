@@ -22,7 +22,6 @@ export type PlaceCoords = [number, number, number];
  */
 export type PlanState = {
   goal: string | null;
-  todos: Array<{ text: string; done: boolean }>;
 };
 
 /** 跨会话自然语言记忆（原 `memory.json` 的 `memory` 字段）。 */
@@ -52,7 +51,7 @@ export const PlanDoc = defineDoc<PlanState>({
   scope: 'conversation',
   history: 'latest',
   fork: 'initial',
-  initial: () => ({ goal: null, todos: [] }),
+  initial: () => ({ goal: null }),
 });
 
 /** 记忆文档的默认值，供"读不到就当作空"的调用方使用。 */
@@ -60,4 +59,4 @@ export const EMPTY_MEMORY = '';
 /** 地点文档的默认值。 */
 export const EMPTY_PLACES: Record<string, PlaceCoords> = {};
 /** 计划文档的默认值。 */
-export const EMPTY_PLAN: PlanState = { goal: null, todos: [] };
+export const EMPTY_PLAN: PlanState = { goal: null };

@@ -31,7 +31,7 @@ export const CONTROL_TOOLS = new Set([
   'Finish',
   'Stop',
   'Say',
-  'UpdatePlan',
+  'UpdateGoal',
   'Feedback',
   // 进程控制：重启是"通道卡死"的最后手段，绝不能被通道挡住。
   'restart',
@@ -102,46 +102,18 @@ export function validateFeedback(args: unknown): ToolValidation {
   return { ok: false, code: 'BAD_ARGS', errors: checked.errors };
 }
 
-/** UpdatePlan 形状校验：goal 可选字符串，todos 可选 {text,done}[]（整单替换）。
- *  注意这里比 JSON Schema **更宽松**（收纯字符串、done 可省，按未完成折算）：
- *  schema 是给模型看的严格形式，校验器负责兼容旧格式，二者故意不一致。 */
-export function validateUpdatePlan(args: unknown): ToolValidation {
+/** UpdateGoal 形状校验：goal 可选字符串，其它键一律拒绝。 */
+export function validateUpdateGoal(args: unknown): ToolValidation {
   if (args == null || typeof args !== 'object' || Array.isArray(args)) {
     return { ok: false, code: 'BAD_ARGS', errors: ['$: expected object'] };
   }
   const given = args as Record<string, unknown>;
   const errors: string[] = [];
   for (const key of Object.keys(given)) {
-    if (key !== 'goal' && key !== 'todos') errors.push(`$: unknown property '${key}'`);
+    if (key !== 'goal') errors.push(`$: unknown property '${key}'`);
   }
   if (given['goal'] !== undefined && given['goal'] !== null && typeof given['goal'] !== 'string') {
     errors.push('$.goal: expected string');
-  }
-  if (given['todos'] !== undefined && given['todos'] !== null) {
-    const todos = given['todos'];
-    if (!Array.isArray(todos)) {
-      errors.push('$.todos: expected array');
-    } else {
-      todos.forEach((todo, i) => {
-        const path = `$.todos[${i}]`;
-        // 旧格式（纯字符串）仍然收，按未完成折算。
-        if (typeof todo === 'string') return;
-        if (todo == null || typeof todo !== 'object' || Array.isArray(todo)) {
-          errors.push(`${path}: expected object {text,done}`);
-          return;
-        }
-        const entry = todo as Record<string, unknown>;
-        for (const key of Object.keys(entry)) {
-          if (key !== 'text' && key !== 'done') errors.push(`${path}: unknown property '${key}'`);
-        }
-        if (typeof entry['text'] !== 'string' || entry['text'].trim() === '') {
-          errors.push(`${path}.text: expected non-empty string`);
-        }
-        if (entry['done'] !== undefined && typeof entry['done'] !== 'boolean') {
-          errors.push(`${path}.done: expected boolean`);
-        }
-      });
-    }
   }
   if (errors.length > 0) return { ok: false, code: 'BAD_ARGS', errors };
   return { ok: true };
@@ -154,7 +126,7 @@ export function validateUpdatePlan(args: unknown): ToolValidation {
  */
 export function validateToolCall(catalog: ToolCatalog, toolName: string, args: unknown): ToolValidation {
   if (toolName === 'Finish' || toolName === 'Stop' || toolName === 'Say') return { ok: true };
-  if (toolName === 'UpdatePlan') return validateUpdatePlan(args);
+  if (toolName === 'UpdateGoal') return validateUpdateGoal(args);
   if (toolName === 'Feedback') return validateFeedback(args);
   const command = catalog.get(toolName);
   if (command === undefined) return { ok: false, code: 'UNKNOWN_TOOL', errors: [`No such tool: ${toolName}.`] };

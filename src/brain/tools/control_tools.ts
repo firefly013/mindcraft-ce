@@ -11,8 +11,8 @@ import {
   buildFeedbackEntry,
   validateFeedback,
 } from '../feedback.js';
-import type { PlanSnapshot, PlanTodoInput } from '../plan.js';
-import { validateUpdatePlan } from './validate.js';
+import type { PlanSnapshot } from '../plan.js';
+import { validateUpdateGoal } from './validate.js';
 import { td, tp } from '../../shared/prompts.js';
 import { outcomeText } from './tools.js';
 
@@ -31,68 +31,36 @@ export function createStopTool(onStop: () => void | Promise<void>): ToolRegistra
   });
 }
 
-/** `UpdatePlan` 的入参类型（`Static` 形状）。 */
-export interface UpdatePlanArgs {
+/** `UpdateGoal` 的入参类型（`Static` 形状）。 */
+export interface UpdateGoalArgs {
   goal?: string;
-  todos?: Array<{ text: string; done?: boolean }>;
 }
 
 /**
- * 旧格式兼容：`todos: ["砍树"]` → `[{text:'砍树', done:false}]`。
- *
- * pi-durable 的 `prepareArguments` 在校验**之前**运行，正是为这种"模型常见
- * 写法要修"的场景设计的——于是"广告给模型的是严格 schema、执行侧仍兼容旧
- * 格式"两者都保住，不用把 schema 放宽。
- *
- * 多余键**原样透传**，交给 `validateUpdatePlan` 报错，不静默吞掉（与旧行为一致）。
+ * 多余键**原样透传**，交给 `validateUpdateGoal` 报错，不静默吞掉。
+ * 旧格式（todos）现在按未知属性拒绝，模型会收到明确回执。
  */
-export function normalizeUpdatePlanArguments(args: unknown): UpdatePlanArgs {
-  const given = (args ?? {}) as Record<string, unknown>;
-  const out: Record<string, unknown> = { ...given };
-  const todos = given['todos'];
-  if (Array.isArray(todos)) {
-    out['todos'] = todos
-      .map((todo): { text: string; done?: boolean } | null => {
-        if (typeof todo === 'string') return { text: todo, done: false };
-        if (todo == null || typeof todo !== 'object' || Array.isArray(todo)) return null;
-        const entry = todo as Record<string, unknown>;
-        const text = typeof entry['text'] === 'string' ? entry['text'] : '';
-        return typeof entry['done'] === 'boolean' ? { text, done: entry['done'] } : { text };
-      })
-      .filter((todo): todo is { text: string; done?: boolean } => todo != null);
-  }
-  return out as UpdatePlanArgs;
+export function normalizeUpdateGoalArguments(args: unknown): UpdateGoalArgs {
+  return { ...((args ?? {}) as Record<string, unknown>) } as UpdateGoalArgs;
 }
 
-/** `UpdatePlan`：整单替换模型自己的计划。 */
-export function createUpdatePlanTool(
-  apply: (goal: string | null | undefined, todos: PlanTodoInput[] | null | undefined) => PlanSnapshot,
+/** `UpdateGoal`：整单替换模型自己的目标。 */
+export function createUpdateGoalTool(
+  apply: (goal: string | null | undefined) => PlanSnapshot,
 ): ToolRegistration {
   return defineTool({
-    name: 'UpdatePlan',
-    description: td('UpdatePlan'),
+    name: 'UpdateGoal',
+    description: td('UpdateGoal'),
     parameters: Type.Object(
       {
-        goal: Type.Optional(Type.String({ description: tp('UpdatePlan', 'goal') })),
-        todos: Type.Optional(
-          Type.Array(
-            Type.Object(
-              {
-                text: Type.String({ description: '待办内容。' }),
-                done: Type.Optional(Type.Boolean({ description: '是否已完成。' })),
-              },
-              { additionalProperties: false },
-            ),
-            { description: tp('UpdatePlan', 'todos') },
-          ),
-        ),
+        goal: Type.Optional(Type.String({ description: tp('UpdateGoal', 'goal') })),
       },
       { additionalProperties: false },
     ),
-    prepareArguments: normalizeUpdatePlanArguments,
+    prepareArguments: normalizeUpdateGoalArguments,
     // 全同步逻辑；`execute` 契约要求 Promise，但不该写 async（require-await）。
     execute: (args) => {
-      const checked = validateUpdatePlan(args);
+      const checked = validateUpdateGoal(args);
       if (!checked.ok) {
         return Promise.resolve({
           content: [
@@ -101,17 +69,11 @@ export function createUpdatePlanTool(
           isError: true,
         });
       }
-      const given = (args ?? {}) as { goal?: string | null; todos?: PlanTodoInput[] | null };
-      const snapshot = apply(given.goal, given.todos);
-      const todos =
-        snapshot.todos.length > 0
-          ? snapshot.todos.map((todo) => `${todo.done ? '[x]' : '[ ]'} ${todo.text}`).join('，')
-          : '现在没有待办';
-      const goalText = snapshot.goal == null ? '目标没有设定' : `目标是 ${snapshot.goal}`;
+      const given = (args ?? {}) as { goal?: string | null };
+      const snapshot = apply(given.goal);
+      const goalText = snapshot.goal == null ? '现在没有设定目标' : `现在的目标是 ${snapshot.goal}`;
       return Promise.resolve({
-        content: [
-          { type: 'text' as const, text: `计划已经更新，${goalText}，待办有 ${todos}。` },
-        ],
+        content: [{ type: 'text' as const, text: `目标已经更新，${goalText}。` }],
       });
     },
   });

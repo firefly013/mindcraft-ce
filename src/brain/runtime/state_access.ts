@@ -1,7 +1,7 @@
 /**
  * P5：跨会话状态的读写门面（memory / places / plan）。
  *
- * P2 定义了文档，这里给它们一个窄接口：`liveTail` 要 memory，`UpdatePlan`
+ * P2 定义了文档，这里给它们一个窄接口：`liveTail` 要 memory，`UpdateGoal`
  * 要 plan 的读写与快照，`rememberHere`/`goToRememberedPlace` 要 places。
  *
  * 约定：**读不到就返回默认值**，而不是 `undefined`——调用方不该到处判空。
@@ -59,16 +59,14 @@ export function createStateAccess(
 
     plan: async () => {
       const stored = await harness.snapshot(PlanDoc, conversationId, context);
-      if (stored == null) return { ...EMPTY_PLAN, todos: [] };
-      // 深拷贝：调用方改快照不该反噬存储（与 PlanStore.snapshot 的约定一致）。
-      return { goal: stored.goal, todos: stored.todos.map((todo) => ({ ...todo })) };
+      if (stored == null) return { ...EMPTY_PLAN };
+      return { goal: stored.goal };
     },
 
     setPlan: async (plan) => {
       await harness.commit(async (tx) => {
         const doc = await tx.doc(PlanDoc, conversationId);
         doc.goal = plan.goal;
-        doc.todos = plan.todos.map((todo) => ({ ...todo }));
       }, context);
     },
   };

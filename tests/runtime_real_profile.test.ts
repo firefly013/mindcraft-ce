@@ -132,7 +132,7 @@ describe('真实 profile 装配', () => {
     const names = buildGameTools({ declarations: toolDeclarations(), execute: () => 'ok' }).map((tool) => tool.name);
     // 生产 profile 对应的模型走的是同一张命令表
     expect(names.length).toBeGreaterThan(30);
-    for (const control of ['Finish', 'Stop', 'Say', 'UpdatePlan', 'Feedback']) {
+    for (const control of ['Finish', 'Stop', 'Say', 'UpdateGoal', 'Feedback']) {
       expect(names).not.toContain(control);
     }
     // 之前删掉的 blueprint 系确实不在（construction 子系统已下线）

@@ -146,8 +146,7 @@ let feedbackCount = 0;
 try { feedbackCount = readFileSync(join(FEED_DIR, 'feedback-list.jsonl'), 'utf8').split('\n').filter(Boolean).length; } catch { }
 let lastFeedback = null;
 function renderFeedback(r) {
-    const todos = (r.plan?.todos ?? []).map((t) => `${t.done ? '[x]' : '[ ]'} ${t.text}`).join('; ');
-    const plan = r.plan ? `计划：goal=${r.plan.goal ?? '-'} | todos=${todos || '-'}` : '计划：-';
+    const plan = r.plan ? `计划：goal=${r.plan.goal ?? '-'}` : '计划：-';
     return `\n## ${r.ts} · ${r.agent} · ${r.title}\n\n${r.body}\n\n_${plan}_\n`;
 }
 function collectFeedback() {

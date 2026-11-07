@@ -7,8 +7,6 @@
  *
  * 本文件不许 import 身体或大脑的任何实现。
  */
-import type { PlanTodo } from './plan.js';
-
 export interface ScreenshotRef {
   file: string;
   takenAt: number;
@@ -172,7 +170,6 @@ export interface LiveState {
   blocksSummary: string[];
   screenshot: LiveScreenshot;
   goal: string | null;
-  todos: PlanTodo[];
   /**
    * 危险操作许可的现状（还有没有授权、授权哪几项、还剩多少秒）。
    * **必须让模型看得见** —— 否则它不知道自己现在能不能倒水/点火，
@@ -619,13 +616,7 @@ const SECTION_RENDERERS: Record<LiveSectionKey, (s: LiveState) => string[]> = {
   },
   goal: (s) => {
     const goal = s.goal == null || s.goal === '' ? '现在没有设定目标' : `现在的目标是 ${s.goal}`;
-    const todos =
-      s.todos.length === 0
-        ? '也没有待办事项'
-        : `待办事项里，${s.todos
-            .map((t) => (t.done ? `已经完成 ${t.text}` : `还没完成 ${t.text}`))
-            .join('，')}`;
-    return [`${goal}，${todos}。`];
+    return [`${goal}。`];
   },
   meta: (s) => {
     const screen = s.meta.openScreen == null ? '现在没有打开任何界面' : `现在打开的界面是 ${s.meta.openScreen}`;

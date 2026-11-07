@@ -13,7 +13,7 @@
  * 不该提醒的时候（用 travelTo、目标很近、读不到位置、有歧义），**回执一个字节都不动**。
  *
  * **目标从哪来**：身体**不知道 goal**（`edges.ts`：目标是大知识，身体不知道也不该知道），
- * 所以这件事只能在大脑侧做——它同时知道 plan（goal/todos）和 places（地名→坐标）。
+ * 所以这件事只能在大脑侧做——它同时知道 plan（单一 goal）和 places（地名→坐标）。
  * 优先取"计划里提到的地名"；只有一个候选时用它；有歧义就**不猜**（宁可不提醒，也不指错地方）。
  */
 
@@ -25,7 +25,7 @@ export interface LongRangeNudgeInput {
   toolName: string;
   /** 现在在哪（水平坐标）；读不到就 null（那就不提醒，不猜）。 */
   here: { x: number; z: number } | null;
-  /** 当前计划（goal + todos）的文本：用来判断"要去的是哪个记住的地方"。 */
+  /** 当前目标的文本：用来判断"要去的是哪个记住的地方"。 */
   planText: string;
   /** 记住的地方：名字 → [x, y, z]。 */
   places: Record<string, [number, number, number]>;

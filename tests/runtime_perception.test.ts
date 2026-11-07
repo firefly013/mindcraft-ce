@@ -36,11 +36,10 @@ describe('composeLiveTail（接真实感知层）', () => {
     expect(tail).toContain('## 当前世界快照');
   });
 
-  it('goal / todos 来自计划，进快照', () => {
+  it('goal 来自计划，进快照', () => {
     const tail = composeLiveTail({
       bot: {},
       goal: '造房子',
-      todos: [{ text: '砍树', done: true }],
     });
     expect(tail).toContain('造房子');
   });

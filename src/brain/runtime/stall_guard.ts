@@ -12,7 +12,7 @@
  *
  * 2026-10-18 实测：整树重启后两个 bot 各发了一次 `content:["thinking","text"]`
  * 的请求（`overnight_a` in=651276、`overnight_b` in=346744），零 `toolCall`，
- * 然后 10 分钟没有任何请求、没有任何动作，`Goal: none Todos: none`。
+ * 然后 10 分钟没有任何请求、没有任何动作，`Goal: none`。
  * 00:22 那次停摆也是同一个形状（记在 `tmp/overnight/FINDINGS.md` F-7）。
  *
  * ## 兜底的两层

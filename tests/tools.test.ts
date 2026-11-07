@@ -6,7 +6,7 @@ import { SAY_LINE_LIMIT } from '../src/shared/prompts.js';
 import { describe, expect, it, vi } from 'vitest';
 import { commandToTool, getOpenAITools } from '../src/brain/tools/advertise.js';
 import { createToolCatalog } from '../src/brain/tools/catalog.js';
-import { checkDomain, formatSay, isActionTool, toolExists, validateToolCall, validateUpdatePlan } from '../src/brain/tools/validate.js';
+import { checkDomain, formatSay, isActionTool, toolExists, validateToolCall, validateUpdateGoal } from '../src/brain/tools/validate.js';
 import { stripBang } from '../src/shared/tools.js';
 import { executeToolCall } from '../src/body/commands/execute.js';
 import { toolDeclarations } from '../src/body/commands/registry.js';
@@ -153,20 +153,20 @@ describe('Say isolation', () => {
     expect(names).toContain('Say');
     expect(names).toContain('Finish');
     expect(names).toContain('Stop');
-    expect(names).toContain('UpdatePlan');
+    expect(names).toContain('UpdateGoal');
   });
 
-  it('UpdatePlan is a control tool with whole-replace shape', () => {
-    expect(toolExists(CATALOG, 'UpdatePlan')).toBe(true);
-    expect(isActionTool(CATALOG, 'UpdatePlan')).toBe(false);
-    expect(validateToolCall(CATALOG, 'UpdatePlan', { goal: 'build', todos: ['wood'] }).ok).toBe(true);
-    expect(validateToolCall(CATALOG, 'UpdatePlan', {}).ok).toBe(true);
-    expect(validateUpdatePlan({ goal: 42 }).ok).toBe(false);
-    expect(validateUpdatePlan({ todos: 'wood' }).ok).toBe(false);
-    expect(validateUpdatePlan({ todos: ['wood', 7] }).ok).toBe(false);
-    expect(validateUpdatePlan({ nope: 1 }).ok).toBe(false);
+  it('UpdateGoal is a control tool with a single goal', () => {
+    expect(toolExists(CATALOG, 'UpdateGoal')).toBe(true);
+    expect(isActionTool(CATALOG, 'UpdateGoal')).toBe(false);
+    expect(validateToolCall(CATALOG, 'UpdateGoal', { goal: 'build' }).ok).toBe(true);
+    expect(validateToolCall(CATALOG, 'UpdateGoal', {}).ok).toBe(true);
+    expect(validateToolCall(CATALOG, 'UpdateGoal', { goal: 'build', todos: ['wood'] }).ok).toBe(false);
+    expect(validateUpdateGoal({ goal: 42 }).ok).toBe(false);
+    expect(validateUpdateGoal({ todos: 'wood' }).ok).toBe(false);
+    expect(validateUpdateGoal({ nope: 1 }).ok).toBe(false);
     const tools = getOpenAITools(ALL_TOOLS, []);
-    expect(tools.map((t) => t.function.name)).toContain('UpdatePlan');
+    expect(tools.map((t) => t.function.name)).toContain('UpdateGoal');
   });
 });
 
