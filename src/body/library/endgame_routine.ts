@@ -1,10 +1,9 @@
 /**
  * 末地相关动作里**碰世界的那一层**。
  *
- * 和末地相关的工具只剩 `enterEnd`；同文件里另外两个是通用动作
- * `drinkPotion` / `recoverAfterDeath`。拆水晶、床炸龙、躲龙息、复活龙
- * 的 routine 已经按用户要求删掉，这里只保留进入末地、掷眼找要塞、
- * 喝药和死亡回收真正用得到的原语。
+ * 和末地相关的工具只剩 `enterEnd`，外加通用动作 `recoverAfterDeath`。
+ * 拆水晶、床炸龙、躲龙息、复活龙、喝指定药水的 routine 已经按用户要求删除，
+ * 这里只保留进入末地、掷眼找要塞和死亡回收真正用得到的原语。
  */
 import Vec3Class from 'vec3';
 import * as skills from './skills.js';
@@ -12,11 +11,8 @@ import * as world from './world.js';
 import {
     END_PLATFORM,
     describeEyeDirection,
-    findPotionById,
     normalizeName,
     planRecovery,
-    potionIdOf,
-    potionInventorySummary,
     trackEyeFlight,
     vec,
     type EyeFlightTrack,
@@ -46,7 +42,7 @@ export interface EndgameToolSpec {
 }
 
 /**
- * 和末地相关的工具只剩 `enterEnd`，外带两个通用动作（drinkPotion / recoverAfterDeath）。
+ * 和末地相关的工具只剩 `enterEnd`，外加通用动作 recoverAfterDeath。
  * **我没有注册它们**，这是给 Lead 的接线清单。
  * `kind` 决定进查询表还是动作表（见 `registry.ts` 的注释）。
  */
@@ -61,17 +57,6 @@ export const endgameToolSpecs: EndgameToolSpec[] = [
         params: {},
         timeoutMinutes: 5,
         backing: '复用 world.getNearestBlock/getNearestBlocksWhere + skills.equip/useToolOnBlock + throwHeld；维度切换判定照抄 nether_portal.ts 的 dimensionChanged。',
-    },
-    {
-        name: 'drinkPotion',
-        kind: 'action',
-        description:
-            '喝一瓶指定 id 的药水（`healing` / `strong_healing` / `long_slow_falling` 这类）。背包里所有药水的物品名都是 potion，id 才能精确到等级和时长；没有这瓶时返回背包里现有的药水 id 清单。',
-        params: {
-            potion: { type: 'string', description: '完整药水 id，例如 healing / strong_healing / long_slow_falling / fire_resistance。' },
-        },
-        timeoutMinutes: 2,
-        backing: 'equip + consume；按 NBT/组件里的 potion id 对齐状态效果名。',
     },
     {
         name: 'recoverAfterDeath',
@@ -110,63 +95,6 @@ function safeInventoryCounts(bot: any): Record<string, number> {
     }
 }
 
-function safeInventoryItems(bot: any): any[] {
-    try {
-        const items = bot?.inventory?.items?.();
-        return Array.isArray(items) ? items : [];
-    } catch {
-        return [];
-    }
-}
-
-/** 背包里某个**完整药水 id** 的药水一共有几瓶（能区分普通/延长/强化版本）。 */
-export function countPotionsById(bot: any, potionId: unknown): number {
-    const wanted = normalizeName(potionId);
-    if (wanted === '') return 0;
-    let total = 0;
-    for (const item of safeInventoryItems(bot)) {
-        if (normalizeName(item?.name) !== 'potion') continue;
-        if (normalizeName(potionIdOf(item)) !== wanted) continue;
-        total += typeof item?.count === 'number' && Number.isFinite(item.count) ? Math.max(0, item.count) : 1;
-    }
-    return total;
-}
-
-/**
- * 喝一瓶**指定 id** 的药水（`healing` / `strong_healing` / `long_slow_falling` 这类）。
- *
- * 只返回结果：没有这瓶时列出背包里现有的；喝了报喝了哪一瓶、还剩几瓶；
- * 包发出去了但数量没变就如实说"不能确认喝下"。不写"下一步""再调一次"。
- */
-export async function drinkPotionById(bot: any, potionId: unknown): Promise<string> {
-    const wanted = normalizeName(potionId);
-    if (wanted === '') return 'drinkPotion：没有给 potion id。';
-    const items = safeInventoryItems(bot);
-    const potion = findPotionById(items, wanted);
-    if (potion == null) {
-        const have = potionInventorySummary(items);
-        return have === ''
-            ? `背包里没有 '${String(potionId)}' 药水，也没有可饮用的药水。`
-            : `背包里没有 '${String(potionId)}' 药水。现有：${have}。`;
-    }
-    const before = countPotionsById(bot, wanted);
-    try {
-        await bot.equip(potion, 'hand');
-        await bot.consume();
-    } catch (error) {
-        return `喝 ${wanted} 没有成功，错误是 ${(error as Error)?.message ?? String(error)}。`;
-    }
-    // 服务端扣物品要过一两个 tick；给它三次机会再判定。
-    let after = countPotionsById(bot, wanted);
-    for (let attempt = 0; attempt < 2 && after >= before; attempt++) {
-        await skills.wait(bot, 250);
-        after = countPotionsById(bot, wanted);
-    }
-    if (after >= before) {
-        return `使用包已经发出去了，但是 ${wanted} 的数量从 ${before} 个变成 ${after} 个，没有变化，所以不能确认已经喝下。`;
-    }
-    return `喝下 ${wanted}（剩 ${after} 瓶）。`;
-}
 
 // ============================ 三·B、床炸的选址与掩体（都从真实世界读） ============================
 // ============================ 四、末地动作：把 plan 变成 bot 动作 ============================

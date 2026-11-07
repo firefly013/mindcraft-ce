@@ -2684,19 +2684,28 @@ const interactCommands: AgentCommand[] = [
     description: td('useEntity'),
     params: {
       entity_id: { type: 'int', description: tp('useEntity', 'entity_id') },
-      input: { type: 'string', description: tp('useEntity', 'input'), optional: true },
+      input_slot: { type: 'int', description: tp('useEntity', 'input_slot'), optional: true, domain: [5, 45] },
       output: { type: 'string', description: tp('useEntity', 'output'), optional: true },
     },
     perform: async function (
       agent: any,
       entity_id: number,
-      input?: unknown,
+      input_slot?: unknown,
       output?: unknown,
     ): Promise<string> {
-      const parsedIn = parseItems(input);
       const parsedOut = parseItems(output);
-      if (parsedIn.error != null) return `useEntity 的参数不对，${parsedIn.error}`;
       if (parsedOut.error != null) return `useEntity 的参数不对，${parsedOut.error}`;
+      const inputItem =
+        input_slot == null
+          ? null
+          : skills.itemAtSlot(agent.bot, input_slot);
+      if (input_slot != null && inputItem == null) {
+        return `第 ${Number(input_slot)} 格没有东西，没法给这个实体。`;
+      }
+      const give =
+        inputItem == null
+          ? null
+          : { name: String(inputItem.name ?? ''), count: Math.max(1, Number(inputItem.count ?? 1)) };
 
       const lines: string[] = [];
       const entity = agent.bot?.entities?.[entity_id];
@@ -2747,7 +2756,7 @@ const interactCommands: AgentCommand[] = [
         return `没做到接近 #${entity_id}，因为走不到。`;
       }
 
-      if (parsedIn.items.length === 0 && parsedOut.items.length === 0) {
+      if (give == null && parsedOut.items.length === 0) {
         if (kind === 'villager') {
           const shown = await skills.showVillagerTrades(agent.bot, entity_id);
           lines.push(shown ? '已打开交易列表。' : '读不到交易列表。');
@@ -2757,7 +2766,7 @@ const interactCommands: AgentCommand[] = [
         return renderReport(lines);
       }
 
-      if (parsedOut.items.length > 0 && parsedIn.items.length === 0) {
+      if (parsedOut.items.length > 0 && give == null) {
         const want = parsedOut.items[0] as ItemSpec;
         if (kind === 'villager') {
           const traded = await skills.tradeWithVillager(agent.bot, entity_id, want.name, want.count);
@@ -2768,7 +2777,7 @@ const interactCommands: AgentCommand[] = [
         return renderReport(lines);
       }
 
-      const give = parsedIn.items[0] as ItemSpec;
+      if (give == null) return `没做到交互 #${entity_id}，因为没有给 input_slot 或 output。`;
       if (kind === 'villager') {
         const traded = await skills.tradeWithVillager(agent.bot, entity_id, give.name, give.count);
         lines.push(`交易 ${give.name}×${give.count} ${traded ? '成功了' : '没有成功'}。`);

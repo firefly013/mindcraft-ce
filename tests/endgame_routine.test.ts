@@ -3,8 +3,6 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 // ============================ 碰世界那一层（用假 bot，不连服务端） ============================
 import {
     countEyesOfEnder,
-    countPotionsById,
-    drinkPotionById,
     endgameToolSpecs,
     enterEndSkill,
     frameHasEye,
@@ -48,9 +46,8 @@ function stack(name: string, count = 1, extra: Record<string, any> = {}) {
 }
 
 /**
- * 假 bot 的"吃东西/喝药"必须**真的从背包里扣掉**。
- * `drinkPotionById` 现在会核对数量（数量没变 = 没喝下去），假 bot 不扣就等于
- * 永远喝不成 —— 那不是被测代码的 bug，是假 bot 不忠实。
+ * 假 bot 的"吃东西/喝药"必须**真的从背包里扣掉**，否则任何靠数量核对的
+ * 实现都会被假 bot 冤成失败。
  */
 function consumeOne(items: any[], held: any): void {
     if (held == null) return;
@@ -130,66 +127,6 @@ function makeFakeBot(options: {
     return bot;
 }
 
-
-describe('drinkPotionById（按完整药水 id 喝药，不猜效果、不挑优先级）', () => {
-    it('按 id 找到药水 → equip 到手上再 consume，结果报喝了哪一瓶/还剩几瓶', async () => {
-        const slowFalling = stack('potion', 1, { nbt: { value: { Potion: 'minecraft:long_slow_falling' } } });
-        const bot = makeFakeBot({ items: [stack('stone', 3), slowFalling] });
-        const receipt = await drinkPotionById(bot, 'long_slow_falling');
-        expect(receipt).toContain('喝下 long_slow_falling');
-        expect(receipt).toContain('剩 0 瓶');
-        expect(bot.calls.map((c: any) => c.fn)).toEqual(['equip', 'consume']);
-        expect(bot.calls[0].item).toBe(slowFalling);
-    });
-
-    it('id 必须精确：给 slow_falling 不会喝 long_slow_falling', async () => {
-        const potion = stack('potion', 1, { nbt: { value: { Potion: 'minecraft:long_slow_falling' } } });
-        const bot = makeFakeBot({ items: [potion] });
-        const receipt = await drinkPotionById(bot, 'slow_falling');
-        expect(receipt).toContain("背包里没有 'slow_falling' 药水");
-        expect(receipt).toContain('long_slow_falling');
-        expect(bot.calls).toHaveLength(0);
-    });
-
-    it('同效果多等级：给哪个 id 就喝哪个，不给就不动', async () => {
-        const base = stack('potion', 1, { nbt: { value: { Potion: 'minecraft:healing' } } });
-        const strong = stack('potion', 1, { nbt: { value: { Potion: 'minecraft:strong_healing' } } });
-        const bot = makeFakeBot({ items: [base, strong] });
-        const receipt = await drinkPotionById(bot, 'strong_healing');
-        expect(receipt).toContain('喝下 strong_healing');
-        expect(bot.calls.map((c: any) => c.fn)).toEqual(['equip', 'consume']);
-        expect(bot.calls[0].item).toBe(strong);
-        expect(countPotionsById(bot, 'healing')).toBe(1);
-    });
-
-    it('背包没有这种药 → 报结果并列出背包现有的药水 id，不做任何动作', async () => {
-        const potion = stack('potion', 1, { nbt: { value: { Potion: 'minecraft:long_slow_falling' } } });
-        const bot = makeFakeBot({ items: [stack('stone', 3), potion] });
-        const receipt = await drinkPotionById(bot, 'fire_resistance');
-        expect(receipt).toContain("背包里没有 'fire_resistance' 药水");
-        expect(receipt).toContain('long_slow_falling');
-        expect(bot.calls).toHaveLength(0);
-    });
-
-    it('背包里那叠数量没变 → 只报"不能确认喝下"，不谎报成功', async () => {
-        const potion = stack('potion', 1, { nbt: { value: { Potion: 'minecraft:long_slow_falling' } } });
-        const bot = makeFakeBot({ items: [potion] });
-        bot.consume = () => {
-            bot.calls.push({ fn: 'consume' });
-            return Promise.resolve();
-        };
-        expect(await drinkPotionById(bot, 'long_slow_falling')).toContain('使用包已经发出去了，但是 long_slow_falling 的数量从 1');
-        expect(countPotionsById(bot, 'long_slow_falling')).toBe(1);
-    });
-
-    it('喝下去之后那一叠真的少一瓶', async () => {
-        const potions = [stack('potion', 2, { nbt: { value: { Potion: 'minecraft:long_slow_falling' } } })];
-        const bot = makeFakeBot({ items: potions });
-        expect(await drinkPotionById(bot, 'long_slow_falling')).toContain('剩 1 瓶');
-        expect(countPotionsById(bot, 'long_slow_falling')).toBe(1);
-    });
-
-});
 
 // ============================ 回归测试：床炸选址 / 掩体 / 死亡回收 ============================
 
@@ -418,8 +355,8 @@ function partialBlock(name: string, shapes: number[][], boundingBox = 'block') {
 // ============================ 回归：掩体必须是"完整立方体"（对抗验证 claim 4） ============================
 
 describe('给 Lead 的接线清单（工具声明）', () => {
-    it('3 条工具、名字唯一、action 都有超时上限（不许再写 -1）', () => {
-        expect(endgameToolSpecs).toHaveLength(3);
+    it('2 条工具、名字唯一、action 都有超时上限（不许再写 -1）', () => {
+        expect(endgameToolSpecs).toHaveLength(2);
         const names = endgameToolSpecs.map((spec) => spec.name);
         expect(new Set(names).size).toBe(names.length);
         for (const spec of endgameToolSpecs) {
@@ -433,13 +370,8 @@ describe('给 Lead 的接线清单（工具声明）', () => {
         }
     });
 
-    it('和末地相关的工具只剩 enterEnd，另外两个是通用动作', () => {
+    it('和末地相关的工具只剩 enterEnd，另外一个是通用动作', () => {
         const names = endgameToolSpecs.map((spec) => spec.name);
-        expect(names).toEqual(['enterEnd', 'drinkPotion', 'recoverAfterDeath']);
-    });
-
-    it('drinkPotion 的参数说明写清了"所有药水都叫 potion"这个坑', () => {
-        const spec = endgameToolSpecs.find((s) => s.name === 'drinkPotion');
-        expect(spec?.description).toContain('potion');
+        expect(names).toEqual(['enterEnd', 'recoverAfterDeath']);
     });
 });

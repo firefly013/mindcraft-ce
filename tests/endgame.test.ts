@@ -2,7 +2,7 @@
  * 末地相关的纯逻辑单元测试（剩下的部分）。
  *
  * 这里**不需要 MC 服务端**：`src/body/library/endgame.ts` 只吃普通数据。
- * 现在覆盖的只有三块：药水识别与查找、死亡回收、末影之眼的方向几何。
+ * 现在覆盖的只有三块：药水识别、死亡回收、末影之眼的方向几何。
  */
 import { describe, expect, it } from 'vitest';
 import {
@@ -13,11 +13,9 @@ import {
     compassBearing,
     describeEyeDirection,
     findNegativeEffect,
-    findPotionById,
     findPotionItem,
     hasActiveEffect,
     planRecovery,
-    potionInventorySummary,
     potionKindOf,
     potionStock,
     trackEyeFlight,
@@ -130,34 +128,7 @@ describe('死亡回收', () => {
     });
 });
 
-describe('按完整药水 id 找药：普通/延长/强化必须分得开', () => {
-    const potion = (id: string) => ({ name: 'potion', nbt: { value: { Potion: `minecraft:${id}` } } });
-
-    it('只认完整 id，不做 long_/strong_ 前缀或效果名折算', () => {
-        const base = potion('healing');
-        const strong = potion('strong_healing');
-        expect(findPotionById([base, strong], 'healing')).toBe(base);
-        expect(findPotionById([base, strong], 'strong_healing')).toBe(strong);
-        expect(findPotionById([base, strong], 'instant_health')).toBeNull();
-        expect(findPotionById([potion('long_slow_falling')], 'slow_falling')).toBeNull();
-        expect(findPotionById([potion('long_slow_falling')], 'long_slow_falling')).not.toBeNull();
-    });
-
-    it('喷溅/滞留药水不能喝，不收', () => {
-        const splash = { name: 'splash_potion', nbt: { value: { Potion: 'minecraft:slow_falling' } } };
-        expect(findPotionById([splash], 'slow_falling')).toBeNull();
-    });
-
-    it('清单按完整药水 id 汇总，普通/延长/强化分得开', () => {
-        expect(
-            potionInventorySummary([
-                { name: 'potion', count: 2, nbt: { value: { Potion: 'minecraft:long_slow_falling' } } },
-                { name: 'potion', count: 1, nbt: { value: { Potion: 'minecraft:regeneration' } } },
-                { name: 'milk_bucket', count: 1 },
-            ]),
-        ).toBe('long_slow_falling×2、regeneration×1');
-    });
-
+describe('负面效果识别', () => {
     it('findNegativeEffect 认得中毒/缓慢，不把缓降当负面', () => {
         expect(findNegativeEffect([{ name: 'Slowness', seconds: 5, amplifier: 0 }])).toBe('slowness');
         expect(findNegativeEffect([{ name: 'slow_falling', seconds: 5, amplifier: 0 }])).toBeNull();

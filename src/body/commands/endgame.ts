@@ -1,9 +1,9 @@
 /*
- * 末地命令：只剩 `!enterEnd`，外加两个通用动作 `!drinkPotion` / `!recoverAfterDeath`。
+ * 末地命令：只剩 `!enterEnd`，外加通用动作 `!recoverAfterDeath`。
  *
  * 和末地相关的其余工具（endFightStatus / clearEndCrystals / bedBombDragon /
- * dodgeDragonBreath / reviveDragon）已按用户要求删除；drinkPotion 和
- * recoverAfterDeath 不是末地专属能力，留在这里只是沿用了原来的文件。
+ * dodgeDragonBreath / reviveDragon）已按用户要求删除。drinkPotion 也已删掉——
+ * 喝药本身是实例操作，`consume(slot)` 已经覆盖，保留两个入口只会让模型猜。
  *
  * **本文件是自包含的**（和 `commands/survival.ts` 同一套路）：描述文本在下面
  * `ENDGAME_TOOL_TEXT`，动作包装在 `runEndgameAction`，不依赖对 `actions.ts` /
@@ -30,13 +30,6 @@ export const ENDGAME_TOOL_TEXT: Record<string, { description: string; params: Re
             '进去落在 (100,49,0) 的黑曜石平台上、面朝西，**平台和主岛之间可能隔着虚空**（要搭桥或扔珍珠）。',
         params: {},
     },
-    drinkPotion: {
-        description:
-            '喝一瓶指定 id 的药水（healing / strong_healing / long_slow_falling 这类）。背包里所有药水的物品名都是 potion，只有药水 id 能精确到等级和时长；没有这瓶时返回背包里现有的药水 id 清单。',
-        params: {
-            potion: '完整药水 id，例如 healing / strong_healing / long_slow_falling / fire_resistance。',
-        },
-    },
     recoverAfterDeath: {
         description:
             '死亡回收：读死亡点记录，给你"东西还在不在 + 已经过了多久 + 从哪回去"的方案。掉落物 **5 分钟**后消失，但**只在区块被加载时才计时**（旁边没人 = 基本不会消失，另一个 bot 在旁边则是在跑的）；掉进虚空（Y<-60）的东西**当场消失**，不用去捡。' +
@@ -52,8 +45,8 @@ const DESCRIPTION = (name: keyof typeof ENDGAME_TOOL_TEXT): string => ENDGAME_TO
  * 动作包装：走身体通道 + 超时兜底。与 `actions.ts` 的 `runAsAction` 同语义，
  * 但**显式传 label**，所以命令不需要住在 `actionsList` 里。
  *
- * `...args` 是**位置参数**（与 `progression.ts` 的 `runProgressionAction` 一致）：
- * 现在只有 `drinkPotion(potion)` 用得到。
+ * `...args` 是**位置参数**（与 `progression.ts` 的 `runProgressionAction` 一致）；
+ * 剩下的动作都不带参数，形参保留只是为了包装器能复用。
  */
 function runEndgameAction(
     label: string,
@@ -96,19 +89,6 @@ export const endgameActionList: AgentCommand[] = [
         // 传 agent 是为了把主世界传送门坐标记进 Memory Bank（recoverAfterDeath 要用）。
         perform: runEndgameAction('enterEnd', 5, (agent) =>
             logReceipt(agent, () => endgame.enterEndSkill(agent.bot, agent)),
-        ),
-    },
-    {
-        name: '!drinkPotion',
-        description: DESCRIPTION('drinkPotion'),
-        params: {
-            potion: {
-                type: 'string',
-                description: ENDGAME_TOOL_TEXT.drinkPotion.params.potion,
-            },
-        },
-        perform: runEndgameAction('drinkPotion', 2, (agent, potion) =>
-            logReceipt(agent, () => endgame.drinkPotionById(agent.bot, potion)),
         ),
     },
     {

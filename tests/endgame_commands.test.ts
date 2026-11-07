@@ -1,15 +1,13 @@
 /**
  * 末地命令接线层的测试（不连 MC 服务端、不烧 token）。
  *
- * 和末地相关的工具已经删到只剩 `enterEnd`，这里只钉留下来的三条：
- * 1) **接线正确**：registry 里能查到 3 条命令，kind 与超时标记对得上；
- * 2) **参数接线**：`drinkPotion(potion)` 的参数必须真的从工具调用传进实现；
- * 3) **命令真的干活**：用假 agent 跑一遍，核对它写进 bot.output 的回执。
+ * 和末地相关的工具已经删到只剩 `enterEnd` 和 `recoverAfterDeath`，这里钉住：
+ * 1) **接线正确**：registry 里能查到 2 条命令，kind 与超时标记对得上；
+ * 2) **命令真的干活**：用假 agent 跑一遍，核对它写进 bot.output 的回执。
  */
 import { describe, expect, it } from 'vitest';
 import { findCommand, toolDeclarations, toolNames } from '../src/body/commands/registry.js';
 import { ENDGAME_TOOL_TEXT, endgameActionList, endgameQueryList } from '../src/body/commands/endgame.js';
-import { executeToolCall } from '../src/body/commands/execute.js';
 import { TOOL_TEXT } from '../src/shared/prompts.js';
 import {
     countEyesOfEnder,
@@ -18,7 +16,6 @@ import {
 
 const ENDGAME_TOOLS = [
     'enterEnd',
-    'drinkPotion',
     'recoverAfterDeath',
 ] as const;
 
@@ -26,7 +23,7 @@ function stack(name: string, count = 1, extra: Record<string, any> = {}) {
     return { name, count, ...extra };
 }
 
-/** 喝药/吃东西要真的从背包里扣掉（`drinkPotionByKind` 会核对数量，假 bot 不扣等于永远喝不成）。 */
+/** 假 bot 的 consume 会从背包扣一个，用来核对「数量真的变了」这类事实。 */
 function consumeOne(items: any[], held: any): void {
     if (held == null) return;
     const index = items.indexOf(held);
@@ -134,31 +131,18 @@ describe('接线：registry 里和末地相关的 3 条命令', () => {
 
     it('findCommand 带不带 ! 都认', () => {
         expect(findCommand('enterEnd')?.name).toBe('!enterEnd');
-        expect(findCommand('!drinkPotion')?.name).toBe('!drinkPotion');
         expect(findCommand('notAThing')).toBeUndefined();
     });
 
     it('**每个参数都有提示词文案**（否则 check-prompts 会报 SCHEMA PARAM WITHOUT PROMPT TEXT）', () => {
-        const parameterized = new Set(['!drinkPotion']);
         for (const command of [...endgameQueryList, ...endgameActionList]) {
             const params = Object.keys(command.params ?? {});
-            if (!parameterized.has(command.name)) {
-                expect(params, `${command.name} 不该有参数`).toEqual([]);
-            }
+            expect(params, `${command.name} 不该有参数`).toEqual([]);
             for (const param of params) {
                 const tool = command.name.replace(/^!/, '');
                 expect((TOOL_TEXT as any)[tool]?.params?.[param], `${tool}.${param} 缺提示词文案`).toBeTruthy();
             }
         }
-        const declarations = toolDeclarations().filter((d) => (ENDGAME_TOOLS as readonly string[]).includes(d.name));
-        for (const declaration of declarations) {
-            for (const param of Object.keys(declaration.params ?? {})) {
-                expect((TOOL_TEXT as any)[declaration.name]?.params?.[param], `${declaration.name}.${param} 缺提示词文案`).toBeTruthy();
-            }
-        }
-        const drink = declarations.find((d) => d.name === 'drinkPotion');
-        expect(Object.keys(drink?.params ?? {})).toEqual(['potion']);
-        expect(drink?.params?.potion?.optional).toBeUndefined();
     });
 
     it('描述写得够长（它就是模型看到的说明书）并且都提到了关键风险', () => {
@@ -166,8 +150,6 @@ describe('接线：registry 里和末地相关的 3 条命令', () => {
         for (const tool of ENDGAME_TOOLS) {
             expect(ENDGAME_TOOL_TEXT[tool].description.length).toBeGreaterThan(80);
         }
-        expect(ENDGAME_TOOL_TEXT.drinkPotion.description).toContain('药水 id');
-        expect(ENDGAME_TOOL_TEXT.drinkPotion.params.potion).toContain('long_slow_falling');
         expect(ENDGAME_TOOL_TEXT.recoverAfterDeath.description).toContain('5 分钟');
     });
 });
@@ -183,12 +165,12 @@ describe('命令执行（假 agent）', () => {
     it('超时回执说清"超时 ≠ 没做成"，被中断则安静返回', async () => {
         const bot = makeFakeBot({});
         const timedOut = makeFakeAgent(bot, { message: null, interrupted: false, timedout: true });
-        const receipt = (await findCommand('!drinkPotion')?.perform(timedOut, 'long_slow_falling')) as string;
+        const receipt = (await findCommand('!recoverAfterDeath')?.perform(timedOut)) as string;
         expect(receipt).toContain('超时');
 
         const interrupted = makeFakeAgent(bot, { message: null, interrupted: true, timedout: false });
         // interrupted 且没超时 = 无需回执（模型自己知道它在干嘛）
-        expect(await findCommand('!drinkPotion')?.perform(interrupted, 'long_slow_falling')).toBeUndefined();
+        expect(await findCommand('!recoverAfterDeath')?.perform(interrupted)).toBeUndefined();
     });
 
     it('每个 action 都走身体通道（runAction 的参数带 action: 前缀和超时）', async () => {
@@ -215,32 +197,6 @@ describe('命令执行（假 agent）', () => {
     });
 });
 
-describe('drinkPotion 的药水 id 参数（壳不再替模型挑药）', () => {
-    it('potion 真的传到实现：给哪个 id 就只喝哪个', async () => {
-        const potion = stack('potion', 1, { nbt: { value: { Potion: 'minecraft:long_slow_falling' } } });
-        const bot = makeFakeBot({ items: [potion] });
-        const agent = makeFakeAgent(bot);
-        await executeToolCall(agent, 'drinkPotion', { potion: 'long_slow_falling' });
-        expect(bot.calls.map((c: any) => c.fn)).toEqual(['equip', 'consume']);
-        expect(bot.output).toContain('喝下 long_slow_falling');
-    });
-
-    it('没有这瓶 → 报结果并列出背包里现有的药水 id', async () => {
-        const potion = stack('potion', 1, { nbt: { value: { Potion: 'minecraft:regeneration' } } });
-        const bot = makeFakeBot({ items: [potion] });
-        await executeToolCall(makeFakeAgent(bot), 'drinkPotion', { potion: 'fire_resistance' });
-        expect(bot.output).toContain("背包里没有 'fire_resistance' 药水");
-        expect(bot.output).toContain('regeneration');
-        expect(bot.calls).toHaveLength(0);
-    });
-
-    it('drinkPotion 是必填参数：schema 里 potion 在 required 里', () => {
-        const declaration = toolDeclarations().find((d) => d.name === 'drinkPotion');
-        expect(Object.keys(declaration?.params ?? {})).toEqual(['potion']);
-        expect(declaration?.params?.potion?.optional).toBeUndefined();
-        expect((TOOL_TEXT as any).drinkPotion?.params?.potion).toBeTruthy();
-    });
-});
 
 describe('routine 里的几个计数器/技能', () => {
     it('countEyesOfEnder 认得末影之眼', () => {

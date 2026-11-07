@@ -438,31 +438,6 @@ export function findNegativeEffect(effects: EffectInfo[] | undefined): string | 
 }
 
 /** 按**完整药水 id** 在背包里找一瓶能喝的药水（喷溅/滞留药水不收）。 */
-export function findPotionById(items: any[], potionId: unknown): any | null {
-    if (!Array.isArray(items)) return null;
-    const wanted = normalizeName(potionId);
-    if (wanted === '') return null;
-    for (const item of items) {
-        if (normalizeName(item?.name) !== 'potion') continue;
-        if (normalizeName(potionIdOf(item)) === wanted) return item;
-    }
-    return null;
-}
-
-/** 背包里可饮用药水的清单（按**完整药水 id** 计数），没有就是空串。 */
-export function potionInventorySummary(items: any[]): string {
-    if (!Array.isArray(items)) return '';
-    const counts = new Map<string, number>();
-    for (const item of items) {
-        if (normalizeName(item?.name) !== 'potion') continue;
-        const id = normalizeName(potionIdOf(item));
-        const label = id === '' ? 'unknown' : id;
-        const n = typeof item?.count === 'number' && Number.isFinite(item.count) ? Math.max(1, item.count) : 1;
-        counts.set(label, (counts.get(label) ?? 0) + n);
-    }
-    return [...counts.entries()].map(([name, n]) => `${name}×${n}`).join('、');
-}
-
 export function hasActiveEffect(effects: EffectInfo[] | undefined, kind: string): boolean {
     if (!Array.isArray(effects)) return false;
     const wanted = normalizeName(kind);
