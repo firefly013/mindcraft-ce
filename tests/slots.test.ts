@@ -106,5 +106,6 @@ describe('命令参数统一成槽位', () => {
     expect(Object.keys(findCommand('!discard')?.params ?? {})).toEqual(['slot', 'num']);
     expect(Object.keys(findCommand('!consume')?.params ?? {})).toEqual(['slot']);
     expect(Object.keys(findCommand('!useOn')?.params ?? {})).toEqual(['tool_slot', 'target']);
+    expect(Object.keys(findCommand('!throwItem')?.params ?? {})).toEqual(['slot', 'target_x', 'target_y', 'target_z']);
   });
 });

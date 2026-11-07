@@ -92,6 +92,12 @@ export const THROW_PROFILES: Readonly<Record<string, ThrowProfile>> = Object.fre
         projectile: 'arrow',
         note: '箭：要弓，**满蓄力 1000ms** 才射得远（拉不满会软绵绵掉在脚下）。',
     },
+    trident: parabolic(
+        'trident',
+        'trident',
+        'trident',
+        '三叉戟：抛物线，固定初速；扔出去会离手，忠诚附魔会飞回来，激流附魔在水里或雨里是冲刺不是投掷。',
+    ),
     eye_of_ender: {
         item: 'eye_of_ender',
         klass: 'guided',
@@ -252,6 +258,10 @@ export interface ThrowDeps {
     hasItem?: (bot: any, item: string) => boolean;
     /** 装备；返回是否成功。 */
     equip?: (bot: any, item: string) => Promise<boolean>;
+    /** 装备**指定那一件**（按槽位解析出来的物品对象）。 */
+    equipExact?: (bot: any, item: any) => Promise<boolean>;
+    /** 要扔的是哪一件；只对非箭矢类生效（箭矢类装备的是弓/弩）。 */
+    exactItem?: any;
     look?: (bot: any, yaw: number, pitch: number) => Promise<void>;
     activate?: (bot: any) => Promise<void>;
     deactivate?: (bot: any) => Promise<void>;
@@ -352,6 +362,7 @@ export async function throwItemSkill(
         }
     });
     const equip = deps.equip ?? ((b: any, item: string) => skills.equip(b, item));
+    const equipExact = deps.equipExact ?? ((b: any, item: any) => skills.equipExactItem(b, item));
     const look = deps.look ?? ((b: any, yaw: number, pitch: number) => b.look(yaw, pitch, true));
     const activate = deps.activate ?? ((b: any) => b.activateItem());
     const deactivate = deps.deactivate ?? ((b: any) => b.deactivateItem());
@@ -438,7 +449,13 @@ export async function throwItemSkill(
     }
 
     // ── 装备 + 投（先记实体表，扔完才知道哪个是新的） ──
-    const equipped = held == null ? false : await equip(bot, held);
+    // 非箭矢类如果有 exactItem，就装备**这一件**；箭矢类要装备的是弓，不是箭。
+    const equipped =
+        held == null
+            ? false
+            : profile.klass !== 'arrow' && deps.exactItem != null
+              ? await equipExact(bot, deps.exactItem)
+              : await equip(bot, held);
     if (!equipped) {
         return finish(`throwItem：${held ?? profile.item} 没拿到手上。`);
     }

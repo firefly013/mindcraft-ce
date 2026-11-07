@@ -12,15 +12,15 @@ import type { AgentCommand, CommandPerform } from './actions.js';
 export const THROWING_TOOL_TEXT = {
     throwItem: {
         description:
-            '**通用投掷**：鸡蛋/雪球/末影珍珠/喷溅药水/滞留药水/箭/末影之眼都能扔，**必须给目标坐标**，按物品的轨迹类型分别处理：' +
-            '① 抛物线类（egg/snowball/ender_pearl/splash_potion/lingering_potion）——重力、空气阻力、初速和路径遮挡交给弹道库 `minecrafthawkeye` 解算（回执里写清抬头多少度、偏航多少度、库量到的最近距离）；' +
+            '**通用投掷**：鸡蛋/雪球/末影珍珠/喷溅药水/滞留药水/三叉戟/箭/末影之眼都能扔，**必须给目标坐标**，按物品的轨迹类型分别处理：' +
+            '① 抛物线类（egg/snowball/ender_pearl/splash_potion/lingering_potion/trident）——重力、空气阻力、初速和路径遮挡交给弹道库 `minecrafthawkeye` 解算（回执里写清抬头多少度、偏航多少度、库量到的最近距离）；' +
             '② 箭矢类（arrow）——自动找弓、拉满 1000ms 再放箭，弹道同样交给库；' +
             '③ 制导类（eye_of_ender）——**不做弹道解算**，朝目标的水平方向扔出去后**追踪它往哪飞（8 方位）**，别看落点。' +
             '回执**只讲事实**：投前/投后数量（没少就是"没扔出去"）、观测到的投掷物实体飞了多久/在哪消失；' +
             '末影珍珠会等坐标跳变（跳了就报落点并提醒**固定吃 5 点伤害**，没跳就说没传送）；' +
             '弹道库算不出可行弹道时**如实说"打不到"并且不扔**。',
         params: {
-            item_name: '要扔的物品 id（英文）：egg / snowball / ender_pearl / splash_potion / lingering_potion / arrow / eye_of_ender。也认俗称（ender_eye、pearl）。',
+            slot: '要扔的那一格，背包行里的 [N]。三叉戟、药水、珍珠都按这一格拿，同名物品靠槽位区分。',
             target_x: '目标 X（必填）。抛物线类用它解弹道；末影之眼只取水平方向。',
             target_y: '目标 Y（必填）。抛物线类需要高差来算抬枪角度。',
             target_z: '目标 Z（必填）。',
@@ -66,7 +66,7 @@ export const throwingActionList: AgentCommand[] = [
         name: '!throwItem',
         description: DESCRIPTION('throwItem'),
         params: {
-            item_name: { type: 'ItemName', description: THROWING_TOOL_TEXT.throwItem.params.item_name },
+            slot: { type: 'int', description: THROWING_TOOL_TEXT.throwItem.params.slot, domain: [5, 45] },
             target_x: {
                 type: 'float',
                 description: THROWING_TOOL_TEXT.throwItem.params.target_x,
@@ -83,8 +83,15 @@ export const throwingActionList: AgentCommand[] = [
         perform: runThrowingAction(
             'throwItem',
             THROW_TIMEOUT_MIN,
-            (agent, rawItem?: unknown, rawX?: unknown, rawY?: unknown, rawZ?: unknown) =>
-                throwingLib.throwItemSkill(agent.bot, rawItem, rawX, rawY, rawZ),
+            async (agent, rawSlot?: unknown, rawX?: unknown, rawY?: unknown, rawZ?: unknown) => {
+                const item = skills.itemAtSlot(agent.bot, rawSlot);
+                if (item == null) return `第 ${Number(rawSlot)} 格没有东西，没法投掷。`;
+                const name = String(item.name ?? '');
+                if (name === '') return `第 ${Number(rawSlot)} 格读不到物品名，没法投掷。`;
+                return await throwingLib.throwItemSkill(agent.bot, name, rawX, rawY, rawZ, {
+                    exactItem: name === 'arrow' ? undefined : item,
+                });
+            },
         ),
     },
 ];

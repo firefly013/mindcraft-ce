@@ -102,15 +102,16 @@ function harness(
         position: () => ({ ...bot.entity.position }),
         countOf: (_b: any, name: string) => items.filter((item) => item.name === name).reduce((sum, item) => sum + item.count, 0),
         hasItem: (_b: any, name: string) => items.some((item) => item.name === name && item.count > 0),
-        equip: async (_b: any, name: string) => {
+        equip: (_b: any, name: string) => {
             equipped = name;
             bot.heldItem = items.find((item) => item.name === name) ?? null;
-            return bot.heldItem != null;
+            return Promise.resolve(bot.heldItem != null);
         },
-        look: async (_b: any, yaw: number, pitch: number) => {
+        look: (_b: any, yaw: number, pitch: number) => {
             look = { yaw, pitch };
+            return Promise.resolve();
         },
-        activate: async () => {
+        activate: () => {
             activated += 1;
             if (options.onActivate != null) options.onActivate({ items });
             else {
@@ -119,14 +120,16 @@ function harness(
                 if (target != null && target.count > 0) target.count -= 1;
             }
             spawn();
+            return Promise.resolve();
         },
-        deactivate: async () => {
+        deactivate: () => {
             deactivated += 1;
             deactivateAt = clock;
+            return Promise.resolve();
         },
         entities: () => entities,
         health: () => bot.health,
-        sleep: async (ms: number) => {
+        sleep: (ms: number) => {
             clock += ms;
             if (options.projectile != null && stepsLeft > 0) {
                 stepsLeft -= 1;
@@ -139,13 +142,14 @@ function harness(
                     };
                 }
                 if (stepsLeft <= 0) {
-                    delete entities[String(options.projectile.id)];
+                    Reflect.deleteProperty(entities, String(options.projectile.id));
                     if (options.teleportTo != null && !teleported) {
                         teleported = true;
                         bot.entity.position = { ...options.teleportTo };
                     }
                 }
             }
+            return Promise.resolve();
         },
         now: () => clock,
     };
@@ -181,11 +185,15 @@ const FAST = { observeMs: 600, pollMs: 100, teleportWaitMs: 600 };
 
 describe('弹道瞄准：交给 minecrafthawkeye', () => {
     it('档案表：三类各自的分类和武器名都写清了', () => {
-        for (const item of ['egg', 'snowball', 'ender_pearl', 'splash_potion', 'lingering_potion']) {
+        for (const item of ['egg', 'snowball', 'ender_pearl', 'splash_potion', 'lingering_potion', 'trident']) {
             const profile = throwProfileOf(item);
             expect(profile?.klass, item).toBe('parabolic');
             expect(profile?.weapon, item).toBe(item === 'lingering_potion' ? 'splash_potion' : item);
         }
+        const trident = throwProfileOf('trident');
+        expect(trident?.klass).toBe('parabolic');
+        expect(trident?.weapon).toBe('trident');
+        expect(trident?.projectile).toBe('trident');
         const arrow = throwProfileOf('arrow');
         expect(arrow?.klass).toBe('arrow');
         expect(arrow?.weapon).toBe('bow');
@@ -506,12 +514,12 @@ describe('接线：registry 与 schema', () => {
 
     it('参数顺序 = perform 的位置参数顺序；每个 schema 参数都有 TOOL_TEXT 说明', () => {
         expect(Object.keys(findCommand('throwItem')?.params ?? {})).toEqual([
-            'item_name',
+            'slot',
             'target_x',
             'target_y',
             'target_z',
         ]);
-        for (const param of ['item_name', 'target_x', 'target_y', 'target_z']) {
+        for (const param of ['slot', 'target_x', 'target_y', 'target_z']) {
             expect(throwingActionList[0].params?.[param].optional).toBeUndefined(); // 全部必填
         }
 
@@ -519,7 +527,7 @@ describe('接线：registry 与 schema', () => {
         const tool = tools.find((t) => t.function.name === 'throwItem');
         expect(tool).toBeDefined();
         const props = Object.keys((tool?.function.parameters as any).properties ?? {});
-        expect(props).toEqual(['item_name', 'target_x', 'target_y', 'target_z']);
+        expect(props).toEqual(['slot', 'target_x', 'target_y', 'target_z']);
         for (const param of props) {
             expect((TOOL_TEXT as any).throwItem?.params?.[param], `throwItem.${param} 缺 TOOL_TEXT 说明`).toBeTruthy();
         }
