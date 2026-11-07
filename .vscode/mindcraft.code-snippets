@@ -1,0 +1,40 @@
+{
+  // 本项目常用代码片段。在 .ts 里输入前缀 + Tab 展开。
+  "Bot action (runAsAction)": {
+    "prefix": "mcact",
+    "body": [
+      "await this.runAsAction(async () => {",
+      "  $1",
+      "}, ${2:timeout});"
+    ],
+    "description": "mineflayer 动作包装"
+  },
+  "Vitest block": {
+    "prefix": "vtest",
+    "body": [
+      "import { describe, it, expect, vi } from 'vitest';",
+      "",
+      "describe('${1:module}', () => {",
+      "  it('${2:behavior}', () => {",
+      "    $0",
+      "    expect(true).toBe(true);",
+      "  });",
+      "});"
+    ]
+  },
+  "Try/catch with error log": {
+    "prefix": "trylog",
+    "body": [
+      "try {",
+      "  $1",
+      "} catch (err) {",
+      "  this.log?.(${2:this.name}, `$3: ${err}`);",
+      "}"
+    ]
+  },
+  "Async arrow no-floating": {
+    "prefix": "voidpromise",
+    "body": ["void (async () => {", "  $0", "})();"],
+    "description": "符合 eslint-plugin-no-floating-promise 的写法"
+  }
+}

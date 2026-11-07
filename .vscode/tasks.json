@@ -1,0 +1,77 @@
+{
+  // Ctrl+Shift+B 运行构建；其余在「终端 → 运行任务」里选。
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "build (tsc + copy static)",
+      "type": "npm",
+      "script": "build",
+      "group": { "kind": "build", "isDefault": true },
+      "problemMatcher": ["$tsc"],
+      "presentation": { "reveal": "always", "panel": "shared" }
+    },
+    {
+      "label": "typecheck (tsc --noEmit)",
+      "type": "npm",
+      "script": "typecheck",
+      "group": "test",
+      "problemMatcher": ["$tsc"],
+      "presentation": { "reveal": "always", "panel": "shared" }
+    },
+    {
+      "label": "lint (eslint .)",
+      "type": "npm",
+      "script": "lint",
+      "group": "test",
+      "problemMatcher": ["$eslint-stylish"],
+      "presentation": { "reveal": "always", "panel": "shared" }
+    },
+    {
+      "label": "test (vitest + coverage)",
+      "type": "npm",
+      "script": "test",
+      "group": { "kind": "test", "isDefault": true },
+      "problemMatcher": [],
+      "presentation": { "reveal": "always", "panel": "shared" }
+    },
+    {
+      "label": "test:watch",
+      "type": "npm",
+      "script": "test",
+      "args": ["--watch"],
+      "problemMatcher": [],
+      "isBackground": true,
+      "presentation": { "reveal": "always", "panel": "dedicated" }
+    },
+    {
+      "label": "generate:schemas",
+      "type": "npm",
+      "script": "generate:schemas",
+      "problemMatcher": [],
+      "presentation": { "reveal": "always", "panel": "shared" }
+    },
+    {
+      "label": "check:prompts",
+      "type": "npm",
+      "script": "check:prompts",
+      "problemMatcher": [],
+      "presentation": { "reveal": "always", "panel": "shared" }
+    },
+    {
+      "label": "start bot (tsx main.ts)",
+      "type": "shell",
+      "command": "npm run start",
+      "isBackground": true,
+      "problemMatcher": [],
+      "presentation": { "reveal": "always", "panel": "dedicated" }
+    },
+    {
+      "label": "CI 全量门禁 (typecheck+lint+test)",
+      "dependsOrder": "sequence",
+      "dependsOn": ["typecheck (tsc --noEmit)", "lint (eslint .)", "test (vitest + coverage)"],
+      "problemMatcher": [],
+      "group": "test",
+      "presentation": { "reveal": "always", "panel": "shared" }
+    }
+  ]
+}

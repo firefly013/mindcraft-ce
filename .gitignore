@@ -1,4 +1,9 @@
-.vscode/
+.vscode/*
+!.vscode/settings.json
+!.vscode/extensions.json
+!.vscode/launch.json
+!.vscode/tasks.json
+!.vscode/mindcraft.code-snippets
 .idea/
 .workbuddy/
 .git-old/

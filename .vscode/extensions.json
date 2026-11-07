@@ -1,0 +1,30 @@
+{
+  // VSCodium 用 Open VSX 市场。打开本工作区时 VSCodium 会提示安装这些推荐扩展。
+  "recommendations": [
+    "dbaeumer.vscode-eslint",
+    "vitest.explorer",
+    "eamodio.gitlens",
+    "EditorConfig.EditorConfig",
+    "usernamehw.errorlens",
+    "gruntfuggly.todo-tree",
+    "aaron-bond.better-comments",
+    "christian-kohler.path-intellisense",
+    "christian-kohler.npm-intellisense",
+    "streetsidesoftware.code-spell-checker",
+    "yzhang.markdown-all-in-one",
+    "redhat.vscode-yaml",
+    "tamasfe.even-better-toml",
+    "mechatroner.rainbow-csv",
+    "alefragnani.project-manager",
+    "jakob101.RelativePath",
+    "venryx.vscode-jsonc",
+    "mhutchie.git-graph",
+    "donjayamanne.githistory",
+    "tomoki1207.pdf"
+  ],
+  "unwantedRecommendations": [
+    "ms-vscode.vscode-typescript-tslint-plugin",
+    "hookyqr.beautify",
+    "ms-python.python"
+  ]
+}
