@@ -1,12 +1,10 @@
 /**
  * 末地命令接线层的测试（不连 MC 服务端、不烧 token）。
  *
- * 这里钉三件事：
- * 1) **接线正确**：registry 里能查到 10 条命令，kind 与超时标记对得上；
- * 2) **参数接线**：`drinkPotion(potion)` / `reviveDragon(spots)` 这类参数必须
- *    真的从工具调用传进实现（参数名要对齐 schema 与提示词）；
- * 3) **命令真的干活**：用假 agent（actions.runAction 立即执行）跑一遍，核对它写进
- *    bot.output 的回执——模型的工具结果就是从 bot.output 来的。
+ * 和末地相关的工具已经删到只剩 `enterEnd`，这里只钉留下来的三条：
+ * 1) **接线正确**：registry 里能查到 3 条命令，kind 与超时标记对得上；
+ * 2) **参数接线**：`drinkPotion(potion)` 的参数必须真的从工具调用传进实现；
+ * 3) **命令真的干活**：用假 agent 跑一遍，核对它写进 bot.output 的回执。
  */
 import { describe, expect, it } from 'vitest';
 import { findCommand, toolDeclarations, toolNames } from '../src/body/commands/registry.js';
@@ -20,14 +18,9 @@ import {
 } from '../src/body/library/endgame_routine.js';
 
 const ENDGAME_TOOLS = [
-    'endFightStatus',
     'enterEnd',
-    'clearEndCrystals',
-    'bedBombDragon',
-    'dodgeDragonBreath',
     'drinkPotion',
     'recoverAfterDeath',
-    'reviveDragon',
 ] as const;
 
 function stack(name: string, count = 1, extra: Record<string, any> = {}) {
@@ -122,48 +115,32 @@ function makeFakeAgent(bot: any, runActionResult: any = { message: 'ACTION-DONE'
     };
 }
 
-describe('接线：registry 里的 10 条末地命令', () => {
+describe('接线：registry 里和末地相关的 3 条命令', () => {
     it('全部注册进来了，名字与顺序稳定', () => {
         const names = toolNames();
         for (const tool of ENDGAME_TOOLS) expect(names).toContain(tool);
-        expect(endgameQueryList.map((c) => c.name.replace('!', ''))).toEqual(['endFightStatus']);
-        expect(endgameActionList.map((c) => c.name.replace('!', ''))).toEqual(ENDGAME_TOOLS.slice(1));
+        expect(endgameQueryList.map((c) => c.name.replace('!', ''))).toEqual([]);
+        expect(endgameActionList.map((c) => c.name.replace('!', ''))).toEqual([...ENDGAME_TOOLS]);
     });
 
-    it('kind 对：体检是 query（不占身体通道），其余 8 条是 action', () => {
+    it('kind 全对：都是 action + longRunning', () => {
         const declarations = toolDeclarations();
         for (const tool of ENDGAME_TOOLS) {
             const declaration = declarations.find((d) => d.name === tool);
             expect(declaration, `${tool} 没在声明里`).toBeDefined();
-            expect(declaration?.kind).toBe(tool === 'endFightStatus' ? 'query' : 'action');
-            expect(declaration?.longRunning).toBe(tool === 'endFightStatus' ? undefined : true);
+            expect(declaration?.kind).toBe('action');
+            expect(declaration?.longRunning).toBe(true);
         }
     });
 
     it('findCommand 带不带 ! 都认', () => {
-        expect(findCommand('endFightStatus')?.name).toBe('!endFightStatus');
+        expect(findCommand('enterEnd')?.name).toBe('!enterEnd');
         expect(findCommand('!drinkPotion')?.name).toBe('!drinkPotion');
         expect(findCommand('notAThing')).toBeUndefined();
     });
 
-    it('工具调用的 `spots` 参数真的传到了 reviveDragon（按 params 顺序展开成位置参数）', async () => {
-        // 用"坏格式"当探针：只有参数真的传进去了，回执才会说"spots 参数没看懂"。
-        // 动作类工具的回执走 `bot.output`（skills.log），返回值是 runAction 的 message。
-        const bot = makeFakeBot({ stacks: [stack('end_crystal', 4)] });
-        const agent = makeFakeAgent(bot);
-        await executeToolCall(agent, 'reviveDragon', { spots: '3,63,0;哎呀' });
-        expect(bot.output).toContain('spots 参数没看懂');
-
-        bot.output = '';
-        await executeToolCall(agent, 'reviveDragon', {});
-        expect(bot.output).not.toContain('spots 参数没看懂');
-    });
-
     it('**每个参数都有提示词文案**（否则 check-prompts 会报 SCHEMA PARAM WITHOUT PROMPT TEXT）', () => {
-        // 真正的不变式不是"没有参数"，而是"**schema 里有的参数，TOOL_TEXT 里必须有说明**"
-        // —— 这正是 `npm run check:prompts` 第 1b 轮在查的东西。
-        // 现在带参数的末地工具：drinkPotion(potion)（指定药水 id）、reviveDragon(spots)。
-        const parameterized = new Set(['!drinkPotion', '!reviveDragon']);
+        const parameterized = new Set(['!drinkPotion']);
         for (const command of [...endgameQueryList, ...endgameActionList]) {
             const params = Object.keys(command.params ?? {});
             if (!parameterized.has(command.name)) {
@@ -180,9 +157,6 @@ describe('接线：registry 里的 10 条末地命令', () => {
                 expect((TOOL_TEXT as any)[declaration.name]?.params?.[param], `${declaration.name}.${param} 缺提示词文案`).toBeTruthy();
             }
         }
-        // 参数必须写进 schema，否则模型没法显式指定
-        const revive = declarations.find((d) => d.name === 'reviveDragon');
-        expect(Object.keys(revive?.params ?? {})).toEqual(['spots']);
         const drink = declarations.find((d) => d.name === 'drinkPotion');
         expect(Object.keys(drink?.params ?? {})).toEqual(['potion']);
         expect(drink?.params?.potion?.optional).toBeUndefined();
@@ -193,31 +167,13 @@ describe('接线：registry 里的 10 条末地命令', () => {
         for (const tool of ENDGAME_TOOLS) {
             expect(ENDGAME_TOOL_TEXT[tool].description.length).toBeGreaterThan(80);
         }
-        expect(ENDGAME_TOOL_TEXT.bedBombDragon.description).toContain('sleep_in_bed');
-        expect(ENDGAME_TOOL_TEXT.clearEndCrystals.description).toContain('12 格');
         expect(ENDGAME_TOOL_TEXT.drinkPotion.description).toContain('药水 id');
         expect(ENDGAME_TOOL_TEXT.drinkPotion.params.potion).toContain('long_slow_falling');
-        expect(ENDGAME_TOOL_TEXT.dodgeDragonBreath.description).toContain('20 格');
         expect(ENDGAME_TOOL_TEXT.recoverAfterDeath.description).toContain('5 分钟');
-        expect(ENDGAME_TOOL_TEXT.reviveDragon.description).toContain('end_crystal');
     });
 });
 
 describe('命令执行（假 agent）', () => {
-    it('endFightStatus 直接返回一份体检报告', () => {
-        const bot = makeFakeBot({ stacks: [stack('white_bed', 4), stack('obsidian', 64)] });
-        const text = findCommand('endFightStatus')?.perform(makeFakeAgent(bot)) as string;
-        expect(text).toContain('末地通关');
-        expect(text).toContain('现状');
-    });
-
-    it('bedBombDragon 在非末地直接拒绝（不做任何危险动作）', async () => {
-        const bot = makeFakeBot({ dimension: 'overworld' });
-        await findCommand('bedBombDragon')?.perform(makeFakeAgent(bot));
-        expect(bot.output).toContain('不在末地');
-        expect(bot.calls).toHaveLength(0);
-    });
-
     it('recoverAfterDeath 读到记录点就给出回收方案', async () => {
         const bot = makeFakeBot({ dimension: 'overworld' });
         await findCommand('recoverAfterDeath')?.perform(makeFakeAgent(bot));

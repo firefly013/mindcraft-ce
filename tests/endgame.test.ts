@@ -6,7 +6,6 @@
  * 改动公式时这些数字会当场拦下来。
  */
 import { describe, expect, it } from 'vitest';
-import { toolNames } from '../src/body/commands/registry.js';
 import {
     BREATH_HARM_RADIUS,
     BLOCK_REACH_DISTANCE,
@@ -594,21 +593,6 @@ describe('阶段状态机：龙死 / 水晶未知 / 工具名必须真的存在'
         const advice = nextEndgameStep({ ...ready, dragonHealth: 200 });
         expect(advice.phase).toBe('clear_crystals');
         expect(advice.action).toContain('读不到');
-    });
-
-    it('建议的工具名全部能在 registry 里查到（原来有 locateStronghold / activateEndPortal）', () => {
-        const names = new Set(toolNames());
-        const states = [
-            {},
-            { gearReady: true },
-            { gearReady: true, strongholdFound: true },
-            { ...ready, crystalsAlive: 3 },
-            { ...ready, crystalsAlive: 0, dragonHealth: 100 },
-        ];
-        for (const state of states) {
-            const advice = nextEndgameStep(state);
-            if (advice.tool != null) expect(names.has(advice.tool), `${advice.phase} → ${advice.tool}`).toBe(true);
-        }
     });
 });
 

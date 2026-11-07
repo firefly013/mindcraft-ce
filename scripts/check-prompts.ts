@@ -17,7 +17,7 @@ const COMMAND_FILES = [
   './src/body/commands/survival.ts',
   './src/body/commands/progression.ts',
   './src/body/commands/throwing.ts',
-  // 末地命令现在带参数了（`reviveDragon(spots)`：人能直接指定四个放水晶的格子），
+  // 末地命令现在带参数了（`drinkPotion(potion)`：模型要显式给药水 id），
   // 所以这个文件也要进扫描名单，否则 schema 有参数而提示词没有，门禁抓不到。
   './src/body/commands/endgame.ts',
 ];

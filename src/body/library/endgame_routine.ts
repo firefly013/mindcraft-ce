@@ -83,20 +83,11 @@ export interface EndgameToolSpec {
 }
 
 /**
- * 末地通关建议暴露的 9 条工具。**我没有注册它们**，这是给 Lead 的接线清单。
+ * 和末地相关的工具只剩 `enterEnd`，外带两个通用动作（drinkPotion / recoverAfterDeath）。
+ * **我没有注册它们**，这是给 Lead 的接线清单。
  * `kind` 决定进查询表还是动作表（见 `registry.ts` 的注释）。
  */
 export const endgameToolSpecs: EndgameToolSpec[] = [
-    {
-        name: 'endFightStatus',
-        kind: 'query',
-        description:
-            '末地通关体检：**整条链**当前到哪一步（备齐 → 下界刷烈焰棒 → 刷末影珍珠 → 合成末影之眼 → 找要塞 → 激活传送门 → 进末地 → 拆水晶 → 床炸龙 → 收尾），' +
-            '还差哪些装备、眼的材料各差多少（棒/粉/珍珠/眼）、还有几颗水晶、龙还剩多少血、有没有故意踩进龙息云。' +
-            '**进末地前先调这个**，它会把"没带缓降药水""还没刷够烈焰棒"这种要命的缺口直接点出来。',
-        params: {},
-        backing: '新增查询命令；纯读 bot 状态（含背包材料计数与 nether_bricks 探针），不占身体通道。',
-    },
     {
         name: 'enterEnd',
         kind: 'action',
@@ -107,39 +98,6 @@ export const endgameToolSpecs: EndgameToolSpec[] = [
         params: {},
         timeoutMinutes: 5,
         backing: '复用 world.getNearestBlock/getNearestBlocksWhere + skills.equip/useToolOnBlock + throwHeld；维度切换判定照抄 nether_portal.ts 的 dimensionChanged。',
-    },
-    {
-        name: 'clearEndCrystals',
-        kind: 'action',
-        description:
-            '拆末地水晶：地面能看到的用弓射（**退不到 12 格外就不放箭**，只告诉你该退到哪），笼中那两颗用 TNT 从顶上掏（点完按爆炸半径 12 格后撤）或上柱子拆铁栏杆。' +
-            '**只要还剩一颗，龙就一直回血**，所以这一步做完才该去打龙。每次调用只处理一颗，回执会报"还剩几颗"。',
-        params: {
-            crystal_id: { type: 'string', description: '可选。只拆指定 id 的那颗（快照实体表里的 #N）。不给就按 plan 的推荐顺序拆下一颗。', optional: true },
-        },
-        timeoutMinutes: 5,
-        backing: '新增动作命令；射箭复用 skills.attackEntity/equip（并核对箭数），TNT 复用 skills.placeBlock + ignite 许可，拆栏杆复用 skills.mineBlockAt。',
-    },
-    {
-        name: 'bedBombDragon',
-        kind: 'action',
-        description:
-            '床炸末影龙，**一次一张床**：龙低头停在 (0,64,0) 时，用 bot.blockAt 探真实地形选好"床位/掩体/站位" → 放床 → 床边放一块挡爆风的方块 → 站到掩体后 → 复检 → 点床 → 退到 10 格外。' +
-            '**安全闸门是硬的**：血量 <10、饥饿 <6、没有掩体、够不着床、自伤超过一半血、龙离床 >3 格，任一成立都直接拒绝执行并说清原因。' +
-            '在末地点床 = 尝试睡觉 = 爆炸，必须先 allowDangerousOps(ops="sleep_in_bed", calls=1)（一张床 = 一次授权）。',
-        params: {},
-        timeoutMinutes: 3,
-        backing: '新增动作命令；选址 planBedBombSite（bot.blockAt 探方块），闸门 planBedBombing，放床/掩体复用 skills.placeBlock，引爆 TODO(真机) bot.sleep / activateBlock。',
-    },
-    {
-        name: 'dodgeDragonBreath',
-        kind: 'action',
-        description:
-            '躲龙息：按地上的紫色云和"龙头低停时 20 格内会被喷"两条规则算出该往哪跑，然后跑过去。' +
-            '已经站在云里时就近方向冲刺出去。',
-        params: {},
-        timeoutMinutes: 2,
-        backing: '新增动作命令；计算在 endgame.planBreathEscape，执行复用 skills.moveBy / goToPosition。',
     },
     {
         name: 'drinkPotion',
@@ -161,17 +119,6 @@ export const endgameToolSpecs: EndgameToolSpec[] = [
         params: {},
         timeoutMinutes: 10,
         backing: '新增动作命令；纯计算在 endgame.planRecovery，执行复用 goToCoordinates / enterEnd，传送门坐标来自 enterEnd 记的 overworld_end_portal。',
-    },
-    {
-        name: 'reviveDragon',
-        kind: 'action',
-        description:
-            '**把已经打完的末影龙叫回来**（这个世界可能已经通关了，拆水晶/床炸那段代码就没机会跑）：往返回门基座环的 4 个缺口各放一颗末影水晶（要 4 颗 end_crystal）。' +
-            '它会从世界读返回门位置（end_portal 方块 → 龙蛋柱 → Memory Bank），从真实方块推导 4 个缺口（不写死 (0,62,0)），**放一颗复验一颗**；' +
-            '缺口被占 / 水晶没放成 / 龙没回来都会停手并如实说，绝不把 4 颗水晶一次烧光。放完柱子上的 10 颗水晶也会一起回来——先 clearEndCrystals 再 bedBombDragon。',
-        params: {},
-        timeoutMinutes: 3,
-        backing: '新增动作命令；找门 world.getNearestBlock(end_portal/dragon_egg) + Memory Bank，缺口纯逻辑在 endgame.planDragonReviveSpots，放置用 skills.placeBlock，验证看新出现的 end_crystal 实体（1.20 里它不是方块）。',
     },
 ];
 
