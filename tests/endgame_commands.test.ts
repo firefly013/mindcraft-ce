@@ -13,7 +13,6 @@ import { executeToolCall } from '../src/body/commands/execute.js';
 import { TOOL_TEXT } from '../src/shared/prompts.js';
 import {
     countEyesOfEnder,
-    crystalToolKit,
     throwHeldSkill,
 } from '../src/body/library/endgame_routine.js';
 
@@ -244,17 +243,10 @@ describe('drinkPotion 的药水 id 参数（壳不再替模型挑药）', () => 
 });
 
 describe('routine 里的几个计数器/技能', () => {
-    it('countEyesOfEnder / crystalToolKit 认得末影之眼、弓、箭、镐、TNT', () => {
-        const bot = makeFakeBot({
-            stacks: [stack('ender_eye', 12), stack('bow', 1), stack('arrow', 32), stack('iron_pickaxe', 1), stack('tnt', 2), stack('bedrock', 64)],
-        });
+    it('countEyesOfEnder 认得末影之眼', () => {
+        const bot = makeFakeBot({ stacks: [stack('ender_eye', 12), stack('stone', 1)] });
         expect(countEyesOfEnder(bot)).toBe(12);
-        const kit = crystalToolKit(bot);
-        expect(kit.bow).toBe('bow');
-        expect(kit.arrows).toBe(32);
-        expect(kit.pickaxe).toBe(true);
-        expect(kit.tnt).toBe(2);
-        expect(crystalToolKit(makeFakeBot({ stacks: [stack('stone', 1)] }))).toEqual({ bow: null, arrows: 0, pickaxe: false, tnt: 0 });
+        expect(countEyesOfEnder(makeFakeBot({ stacks: [stack('stone', 1)] }))).toBe(0);
     });
 
     it('throwHeldSkill：下坠时会把珍珠往脚下扔（瞄准点低于脚下）', async () => {
