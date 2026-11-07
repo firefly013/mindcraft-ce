@@ -40,12 +40,17 @@ describe('containerContents：严格按 inventoryStart 分界', () => {
 });
 
 describe('discard：原地丢不移动，并回报落点', () => {
-  it('不调用任何寻路/移动，toss 在当前位置发生，回执带起点/落点', async () => {
-    const item = { type: 1, name: 'water_bucket', count: 1 };
+describe('discard：原地丢不移动，并回报落点', () => {
+  it('不调用任何寻路/移动，按槽位丢，回执带起点/落点', async () => {
+    const item = { type: 1, name: 'water_bucket', count: 1, slot: 36 };
+    const slots: any[] = new Array(46).fill(null);
+    slots[36] = item;
     const bot: any = {
       output: '',
-      inventory: { findInventoryItem: () => item },
-      toss: vi.fn(async () => {}),
+      inventory: { slots },
+      heldItem: null,
+      registry: { blocksByName: {} },
+      tossStack: vi.fn(async () => {}),
       entity: {
         yaw: 0,
         position: {
@@ -71,12 +76,13 @@ describe('discard：原地丢不移动，并回报落点', () => {
     const command = findCommand('discard');
     expect(command).toBeDefined();
     if (command == null) throw new Error('discard command missing');
-    await command.perform(agent, 'water_bucket', 1);
-    expect(bot.toss).toHaveBeenCalledTimes(1);
+    await command.perform(agent, 36, 1);
+    expect(bot.tossStack).toHaveBeenCalledTimes(1);
     expect(bot.pathfinder.setGoal).not.toHaveBeenCalled();
     expect(bot.pathfinder.setMovements).not.toHaveBeenCalled();
-    expect(bot.output).toContain('Discarded 1 water_bucket.');
+    expect(bot.output).toContain('从背包第 36 格丢了 1 个 water_bucket');
     expect(bot.output).toContain('落点');
     expect(bot.output).toContain('1.25');
   });
+});
 });

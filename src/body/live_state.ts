@@ -279,10 +279,15 @@ export function sampleLiveState(ctx: SampleContext): LiveState {
     // 当前手持那格前面标 `*`，免得模型再靠猜。
     const heldSlot = Number((bot as { quickBarSlot?: unknown }).quickBarSlot);
     const heldIndex = Number.isFinite(heldSlot) ? 36 + heldSlot : -1;
-    for (let i = 9; i <= 44; i++) {
+    // **背包、快捷栏、护甲、副手全部列出来**：`slot` 参数现在用的是这套绝对编号，
+    // 模型必须能看见 5–8（护甲）和 45（副手），否则想换头盔时没有地址可写。
+    for (let i = 5; i <= 45; i++) {
       const n = slotName(i);
-      if (n == null) free++;
-      else packItems.push(`${i === heldIndex ? '*' : ''}[${i}]${n}`);
+      if (n == null) continue;
+      packItems.push(`${i === heldIndex ? '*' : ''}[${i}]${n}`);
+    }
+    for (let i = 9; i <= 44; i++) {
+      if (slotName(i) == null) free++;
     }
     empty.backpack = {
       synced: inventorySynced,

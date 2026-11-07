@@ -40,8 +40,8 @@ describe('useBlock 拆分后的工具清单', () => {
   it('参数顺序固定，命令按参数名取值不会错位', () => {
     expect(Object.keys(findCommand('!smelt')?.params ?? {})).toEqual(['input', 'output', 'type', 'coords']);
     expect(Object.keys(findCommand('!combineAtAnvil')?.params ?? {})).toEqual([
-      'input1',
-      'input2',
+      'slot1',
+      'slot2',
       'output',
       'type',
       'coords',

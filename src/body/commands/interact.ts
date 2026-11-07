@@ -41,7 +41,7 @@ import { describeCraftShortfallForBot } from '../library/craft_shortfall.js';
 import { corridorThreatVerdict, threatsNearCorridor } from '../safety/path_threat.js';
 import Vec3 from 'vec3';
 import { td, tp } from '../../shared/prompts.js';
-import { findInventoryItemByLabel, isAnvilBlockName, itemDisplayName } from '../library/item_variants.js';
+import { isAnvilBlockName, itemDisplayName } from '../library/item_variants.js';
 import type { AgentCommand } from './actions.js';
 
 /** 物品规格：`{name, count}` 或裸名字。 */
@@ -1164,21 +1164,15 @@ async function moveOneItemIntoAnvilSlot(bot: any, window: any, item: any, destSl
 async function combineAtAnvil(
   agent: any,
   located: { x: number; y: number; z: number },
-  inputs: readonly ItemSpec[],
+  first: any,
+  second: any,
   outputSpec: ItemSpec | null,
   lines: string[],
 ): Promise<string> {
   const bot = agent.bot;
-  if (inputs.length !== 2) {
-    return renderReport(lines, `没做到铁砧合成：需要 2 个输入，收到 ${inputs.length} 个。`);
+  if (first == null || second == null) {
+    return renderReport(lines, '没做到铁砧合成：两格输入里有一格是空的。');
   }
-  const registry = bot?.registry ?? null;
-  const firstSpec = inputs[0] as ItemSpec;
-  const secondSpec = inputs[1] as ItemSpec;
-  const first = findInventoryItemByLabel(bot, firstSpec.name, registry);
-  if (first == null) return renderReport(lines, `没做到铁砧合成：背包里没有 ${firstSpec.name}。`);
-  const second = findInventoryItemByLabel(bot, secondSpec.name, registry);
-  if (second == null) return renderReport(lines, `没做到铁砧合成：背包里没有 ${secondSpec.name}。`);
   const block = bot.blockAt?.(new Vec3(located.x, located.y, located.z));
   if (block == null) return renderReport(lines, '没做到铁砧合成：读不到铁砧那一格。');
   if (typeof bot.openAnvil !== 'function') return renderReport(lines, '没做到铁砧合成：客户端没有 openAnvil。');
@@ -2153,12 +2147,6 @@ async function performBlockTransaction(
         return renderReport(lines);
       }
 
-      if (isAnvilBlockName(type)) {
-        if (located == null) return '没做到铁砧合成：定位不到铁砧。';
-        const outputSpec = parsedOut.items[0] ?? null;
-        return combineAtAnvil(agent, located, parsedIn.items, outputSpec, lines);
-      }
-
       // process：output 是断言。
       const wanted = parsedOut.items[0];
       if (wanted == null) return '这次操作做不到：加工缺少 output。';
@@ -2565,26 +2553,31 @@ const interactCommands: AgentCommand[] = [
     name: '!combineAtAnvil',
     description: td('combineAtAnvil'),
     params: {
-      input1: { type: 'string', description: tp('combineAtAnvil', 'input1') },
-      input2: { type: 'string', description: tp('combineAtAnvil', 'input2') },
+      slot1: { type: 'int', description: tp('combineAtAnvil', 'slot1'), domain: [5, 45] },
+      slot2: { type: 'int', description: tp('combineAtAnvil', 'slot2'), domain: [5, 45] },
       output: { type: 'string', description: tp('combineAtAnvil', 'output'), optional: true },
       type: { type: 'BlockOrItemName', description: tp('combineAtAnvil', 'type'), optional: true },
       coords: { type: 'string', description: tp('combineAtAnvil', 'coords'), optional: true },
     },
     perform: async function (
       agent: any,
-      input1: unknown,
-      input2: unknown,
+      slot1: number,
+      slot2: number,
       output?: unknown,
       type?: unknown,
       coords?: unknown,
     ): Promise<string> {
-      const first = typeof input1 === 'string' ? input1.trim() : '';
-      const second = typeof input2 === 'string' ? input2.trim() : '';
-      if (first === '' || second === '') return 'combineAtAnvil 需要 input1 和 input2 两件物品。';
+      const first = skills.itemAtSlot(agent.bot, slot1);
+      if (first == null) return `第 ${slot1} 格没有东西，铁砧合成需要两件输入。`;
+      const second = skills.itemAtSlot(agent.bot, slot2);
+      if (second == null) return `第 ${slot2} 格没有东西，铁砧合成需要两件输入。`;
+      const parsedOut = parseItems(output);
+      if (parsedOut.error != null) return `output 参数不对，${parsedOut.error}`;
       const resolved = resolveBlockType(agent, type, coords, ANVIL_TYPES, '铁砧');
       if (typeof resolved === 'string') return resolved;
-      return await performBlockTransaction(agent, resolved.type, resolved.coords, `${first}, ${second}`, output);
+      const located = await locateBlockForAction(agent, resolved.type, resolved.coords);
+      if (typeof located === 'string') return located;
+      return await combineAtAnvil(agent, located, first, second, parsedOut.items[0] ?? null, []);
     },
   },
   {

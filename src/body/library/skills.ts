@@ -792,7 +792,7 @@ async function equipHighestAttack(bot: any): Promise<void> {
 
 /**
  * 背包里"最能打"的那件武器名；没有武器返回 null。**和 `equipHighestAttack` 同一套排序**，
- * 只是把名字读出来——用来在"打不死"的回执里给一条 `equip(item_name=…)` 的具体建议。
+ * 只是把名字读出来——用来在"打不死"的回执里给一条 `equip(slot=…)` 的具体建议。
  */
 export function bestWeaponInInventory(bot: any): string | null {
     try {
@@ -2750,6 +2750,158 @@ export async function failPlacementAfterClear(
     }
 }
 
+/**
+ * 按**背包槽位**取物品对象。
+ *
+ * 槽位就是 Live State 背包行里的 `[N]`，也覆盖护甲 5–8 和副手 45。
+ * 返回 null 表示这一格没有东西，或者槽位号不合法；调用方负责把 null 说成事实。
+ */
+export function itemAtSlot(bot: any, rawSlot: unknown): any | null {
+    const slot = Number(rawSlot);
+    if (!Number.isInteger(slot) || slot < 5 || slot > 45) return null;
+    try {
+        return bot?.inventory?.slots?.[slot] ?? null;
+    } catch {
+        return null;
+    }
+}
+
+/** 槽位里的物品应该装到哪个身体部位。 */
+function bodyPartForItem(name: string): 'hand' | 'head' | 'torso' | 'legs' | 'feet' | 'off-hand' {
+    if (name.includes('leggings')) return 'legs';
+    if (name.includes('boots')) return 'feet';
+    if (name.includes('helmet')) return 'head';
+    if (name.includes('chestplate') || name.includes('elytra')) return 'torso';
+    if (name.includes('shield')) return 'off-hand';
+    return 'hand';
+}
+
+/**
+ * 按背包槽位装备那一件物品。
+ *
+ * 和名字版 `equip` 的区别是**精确到实例**：两把同名镐、一本附魔书，靠槽位就能
+ * 分开。装备后槽位会变（会和快捷栏交换），这是原版行为，回执会把取用槽位写出来。
+ */
+export async function equipSlot(bot: any, rawSlot: unknown): Promise<boolean> {
+    const slot = Number(rawSlot);
+    const item = itemAtSlot(bot, slot);
+    if (item == null) {
+        log(bot, `第 ${Number.isInteger(slot) ? slot : rawSlot} 格没有东西，没法装备。`);
+        return false;
+    }
+    const name = String(item.name ?? 'unknown');
+    const part = bodyPartForItem(name);
+    if (part === 'hand' && Number(bot?.heldItem?.slot) === slot) {
+        log(bot, `第 ${slot} 格的 ${name} 已经拿在手上了，不用再换一次。`);
+        return true;
+    }
+    try {
+        await bot.equip(item, part);
+    } catch (error: unknown) {
+        log(bot, `没装备上第 ${slot} 格的 ${name}，错误是 ${error instanceof Error ? error.message : String(error)}。`);
+        return false;
+    }
+    const where = slot >= 36 && slot <= 44 ? '快捷栏' : slot >= 5 && slot <= 8 ? '装备栏' : '背包';
+    const bodyText = part === 'legs' ? '腿上' : part === 'feet' ? '脚上' : part === 'head' ? '头上' : part === 'torso' ? '身上' : part === 'off-hand' ? '副手' : '手上';
+    log(bot, `把${where}第 ${slot} 格的 ${name} 装备到了${bodyText}。`);
+    return true;
+}
+
+/**
+ * 按背包槽位丢弃那一格。
+ *
+ * 整叠丢弃走 `tossStack`，精确到那一格；只丢一部分时先把这叠拿到光标上，
+ * 再逐次点窗口外面，最后把剩下的放回原格，避免 `toss(type)` 误丢同类型的另一叠。
+ */
+export async function discardSlot(bot: any, rawSlot: unknown, num: number = -1): Promise<boolean> {
+    const slot = Number(rawSlot);
+    const item = itemAtSlot(bot, slot);
+    if (item == null) {
+        log(bot, `第 ${Number.isInteger(slot) ? slot : rawSlot} 格没有东西，没法丢弃。`);
+        return false;
+    }
+    if ((slot >= 5 && slot <= 8) || slot === 45) {
+        log(bot, `第 ${slot} 格是穿在身上的装备，先换到背包再丢。`);
+        return false;
+    }
+    const name = String(item.name ?? 'unknown');
+    const have = Math.max(1, Number(item.count ?? 1));
+    const wanted = num === -1 ? have : Math.max(1, Math.min(have, Math.floor(num)));
+    const packBefore = world.getInventoryCounts(bot);
+    try {
+        if (wanted >= have) {
+            await bot.tossStack(item);
+        } else if (typeof bot.clickWindow === 'function') {
+            await bot.clickWindow(slot, 0, 0);
+            for (let i = 0; i < wanted; i++) await bot.clickWindow(-999, 1, 0);
+            await bot.clickWindow(slot, 0, 0);
+        } else {
+            log(bot, `第 ${slot} 格有 ${have} 个 ${name}，这个客户端不支持只丢 ${wanted} 个；整叠没动。`);
+            return false;
+        }
+    } catch (error: unknown) {
+        log(bot, `没丢掉第 ${slot} 格的 ${name}，错误是 ${error instanceof Error ? error.message : String(error)}。`);
+        return false;
+    }
+    log(bot, `从背包第 ${slot} 格丢了 ${wanted} 个 ${name}（原来有 ${have} 个）。`);
+    const advice = inventoryLossAdvice({
+        action: 'discard',
+        before: packBefore,
+        after: world.getInventoryCounts(bot),
+        isFood: (itemName) => foodValueOf(itemName) != null,
+        isPlaceable: (itemName) => bot?.registry?.blocksByName?.[itemName]?.boundingBox === 'block',
+    });
+    if (advice.text !== '') log(bot, advice.text);
+    return true;
+}
+
+/** 按背包槽位吃/喝那一件。 */
+export async function consumeSlot(bot: any, rawSlot: unknown): Promise<boolean> {
+    const item = itemAtSlot(bot, rawSlot);
+    if (item == null) {
+        log(bot, `第 ${Number(rawSlot)} 格没有东西，没法吃喝。`);
+        return false;
+    }
+    const name = String(item.name ?? '');
+    if (name === '') {
+        log(bot, `第 ${Number(rawSlot)} 格读不到物品名，没法吃喝。`);
+        return false;
+    }
+    return await consume(bot, name, { exactItem: item });
+}
+
+/**
+ * 按背包槽位拿工具去用。
+ *
+ * `target` 的解析与名字版 `useToolOn` 完全一致，只是装备时精确到这一格。
+ */
+export async function useToolOnSlot(bot: any, rawSlot: unknown, targetName: string): Promise<boolean> {
+    const item = itemAtSlot(bot, rawSlot);
+    if (item == null) {
+        log(bot, `第 ${Number(rawSlot)} 格没有东西，没法当工具用。`);
+        return false;
+    }
+    const name = String(item.name ?? '');
+    if (name === '') {
+        log(bot, `第 ${Number(rawSlot)} 格读不到物品名，没法当工具用。`);
+        return false;
+    }
+    return await useToolOn(bot, name, targetName, item);
+}
+
+/** 把指定物品对象拿到主手；失败只写回执，不抛。 */
+export async function equipExactItem(bot: any, item: any): Promise<boolean> {
+    if (item == null) return false;
+    if (Number(bot?.heldItem?.slot) === Number(item.slot) && bot?.heldItem?.name === item.name) return true;
+    try {
+        await bot.equip(item, 'hand');
+        return true;
+    } catch (error: unknown) {
+        log(bot, `没把 ${String(item?.name ?? '物品')} 拿到手上，错误是 ${error instanceof Error ? error.message : String(error)}。`);
+        return false;
+    }
+}
+
 export async function equip(bot: any, itemName: string): Promise<boolean> {
     /**
      * Equip the given item to the proper body part, like tools or armor.
@@ -3229,6 +3381,8 @@ export interface ConsumeOptions {
     retryBackoffMs?: number;
     /** 最多尝试次数。 */
     maxAttempts?: number;
+    /** 指定要吃的**那一件**（按背包槽位解析出来的物品对象）。 */
+    exactItem?: any;
 }
 
 export interface FoodState {
@@ -3379,6 +3533,13 @@ export async function consume(bot: any, itemName: string = "", options: ConsumeO
     /** 每次都重新取：重试前必须确认东西**真的还在背包里**。 */
     const findItem = (): any => {
         if (wanted === '') return null;
+        const exact = options.exactItem;
+        if (exact != null) {
+            const slot = Number(exact.slot);
+            const current = Number.isInteger(slot) ? bot?.inventory?.slots?.[slot] : null;
+            if (current != null && String(current.name ?? '') === wanted) return current;
+            return null;
+        }
         try {
             const found = bot?.inventory?.findInventoryItem?.(wanted);
             if (found != null) return found;
@@ -6161,7 +6322,7 @@ export async function goToSurface(bot: any): Promise<boolean> {
     log(bot, 'Reached the surface at y=' + targetY + '.');
     return true;
 }
-export async function useToolOn(bot: any, toolName: string, targetName: string): Promise<boolean> {
+export async function useToolOn(bot: any, toolName: string, targetName: string, exactItem?: any): Promise<boolean> {
     /**
      * Equip a tool and use it on the nearest target.
      * @param {MinecraftBot} bot
@@ -6176,8 +6337,11 @@ export async function useToolOn(bot: any, toolName: string, targetName: string):
     // 的条件——那是 `(!undefined) === 'creative'` 即 `true === 'creative'`，**恒为
     // false**，于是这个分支从来没进过。结果：模型没带桶却去装水，一条回执都没有
     // （"既不说成功也不说失败"，它因此白试了两次）。
-    const hasItem: boolean = toolName === 'hand' ||
-        ((bot.inventory?.slots ?? []) as Array<{ name?: string }>).some((slot) => slot?.name === toolName);
+    const hasItem: boolean =
+        exactItem != null
+            ? String(bot?.inventory?.slots?.[Number(exactItem.slot)]?.name ?? '') === toolName
+            : toolName === 'hand' ||
+              ((bot.inventory?.slots ?? []) as Array<{ name?: string }>).some((slot) => slot?.name === toolName);
     if (!hasItem && bot.game?.gameMode !== 'creative') {
         log(bot, `You do not have any ${toolName} to use.（背包里没有这个东西，先拿到手再说）`);
         return false;
@@ -6195,7 +6359,7 @@ export async function useToolOn(bot: any, toolName: string, targetName: string):
     if (toolName === 'flint_and_steel' && !allowDangerousOp(bot, 'ignite')) return false;
 
     if (targetName === 'nothing') {
-        const equipped: boolean = await equip(bot, toolName);
+        const equipped: boolean = exactItem != null ? await equipExactItem(bot, exactItem) : await equip(bot, toolName);
         if (!equipped) {
             return false;
         }
@@ -6212,7 +6376,7 @@ export async function useToolOn(bot: any, toolName: string, targetName: string):
             await bot.unequip('hand');
         }
         else {
-            const equipped: boolean = await equip(bot, toolName);
+            const equipped: boolean = exactItem != null ? await equipExactItem(bot, exactItem) : await equip(bot, toolName);
             if (!equipped) return false;
         }
         // **交互前自动面向目标**：不依赖模型先 turnView；1.2 格内失败很多时候只是没看它。
@@ -6264,13 +6428,13 @@ export async function useToolOn(bot: any, toolName: string, targetName: string):
             log(bot, `Could not find any ${targetName}.`);
             return false;
         }
-        return await useToolOnBlock(bot, toolName, block);
+        return await useToolOnBlock(bot, toolName, block, exactItem);
     }
 
     return true;
  }
 
-  export async function useToolOnBlock(bot: any, toolName: string, block: any): Promise<boolean> {
+  export async function useToolOnBlock(bot: any, toolName: string, block: any, exactItem?: any): Promise<boolean> {
     /**
      * Use a tool on a specific block.
      * @param {MinecraftBot} bot
@@ -6337,7 +6501,7 @@ export async function useToolOn(bot: any, toolName: string, targetName: string):
         }
     }
 
-    const equipped: boolean = await equip(bot, toolName);
+    const equipped: boolean = exactItem != null ? await equipExactItem(bot, exactItem) : await equip(bot, toolName);
 
     if (!equipped) {
         log(bot, `Could not equip ${toolName}.`);

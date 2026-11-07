@@ -148,42 +148,33 @@ describe('铁砧规划', () => {
 });
 
 describe('combineAtAnvil 铁砧合成', () => {
-  it('按显示标签选中那本附魔书，放进铁砧并取回产物', async () => {
+  it('按槽位放进指定的一本书，不按名字拿第一本', async () => {
     const { bot, placed } = makeAnvilBot();
     const mending = bot.inventory.items()[1];
     const sharpBook = bot.inventory.items()[2];
     const text = (await findCommand('!combineAtAnvil')?.perform(
       makeAgent(bot),
-      'diamond_sword',
-      'enchanted_book[mending 1]',
+      9,
+      10,
       'diamond_sword',
       'anvil',
       '0,64,0',
     )) as string;
     expect(text).toContain('铁砧产出了 diamond_sword，一共 1 个。');
-    expect(text).toContain('铁砧产出了 diamond_sword，一共 1 个。');
-    expect(text).toContain('铁砧产出了 diamond_sword，一共 1 个。');
-    // 放进去的是 mending 那本，不是 sharpness 那本。
     expect(placed).toContain(mending);
     expect(placed).not.toContain(sharpBook);
   });
 
-  it('标签对不上 → 如实报背包里没有，不拿别的书凑数', async () => {
+  it('第二格是空的 ⇒ 如实报空槽，不拿别的书凑数', async () => {
     const { bot } = makeAnvilBot();
     const text = (await findCommand('!combineAtAnvil')?.perform(
       makeAgent(bot),
-      'diamond_sword',
-      'enchanted_book[efficiency 1]',
+      9,
+      20,
       undefined,
       'anvil',
       '0,64,0',
     )) as string;
-    expect(text).toContain('背包里没有 enchanted_book[efficiency 1]');
-  });
-
-  it('只给一件输入 → 说清铁砧要两件（不是悄悄当合成台用）', async () => {
-    const { bot } = makeAnvilBot();
-    const text = (await findCommand('!combineAtAnvil')?.perform(makeAgent(bot), 'diamond_sword', '', undefined, 'anvil', '0,64,0')) as string;
-    expect(text).toContain('需要 input1 和 input2');
+    expect(text).toContain('第 20 格没有东西');
   });
 });

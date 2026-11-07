@@ -894,15 +894,15 @@ function waterLine(a: FoodRouteAssets): string {
 /** 三条可再生路线（回执里逐条列出来；主行动只挑一条，见 `foodRoutePrimary`）。 */
 export function foodRouteLines(a: FoodRouteAssets): string[] {
     const rod = a.hasFishingRod
-        ? '① **钓鱼**（最稳、可再生）：你已经有 fishing_rod → 到水边 useOn(tool_name="fishing_rod", target="water")；一条鱼 2 点食物。'
-        : '① **钓鱼**（最稳、可再生）：先做竿 craft(input="3 stick, 2 string", output="1 fishing_rod")（3 木棍 + 2 线）→ 到水边 useOn(tool_name="fishing_rod", target="water")；一条鱼 2 点食物。';
+        ? '① **钓鱼**（最稳、可再生）：你已经有 fishing_rod → 到水边 useOn(tool_slot=<钓鱼竿所在格>, target="water")；一条鱼 2 点食物。'
+        : '① **钓鱼**（最稳、可再生）：先做竿 craft(input="3 stick, 2 string", output="1 fishing_rod")（3 木棍 + 2 线）→ 到水边 useOn(tool_slot=<钓鱼竿所在格>, target="water")；一条鱼 2 点食物。';
     const farm =
         a.seeds > 0
             ? `② **种小麦**（背包里有 ${a.seeds} 个种子）：木锄 → 在泥土/草方块上锄地 → 播种；3 个小麦做 1 个面包。`
             : '② **种小麦**：背包里没有种子（打草会掉 wheat_seeds）——有种子就能自给：木锄 → 锄地 → 播种，3 小麦做面包。';
     const rotten =
         a.rottenFlesh > 0
-            ? `③ **腐肉**（最后手段，你有 ${a.rottenFlesh} 个）：consume(item_name="rotten_flesh")——会附带饥饿效果，**只当应急**，别当主食。`
+            ? `③ **腐肉**（最后手段，你有 ${a.rottenFlesh} 个）：consume(slot=<腐肉所在格>)——会附带饥饿效果，**只当应急**，别当主食。`
             : '③ **腐肉**：僵尸掉的，会附带饥饿效果，只当最后手段（背包里现在没有）。';
     return ['可再生食物路线（别再空跑找动物）：', rod, farm, rotten, waterLine(a)];
 }
@@ -928,7 +928,7 @@ export function foodRoutePrimary(a: FoodRouteAssets): string {
             return `goToCoordinates(x=${Math.round(a.water.position.x)}, y=${Math.round(a.water.position.y)}, z=${Math.round(a.water.position.z)}, closeness=3)`;
         }
     }
-    if (a.rottenFlesh > 0) return 'consume(item_name="rotten_flesh")';
+    if (a.rottenFlesh > 0) return 'consume(slot=<腐肉所在格>)';
     if (a.water != null) {
         return `goToCoordinates(x=${Math.round(a.water.position.x)}, y=${Math.round(a.water.position.y)}, z=${Math.round(a.water.position.z)}, closeness=3)`;
     }
@@ -2306,7 +2306,7 @@ export function tunnelNextAction(o: TunnelOutcome): string {
             return 'moveAway(distance=3)';
         case 'no_tool':
         case 'tool_low': // 历史停止码：不再产生，仅为兼容旧回执保留
-            return o.hintEquip != null ? `equip(item_name="${o.hintEquip}")` : 'stats(type="inventory")';
+            return o.hintEquip != null ? `equip(slot=<${o.hintEquip} 所在格>)` : 'stats(type="inventory")';
         case 'low_health':
         case 'damaged':
             return 'stats(type="body")';
@@ -2315,7 +2315,7 @@ export function tunnelNextAction(o: TunnelOutcome): string {
             return 'stats(type="body")';
         case 'stalled':
             // **绝不把同一个会空转的调用原样丢回去**：先看清身体状态/手上工具。
-            return o.hintEquip != null ? `equip(item_name="${o.hintEquip}")` : 'stats(type="body")';
+            return o.hintEquip != null ? `equip(slot=<${o.hintEquip} 所在格>)` : 'stats(type="body")';
         case 'protected_block': {
             // 直线上撞到箱子/熔炉这类方块：**横着挪开再继续**，别在原地再挖一次。
             const sideways = o.dir.axis === 'x' ? '+z' : '+x';

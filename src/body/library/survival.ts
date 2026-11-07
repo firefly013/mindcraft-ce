@@ -2057,7 +2057,7 @@ export async function fishSkill(
         const equipped = await equip(bot, 'fishing_rod');
         if (!equipped) {
             stopReason = 'no_rod';
-            warnings.push('钓鱼竿没拿到手上（装备失败）：先 equip(item_name="fishing_rod") 再钓。');
+            warnings.push('钓鱼竿没拿到手上（装备失败）：先 equip(slot=<钓鱼竿所在格>) 再钓。');
         } else if (water == null) {
             stopReason = 'no_water';
         } else {

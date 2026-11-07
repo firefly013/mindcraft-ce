@@ -934,7 +934,7 @@ describe('huntFor：刷到够数 / 只认真实增量', () => {
         ).toBe('goToCoordinates(x=10, y=63, z=5, closeness=3)');
         expect(foodRoutePrimary({ ...base, seeds: 12, planks: 4, sticks: 4 })).toContain('wooden_hoe');
         expect(foodRoutePrimary({ ...base, seeds: 12, hasHoe: true, water: { position: { x: 1, y: 62, z: 1 }, distance: 1.4 } })).toContain('goToCoordinates');
-        expect(foodRoutePrimary({ ...base, rottenFlesh: 1 })).toBe('consume(item_name="rotten_flesh")');
+        expect(foodRoutePrimary({ ...base, rottenFlesh: 1 })).toBe('consume(slot=<腐肉所在格>)');
         expect(foodRoutePrimary(base)).toBe('searchForBlock(type="water", search_range=256)');
     });
 

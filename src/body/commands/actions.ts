@@ -201,48 +201,56 @@ export const actionsList: AgentCommand[] = [
     {
         name: '!consume',
         description: td('consume'),
-        params: {'item_name': { type: 'ItemName', description: tp('consume', 'item_name') }},
-        perform: runAsAction(async (agent: any, item_name: string) => {
-            await skills.consume(agent.bot, item_name);
+        params: {'slot': { type: 'int', description: tp('consume', 'slot'), domain: [5, 45] }},
+        perform: runAsAction(async (agent: any, slot: number) => {
+            await skills.consumeSlot(agent.bot, slot);
         })
     },
     {
         name: '!equip',
         description: td('equip'),
-        params: {'item_name': { type: 'ItemName', description: tp('equip', 'item_name') }},
-        perform: runAsAction(async (agent: any, item_name: string) => {
-            await skills.equip(agent.bot, item_name);
+        params: {'slot': { type: 'int', description: tp('equip', 'slot'), optional: true, domain: [5, 45] }},
+        perform: runAsAction(async (agent: any, slot?: number) => {
+            if (slot == null) {
+                await agent.bot.unequip('hand');
+                skills.log(agent.bot, '已经换成空手。');
+                return;
+            }
+            await skills.equipSlot(agent.bot, slot);
         })
     },
     {
         name: '!discard',
         description: td('discard'),
         params: {
-            'item_name': { type: 'ItemName', description: tp('discard', 'item_name') },
-            'num': { type: 'int', description: tp('discard', 'num'), domain: [1, Number.MAX_SAFE_INTEGER] }
+            'slot': { type: 'int', description: tp('discard', 'slot'), domain: [5, 45] },
+            'num': { type: 'int', description: tp('discard', 'num'), optional: true, domain: [1, Number.MAX_SAFE_INTEGER] }
         },
-        perform: runAsAction(async (agent: any, item_name: string, num: number) => {
+        perform: runAsAction(async (agent: any, slot: number, num?: number) => {
             // **原地丢，不寻路、不移动**：Feedback #36/#37——移交东西时先走 5 格
             // 会让落点和队友以为的位置对不上。想离开掉落物范围请另外显式 goToCoordinates。
             const bot = agent.bot;
+            const slotItem = skills.itemAtSlot(bot, slot);
+            const itemLabel = slotItem == null ? '?' : String(slotItem.name ?? '?');
             const drop = bot.entity.position.clone();
             const yaw = Number(bot?.entity?.yaw ?? 0);
             const dx = -Math.sin(yaw);
             const dz = Math.cos(yaw);
             const landing = { x: drop.x + dx * 1.5, z: drop.z + dz * 1.5 };
-            const ok = await skills.discard(bot, item_name, num);
+            const ok = await skills.discardSlot(bot, slot, num ?? -1);
             if (ok) {
+                const dropped = num ?? Math.max(1, Number(slotItem?.count ?? 1));
                 // **免疫记三样**：名字、落点、以及随后 itemDrop 事件认领到的实体 id。
                 // 只记名字挡不住真机那条路径（overnight_b 13:24：扔 256 下界岩，
                 // 2.7 秒后被自己捡回，free 仍为 0）——实体名可能还没同步，
                 // 反射更可能是从落点上**踩过去**（原版拾取，代码拦不住）。
-                markDiscarded(item_name, { x: landing.x, y: drop.y, z: landing.z });
+                markDiscarded(itemLabel, { x: landing.x, y: drop.y, z: landing.z });
                 // **丢完立刻后退 2 格**：站在落点旁边时，原版拾取会在 pickupDelay
                 // 结束后把东西吸回背包。后退不改变落点，只拉开距离。
                 const steppedBack = await skills.moveBy(bot, 'back', 2, 'walk');
                 skills.log(
                     bot,
-                    '丢了 ' + num + ' 个 ' + item_name + '，起点在 (' +
+                    '从第 ' + slot + ' 格丢了 ' + dropped + ' 个 ' + itemLabel + '，起点在 (' +
                         drop.x.toFixed(2) + ',' + drop.y.toFixed(2) + ',' + drop.z.toFixed(2) +
                         ')，落点在 (' +
                         landing.x.toFixed(2) + ',' + drop.y.toFixed(2) + ',' + landing.z.toFixed(2) + ')' +
@@ -428,11 +436,11 @@ export const actionsList: AgentCommand[] = [
         name: '!useOn',
         description: td('useOn'),
         params: {
-            'tool_name': { type: 'string', description: tp('useOn', 'tool_name') },
+            'tool_slot': { type: 'int', description: tp('useOn', 'tool_slot'), domain: [5, 45] },
             'target': { type: 'string', description: tp('useOn', 'target') }
         },
-        perform: runAsAction(async (agent: any, tool_name: string, target: string) => {
-            await skills.useToolOn(agent.bot, tool_name, target);
+        perform: runAsAction(async (agent: any, tool_slot: number, target: string) => {
+            await skills.useToolOnSlot(agent.bot, tool_slot, target);
         })
     },
     // 交互类：方块交易工具 / useEntity / craft。它们取代了一批把固定流程写死的中层
