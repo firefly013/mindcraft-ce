@@ -4,21 +4,18 @@
  *
  * 为什么不是"一个 activateItem 打天下"——**轨迹分三类**：
  *
- *   1. **抛物线类**（egg / snowball / ender_pearl / splash_potion / lingering_potion /
- *      experience_bottle）：初速 ~1.5 格/刻、重力 ~0.03 格/刻²、阻力 0.99。
- *      平着瞄一定打低（10 格外就掉一截），**必须先解抛物线再把枪口抬起来**。
- *   2. **箭矢类**（arrow，用弓）：速度随蓄力变、重力更大；而且要
- *      `activateItem`（开始拉弓）→ 等 → `deactivateItem`（放箭）两步。
- *      老代码 `endgame_routine.shootAtEntity` 里有 `TODO(真机)`：这套时序从没被真机验证过。
- *      本文件把它连同"箭数核对"一起做成可测的：**箭数没少就不算射出去**。
+ *   1. **抛物线类**（egg / snowball / ender_pearl / splash_potion / lingering_potion）：
+ *      重力、空气阻力、初速和飞行路径上的方块遮挡全部交给 `minecrafthawkeye` 算，
+ *      本文件不再手解弹道公式，也不再维护 v/g 表。
+ *   2. **箭矢类**（arrow，用弓）：同样由 hawkEye 按 bow 算；本文件负责
+ *      `activateItem`（拉弓）→ 等 1000ms → `deactivateItem`（放箭）两步，
+ *      外加"箭数没少就不算射出去"的核对。
  *   3. **制导类**（eye_of_ender）：**根本不走抛物线**——它朝要塞飞，然后掉落或碎掉。
- *      所以这一类**不做弹道解算**（拿抛物线公式瞄它只会得到"打不到"），
- *      而是"按朝向扔出去 + 采样轨迹推方向"，方向几何复用 `endgame.ts` 的纯函数
- *      （`trackEyeFlight` / `compassBearing` / `describeEyeDirection`，只 import 不改）。
+ *      所以这一类**不做弹道解算**，而是"按朝向扔出去 + 采样轨迹推方向"，方向几何
+ *      复用 `endgame.ts` 的纯函数（`trackEyeFlight` / `compassBearing` /
+ *      `describeEyeDirection`，只 import 不改）。
  *
- * **表是可校准的**（用户原话"得看着适配"）：`THROW_PROFILES` 只是默认值，
- * `applyThrowCalibration()` 按真机观测改 v/g；每次投掷的回执里都带一行**可校准观测值**
- * （飞了多少刻、最后在哪、沿瞄准方向多远 vs 预测多远），下一轮就能拿真机数据修表。
+ * 支持哪些投掷物见 `THROW_PROFILES`。经验瓶不在 hawkEye 的武器表里，已经不支持。
  *
  * 规矩和 `consume` / `mineTunnel` 一致：**事实，不是假设**。投前记数量 → 投后重新数，
  * 数量没少就是"没扔出去"；看到投掷物实体才报实体，没看到就说没看到；方向看不清就说看不清。
@@ -28,6 +25,7 @@
  */
 
 import Vec3 from 'vec3';
+import type { HawkEye, Weapons } from 'minecrafthawkeye';
 import * as skills from './skills.js';
 import { describeEyeDirection, trackEyeFlight, type EyeSample } from './endgame.js';
 
@@ -36,16 +34,15 @@ export const TICKS_PER_SECOND = 20;
 
 export type ThrowClass = 'parabolic' | 'arrow' | 'guided';
 
+/** `minecrafthawkeye` 认的武器名。 */
+export type ThrowWeapon = 'bow' | 'crossbow' | 'trident' | 'ender_pearl' | 'snowball' | 'egg' | 'splash_potion';
+
 export interface ThrowProfile {
     /** 规范物品名（`throwProfileOf` 会先把别名归一化）。 */
     item: string;
     klass: ThrowClass;
-    /** 抛物线的初速（格/刻）。制导类不参与弹道解算，可以没有。 */
-    velocity?: number;
-    /** 抛物线的重力（格/刻²）。 */
-    gravity?: number;
-    /** 空气阻力（诊断/校准用；闭式解不含阻力，靠 v 校准吸收）。 */
-    drag?: number;
+    /** `minecrafthawkeye` 的武器名（制导类不需要）。 */
+    weapon?: ThrowWeapon;
     /** 需要"拉弓 → 放箭"两步。 */
     charged?: boolean;
     /** 满蓄力时间（毫秒；1 秒 = 20 刻）。 */
@@ -60,20 +57,13 @@ export interface ThrowProfile {
     note: string;
 }
 
-const PARABOLIC_VELOCITY = 1.5;
-const PARABOLIC_GRAVITY = 0.03;
-const PARABOLIC_DRAG = 0.99;
-const ARROW_VELOCITY = 3.0;
-const ARROW_GRAVITY = 0.05;
 const ARROW_CHARGE_MS = 1000;
 
-function parabolic(item: string, projectile: string, note: string, extra: Partial<ThrowProfile> = {}): ThrowProfile {
+function parabolic(item: string, weapon: ThrowWeapon, projectile: string, note: string, extra: Partial<ThrowProfile> = {}): ThrowProfile {
     return {
         item,
         klass: 'parabolic',
-        velocity: PARABOLIC_VELOCITY,
-        gravity: PARABOLIC_GRAVITY,
-        drag: PARABOLIC_DRAG,
+        weapon,
         projectile,
         note,
         ...extra,
@@ -81,26 +71,22 @@ function parabolic(item: string, projectile: string, note: string, extra: Partia
 }
 
 /**
- * 默认档案表（**可校准**：改这里之前先看 `applyThrowCalibration`）。
- *
- * v/g 是原版量级：投掷物 1.5 格/刻、0.03 格/刻²、阻力 0.99；箭满蓄力约 3 格/刻、0.05。
- * 阻力没进闭式解（那会变成数值题），而是"用实测数据回头调 v"——这就是校准的落点。
+ * 物品 → 投掷档案。弹道参数不再写在这里：重力、阻力、初速和方块遮挡
+ * 全部由 `minecrafthawkeye` 按武器类型算，这张表只负责分类和投掷物实体名。
  */
 export const THROW_PROFILES: Readonly<Record<string, ThrowProfile>> = Object.freeze({
-    egg: parabolic('egg', 'egg', '鸡蛋：抛物线，抬高瞄；碎在落点，不伤人。'),
-    snowball: parabolic('snowball', 'snowball', '雪球：抛物线，抬高瞄；对烈焰人有伤害，是好武器。'),
-    ender_pearl: parabolic('ender_pearl', 'ender_pearl', '末影珍珠：抛物线；**传送固定吃 5 点伤害**，血少先别扔。', {
+    egg: parabolic('egg', 'egg', 'egg', '鸡蛋：抛物线，抬高瞄；碎在落点，不伤人。'),
+    snowball: parabolic('snowball', 'snowball', 'snowball', '雪球：抛物线，抬高瞄；对烈焰人有伤害，是好武器。'),
+    ender_pearl: parabolic('ender_pearl', 'ender_pearl', 'ender_pearl', '末影珍珠：抛物线；**传送固定吃 5 点伤害**，血少先别扔。', {
         teleports: true,
     }),
-    splash_potion: parabolic('splash_potion', 'splash_potion', '喷溅药水：抛物线；落地才生效，抬高瞄能让它落在目标脚边。'),
-    lingering_potion: parabolic('lingering_potion', 'lingering_potion', '滞留药水：抛物线；落地留云，别扔在自己脚下。'),
-    experience_bottle: parabolic('experience_bottle', 'experience_bottle', '经验瓶：抛物线，抬高瞄；碎了给经验。'),
+    splash_potion: parabolic('splash_potion', 'splash_potion', 'splash_potion', '喷溅药水：抛物线；落地才生效，抬高瞄能让它落在目标脚边。'),
+    // 滞留药水和喷溅药水是同一套投掷物物理，hawkEye 里没有单独的类型。
+    lingering_potion: parabolic('lingering_potion', 'splash_potion', 'splash_potion', '滞留药水：抛物线；落地留云，别扔在自己脚下。'),
     arrow: {
         item: 'arrow',
         klass: 'arrow',
-        velocity: ARROW_VELOCITY,
-        gravity: ARROW_GRAVITY,
-        drag: PARABOLIC_DRAG,
+        weapon: 'bow',
         charged: true,
         chargeMs: ARROW_CHARGE_MS,
         projectile: 'arrow',
@@ -119,8 +105,6 @@ export const THROW_PROFILES: Readonly<Record<string, ThrowProfile>> = Object.fre
 const THROW_ALIASES: Readonly<Record<string, string>> = Object.freeze({
     ender_eye: 'eye_of_ender',
     eye: 'eye_of_ender',
-    xp_bottle: 'experience_bottle',
-    bottle_o_enchanting: 'experience_bottle',
     snow_ball: 'snowball',
     pearl: 'ender_pearl',
     splash: 'splash_potion',
@@ -133,18 +117,12 @@ export function normalizeThrowName(name: unknown): string {
     return typeof name === 'string' ? name.trim().toLowerCase().replace(/^minecraft:/, '') : '';
 }
 
-/** 当前生效的档案（含校准覆盖）。 */
-const calibrations = new Map<string, Partial<ThrowProfile>>();
-
 /** 这个物品怎么扔；不认识的物品返回 null（由调用方如实拒绝，不猜）。 */
 export function throwProfileOf(name: unknown): ThrowProfile | null {
     const key = normalizeThrowName(name);
     if (key === '') return null;
     const canonical = THROW_ALIASES[key] ?? key;
-    const base = THROW_PROFILES[canonical];
-    if (base == null) return null;
-    const patch = calibrations.get(canonical);
-    return patch == null ? base : { ...base, ...patch };
+    return THROW_PROFILES[canonical] ?? null;
 }
 
 /** 支持哪些投掷物（拒绝时点名用）。 */
@@ -152,34 +130,7 @@ export function supportedThrowables(): string[] {
     return Object.keys(THROW_PROFILES);
 }
 
-/**
- * 用真机观测校准某一项的弹道参数（v/g）。
- *
- * 用户说的"得看着适配"就落在这里：回执里给了"飞了多少刻、落在哪、比对预测差多少"，
- * 拿这些数据回头调 v（阻力、服务端差异都会被吸收进这个数）。不传的字段不动。
- */
-export function applyThrowCalibration(item: unknown, patch: { velocity?: number; gravity?: number }): ThrowProfile | null {
-    const key = normalizeThrowName(item);
-    const canonical = THROW_ALIASES[key] ?? key;
-    const base = THROW_PROFILES[canonical];
-    if (base == null) return null;
-    const mergedPatch: Partial<ThrowProfile> = { ...calibrations.get(canonical) };
-    if (typeof patch.velocity === 'number' && Number.isFinite(patch.velocity) && patch.velocity > 0) {
-        mergedPatch.velocity = patch.velocity;
-    }
-    if (typeof patch.gravity === 'number' && Number.isFinite(patch.gravity) && patch.gravity > 0) {
-        mergedPatch.gravity = patch.gravity;
-    }
-    calibrations.set(canonical, mergedPatch);
-    return throwProfileOf(canonical);
-}
-
-/** 清掉全部校准（测试与"回到默认"用）。 */
-export function resetThrowCalibrations(): void {
-    calibrations.clear();
-}
-
-// ─────────────────────────────── 瞄准（纯函数） ───────────────────────────────
+// ─────────────────────── 瞄准（交给 minecrafthawkeye） ───────────────────────
 
 export interface FlatPosition {
     x: number;
@@ -187,52 +138,27 @@ export interface FlatPosition {
     z: number;
 }
 
-/**
- * 闭式**低伸弹道**俯仰角（返回 mineflayer 的 `pitch`：**抬头为正**）。
- *
- *   tanθ = (v² − √(v⁴ − g(g·x² + 2·y·v²))) / (g·x)
- *
- * x = 水平距离、y = 高差（目标更高为正）、v = 初速、g = 重力。
- * 判别式 < 0 → 这个距离打不到（返回 null，由调用方如实说"打不到"，不许硬扔）。
- * 取减号 = 低伸解（平射）；加号是高抛解，命中间隔太久、容易被挡，不用。
- *
- * **符号以 mineflayer 源码为准**（三条互相独立，都对得上）：
- *   1. `ray_trace.js` 的 `getViewDirection(pitch, yaw)` 的 y 分量 = `sin(pitch)`
- *      ⇒ pitch 为正 = 视线朝上；
- *   2. `physics.js` 的 `bot.lookAt`：`pitch = atan2(delta.y, groundDistance)`
- *      ⇒ 目标更高，pitch 为正；
- *   3. `conversions.js`：`toNotchianPitch(pitch) = toDegrees(−pitch)`，
- *      原版 pitch 负数为抬头 ⇒ mineflayer 的正数为抬头。
- * **真机交叉验证**（2026-10-23，(-246,60,-183)）：`lookAtPosition` 指向头顶上方
- * y=62 的石头，读数 pitch = **+38°**，且 `inspect` 的准星确实落在 (-247,62,-184) 的石头上。
- * 以前这里返回 `−atan(tanθ)`（等于默认"抬头为负"），投出去一律往下扎。
- *
- * 不含阻力：原版阻力 0.99/刻会让实际射程略短，所以表里的 v 是**可校准**的，
- * 回执也会把 v/g 写出来，方便用实测数据改。
- */
-export function solveBallisticPitch(x: number, y: number, v: number, g: number): number | null {
-    if (![x, y, v, g].every((n) => Number.isFinite(n))) return null;
-    if (v <= 0 || g <= 0) return null;
-    if (x <= 0) {
-        // 垂直上下：目标在正上方就抬头 +90°，正下方就低头 −90°（这种扔法没意义，如实返回）。
-        if (Math.abs(y) < 1e-9) return 0;
-        return y > 0 ? Math.PI / 2 : -Math.PI / 2;
-    }
-    const v2 = v * v;
-    const discriminant = v2 * v2 - g * (g * x * x + 2 * y * v2);
-    if (discriminant < 0) return null;
-    const tanTheta = (v2 - Math.sqrt(discriminant)) / (g * x);
-    return Math.atan(tanTheta);
+/** 弹道库算出来的一次射击。 */
+export interface HawkEyeShot {
+    yaw: number;
+    pitch: number;
+    grade: number;
+    nearestDistance: number;
+    trajectoryPoints: FlatPosition[];
+    blockHit: { name: string; x: number; y: number; z: number } | null;
 }
 
-/** 水平朝向角（mineflayer 的 yaw：0 = 南(+z)，90° = 西(-x)）。 */
+export type AimPlan =
+    | ({ kind: 'ballistic'; weapon: ThrowWeapon; distance: number; heightDiff: number } & HawkEyeShot)
+    | { kind: 'guided'; yaw: number; pitch: number; note: string }
+    | { kind: 'unreachable'; distance: number; heightDiff: number; reason: string };
+
 /**
- * 从 from 看向 to 时的 **mineflayer 朝向（弧度）**。
+ * 从 from 看向 to 时的 **mineflayer 水平朝向（弧度）**。
  *
- * 和 `skills.anglesToPoint` 同一套约定（mineflayer 自己的 `bot.lookAt`）：
  *   `yaw = atan2(−dx, −dz)`  （yaw 0 = 北=−Z，+90° = 西=−X）
- * **别和 Notchian 的 0=南 混用。** 以前这里写成 `atan2(−dx, +dz)`（z 分量漏了负号），
- * 于是所有投掷物朝**反方向**飞（正北的目标会算出正南的 yaw，整整 180°）。
+ *
+ * 只给制导类（末影之眼）用；抛物线类的 yaw/pitch 由弹道库算。
  */
 export function yawTo(from: FlatPosition, to: FlatPosition): number {
     const dx = to.x - from.x;
@@ -240,41 +166,25 @@ export function yawTo(from: FlatPosition, to: FlatPosition): number {
     return Math.atan2(-dx, -dz);
 }
 
-/** 同一俯仰角下的**平射射程**（真空解；用来和实测比对，差多少就是校准数据）。
- *
- * θ = 抬头为正的发射仰角 ⇒ 同高射程 = v²·sin(2θ)/g。以前写成 `sin(−2·pitch)`
- * 是为了抵消当时"抬头为负"的错误约定。
- */
-export function predictedRange(pitch: number, v: number, g: number): number | null {
-    if (![pitch, v, g].every((n) => Number.isFinite(n)) || g <= 0) return null;
-    return (v * v * Math.sin(2 * pitch)) / g;
-}
-
-export type AimPlan =
-    | {
-          kind: 'ballistic';
-          yaw: number;
-          pitch: number;
-          velocity: number;
-          gravity: number;
-          distance: number;
-          heightDiff: number;
-          predictedRange: number | null;
-      }
-    | { kind: 'guided'; yaw: number; pitch: number; note: string }
-    | { kind: 'unreachable'; distance: number; heightDiff: number; velocity: number; gravity: number; maxRange: number };
-
 /**
- * 给一次投掷定朝向。目标坐标是必填的，这里不再有"按当前朝向平扔"的分支。
+ * 给一次投掷定朝向。
  *
- * - 抛物线类：解闭式弹道（低伸），打不到就返回 unreachable；
+ * - 抛物线类/箭矢类：调 `bot.hawkEye.getMasterGrade`，由弹道库按物品的重力、
+ *   空气阻力、初速和世界方块遮挡算出 yaw/pitch，本文件不再解公式；
  * - 制导类（末影之眼）：**不做弹道解算**，只朝目标的水平方向，俯仰 0。
  */
 export function planThrowAim(
+    bot: unknown,
     profile: ThrowProfile,
     from: FlatPosition,
     target: FlatPosition,
 ): AimPlan {
+    const dx = target.x - from.x;
+    const dy = target.y - from.y;
+    const dz = target.z - from.z;
+    const distance = Math.hypot(dx, dz);
+    const heightDiff = dy;
+
     if (profile.guided === true) {
         return {
             kind: 'guided',
@@ -283,34 +193,54 @@ export function planThrowAim(
             note: '朝目标的水平方向',
         };
     }
-    const velocity = profile.velocity ?? PARABOLIC_VELOCITY;
-    const gravity = profile.gravity ?? PARABOLIC_GRAVITY;
-    const dx = target.x - from.x;
-    const dy = target.y - from.y;
-    const dz = target.z - from.z;
-    const distance = Math.hypot(dx, dz);
-    const pitch = solveBallisticPitch(distance, dy, velocity, gravity);
-    if (pitch == null) {
+
+    const hawk = (bot as { hawkEye?: HawkEye } | null)?.hawkEye;
+    if (hawk == null) {
+        return { kind: 'unreachable', distance, heightDiff, reason: '弹道库没有加载到 bot 上' };
+    }
+    if (profile.weapon == null) {
+        return { kind: 'unreachable', distance, heightDiff, reason: '这个物品没有对应的弹道武器' };
+    }
+
+    try {
+        const result = hawk.getMasterGrade(
+            { position: new Vec3(target.x, target.y, target.z), isValid: true },
+            new Vec3(0, 0, 0),
+            profile.weapon as Weapons,
+        );
+        if (result == null) {
+            return { kind: 'unreachable', distance, heightDiff, reason: '弹道库算不出可行弹道' };
+        }
+        return {
+            kind: 'ballistic',
+            weapon: profile.weapon,
+            distance,
+            heightDiff,
+            yaw: result.yaw,
+            pitch: result.pitch,
+            grade: result.grade,
+            nearestDistance: result.nearestDistance,
+            trajectoryPoints: result.arrowTrajectoryPoints.map((p) => ({ x: p.x, y: p.y, z: p.z })),
+            blockHit:
+                result.blockInTrayect == null
+                    ? null
+                    : {
+                          name: String(result.blockInTrayect.name ?? 'unknown'),
+                          x: result.blockInTrayect.position.x,
+                          y: result.blockInTrayect.position.y,
+                          z: result.blockInTrayect.position.z,
+                      },
+        };
+    } catch (err) {
         return {
             kind: 'unreachable',
             distance,
-            heightDiff: dy,
-            velocity,
-            gravity,
-            maxRange: (velocity * velocity) / gravity,
+            heightDiff,
+            reason: `弹道库报错：${err instanceof Error ? err.message : String(err)}`,
         };
     }
-    return {
-        kind: 'ballistic',
-        yaw: yawTo(from, target),
-        pitch,
-        velocity,
-        gravity,
-        distance,
-        heightDiff: dy,
-        predictedRange: predictedRange(pitch, velocity, gravity),
-    };
 }
+
 
 // ─────────────────────────── 投掷（事实核验） ───────────────────────────
 
@@ -375,7 +305,6 @@ export interface ThrowOutcome {
     flightMs: number | null;
     /** 沿瞄准方向飞了多远（有落点时）。 */
     flownBlocks: number | null;
-    notes: string[];
 }
 
 function defaultPosition(bot: any): FlatPosition {
@@ -437,7 +366,6 @@ export async function throwItemSkill(
 
     const item = normalizeThrowName(rawItem);
     const profile = throwProfileOf(item);
-    const notes: string[] = [];
     const health = healthOf(bot);
     const launch = position(bot);
 
@@ -469,7 +397,7 @@ export async function throwItemSkill(
         return finish(`throwItem：有箭，没有弓/弩。`);
     }
 
-    // ── 瞄准（抛物线解算 / 制导直扔） ──
+    // ── 瞄准（弹道库解算 / 制导直扔） ──
     const targetRaw = [rawTargetX, rawTargetY, rawTargetZ];
     const given = targetRaw.filter((value) => value != null && value !== '');
     if (given.length === 0) {
@@ -488,21 +416,23 @@ export async function throwItemSkill(
     }
     const target: FlatPosition = { x, y, z };
 
-    const aim = planThrowAim(profile, launch, target);
+    const aim = planThrowAim(bot, profile, launch, target);
     if (aim.kind === 'unreachable') {
         return finish(
-            `throwItem ${profile.item}：打不到（水平 ${aim.distance.toFixed(1)} 格、高差 ${aim.heightDiff.toFixed(1)} 格，` +
-                `最大射程 ${aim.maxRange.toFixed(1)} 格）。没扔。`,
+            `throwItem ${profile.item}：打不到（水平 ${aim.distance.toFixed(1)} 格、高差 ${aim.heightDiff.toFixed(1)} 格，${aim.reason}）。没扔。`,
         );
     }
     const pitchDeg = (aim.pitch * 180) / Math.PI;
-    if (aim.kind === 'ballistic') {
-        lines.push(
-            `throwItem ${profile.item}：瞄准水平 ${aim.distance.toFixed(1)} 格、高差 ${aim.heightDiff >= 0 ? '+' : ''}${aim.heightDiff.toFixed(1)} 格，抬头 ${pitchDeg.toFixed(1)}°。`,
+    if (aim.kind === 'ballistic' && aim.blockHit != null) {
+        return finish(
+            `throwItem ${profile.item}：飞行路径被 ${aim.blockHit.name} (${aim.blockHit.x}, ${aim.blockHit.y}, ${aim.blockHit.z}) 挡住。没扔。`,
         );
-        if (aim.predictedRange != null) {
-            notes.push(`预测射程 ${aim.predictedRange.toFixed(1)} 格。`);
-        }
+    }
+    if (aim.kind === 'ballistic') {
+        const yawDeg = (aim.yaw * 180) / Math.PI;
+        lines.push(
+            `throwItem ${profile.item}：弹道解算水平 ${aim.distance.toFixed(1)} 格、高差 ${aim.heightDiff >= 0 ? '+' : ''}${aim.heightDiff.toFixed(1)} 格，抬头 ${pitchDeg.toFixed(1)}°，偏航 ${yawDeg.toFixed(1)}°；库量到目标最近距离 ${aim.nearestDistance.toFixed(2)} 格，路径无方块遮挡。`,
+        );
     } else {
         lines.push(`throwItem ${profile.item} 是制导类投掷，${aim.note}，俯仰角 0 度。`);
     }
@@ -605,9 +535,8 @@ export async function throwItemSkill(
         interrupted: bot?.interrupt_code === true,
         flightMs,
         flownBlocks,
-        notes,
     };
-    void outcome; // 结构体给未来复用（校准管线），当前回执直接由上面的行拼成
+    void outcome; // 结构体给未来复用，当前回执直接由上面的行拼成
     return lines.join('\n');
 }
 

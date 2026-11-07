@@ -184,6 +184,7 @@ export function initBot(username: string): any {
     bot.loadPlugin(autoEat);
     bot.loadPlugin(loadNxgPlugin('@nxg-org/mineflayer-common-sense')); // 保命应急：着火/摔落等基础响应
     bot.loadPlugin(armorManager); // auto equip armor
+    bot.loadPlugin(loadNxgPlugin('minecrafthawkeye')); // 弹道解算：throwItem 的 yaw/pitch 和落点由它算
     // 这个插件按**材质等级**自动换甲（leather < golden < iron < …），在下界会把金甲换成铁甲，
     // 于是猪灵从"中立"变成"主动攻击"（overnight_b 真机事故）。装上守卫：下界保留金甲 + 任何
     // 护甲变化都要说出来；主世界/末地照旧换更好的甲。

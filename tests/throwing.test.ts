@@ -2,20 +2,18 @@
  * 通用投掷（`throwItem`）的测试：不连服务器、不烧 token。
  *
  * 钉四件事：
- *   1) **三类轨迹不能混**：抛物线类解弹道（低伸、超程如实说"打不到"）、
- *      箭矢类"拉弓→放箭 + 核对箭数"、制导类（末影之眼）**永远不做弹道解算**；
+ *   1) **三类轨迹不能混**：抛物线类/箭矢类把 yaw、pitch、方块遮挡交给 `minecrafthawkeye`
+ *      算（库算不出就如实说"打不到"），制导类（末影之眼）**永远不做弹道解算**；
  *   2) **事实核验**：数量没少就是"没扔出去"；没看到实体就如实说没看到；
  *      末影珍珠等坐标跳变（跳了报落点 + 提醒固定 5 点伤害，没跳就说没传送）；
- *   3) **表可校准**：`applyThrowCalibration` 改 v 会改解算角度，reset 回默认；
+ *   3) **库是唯一弹道来源**：假 `bot.hawkEye` 返回什么角度就用什么角度，
+ *      库没了/算不出就不扔；
  *   4) **接线/门禁**：注册成 action + longRunning，参数顺序 = perform 位置参数顺序，
  *      schema 每个参数在 TOOL_TEXT 里都有说明（`scripts/check-prompts.ts` 的同款不变式）。
  */
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import {
-    applyThrowCalibration,
     planThrowAim,
-    resetThrowCalibrations,
-    solveBallisticPitch,
     supportedThrowables,
     throwItemSkill,
     throwProfileOf,
@@ -53,6 +51,8 @@ function harness(
         onActivate?: (ctx: { items: FakeItem[] }) => void;
         /** 投掷物消失后把玩家传送到这里（末影珍珠）。 */
         teleportTo?: FlatPosition;
+        /** 假弹道库返回什么；undefined = 默认的成功解，null = 算不出。 */
+        grade?: any;
     } = {},
 ) {
     const items: FakeItem[] = (options.items ?? []).map((item) => ({ ...item }));
@@ -65,6 +65,22 @@ function harness(
             findInventoryItem: (name: string) => items.find((item) => item.name === name && item.count > 0),
         },
     };
+    const getMasterGrade = vi.fn(() => {
+        if (options.grade !== undefined) return options.grade;
+        return {
+            yaw: 0.2,
+            pitch: 0.4,
+            grade: 22.9,
+            nearestDistance: 0.5,
+            target: { x: 0, y: 70, z: 0 },
+            arrowTrajectoryPoints: [
+                { x: 0, y: 70, z: 0 },
+                { x: 1, y: 71, z: 0 },
+            ],
+            blockInTrayect: null,
+        };
+    });
+    bot.hawkEye = { getMasterGrade };
     let entities: Record<string, any> = {};
     let clock = 0;
     let activated = 0;
@@ -138,6 +154,7 @@ function harness(
         bot,
         deps,
         items,
+        getMasterGrade,
         count: (name: string) => items.filter((item) => item.name === name).reduce((sum, item) => sum + item.count, 0),
         get activated() {
             return activated;
@@ -160,53 +177,18 @@ function harness(
 /** 快速档：观测窗口短一点，测试跑得快，同时保留轮询语义。 */
 const FAST = { observeMs: 600, pollMs: 100, teleportWaitMs: 600 };
 
-afterEach(() => {
-    resetThrowCalibrations();
-});
+// ─────────────────────── 一、弹道瞄准（弹道库） ───────────────────────
 
-// ─────────────────────────── 一、弹道瞄准（纯函数） ───────────────────────────
-
-// **pitch 正 = 抬头**（mineflayer 约定，见 throwing.ts 的源码引用与真机验证）。
-describe('抛物线瞄准：闭式低伸解', () => {
-    it('60 格平射 → 抬头 ≈+26.57°（取低伸解，不是 63.43° 的高抛）', () => {
-        const pitch = solveBallisticPitch(60, 0, 1.5, 0.03);
-        expect(pitch).not.toBeNull();
-        const degrees = ((pitch as number) * 180) / Math.PI;
-        expect(degrees).toBeCloseTo(26.57, 1);
-        // 高抛解是 63.43°：必须**没**取它
-        expect(degrees).toBeLessThan(45);
-    });
-
-    it('目标更高要抬得更高；目标更低可以压低', () => {
-        const flat = solveBallisticPitch(30, 0, 1.5, 0.03) as number;
-        const up = solveBallisticPitch(30, 10, 1.5, 0.03) as number;
-        const down = solveBallisticPitch(30, -10, 1.5, 0.03) as number;
-        expect(up).toBeGreaterThan(flat);
-        expect(down).toBeLessThan(flat);
-    });
-
-    it('超出最大射程（v²/g = 75 格）→ null：调用方如实说"打不到"', () => {
-        expect(solveBallisticPitch(74, 0, 1.5, 0.03)).not.toBeNull();
-        expect(solveBallisticPitch(80, 0, 1.5, 0.03)).toBeNull();
-    });
-
-    it('档案表：三类各自的参数都写清了（抛物线 v/g/阻力、箭矢蓄力、眼睛制导）', () => {
-        for (const item of [
-            'egg',
-            'snowball',
-            'ender_pearl',
-            'splash_potion',
-            'lingering_potion',
-            'experience_bottle',
-        ]) {
+describe('弹道瞄准：交给 minecrafthawkeye', () => {
+    it('档案表：三类各自的分类和武器名都写清了', () => {
+        for (const item of ['egg', 'snowball', 'ender_pearl', 'splash_potion', 'lingering_potion']) {
             const profile = throwProfileOf(item);
             expect(profile?.klass, item).toBe('parabolic');
-            expect(profile?.velocity, item).toBe(1.5);
-            expect(profile?.gravity, item).toBe(0.03);
-            expect(profile?.drag, item).toBe(0.99);
+            expect(profile?.weapon, item).toBe(item === 'lingering_potion' ? 'splash_potion' : item);
         }
         const arrow = throwProfileOf('arrow');
         expect(arrow?.klass).toBe('arrow');
+        expect(arrow?.weapon).toBe('bow');
         expect(arrow?.charged).toBe(true);
         expect(arrow?.chargeMs).toBe(1000);
         const eye = throwProfileOf('eye_of_ender');
@@ -214,44 +196,70 @@ describe('抛物线瞄准：闭式低伸解', () => {
         expect(eye?.guided).toBe(true);
         // 别名两代都认
         expect(throwProfileOf('ender_eye')?.item).toBe('eye_of_ender');
-        expect(throwProfileOf('xp_bottle')?.item).toBe('experience_bottle');
         expect(throwProfileOf('minecraft:egg')?.item).toBe('egg');
-        // 不认识就是 null（由调用方拒绝）
+        // 经验瓶不在 hawkEye 的武器表里，已经不支持；不认识的物品返回 null
+        expect(throwProfileOf('experience_bottle')).toBeNull();
         expect(throwProfileOf('diamond_sword')).toBeNull();
     });
 
     it('**制导类永远不做弹道解算**：500 格外也返回 guided，而不是"打不到"', () => {
+        const h = harness({});
         const eye = throwProfileOf('eye_of_ender');
-        expect(eye).not.toBeNull();
-        const plan = planThrowAim(eye as any, { x: 0, y: 70, z: 0 }, { x: 0, y: 70, z: 500 });
+        const plan = planThrowAim(h.bot, eye as any, { x: 0, y: 70, z: 0 }, { x: 0, y: 70, z: 500 });
         // 如果谁把末影之眼塞进抛物线表，这里会变成 kind='unreachable' → 测试红
         expect(plan.kind).toBe('guided');
         if (plan.kind !== 'guided') throw new Error('制导类必须返回 guided');
         expect(plan.pitch).toBe(0);
-        // 同样的距离对抛物线类就是"打不到"
-        const egg = throwProfileOf('egg');
-        expect(planThrowAim(egg as any, { x: 0, y: 70, z: 0 }, { x: 0, y: 70, z: 500 }).kind).toBe('unreachable');
+        expect(h.getMasterGrade).not.toHaveBeenCalled();
     });
 
-    it('校准：改 v 会改解算角度，reset 回默认', () => {
-        const before = solveBallisticPitch(40, 0, 1.5, 0.03);
-        const calibrated = applyThrowCalibration('egg', { velocity: 1.2 });
-        expect(calibrated?.velocity).toBe(1.2);
-        expect(throwProfileOf('egg')?.velocity).toBe(1.2);
-        const after = solveBallisticPitch(40, 0, 1.2, 0.03);
-        expect(after).not.toBeNull();
-        expect(after).not.toBeCloseTo(before as number, 3);
-        resetThrowCalibrations();
-        expect(throwProfileOf('egg')?.velocity).toBe(1.5);
-        // 不认识的物品校准不了
-        expect(applyThrowCalibration('diamond_sword', { velocity: 9 })).toBeNull();
+    it('抛物线类：把目标坐标和武器名交给库，拿回 yaw/pitch/最近距离', () => {
+        const h = harness({});
+        const egg = throwProfileOf('egg');
+        const plan = planThrowAim(h.bot, egg as any, { x: 0, y: 70, z: 0 }, { x: 40, y: 70, z: 0 });
+        expect(h.getMasterGrade).toHaveBeenCalledTimes(1);
+        const [target, speed, weapon] = h.getMasterGrade.mock.calls[0] as any[];
+        expect(target).toMatchObject({ isValid: true });
+        expect(target.position).toMatchObject({ x: 40, y: 70, z: 0 });
+        expect(speed).toMatchObject({ x: 0, y: 0, z: 0 });
+        expect(weapon).toBe('egg');
+        expect(plan.kind).toBe('ballistic');
+        if (plan.kind !== 'ballistic') throw new Error('抛物线类必须返回 ballistic');
+        expect(plan.pitch).toBe(0.4);
+        expect(plan.nearestDistance).toBe(0.5);
+        expect(plan.distance).toBe(40);
+    });
+
+    it('库算不出可行弹道 → unreachable，由调用方如实说"打不到"', () => {
+        const h = harness({ grade: null });
+        const egg = throwProfileOf('egg');
+        const plan = planThrowAim(h.bot, egg as any, { x: 0, y: 70, z: 0 }, { x: 100, y: 70, z: 0 });
+        expect(plan.kind).toBe('unreachable');
+    });
+
+    it('库里没有弹道结果就不扔（库没加载也算 unreachable）', () => {
+        const egg = throwProfileOf('egg');
+        const plan = planThrowAim({}, egg as any, { x: 0, y: 70, z: 0 }, { x: 10, y: 70, z: 0 });
+        expect(plan.kind).toBe('unreachable');
+    });
+
+    it('yawTo 仍是 mineflayer 约定（制导类用）', () => {
+        for (const to of [
+            { x: 3, y: 70, z: -24 }, // 正北（−Z）
+            { x: 23, y: 70, z: -4 }, // 正东（+X）
+        ]) {
+            const yaw = yawTo({ x: 0, y: 70, z: 0 }, to);
+            const len = Math.hypot(to.x, to.z);
+            expect(-Math.sin(yaw)).toBeCloseTo(to.x / len, 6);
+            expect(-Math.cos(yaw)).toBeCloseTo(to.z / len, 6);
+        }
     });
 });
 
 // ───────────────────────── 二、投掷：事实核验 ─────────────────────────
 
 describe('throwItem：投掷与核验', () => {
-    it('抛物线类：给目标就抬头（回执写明 v/g），数量确实少了才叫"投出"', async () => {
+    it('抛物线类：库里算出的角度真的用上（回执写明偏航和最近距离），数量确实少了才叫"投出"', async () => {
         const h = harness({
             items: [{ name: 'egg', count: 3 }],
             projectile: { name: 'egg', id: 11, from: { x: 1, y: 70, z: 0 }, step: { x: 1, y: 0, z: 0 }, steps: 4 },
@@ -260,10 +268,12 @@ describe('throwItem：投掷与核验', () => {
 
         expect(h.activated).toBe(1);
         expect(h.equipped).toBe('egg');
-        // 40 格平射：解出来的 pitch 必须是"抬头"（**正值**），且回执写了 v/g
-        expect(h.look?.pitch).toBeGreaterThan(0);
+        // 库给的 0.4 rad 是抬头（正值），look 用的就是它
+        expect(h.look?.pitch).toBe(0.4);
         expect(receipt).toContain('抬头');
-        expect(receipt).toContain('throwItem egg：瞄准水平 40.0 格、高差 +0.0 格，抬');
+        expect(receipt).toContain('偏航');
+        expect(receipt).toContain('throwItem egg：弹道解算水平 40.0 格、高差 +0.0 格，抬头');
+        expect(receipt).toContain('库量到目标最近距离 0.50 格');
         expect(receipt).toContain('观测：');
         expect(receipt).toContain('刻');
         expect(h.count('egg')).toBe(2);
@@ -292,8 +302,8 @@ describe('throwItem：投掷与核验', () => {
         }
     });
 
-    it('目标超出射程 → 明确说"打不到"，并且**一格都没扔**', async () => {
-        const h = harness({ items: [{ name: 'ender_pearl', count: 2 }] });
+    it('库算不出弹道 → 明确说"打不到"，并且**一格都没扔**', async () => {
+        const h = harness({ items: [{ name: 'ender_pearl', count: 2 }], grade: null });
         const receipt = await throwItemSkill(h.bot, 'ender_pearl', 100, 70, 0, h.deps, FAST);
 
         expect(receipt).toContain('打不到');
@@ -330,7 +340,27 @@ describe('throwItem：投掷与核验', () => {
         });
         const receipt = await throwItemSkill(h.bot, 'snowball', 10, 70, 0, h.deps, FAST);
 
-        expect(receipt).toContain('throwItem snowball：瞄准水平 10.0 格、高差 +0.0');
+        expect(receipt).toContain('throwItem snowball：弹道解算水平 10.0 格、高差 +0.0');
+    });
+
+    it('库说飞行路径被方块挡住 → 不扔，并报出挡路的方块', async () => {
+        const h = harness({
+            items: [{ name: 'egg', count: 1 }],
+            grade: {
+                yaw: 0,
+                pitch: 0.1,
+                grade: 6,
+                nearestDistance: 0.2,
+                target: { x: 10, y: 70, z: 0 },
+                arrowTrajectoryPoints: [],
+                blockInTrayect: { name: 'stone', position: { x: 2, y: 70, z: 0 } },
+            },
+        });
+        const receipt = await throwItemSkill(h.bot, 'egg', 10, 70, 0, h.deps, FAST);
+        expect(receipt).toContain('被 stone (2, 70, 0) 挡住');
+        expect(receipt).toContain('没扔');
+        expect(h.activated).toBe(0);
+        expect(h.count('egg')).toBe(1);
     });
 
     it('物品不在背包 → 点名缺什么，并列出能扔的', async () => {
@@ -449,7 +479,7 @@ describe('箭矢类：弓 + 蓄力 + 核对箭数', () => {
         expect(h.activated).toBe(1);
         expect(h.deactivated).toBe(1); // 两步时序
         expect(h.deactivateAt ?? 0).toBeGreaterThanOrEqual(1000); // 蓄力 ≥ 1000ms
-        expect(receipt).toContain('throwItem arrow：瞄准水平 30.0 格、高差 +0.0 格');
+        expect(receipt).toContain('throwItem arrow：弹道解算水平 30.0 格、高差 +0.0 格');
         expect(h.count('arrow')).toBe(4);
     });
 

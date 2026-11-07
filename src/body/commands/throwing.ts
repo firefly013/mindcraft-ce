@@ -12,15 +12,15 @@ import type { AgentCommand, CommandPerform } from './actions.js';
 export const THROWING_TOOL_TEXT = {
     throwItem: {
         description:
-            '**通用投掷**：鸡蛋/雪球/末影珍珠/喷溅药水/经验瓶/箭/末影之眼都能扔，**必须给目标坐标**，按物品的轨迹类型分别处理：' +
-            '① 抛物线类（egg/snowball/ender_pearl/splash_potion/lingering_potion/experience_bottle）——解**低伸弹道**（回执里写清抬头多少度、用的 v/g）；' +
-            '② 箭矢类（arrow）——自动找弓、拉满 1000ms 再放箭；' +
+            '**通用投掷**：鸡蛋/雪球/末影珍珠/喷溅药水/滞留药水/箭/末影之眼都能扔，**必须给目标坐标**，按物品的轨迹类型分别处理：' +
+            '① 抛物线类（egg/snowball/ender_pearl/splash_potion/lingering_potion）——重力、空气阻力、初速和路径遮挡交给弹道库 `minecrafthawkeye` 解算（回执里写清抬头多少度、偏航多少度、库量到的最近距离）；' +
+            '② 箭矢类（arrow）——自动找弓、拉满 1000ms 再放箭，弹道同样交给库；' +
             '③ 制导类（eye_of_ender）——**不做弹道解算**，朝目标的水平方向扔出去后**追踪它往哪飞（8 方位）**，别看落点。' +
             '回执**只讲事实**：投前/投后数量（没少就是"没扔出去"）、观测到的投掷物实体飞了多久/在哪消失；' +
             '末影珍珠会等坐标跳变（跳了就报落点并提醒**固定吃 5 点伤害**，没跳就说没传送）；' +
-            '距离超出射程时**如实说"打不到"并且不扔**，同时给一个走近坐标。',
+            '弹道库算不出可行弹道时**如实说"打不到"并且不扔**。',
         params: {
-            item_name: '要扔的物品 id（英文）：egg / snowball / ender_pearl / splash_potion / lingering_potion / experience_bottle / arrow / eye_of_ender。也认俗称（ender_eye、xp_bottle）。',
+            item_name: '要扔的物品 id（英文）：egg / snowball / ender_pearl / splash_potion / lingering_potion / arrow / eye_of_ender。也认俗称（ender_eye、pearl）。',
             target_x: '目标 X（必填）。抛物线类用它解弹道；末影之眼只取水平方向。',
             target_y: '目标 Y（必填）。抛物线类需要高差来算抬枪角度。',
             target_z: '目标 Z（必填）。',
