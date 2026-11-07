@@ -13,7 +13,10 @@ describe('残留界面：动作入口先关、Stop 兜底、关不掉就大声�
   it('动作入口：有窗口且不是容器类动作 ⇒ 先 closeStaleWindow 并在回执里说明', () => {
     const code = src();
     expect(code).toContain('const hasWindow = (this.bot as any)?.currentWindow != null;');
-    expect(code).toContain("const managesWindow = name === 'useBlock' || name === 'craft' || name === 'smelt';");
+    expect(code).toContain("name === 'smelt'");
+    expect(code).toContain("name === 'putInContainer'");
+    expect(code).toContain("name === 'inspectContainer'");
+    expect(code).toContain("name === 'craft'");
     expect(code).toContain('const closed = closeStaleWindow(this.bot);');
     expect(code).toContain('已关闭残留界面。');
   });
@@ -31,9 +34,12 @@ describe('残留界面：动作入口先关、Stop 兜底、关不掉就大声�
     expect(code).toContain("by: 'stop'");
   });
 
-  it('容器类动作自己管界面，不被入口提前关掉（useBlock/craft/smelt）', () => {
+  it('容器类动作自己管界面，不被入口提前关掉（smelt/容器工具/craft）', () => {
     const code = src();
-    expect(code).toContain("const managesWindow = name === 'useBlock' || name === 'craft' || name === 'smelt';");
+    expect(code).toContain("name === 'smelt'");
+    expect(code).toContain("name === 'putInContainer'");
+    expect(code).toContain("name === 'inspectContainer'");
+    expect(code).toContain("name === 'craft'");
   });
 });
 

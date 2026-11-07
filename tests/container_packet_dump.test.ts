@@ -41,7 +41,7 @@ describe('容器包转储：失败时才留证据，落一行', () => {
   it('武装后记下"我们发了什么"和"服务端回了什么"，收尾只有一行', () => {
     const body = bareBody();
     const client = body.bot._client;
-    body.armContainerPacketDump('useBlock chest');
+    body.armContainerPacketDump('inspectContainer chest');
     // 我们的发包（真实路径：block_place 带 location/direction/hand/cursor/sequence）
     client.write('block_place', { location: { x: 9, y: 62, z: 0 }, direction: 1, hand: 0, cursorX: 8, cursorY: 8, cursorZ: 8, sequence: 0 });
     // 服务端没回任何窗口包 → 到期收尾
@@ -56,7 +56,7 @@ describe('容器包转储：失败时才留证据，落一行', () => {
 
   it('**只有开窗包、没有槽位包 ⇒ 不许叫 window-arrived**（真机就是这样超时的）', () => {
     const body = bareBody();
-    body.armContainerPacketDump('useBlock chest');
+    body.armContainerPacketDump('inspectContainer chest');
     body.onContainerIncoming?.({}, { name: 'open_window' });   // 1.20.2+ 的名字
     // 开窗包本身不收尾——收尾会把紧接着要看的槽位包挡在门外。
     expect(body._logs).toHaveLength(0);
@@ -71,7 +71,7 @@ describe('容器包转储：失败时才留证据，落一行', () => {
 
   it('开窗包 + 槽位包 ⇒ 才叫 window-arrived，并立刻收尾', () => {
     const body = bareBody();
-    body.armContainerPacketDump('useBlock chest');
+    body.armContainerPacketDump('inspectContainer chest');
     body.onContainerIncoming?.({}, { name: 'open_window' });
     body.onContainerIncoming?.({ windowId: 1, items: [] }, { name: 'window_items' });
     expect(body._logs).toHaveLength(1);
@@ -81,7 +81,7 @@ describe('容器包转储：失败时才留证据，落一行', () => {
 
   it('开窗之后紧跟的包按顺序记（不受 24 条上限影响）', () => {
     const body = bareBody();
-    body.armContainerPacketDump('useBlock chest');
+    body.armContainerPacketDump('inspectContainer chest');
     body.onContainerIncoming?.({}, { name: 'open_window' });
     for (const n of ['a', 'b', 'c', 'd']) body.onContainerIncoming?.({}, { name: n });
     body.finishContainerPacketDump('window-expired');
@@ -96,7 +96,7 @@ describe('容器包转储：失败时才留证据，落一行', () => {
 
   it('有界：最多 24 条，收尾只发一次日志（重复 finish 无害）', () => {
     const body = bareBody();
-    body.armContainerPacketDump('useBlock chest');
+    body.armContainerPacketDump('inspectContainer chest');
     for (let i = 0; i < 40; i++) body.onContainerIncoming?.({}, { name: 'window_items' });
     const line = body._logs[0];
     expect(line.lines.length).toBeLessThanOrEqual(25); // reason + ≤24 条
@@ -108,7 +108,7 @@ describe('容器包转储：失败时才留证据，落一行', () => {
     const body = bareBody();
     const client = body.bot._client;
     const original = client.write;
-    body.armContainerPacketDump('useBlock chest');
+    body.armContainerPacketDump('inspectContainer chest');
     expect(client.write).not.toBe(original); // 期间是包过的
     body.finishContainerPacketDump('opened');
     expect(client.write).toBe(original); // 收尾后还原
@@ -118,7 +118,7 @@ describe('容器包转储：失败时才留证据，落一行', () => {
 describe('decisive question：服务端到底说没说话（catch-all + verdict）', () => {
   it('服务端一个字都没回 ⇒ verdict=no-reply、inboundCount=0', () => {
     const body = bareBody();
-    body.armContainerPacketDump('useBlock chest');
+    body.armContainerPacketDump('inspectContainer chest');
     body.bot._client.write('block_place', { location: { x: 9, y: 62, z: 0 }, direction: 1, hand: 0, sequence: 0 });
     body.finishContainerPacketDump('window-expired');
     const line = body._logs[0];
@@ -129,7 +129,7 @@ describe('decisive question：服务端到底说没说话（catch-all + verdict�
 
   it('服务端回了别的包（block_change / ping）⇒ 只记名字 + verdict=replied-no-window', () => {
     const body = bareBody();
-    body.armContainerPacketDump('useBlock chest');
+    body.armContainerPacketDump('inspectContainer chest');
     body.onContainerIncoming?.({ location: { x: 9, y: 62, z: 0 }, type: 0 }, { name: 'block_change' });
     body.onContainerIncoming?.({}, { name: 'ping' });
     body.finishContainerPacketDump('window-expired');
@@ -146,7 +146,7 @@ describe('decisive question：服务端到底说没说话（catch-all + verdict�
 
   it('窗口包仍记载荷判定字段（windowId/items），verdict=window-arrived', () => {
     const body = bareBody();
-    body.armContainerPacketDump('useBlock chest');
+    body.armContainerPacketDump('inspectContainer chest');
     body.onContainerIncoming?.({ windowId: 5, items: [1, 2, 3] }, { name: 'window_items' });
     const line = body._logs[0];
     expect(line.verdict).toBe('window-arrived');
@@ -155,7 +155,7 @@ describe('decisive question：服务端到底说没说话（catch-all + verdict�
 
   it('inboundNames 有界（去重 + 最多 24 个）', () => {
     const body = bareBody();
-    body.armContainerPacketDump('useBlock chest');
+    body.armContainerPacketDump('inspectContainer chest');
     for (let i = 0; i < 60; i++) body.onContainerIncoming?.({}, { name: `packet_${i}` });
     body.finishContainerPacketDump('window-expired');
     expect(body._logs[0].inboundNames.length).toBeLessThanOrEqual(24);
@@ -217,7 +217,7 @@ describe('协议解析失败（真机 04:10 的最终根因）：抓得到、说
 
   it('转储武装期间发生解析失败 ⇒ 立刻收尾 outcome=protocol-parse-error，并把 fault 记进去', () => {
     const body = bareBody();
-    body.armContainerPacketDump('useBlock chest');
+    body.armContainerPacketDump('inspectContainer chest');
     body.bot._client.write('block_place', { location: { x: 9, y: 62, z: 0 }, direction: 1, hand: 0, sequence: 0 });
     const err: any = new Error('Read error for undefined : undefined');
     err.name = 'PartialReadError';
@@ -243,7 +243,7 @@ describe('协议解析失败（真机 04:10 的最终根因）：抓得到、说
     expect(text).toContain('包 id 62');
     expect(text).toContain('这个服务端的容器协议和我们的定义对不上');
     // 2026-10-30：删掉了"别再 useBlock…"那条策略处方，保留协议级故障这条事实
-    expect(text).toContain('重发同一个 useBlock 不会有不同结果');
+    expect(text).toContain('重发同一次容器操作不会有不同结果');
     expect(text).not.toContain('一个窗口包都没发');
     expect(text).not.toContain('但没接住');
     expect(text).not.toContain('一个窗口包都没发')
@@ -283,7 +283,7 @@ describe('"hook 没触发"要能区分：错误没发生 / 错误走了别的出
 
   it('收尾行带上"这次尝试期间到底有没有解析错误"与"距 open_window 多少毫秒"', () => {
     const body = bareBody();
-    body.armContainerPacketDump('useBlock chest');
+    body.armContainerPacketDump('inspectContainer chest');
     // 开窗包到了
     body.onContainerIncoming?.({ windowId: 1 }, { name: 'open_window' });
     expect(body.containerSawOpenAt).toBeGreaterThan(0);
@@ -307,7 +307,7 @@ describe('"hook 没触发"要能区分：错误没发生 / 错误走了别的出
     err.partialReadError = { buffer: Buffer.from([0x3e]) };
     body.onProtocolFault(err, 'client-error'); // 先前的错误
     body.protocolFault.at = Date.now() - 60_000; // 一分钟前
-    body.armContainerPacketDump('useBlock chest');
+    body.armContainerPacketDump('inspectContainer chest');
     body.finishContainerPacketDump('window-expired');
     const dump = body._logs.find((l: any) => l.event === 'container-packet-dump');
     expect(dump.protocolFaultsDuringAttempt).toBe(0);
@@ -358,21 +358,21 @@ describe('确证失效 ⇒ 工具层快速失败（不烧 6 秒 × 重试）', (
   it('身体侧：verdict=opened-no-slots 会把状态置为 blocked（带 TTL），window-arrived 会清掉它', () => {
     const body = bareBody();
     // 第一次失败：开窗包到了、没有槽位包
-    body.armContainerPacketDump('useBlock chest');
+    body.armContainerPacketDump('inspectContainer chest');
     body.onContainerIncoming?.({ windowId: 1 }, { name: 'open_window' });
     body.finishContainerPacketDump('window-expired');
     expect(body.slottedContainerStatus()).toMatchObject({ blocked: true });
     expect(body.slottedContainerStatus().msLeft).toBeGreaterThan(0);
     expect(body.slottedContainerStatus().reason).toContain('不发内容');
     // 后来真有窗口内容到达 ⇒ 立刻解除（escape hatch）
-    body.armContainerPacketDump('useBlock chest');
+    body.armContainerPacketDump('inspectContainer chest');
     body.onContainerIncoming?.({ windowId: 2, items: [1] }, { name: 'window_items' });
     expect(body.slottedContainerStatus().blocked).toBe(false);
   });
 
   it('身体侧：TTL 过期后自动恢复（结论不许永久焊死）', () => {
     const body = bareBody();
-    body.armContainerPacketDump('useBlock chest');
+    body.armContainerPacketDump('inspectContainer chest');
     body.onContainerIncoming?.({ windowId: 1 }, { name: 'open_window' });
     body.finishContainerPacketDump('window-expired');
     expect(body.slottedContainerStatus().blocked).toBe(true);

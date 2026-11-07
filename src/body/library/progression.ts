@@ -895,7 +895,7 @@ function waterLine(a: FoodRouteAssets): string {
 export function foodRouteLines(a: FoodRouteAssets): string[] {
     const rod = a.hasFishingRod
         ? '① **钓鱼**（最稳、可再生）：你已经有 fishing_rod → 到水边 useOn(tool_name="fishing_rod", target="water")；一条鱼 2 点食物。'
-        : '① **钓鱼**（最稳、可再生）：先做竿 useBlock(type="crafting_table", input="3 stick, 2 string", output="1 fishing_rod")（3 木棍 + 2 线）→ 到水边 useOn(tool_name="fishing_rod", target="water")；一条鱼 2 点食物。';
+        : '① **钓鱼**（最稳、可再生）：先做竿 craft(input="3 stick, 2 string", output="1 fishing_rod")（3 木棍 + 2 线）→ 到水边 useOn(tool_name="fishing_rod", target="water")；一条鱼 2 点食物。';
     const farm =
         a.seeds > 0
             ? `② **种小麦**（背包里有 ${a.seeds} 个种子）：木锄 → 在泥土/草方块上锄地 → 播种；3 个小麦做 1 个面包。`
@@ -915,14 +915,14 @@ export function foodRouteLines(a: FoodRouteAssets): string[] {
  */
 export function foodRoutePrimary(a: FoodRouteAssets): string {
     if (!a.hasFishingRod && a.sticks >= 3 && a.string >= 2) {
-        return 'useBlock(type="crafting_table", input="3 stick, 2 string", output="1 fishing_rod")';
+        return 'craft(input="3 stick, 2 string", output="1 fishing_rod")';
     }
     if (a.hasFishingRod && a.water != null) {
         return `goToCoordinates(x=${Math.round(a.water.position.x)}, y=${Math.round(a.water.position.y)}, z=${Math.round(a.water.position.z)}, closeness=3)`;
     }
     if (a.seeds > 0) {
         if (!a.hasHoe && a.planks >= 2 && a.sticks >= 2) {
-            return 'useBlock(type="crafting_table", input="2 oak_planks, 2 stick", output="1 wooden_hoe")';
+            return 'craft(input="2 oak_planks, 2 stick", output="1 wooden_hoe")';
         }
         if (a.water != null) {
             return `goToCoordinates(x=${Math.round(a.water.position.x)}, y=${Math.round(a.water.position.y)}, z=${Math.round(a.water.position.z)}, closeness=3)`;
@@ -2632,7 +2632,7 @@ export async function digLine(
             outcome.progress.push(
                 `- 前方 ${formatPoint(obstruction.cell)} 是 ${name}（容器/功能方块）→ **不挖它**，` +
                     `${detourRise > baseRise ? '抬' : '降'} 1 格绕过去` +
-                    (isContainerBlockName(name) ? `；**里面的东西原样没动**（要拿就用 useBlock 打开它）` : ''),
+                    (isContainerBlockName(name) ? `；**里面的东西原样没动**（要拿就用 lootContainer 打开它）` : ''),
             );
             step = detourStep;
         }

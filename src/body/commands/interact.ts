@@ -1,30 +1,25 @@
 /**
- * 交互类工具：`useBlock` / `useEntity` / `craft`。
+ * 交互类工具：方块交易、`useEntity`、`craft`。
  *
- * ## 为什么要把一批中层工具收成一个
+ * ## 从 `useBlock` 拆成单动词工具
  *
- * 原来有十个工具把"固定流程"写死在里面：`craftRecipe`（放工作台+合成）、
- * `smeltItem`（放炉子+烧+取）、`putInChest`/`takeFromChest`/`viewChest`、
- * `tradeWithVillager`/`showVillagerTrades`、`goToBed`、`clearFurnace`、
- * `givePlayer`（跑过去+扔）。流程一写死，环境不配合就整条失败，而且**失败在
- * 哪一步模型看不见**——模型反馈里那两条"调用后再无音讯、不知道成功失败还是
- * 被中断"，根子就是这个黑盒。
+ * 之前的 `useBlock(type, coords?, input?, output?)` 靠 `input`/`output` 是否为空
+ * 决定存款、取款、合成、烧炼还是直接使用。语义本身没错（我放进去什么，机制随便，
+ * 最后给我什么），但一个参数在不同分支含义不同，最后长成了小型 DSL。
  *
- * ## `useBlock`：四个参数说清绝大多数交互
+ * 现在拆成十个工具，每个只表达一种动作：
  *
- * | `input` | `output` | 做什么 |
- * |---|---|---|
- * | 有 | 无 | **存进去**（箱子） |
- * | 无 | 有 | **取出来**（箱子 / 熔炉取成品） |
- * | 有 | 有 | **加工**（合成 / 烧炼 / 铁砧），`output` 是**断言** |
- * | 无 | 无 | **直接用这个方块**（开箱子读内容 / 睡 / 开关门 / 附魔台读可选附魔） |
+ * - `smelt`，熔炉族投料烧炼
+ * - `combineAtAnvil`，铁砧两件合成
+ * - `putInContainer` / `takeFromContainer`，容器存取
+ * - `inspectContainer`，只读查看，不拿东西
+ * - `lootContainer`，把奖励箱全部拿走
+ * - `takeFurnaceOutput`，只取熔炉产物槽
+ * - `sleep`，睡觉
+ * - `interactBlock`，通用右键门/按钮/拉杆
  *
- * 铁砧是例外：`input` 给**两件**（主物品 + 牺牲品，如附魔书），`output` 可给可不给。
- * 物品可以写背包里看到的完整标签（`enchanted_book[mending]`），用来精确选附魔书。
- *
- * `action` 参数**不需要**——谁为 null 就决定了干什么；`type` 天然消歧（同样
- * `input={stone_pickaxe}`，`type=chest` 是"存进去"，`type=crafting_table`
- * 是"要合出这个"）。
+ * 真正执行仍走同一个内部函数 `performBlockTransaction`，定位、分支和分段回执
+ * 不重复实现；模型看不到 `input`/`output` 的空值语义。
  *
  * ## 走路：给了 coords 才走
  *
@@ -46,7 +41,7 @@ import { describeCraftShortfallForBot } from '../library/craft_shortfall.js';
 import { corridorThreatVerdict, threatsNearCorridor } from '../safety/path_threat.js';
 import Vec3 from 'vec3';
 import { td, tp } from '../../shared/prompts.js';
-import { findInventoryItemByLabel, isAnvilBlockName } from '../library/item_variants.js';
+import { findInventoryItemByLabel, isAnvilBlockName, itemDisplayName } from '../library/item_variants.js';
 import type { AgentCommand } from './actions.js';
 
 /** 物品规格：`{name, count}` 或裸名字。 */
@@ -1486,17 +1481,100 @@ export function formatSmeltUnfinished(accounting: SmeltAccounting, next: SmeltNe
     return `${head}，炉内剩 ${remaining} 个 ${accounting.rawName}（${why}）。`;
 }
 
-/** 容器类方块（只存或只取）。 */
-const CONTAINER_BLOCKS = new Set(['chest', 'trapped_chest', 'barrel', 'ender_chest', 'shulker_box']);
+/** 容器类方块（只存或只取）。彩色潜影盒用 `isContainerBlockType` 的 `endsWith` 兜住。 */
+const CONTAINER_BLOCKS: readonly string[] = ['chest', 'trapped_chest', 'barrel', 'ender_chest', 'shulker_box'];
 
-/** 开箱拿东西用（含 shulker 变体，下面用 endsWith 兜住）。 */
+/** 开箱拿东西用（含 shulker 变体，`isContainerBlockType` 统一判定）。 */
 const CONTAINER_TYPES = CONTAINER_BLOCKS;
 
+const FURNACE_TYPES: readonly string[] = ['furnace', 'blast_furnace', 'smoker'];
+const ANVIL_TYPES: readonly string[] = ['anvil', 'chipped_anvil', 'damaged_anvil'];
+
+/** 箱子类容器，包含所有颜色的潜影盒。 */
+export function isContainerBlockType(name: unknown): boolean {
+  const text = String(name ?? '').trim();
+  return CONTAINER_BLOCKS.includes(text) || text.endsWith('_shulker_box');
+}
+
+/** 当前版本注册表里所有容器名，用于“不给 type 时找最近一个容器”。 */
+export function containerTypeNames(bot: any): string[] {
+  const names = [...CONTAINER_BLOCKS];
+  try {
+    for (const name of Object.keys(bot?.registry?.blocksByName ?? {})) {
+      if (name.endsWith('_shulker_box') && !names.includes(name)) names.push(name);
+    }
+  } catch {
+    // 读不到注册表就用基础名单。
+  }
+  return names;
+}
+
+/** 多个类型里够得着的最近一个。 */
+function nearestReachableOfTypes(
+  bot: any,
+  types: readonly string[],
+  maxDistance = 4,
+): { name: string; x: number; y: number; z: number } | null {
+  let best: { name: string; x: number; y: number; z: number } | null = null;
+  let bestD = Number.POSITIVE_INFINITY;
+  for (const name of types) {
+    const pos = nearestReachableBlock(bot, name, maxDistance);
+    if (pos == null) continue;
+    const d = distanceToBlock(bot, pos.x, pos.y, pos.z);
+    if (d != null && d < bestD) {
+      bestD = d;
+      best = { name, ...pos };
+    }
+  }
+  return best;
+}
+
 /**
- * `useBlock` 的落点分派。
+ * 给拆分后的工具解析目标方块。
  *
- * 抽成纯函数是为了能单测：给定 type / input / output 该走哪条路，是这套设计里
- * 唯一容易搞错的地方（`action` 参数就是被它取代的）。
+ * - `type` 给了就按它找，并校验属于该工具允许的类型
+ * - 没给 `type` 但给了 `coords`，就读那一格的实际方块名
+ * - 两样都没给，就在允许类型里找够得着的最近一个
+ *
+ * 成功返回 `{ type, coords }`，失败返回一句可以直接回给模型的话。
+ */
+export function resolveBlockType(
+  agent: any,
+  rawType: unknown,
+  coords: unknown,
+  allowed: readonly string[],
+  label: string,
+): { type: string; coords?: unknown } | string {
+  const given = typeof rawType === 'string' ? rawType.trim() : '';
+  if (given !== '') {
+    if (!allowed.includes(given)) {
+      return `${label} 不支持 ${given}，可以用的类型有 ${allowed.join('、')}。`;
+    }
+    return { type: given, coords };
+  }
+  if (typeof coords === 'string' && coords.trim() !== '') {
+    const parts = coords.split(',').map((part) => Number(part.trim()));
+    if (parts.length !== 3 || parts.some((n) => !Number.isFinite(n))) {
+      return `coords 要写成 "x,y,z"，这次收到的是 "${coords}"。`;
+    }
+    const [x, y, z] = parts as [number, number, number];
+    const actual = blockNameAt(agent.bot, x, y, z);
+    if (actual == null) return `读不到 (${x},${y},${z}) 那一格。`;
+    if (!allowed.includes(actual)) {
+      return `(${x},${y},${z}) 那一格是 ${actual}，不是 ${label}。`;
+    }
+    return { type: actual, coords };
+  }
+  const found = nearestReachableOfTypes(agent.bot, allowed);
+  if (found == null) return `身边 4 格内没有够得着的${label}。`;
+  return { type: found.name, coords: `${found.x},${found.y},${found.z}` };
+}
+
+/**
+ * 方块的落点分派（内部用，不再暴露成工具参数）。
+ *
+ * 拆成十个单动词工具之后，这个函数只负责把“这个方块 + 有没有输入/输出”映射到
+ * 具体动作，不再让模型面对 `input`/`output` 同时代表存款、取款、合成和烧炼。
  */
 export type BlockPlan =
   | { kind: 'deposit' }
@@ -1518,7 +1596,7 @@ export function planUseBlock(
     };
   }
   if (hasInput) {
-    if (CONTAINER_BLOCKS.has(type)) return { kind: 'deposit' };
+    if (isContainerBlockType(type)) return { kind: 'deposit' };
     // 铁砧：两件输入就能合成，output 只是断言，可以不给。
     if (isAnvilBlockName(type)) return { kind: 'process' };
     if (PROCESSING_BLOCKS.has(type)) {
@@ -1530,7 +1608,7 @@ export function planUseBlock(
     return { kind: 'unsupported', reason: `${type} 不能只给 input。` };
   }
   if (hasOutput) {
-    if (CONTAINER_BLOCKS.has(type)) return { kind: 'withdraw' };
+    if (isContainerBlockType(type)) return { kind: 'withdraw' };
     // 熔炉取成品：output 单独给就是"把烤好的拿出来"。
     if (FURNACE_BLOCKS.has(type)) return { kind: 'withdraw' };
     if (PROCESSING_BLOCKS.has(type)) {
@@ -1912,80 +1990,84 @@ export async function craftSmart(bot: any, itemName: string, num = 1): Promise<b
   return outcome.ok;
 }
 
-const interactCommands: AgentCommand[] = [
-  {
-    name: '!useBlock',
-    description: td('useBlock'),
-    params: {
-      type: { type: 'BlockOrItemName', description: tp('useBlock', 'type') },
-      coords: { type: 'string', description: tp('useBlock', 'coords'), optional: true },
-      input: { type: 'string', description: tp('useBlock', 'input'), optional: true },
-      output: { type: 'string', description: tp('useBlock', 'output'), optional: true },
-    },
-    perform: async function (
-      agent: any,
-      type: string,
-      coords?: unknown,
-      input?: unknown,
-      output?: unknown,
-    ): Promise<string> {
+/**
+ * 单次方块交易的内部实现。
+ *
+ * 十个单动词工具只负责把参数整理成 `type + input + output`，真正的定位、
+ * 工作台/熔炉/铁砧/箱子分支和分段回执都留在这里。**它不再是工具**，模型看不到，
+ * `input`/`output` 靠空值决定动作的那套歧义只存在于内部。
+ */
+/** 定位到某一格方块；返回坐标或一句可以直接回给模型的话。 */
+async function locateBlockForAction(
+  agent: any,
+  type: string,
+  coords: unknown,
+): Promise<{ x: number; y: number; z: number } | string> {
+  if (typeof coords === 'string' && coords.trim() !== '') {
+    const parts = coords.split(',').map((p) => Number(p.trim()));
+    if (parts.length !== 3 || parts.some((n) => !Number.isFinite(n))) {
+      return `coords 要写成 "x,y,z"，这次收到的是 "${coords}"。`;
+    }
+    const [x, y, z] = parts as [number, number, number];
+    const actual = blockNameAt(agent.bot, x, y, z);
+    if (actual != null && actual !== type) {
+      return `(${x},${y},${z}) 那一格是 ${actual}，不是 ${type}。`;
+    }
+    const startDistance = distanceToBlock(agent.bot, x, y, z);
+    if (startDistance == null || startDistance > 4.5) {
+      let ok = await skills.goToPosition(agent.bot, x, y, z, 2);
+      if (!ok) {
+        // 目标方块本身不可站立：改试相邻可站立格。
+        const spots = findAdjacentStandable(agent.bot, x, y, z);
+        for (const spot of spots.slice(0, 4)) {
+          const reached = await skills.goToPosition(agent.bot, spot.x, spot.y, spot.z, 0);
+          if (reached) {
+            ok = true;
+            break;
+          }
+        }
+      }
+      if (!ok) {
+        const nowDistance = distanceToBlock(agent.bot, x, y, z);
+        return `走不到 (${x},${y},${z})，离目标 ${
+          nowDistance == null ? '读不到' : nowDistance.toFixed(1)
+        } 格）。`;
+      }
+    }
+    return { x, y, z };
+  }
+  const nearby = nearestReachableBlock(agent.bot, type);
+  if (nearby == null) return `身边 4 格内没有 ${type}。`;
+  return nearby;
+}
+
+/** 方块交易的内部实现。 */
+async function performBlockTransaction(
+  agent: any,
+  type: string,
+  coords?: unknown,
+  input?: unknown,
+  output?: unknown,
+): Promise<string> {
       const lines: string[] = [];
       const parsedIn = parseItems(input);
       const parsedOut = parseItems(output);
-      if (parsedIn.error != null) return `useBlock 的参数不对，${parsedIn.error}`;
-      if (parsedOut.error != null) return `useBlock 的参数不对，${parsedOut.error}`;
+      if (parsedIn.error != null) return `参数不对，${parsedIn.error}`;
+      if (parsedOut.error != null) return `参数不对，${parsedOut.error}`;
 
       const plan = planUseBlock(type, parsedIn.items.length > 0, parsedOut.items.length > 0);
-      if (plan.kind === 'unsupported') return `useBlock 用不了，${plan.reason}`;
+      if (plan.kind === 'unsupported') return `这次操作不支持，${plan.reason}`;
 
-      // 定位：给了 coords 就过去；没给就用够得着的最近一个。
-      let located: { x: number; y: number; z: number } | null;
-      if (typeof coords === 'string' && coords.trim() !== '') {
-        const parts = coords.split(',').map((p) => Number(p.trim()));
-        if (parts.length !== 3 || parts.some((n) => !Number.isFinite(n))) {
-          return `useBlock 的参数不对，coords 要写成 "x,y,z"，这次收到的是 "${coords}"。`;
-        }
-        const [x, y, z] = parts as [number, number, number];
-        const actual = blockNameAt(agent.bot, x, y, z);
-        if (actual != null && actual !== type) {
-          return `useBlock 用不了，(${x},${y},${z}) 那一格是 ${actual}，不是 ${type}。`;
-        }
-        const startDistance = distanceToBlock(agent.bot, x, y, z);
-        if (startDistance == null || startDistance > 4.5) {
-          let ok = await skills.goToPosition(agent.bot, x, y, z, 2);
-          if (!ok) {
-            // 目标方块本身不可站立：改试相邻可站立格。
-            const spots = findAdjacentStandable(agent.bot, x, y, z);
-            for (const spot of spots.slice(0, 4)) {
-              const reached = await skills.goToPosition(agent.bot, spot.x, spot.y, spot.z, 0);
-              if (reached) {
-                ok = true;
-                break;
-              }
-            }
-          }
-          if (!ok) {
-            const nowDistance = distanceToBlock(agent.bot, x, y, z);
-            return `没做到 ${type}，走不到 (${x},${y},${z})，离目标 ${
-              nowDistance == null ? '读不到' : nowDistance.toFixed(1)
-            } 格）。`;
-          }
-        }
-        located = { x, y, z };
-      } else {
-        const nearby = nearestReachableBlock(agent.bot, type);
-        if (nearby == null) {
-          return `身边 4 格内没有 ${type}。`;
-        }
-        located = nearby;
-      }
+      const locatedOrError = await locateBlockForAction(agent, type, coords);
+      if (typeof locatedOrError === 'string') return locatedOrError;
+      const located = locatedOrError;
 
       // 分派到已有技能。每一步都写进 lines，失败也写清楚。
       if (plan.kind === 'interact') {
         // **开箱 = 拿东西**（用户要求「世界里有奖励箱，他们得拿」）。
-        // 不新增工具：模型能调用的只有 `useBlock`，所以能力就放在它的 interact 分支里
+        // 容器全拿能力放在这个内部 interact 分支里
         // （`takeFromChest`/`viewChest` 从来不是工具，模型根本调不到——那些文案今晚一并删掉）。
-        if (CONTAINER_TYPES.has(type) || type.endsWith('shulker_box')) {
+        if (isContainerBlockType(type)) {
           if (located == null) return '没做到开箱：定位不到容器。';
           const containerBlock = agent.bot.blockAt?.(new Vec3(located.x, located.y, located.z));
           if (containerBlock == null) {
@@ -2079,10 +2161,10 @@ const interactCommands: AgentCommand[] = [
 
       // process：output 是断言。
       const wanted = parsedOut.items[0];
-      if (wanted == null) return 'useBlock 用不了：加工缺少 output。';
+      if (wanted == null) return '这次操作做不到：加工缺少 output。';
       const resolvedWanted = resolveCraftItemName(wanted.name);
       if (!resolvedWanted.valid) {
-        return `useBlock 用不了，${wanted.name} 不是有效的物品名。`;
+        return `这次操作做不到，${wanted.name} 不是有效的物品名。`;
       }
       const aliasNote = resolvedWanted.aliasOf != null ? `（${resolvedWanted.aliasOf} → ${resolvedWanted.name}）` : '';
       wanted.name = resolvedWanted.name;
@@ -2097,7 +2179,7 @@ const interactCommands: AgentCommand[] = [
         try {
           const arm = (agent.bot as { __armContainerPacketDump?: (reason: string, label?: 'container' | 'craft' | 'furnace') => void })
             .__armContainerPacketDump;
-          arm?.(`useBlock furnace`, 'furnace');
+          arm?.(`smelt furnace`, 'furnace');
         } catch {
           // 诊断不是功能，武装失败不影响烧炼。
         }
@@ -2299,6 +2381,309 @@ const interactCommands: AgentCommand[] = [
         lines.push(`没做到合成 ${wanted.name}，因为背包读数不可用。`);
       }
       return renderReport(lines);
+}
+
+/** 只读查看容器或熔炉，不移动任何东西。 */
+async function inspectBlockContents(agent: any, type: string, coords: unknown): Promise<string> {
+  const located = await locateBlockForAction(agent, type, coords);
+  if (typeof located === 'string') return located;
+  const block = agent.bot.blockAt?.(new Vec3(located.x, located.y, located.z));
+  if (block == null) return `读不到 (${located.x},${located.y},${located.z}) 那一格。`;
+  const container: any = await withTimeout(skills.openBlockUi(agent.bot, block), TOOL_TIMEOUT_MS, null);
+  if (container == null) return `这次调用超时了，${Math.round(TOOL_TIMEOUT_MS / 1000)} 秒没有返回。`;
+  try {
+    if (isFurnaceLikeBlock(type)) {
+      const lines = [
+        slotLine(readSlot(container, 'inputItem'), '原料槽'),
+        slotLine(readSlot(container, 'fuelItem'), '燃料槽'),
+        slotLine(readSlot(container, 'outputItem'), '产物槽'),
+      ];
+      return renderReport([`${type} (${located.x},${located.y},${located.z})：`, ...lines]);
+    }
+    const slots: any[] = Array.isArray(container.slots) ? container.slots : [];
+    const invStart = Number(container.inventoryStart ?? 9);
+    const end = Math.min(invStart, slots.length);
+    const occupied: string[] = [];
+    for (let i = 0; i < end; i++) {
+      const slot = slots[i];
+      const name = String(slot?.name ?? '');
+      if (name === '') continue;
+      const label = itemDisplayName(slot, name, agent.bot?.registry ?? null);
+      occupied.push(`第 ${i + 1} 格 ${label}×${Number(slot?.count ?? 1)}`);
+    }
+    let free = 0;
+    for (let i = 0; i < end; i++) if (slots[i] == null) free++;
+    const head = `${type} (${located.x},${located.y},${located.z}) 里有 ${
+      occupied.length > 0 ? occupied.join('、') : '没有东西'
+    }。`;
+    return renderReport([head, `容器里还剩 ${free} 个空格。`]);
+  } finally {
+    try {
+      await container.close?.();
+    } catch {
+      // 关不上不影响已读到的内容。
+    }
+  }
+}
+
+/** 把熔炉产物槽里已经烧好的东西全部取出来，不投料。 */
+async function takeFurnaceOutputAction(agent: any, type: string, coords: unknown): Promise<string> {
+  const located = await locateBlockForAction(agent, type, coords);
+  if (typeof located === 'string') return located;
+  const bot = agent.bot;
+  const block = bot.blockAt?.(new Vec3(located.x, located.y, located.z));
+  if (block == null) return `读不到 (${located.x},${located.y},${located.z}) 那一格。`;
+  if (typeof bot.openFurnace !== 'function') return '客户端没有 openFurnace，取不了产物。';
+  const ui: any = await withTimeout(bot.openFurnace(block), TOOL_TIMEOUT_MS, null);
+  if (ui == null) return `这次调用超时了，${Math.round(TOOL_TIMEOUT_MS / 1000)} 秒没有返回。`;
+  const before = world.getInventoryCounts(bot);
+  const taken: Array<{ name: string; count: number }> = [];
+  try {
+    for (let guard = 0; guard < 64; guard++) {
+      const item = ui?.outputItem?.();
+      if (item == null) break;
+      const got: any = await ui.takeOutput();
+      const count = Number(got?.count ?? 0);
+      if (count <= 0) break;
+      taken.push({ name: String(got?.name ?? item?.name ?? 'unknown'), count });
+    }
+  } finally {
+    try {
+      await bot.closeWindow(ui);
+    } catch {
+      // 关不上不影响已取到的产物。
+    }
+  }
+  await settleInventory(bot, 3, 50);
+  const after = world.getInventoryCounts(bot);
+  const lines: string[] = [];
+  if (taken.length === 0) {
+    lines.push('产物槽是空的，没有可拿的东西。');
+  } else {
+    lines.push(`从产物槽拿了 ${taken.map((entry) => `${entry.name}×${entry.count}`).join('、')}。`);
+    const changed: string[] = [];
+    for (const name of new Set([...Object.keys(before), ...Object.keys(after)])) {
+      const was = Number(before[name] ?? 0);
+      const now = Number(after[name] ?? 0);
+      if (was !== now) changed.push(`${name} 从 ${was} 个变成 ${now} 个`);
+    }
+    if (changed.length > 0) lines.push(`背包的变化是 ${changed.join('，')}。`);
+  }
+  return renderReport(lines);
+}
+
+/** 通用右键一个方块实例。 */
+async function interactWithBlockAction(agent: any, coords: unknown, rawType: unknown): Promise<string> {
+  if (typeof coords !== 'string' || coords.trim() === '') {
+    return 'interactBlock 需要 coords，写成 "x,y,z"，告诉我要右键哪一格。';
+  }
+  const parts = coords.split(',').map((part) => Number(part.trim()));
+  if (parts.length !== 3 || parts.some((n) => !Number.isFinite(n))) {
+    return `coords 要写成 "x,y,z"，这次收到的是 "${coords}"。`;
+  }
+  const [x, y, z] = parts as [number, number, number];
+  const actual = blockNameAt(agent.bot, x, y, z);
+  if (actual == null) return `读不到 (${x},${y},${z}) 那一格。`;
+  const given = typeof rawType === 'string' ? rawType.trim() : '';
+  if (given !== '' && given !== actual) {
+    return `(${x},${y},${z}) 那一格是 ${actual}，不是 ${given}。`;
+  }
+  const located = await locateBlockForAction(agent, actual, coords);
+  if (typeof located === 'string') return located;
+  const block = agent.bot.blockAt?.(new Vec3(located.x, located.y, located.z));
+  if (block == null) return `读不到 (${located.x},${located.y},${located.z}) 那一格。`;
+  const lines: string[] = [`走到了 ${actual} (${located.x},${located.y},${located.z}) 旁边。`];
+  try {
+    if (agent.bot?.heldItem != null) await agent.bot.unequip('hand');
+  } catch {
+    // 换空手失败就照常试右键，失败会在下面报出来。
+  }
+  try {
+    await agent.bot.activateBlock(block);
+  } catch (error: unknown) {
+    return renderReport(lines, `右键 ${actual} 失败了，错误是 ${error instanceof Error ? error.message : String(error)}。`);
+  }
+  await skills.wait(agent.bot, 300);
+  const window: any = agent.bot?.currentWindow;
+  if (window != null) {
+    lines.push(`右键打开了 ${String(window.type ?? '窗口')}。`);
+    try {
+      await agent.bot.closeWindow(window);
+      lines.push('已经关掉窗口，这个工具不支持继续操作窗口内容。');
+    } catch {
+      lines.push('窗口没能关掉。');
+    }
+  } else {
+    lines.push('右键动作发出去了，没有可观察的界面变化。');
+  }
+  return renderReport(lines);
+}
+
+/** 睡床。 */
+async function sleepOnBedAction(agent: any, coords: unknown): Promise<string> {
+  const hasCoords = typeof coords === 'string' && coords.trim() !== '';
+  let located: { x: number; y: number; z: number } | null = null;
+  if (hasCoords) {
+    const target = await locateBlockForAction(agent, 'bed', coords);
+    if (typeof target === 'string') return target;
+    located = target;
+  }
+  const ok = await skills.goToBed(agent.bot);
+  if (ok) {
+    return located == null
+      ? '睡下并醒来了。'
+      : `在 (${located.x},${located.y},${located.z}) 的床上睡下并醒来。`;
+  }
+  return located == null
+    ? '没做到睡觉，附近没有睡成的床。'
+    : `没做到睡觉，床在 (${located.x},${located.y},${located.z})。`;
+}
+
+const interactCommands: AgentCommand[] = [
+  {
+    name: '!smelt',
+    description: td('smelt'),
+    params: {
+      input: { type: 'string', description: tp('smelt', 'input') },
+      output: { type: 'string', description: tp('smelt', 'output') },
+      type: { type: 'BlockOrItemName', description: tp('smelt', 'type'), optional: true },
+      coords: { type: 'string', description: tp('smelt', 'coords'), optional: true },
+    },
+    perform: async function (
+      agent: any,
+      input: unknown,
+      output: unknown,
+      type?: unknown,
+      coords?: unknown,
+    ): Promise<string> {
+      const resolved = resolveBlockType(agent, type, coords, FURNACE_TYPES, '熔炉');
+      if (typeof resolved === 'string') return resolved;
+      return await performBlockTransaction(agent, resolved.type, resolved.coords, input, output);
+    },
+  },
+  {
+    name: '!combineAtAnvil',
+    description: td('combineAtAnvil'),
+    params: {
+      input1: { type: 'string', description: tp('combineAtAnvil', 'input1') },
+      input2: { type: 'string', description: tp('combineAtAnvil', 'input2') },
+      output: { type: 'string', description: tp('combineAtAnvil', 'output'), optional: true },
+      type: { type: 'BlockOrItemName', description: tp('combineAtAnvil', 'type'), optional: true },
+      coords: { type: 'string', description: tp('combineAtAnvil', 'coords'), optional: true },
+    },
+    perform: async function (
+      agent: any,
+      input1: unknown,
+      input2: unknown,
+      output?: unknown,
+      type?: unknown,
+      coords?: unknown,
+    ): Promise<string> {
+      const first = typeof input1 === 'string' ? input1.trim() : '';
+      const second = typeof input2 === 'string' ? input2.trim() : '';
+      if (first === '' || second === '') return 'combineAtAnvil 需要 input1 和 input2 两件物品。';
+      const resolved = resolveBlockType(agent, type, coords, ANVIL_TYPES, '铁砧');
+      if (typeof resolved === 'string') return resolved;
+      return await performBlockTransaction(agent, resolved.type, resolved.coords, `${first}, ${second}`, output);
+    },
+  },
+  {
+    name: '!putInContainer',
+    description: td('putInContainer'),
+    params: {
+      items: { type: 'string', description: tp('putInContainer', 'items') },
+      type: { type: 'BlockOrItemName', description: tp('putInContainer', 'type'), optional: true },
+      coords: { type: 'string', description: tp('putInContainer', 'coords'), optional: true },
+    },
+    perform: async function (
+      agent: any,
+      items: unknown,
+      type?: unknown,
+      coords?: unknown,
+    ): Promise<string> {
+      const resolved = resolveBlockType(agent, type, coords, containerTypeNames(agent.bot), '容器');
+      if (typeof resolved === 'string') return resolved;
+      return await performBlockTransaction(agent, resolved.type, resolved.coords, items, undefined);
+    },
+  },
+  {
+    name: '!takeFromContainer',
+    description: td('takeFromContainer'),
+    params: {
+      items: { type: 'string', description: tp('takeFromContainer', 'items') },
+      type: { type: 'BlockOrItemName', description: tp('takeFromContainer', 'type'), optional: true },
+      coords: { type: 'string', description: tp('takeFromContainer', 'coords'), optional: true },
+    },
+    perform: async function (
+      agent: any,
+      items: unknown,
+      type?: unknown,
+      coords?: unknown,
+    ): Promise<string> {
+      const resolved = resolveBlockType(agent, type, coords, containerTypeNames(agent.bot), '容器');
+      if (typeof resolved === 'string') return resolved;
+      return await performBlockTransaction(agent, resolved.type, resolved.coords, undefined, items);
+    },
+  },
+  {
+    name: '!inspectContainer',
+    description: td('inspectContainer'),
+    params: {
+      type: { type: 'BlockOrItemName', description: tp('inspectContainer', 'type'), optional: true },
+      coords: { type: 'string', description: tp('inspectContainer', 'coords'), optional: true },
+    },
+    perform: async function (agent: any, type?: unknown, coords?: unknown): Promise<string> {
+      const allowed = [...containerTypeNames(agent.bot), ...FURNACE_TYPES];
+      const resolved = resolveBlockType(agent, type, coords, allowed, '容器或熔炉');
+      if (typeof resolved === 'string') return resolved;
+      return await inspectBlockContents(agent, resolved.type, resolved.coords);
+    },
+  },
+  {
+    name: '!lootContainer',
+    description: td('lootContainer'),
+    params: {
+      type: { type: 'BlockOrItemName', description: tp('lootContainer', 'type'), optional: true },
+      coords: { type: 'string', description: tp('lootContainer', 'coords'), optional: true },
+    },
+    perform: async function (agent: any, type?: unknown, coords?: unknown): Promise<string> {
+      const resolved = resolveBlockType(agent, type, coords, containerTypeNames(agent.bot), '容器');
+      if (typeof resolved === 'string') return resolved;
+      return await performBlockTransaction(agent, resolved.type, resolved.coords);
+    },
+  },
+  {
+    name: '!takeFurnaceOutput',
+    description: td('takeFurnaceOutput'),
+    params: {
+      type: { type: 'BlockOrItemName', description: tp('takeFurnaceOutput', 'type'), optional: true },
+      coords: { type: 'string', description: tp('takeFurnaceOutput', 'coords'), optional: true },
+    },
+    perform: async function (agent: any, type?: unknown, coords?: unknown): Promise<string> {
+      const resolved = resolveBlockType(agent, type, coords, FURNACE_TYPES, '熔炉');
+      if (typeof resolved === 'string') return resolved;
+      return await takeFurnaceOutputAction(agent, resolved.type, resolved.coords);
+    },
+  },
+  {
+    name: '!sleep',
+    description: td('sleep'),
+    params: {
+      coords: { type: 'string', description: tp('sleep', 'coords'), optional: true },
+    },
+    perform: async function (agent: any, coords?: unknown): Promise<string> {
+      return await sleepOnBedAction(agent, coords);
+    },
+  },
+  {
+    name: '!interactBlock',
+    description: td('interactBlock'),
+    params: {
+      coords: { type: 'string', description: tp('interactBlock', 'coords') },
+      type: { type: 'BlockOrItemName', description: tp('interactBlock', 'type'), optional: true },
+    },
+    perform: async function (agent: any, coords: unknown, type?: unknown): Promise<string> {
+      return await interactWithBlockAction(agent, coords, type);
     },
   },
   {

@@ -1090,7 +1090,9 @@ export function isStuck(
 const STATIONARY_ACTIONS: readonly string[] = [
   // 旧名单里的 inventory / nearbyBlocks / entities / craftable / savedPlaces 已删：
   // 它们的查询全部并进 stats(type=…)，站着的也只有 stats 一个入口。
-  'useBlock', 'useEntity', 'craft', 'stats', 'getCraftingPlan', 'searchWiki',
+  'smelt', 'combineAtAnvil', 'putInContainer', 'takeFromContainer', 'inspectContainer',
+  'lootContainer', 'takeFurnaceOutput', 'sleep', 'interactBlock', 'useEntity', 'craft',
+  'stats', 'getCraftingPlan', 'searchWiki',
   'rememberHere', 'Say', 'Feedback', 'Stop',
   // **stay 是主动待命**：模型明确要求"站 10 秒"，位置不变正是它的本职——
   // prober 实测 stay(10) 被判卡住 70 秒还推了 task.stuck（Feedback 原话：

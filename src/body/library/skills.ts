@@ -3000,7 +3000,7 @@ export function formatLootReport(outcome: LootOutcome): string[] {
     if (!outcome.readable) {
         lines.push(
             '箱子**槽位表读不到**（窗口没给内容）——**不能据此判断箱子是空的**。' +
-                '先重试一次 `useBlock`（同一个箱子），或用 `stats` 核对；容器这条路不稳时别在这上面耗。',
+                '先重试一次同一个容器的操作（例如 `inspectContainer`），或用 `stats` 核对；容器这条路不稳时别在这上面耗。',
         );
         return lines;
     }
@@ -3033,10 +3033,10 @@ export function formatLootReport(outcome: LootOutcome): string[] {
 }
 
 /**
- * **开容器并把能装的都装走**（`useBlock(type="chest")` 的实际动作）。
+ * **开容器并把能装的都装走**（`lootContainer` 的实际动作）。
  *
  * 为什么不是 `takeFromChest`：那个函数**不是工具**（模型调不到），只存在于 skills 里。
- * 用户的要求"把奖励箱拿走"必须走模型真的能调用的 `useBlock`，所以能力放在这里。
+ * 用户的要求"把奖励箱拿走"必须走模型真的能调用的 `lootContainer`，所以能力放在这里。
  */
 export async function lootContainer(bot: any, block: any): Promise<LootOutcome> {
     const snapshot = (): Map<string, number> => {
@@ -6516,7 +6516,7 @@ export async function openBlockUi(
     if (!furnaceLike && !containerLike) {
         throw new Error(
             `${name} 没有"打开界面"这个操作。能打开的只有箱子/陷阱箱/木桶/末影箱/漏斗/发射器/投掷器/潜影盒；`
-                + `熔炉/高炉/烟熏炉走 useBlock 的 input/output（投料、取货）。`
+                + `熔炉/高炉/烟熏炉用 smelt 投料，产物用 takeFurnaceOutput 取。`
                 + `工作台合成用 craft。`,
         );
     }
@@ -6577,7 +6577,7 @@ export async function openBlockUi(
     // 这是"0 个窗口包"那个诊断的下一级：直接记下我们发了什么、服务端有没有回。
     try {
         const arm = (bot as { __armContainerPacketDump?: (reason: string) => void }).__armContainerPacketDump;
-        arm?.(`useBlock ${name}`);
+        arm?.(`openBlockUi ${name}`);
     } catch {
         // 转储不是功能，武装失败不影响打开。
     }
@@ -6672,10 +6672,10 @@ export async function openBlockUi(
     // 那是可验证的（同样的调用同样的结果），不是策略。"改走哪条路"由模型决定。
     const repeatNote =
         protocolFault != null
-            ? `**带槽位容器在这台服务端上是协议级故障**：重发同一个 useBlock 不会有不同结果。`
+            ? `**带槽位容器在这台服务端上是协议级故障**：重发同一次容器操作不会有不同结果。`
             : consecutive >= 2
                 ? `这已经是连续第 ${consecutive} 次打不开容器了——同一个调用重发不会有不同结果。`
-                : `同一个箱子重复 useBlock 不会有不同结果（换坐标或换种类是另一条路径）。`;
+                : `同一个箱子重复打开不会有不同结果（换坐标或换种类是另一条路径）。`;
     throw new Error(
         `打开 ${name} 失败：${diagnosis}。` +
             `现场：方块 ${name} @${where}，开之前${hadWindowOpenAlready ? '**已经有一个界面开着**' : '没有界面开着'}。` +

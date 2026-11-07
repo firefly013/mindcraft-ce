@@ -2,7 +2,7 @@
 
 来源是当前 `develop` 工作区的工具注册表，名字就是模型调用时看到的名字。
 
-身体工具 47 个，大脑工具 7 个，合计 54 个。
+身体工具 55 个，大脑工具 7 个，合计 62 个。
 
 ## 大脑工具
 
@@ -41,7 +41,7 @@
 | drinkPotion | 动作 | potion | 喝一瓶指定 id 的药水（healing / strong_healing / long_slow_falling 这类）。背包里所有药水的物品名都是 potion，只有药水 id 能精确到等级和时长；没有这瓶时返回背包里现有的药水 id 清单。 |
 | recoverAfterDeath | 动作 | 无 | 死亡回收：读死亡点记录，给你"东西还在不在 + 已经过了多久 + 从哪回去"的方案。掉落物 **5 分钟**后消失，但**只在区块被加载时才计时**（旁边没人 = 基本不会消失，另一个 bot 在旁边则是在跑的）；掉进虚空（Y<-60）的东西**当场消失**，不用去捡。人已经在末地时会直接带你走到尸体坐标；在别的… |
 
-### 基础动作（33）
+### 基础动作（41）
 
 | 工具 | 类型 | 参数 | 说明 |
 | --- | --- | --- | --- |
@@ -67,9 +67,17 @@
 | goToSurface | 动作 | 无 | 回到头顶最高的方块（一般就是地面）。 |
 | enterNether | 动作 | 无 | 自动从主世界进入下界：先检查背包，至少要有 10 块黑曜石和 1 个打火石；材料够时会自动选址、搭 4×5 下界门框（10 块黑曜石）、点燃，并走进传送门等维度切换。4×5 门框的四个角在施工时需要用常见方块（dirt / cobblestone / stone / netherrack 等，最多 4 个）垫住；… |
 | useOn | 动作 | tool_name, target | 对最近的某种目标使用（右键）指定工具。 |
-| useBlock | 动作 | type, coords, input, output | 用一个方块干活。**谁为 null 决定干什么**：input 有 output 空 = 存进去（只限箱子/木桶这类容器）；input 空 output 有 = 取出来；两个都有 = 加工（工作台合成 / 熔炉烧炼），output 是期望产物。**熔炉加工必须同时给 input 和 output**：只给 inp… |
+| smelt | 动作 | input, output, type, coords | 把原料放进熔炉、高炉或烟熏炉烧成产物，并等产物进背包。燃料由工具自己从背包里找，产物一出现就取出来；失败或超时会把炉里的原料和燃料取回。回执分开报背包前后数量、炉内原料/燃料/产物三槽、实际烧出多少、没烧完的原因。 |
+| combineAtAnvil | 动作 | input1, input2, output, type, coords | 把两件物品放进铁砧合成一件，比如给剑附魔、合并两本附魔书。两件输入都可以写背包里看到的完整标签（enchanted_book[mending] / diamond_sword[sharpness 5]）来精确选那一本、那一把。output 是期望产物，可给可不给；回执会报产物和背包变化。 |
+| putInContainer | 动作 | items, type, coords | 把背包里的物品放进箱子、木桶、潜影盒或末影箱。只报实际放进去的数量和背包剩余；容器满了或物品没放进去会明确说。 |
+| takeFromContainer | 动作 | items, type, coords | 从箱子、木桶、潜影盒或末影箱里取出指定物品。只报实际拿到的数量；容器里没有这件东西时会列出容器现有的物品。 |
+| inspectContainer | 动作 | type, coords | 只读查看容器或熔炉里有什么，**不拿任何东西**。容器会列出每个占用格和剩余空格；熔炉会分别列出原料槽、燃料槽、产物槽。 |
+| lootContainer | 动作 | type, coords | 把容器里的东西**全部拿走**，用于世界里的奖励箱。回执写清箱子里原本有什么、实际拿走了什么、还剩什么（背包没空格时）。 |
+| takeFurnaceOutput | 动作 | type, coords | 把熔炉产物槽里已经烧好的东西全部取出来，不投料。 |
+| sleep | 动作 | coords | 走到床上去睡觉，睡到天亮。回执报床的坐标和有没有睡成。 |
+| interactBlock | 动作 | coords, type | 右键一个方块实例，用来开门、开活板门、按按钮、拉拉杆、开栅栏门这类通用交互。附魔台暂时不支持。回执报方块名、坐标，以及有没有出现可观察的界面变化。 |
 | useEntity | 动作 | entity_id, input, output | 对一个实体干活（喂食 / 剪羊毛 / 挤奶 / 和村民交易）。用 entity_id 指定是谁——Live State 的实体表里有 id。**会自己走过去**（实体会动，交给模型算距离不现实）。input 有 output 空 = 给它东西；input 空 output 有 = 想从它身上拿；两个都空 = 看它… |
-| craft | 动作 | input, output | **背包内**合成（2×2，不需要工作台）：木板、木棍、工作台本身、火把这类。需要工作台的 3×3 配方用 useBlock(type=crafting_table, input=…, output=…)。output 是期望产出，做不出来会明确报。 |
+| craft | 动作 | input, output | 按配方合成物品，背包 2×2 和需要工作台的 3×3 都走它。工作台会自己找、找不到会用背包里的工作台放一个。output 是期望产出，做不出来会明确报缺口。 |
 | allowDangerousOps | 动作 | minutes, calls, reason, ops, revoke | 授权自己做危险操作（默认禁止的）：pour_water（用桶倒水）、pour_lava（倒岩浆）、ignite（主动点火）、sleep_in_bed（在下界/末地睡觉——那两处的床会炸）、enter_deep_water（进深水/向深水寻路）。只在真需要时用，比如浇黑曜石前开 pour_water、点地狱门前开 … |
 | disableSafeguards | 动作 | minutes, calls, reason, restore | **关掉保命程序**，一段时间内或若干次工具调用内：进深水不会自动上岸、溺水不会自动上浮。只有在你清楚后果、并且需要连续做完一串动作（水下挖洞、封顶留空气）时才用——这几步做完之前保命不会来救你，出事就是真出事。用 calls 比 minutes 安全：中途失手了额度一用完，保命立刻接管。**填 restore=… |
 | restoreAllSafety | 动作 | 无 | **一键恢复两层保护**：收回所有危险操作授权（连内部豁免票一起）+ 重新打开保命程序。当你觉得刚才的授权给错了、或者玩脱了，立刻调这个——不必分别去调 allowDangerousOps(revoke=true) 和 disableSafeguards(restore=true)，漏掉一个就等于没恢复干净。 |

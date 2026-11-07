@@ -101,7 +101,7 @@ describe('成功路径不许被诊断代码破坏', () => {
     await openBlockUi(bot2, chest);
     const after = await openBlockUi(fakeBot(), chest, { timeoutMs: 100 }).catch((e: Error) => e.message);
     // 计数确实清零了：这次是"第 1 次"的形状（同一种箱子的确定性说明），不是"连续第 N 次"
-    expect(String(after)).toContain('同一个箱子重复 useBlock');
+    expect(String(after)).toContain('同一个箱子重复打开');
   });
 
   it('熔炉族仍走 openFurnace（回归：分路不许坏）', async () => {

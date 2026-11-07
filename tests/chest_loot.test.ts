@@ -1,5 +1,5 @@
 /**
- * 「世界里有奖励箱，他们得拿」——开箱 = 拿东西，走模型真的能调用的 `useBlock`。
+ * 「世界里有奖励箱，他们得拿」——开箱 = 拿东西，走模型真的能调用的 `lootContainer`。
  *
  * 三条要钉住的事实：
  *   ① 箱子有东西 ⇒ 全部拿走、**按背包实测增量计数**（不是"点了几个槽"）；
@@ -53,22 +53,20 @@ describe('formatLootReport：三件事分开说', () => {
     const lines = formatLootReport({ readable: false, contents: [], taken: [], left: [], freeSlots: null, reason: '槽位表为空' }).join('\n');
     expect(lines).toContain('槽位表读不到');
     expect(lines).toContain('不能据此判断箱子是空的');
-    expect(lines).toContain('useBlock');
+    expect(lines).toContain('inspectContainer');
     expect(lines).not.toContain('takeFromChest');
   });
 });
 
-describe('能力在 useBlock 里，且回执不再点名不存在的工具', () => {
+describe('能力在 lootContainer 里，且回执不再点名不存在的工具', () => {
   const interact = () => readFileSync(join(process.cwd(), 'src', 'body', 'commands', 'interact.ts'), 'utf8');
   const actions = () => readFileSync(join(process.cwd(), 'src', 'body', 'commands', 'actions.ts'), 'utf8');
   const skills = () => readFileSync(join(process.cwd(), 'src', 'body', 'library', 'skills.ts'), 'utf8');
 
-  it('useBlock 的 interact 分支真的会开箱拿东西（lootContainer）', () => {
+  it('lootContainer 的 interact 分支真的会开箱拿东西', () => {
     const src = interact();
     expect(src).toContain('skills.lootContainer(agent.bot, containerBlock)');
-    expect(src).toContain('/**');
-    expect(src).toContain('/**');
-    expect(src).toContain("type.endsWith('shulker_box')");
+    expect(src).toContain('isContainerBlockType(type)');
   });
 
   it('模型可见的回执里不再出现"队友 takeFromChest 取"这类不可执行指引', () => {

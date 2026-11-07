@@ -2038,7 +2038,7 @@ export async function fishSkill(
         stopReason = 'no_rod';
         warnings.push(
             `没有钓鱼竿：**要在工作台上做**（3 木棍 + 2 线）——2×2 的 craft 放不下这个配方：` +
-                `useBlock(type="crafting_table", input="3 stick, 2 string", output="1 fishing_rod")。`,
+                `craft(input="3 stick, 2 string", output="1 fishing_rod")。`,
         );
     } else if (foodCountNow >= FISH_FOOD_ENOUGH) {
         stopReason = 'food_enough';

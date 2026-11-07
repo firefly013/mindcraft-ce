@@ -1421,10 +1421,9 @@ export class MineflayerBody {
                 // **结论只属于失败的那一种方块**（真机 2026-10-20：B 报「容器全坏」，
                 // 几行后自我纠正「熔炉其实完全可用，21 块玻璃已产出」——箱子失败不等于
                 // 熔炉失败，它们是不同路径，不许互相短路）。
-                const armReason = String(this.containerDumpReason ?? '');
-                this.slottedContainerBlockedFor = armReason.startsWith('useBlock ')
-                    ? armReason.slice('useBlock '.length).trim()
-                    : null;
+                const armReason = String(this.containerDumpReason ?? '').trim();
+                const armParts = armReason === '' ? [] : armReason.split(/\s+/);
+                this.slottedContainerBlockedFor = armParts.length >= 2 ? armParts.slice(1).join(' ').trim() : null;
                 this.slottedContainerBlockedReason =
                     '服务端开窗但不发内容（open_window 到了，window_items/set_content 一个都没有，且本进程零协议解析错误）';
             } else if (verdict === 'window-arrived') {
@@ -6257,7 +6256,15 @@ export class MineflayerBody {
                     let residualScreenNote = '';
                     try {
                         const hasWindow = (this.bot as any)?.currentWindow != null;
-                        const managesWindow = name === 'useBlock' || name === 'craft' || name === 'smelt';
+                        const managesWindow =
+                            name === 'smelt' ||
+                            name === 'combineAtAnvil' ||
+                            name === 'putInContainer' ||
+                            name === 'takeFromContainer' ||
+                            name === 'inspectContainer' ||
+                            name === 'lootContainer' ||
+                            name === 'takeFurnaceOutput' ||
+                            name === 'craft';
                         if (hasWindow && !managesWindow) {
                             const closed = closeStaleWindow(this.bot);
                             if (closed) {

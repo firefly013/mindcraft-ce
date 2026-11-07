@@ -171,7 +171,7 @@ describe('collectBlocks 回执统一口径', () => {
   });
 });
 
-describe('useBlock 加工语义', () => {
+describe('方块交易加工语义', () => {
   it('熔炉只给 input 时明确要求同时给 output', () => {
     const plan = planUseBlock('furnace', true, false);
     expect(plan.kind).toBe('unsupported');
@@ -332,7 +332,7 @@ describe('交互动作的统一结局', () => {
         },
       },
     };
-    await expect(runInteractiveAction(agent, 'useBlock', () => '看完了：原料槽：空')).resolves.toContain('原料槽');
+    await expect(runInteractiveAction(agent, 'smelt', () => '看完了：原料槽：空')).resolves.toContain('原料槽');
   });
 
   it('被中断时明确说被中断，不假装完成', async () => {
@@ -344,7 +344,7 @@ describe('交互动作的统一结局', () => {
         },
       },
     };
-    const text = await runInteractiveAction(agent, 'useBlock', () => '不该原样返回');
+    const text = await runInteractiveAction(agent, 'smelt', () => '不该原样返回');
     expect(text).toContain('被中断');
     // 契约变更（Lead 2026-10-21）：**不许列三个候选**，要么指名、要么如实说没记录。
     expect(text).toContain('被中断了，原因是 没有记录。');
@@ -353,7 +353,7 @@ describe('交互动作的统一结局', () => {
   });
 
   it('空结果也有可行动的回执', async () => {
-    const text = await runInteractiveAction({}, 'useBlock', () => '   ');
+    const text = await runInteractiveAction({}, 'smelt', () => '   ');
     expect(text).toContain('没有返回');
   });
 });

@@ -435,8 +435,8 @@ export const actionsList: AgentCommand[] = [
             await skills.useToolOn(agent.bot, tool_name, target);
         })
     },
-    // 交互类：useBlock / useEntity / craft。它们取代了一批把固定流程写死的中层
-    // 工具（craftRecipe / smeltItem / useBlock 的容器读写 /
+    // 交互类：方块交易工具 / useEntity / craft。它们取代了一批把固定流程写死的中层
+    // 工具（craftRecipe / smeltItem / 容器读写 /
     // tradeWithVillager / showVillagerTrades / goToBed / clearFurnace / givePlayer）。
     ...interactList,
     // 危险操作许可。**开关合一**：`revoke=true` 即收回授权。
