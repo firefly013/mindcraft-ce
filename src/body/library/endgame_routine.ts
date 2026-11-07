@@ -163,17 +163,6 @@ export const endgameToolSpecs: EndgameToolSpec[] = [
         backing: '新增动作命令；纯计算在 endgame.planRecovery，执行复用 goToCoordinates / enterEnd，传送门坐标来自 enterEnd 记的 overworld_end_portal。',
     },
     {
-        name: 'throwHeld',
-        kind: 'action',
-        description:
-            '把手里的东西扔出去（先 equip）：末影之眼指路找要塞——**扔完会盯它 1~2 秒量出飞行方向**（8 方位 + 方位角 + 飞了多远），' +
-            '并把最后看到的位置记进 Memory Bank（last_eye_of_ender）；没采到就如实说"没看清"，绝不编方向。' +
-            '末影珍珠是位移/免摔伤（下坠时会自动往脚下扔）。扔完会核对手里那一叠的数量有没有真的减少，没减少就如实报"没扔成"。',
-        params: {},
-        timeoutMinutes: 1,
-        backing: '原子原语 throwHeld + throwEyeAndTrack 都在 library/endgame_routine.ts（瞄准 + activateItem + 数量核对 + 眼实体采样）；方向几何是 endgame.compassBearing/trackEyeFlight（纯函数，已单测）。',
-    },
-    {
         name: 'reviveDragon',
         kind: 'action',
         description:
@@ -1372,7 +1361,7 @@ export async function throwEyeAndTrack(
                 samples.length === 0
                     ? '一个采样点都没读到：眼睛可能一出膛就碎了（每次 20% 概率），或者服务端没把它同步过来。'
                     : `只采到 ${samples.length} 个采样点，位移太小，推不出方向。`,
-                '**不要按猜测的方向走**。再调一次 throwHeld（多备几颗眼），或者用 goToCoordinates 换个方向站远一点再扔——两次方向交叉就能定位。',
+                '**不要按猜测的方向走**。再调一次 enterEnd（多备几颗眼），或者用 goToCoordinates 换个方向站远一点再扔——两次方向交叉就能定位。',
             ]),
         };
     }
@@ -1393,7 +1382,7 @@ export async function throwEyeAndTrack(
 export async function throwHeldSkill(bot: any, agent?: any): Promise<string> {
     const held: any = bot?.heldItem;
     if (held == null || typeof held.name !== 'string') {
-        return '没做到 throwHeld：手上是空的。';
+        return '手里是空的，没扔出去。';
     }
     const name = normalizeName(held.name);
 
@@ -1417,7 +1406,7 @@ export async function throwHeldSkill(bot: any, agent?: any): Promise<string> {
     const aim = falling && position != null ? vec(position.x, position.y - 8, position.z) : null;
     const threw = await throwHeld(bot, aim);
     if (!threw) {
-        return `没做到 throwHeld，${name} 没有扔出去。`;
+        return `${name} 没有扔出去。`;
     }
     if (name.includes('ender_pearl')) {
         return falling ? '下坠中往脚下扔了一颗末影珍珠。' : '扔出了末影珍珠。';

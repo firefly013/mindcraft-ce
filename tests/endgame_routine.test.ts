@@ -943,8 +943,8 @@ describe('掩体判据：火把/栅栏/铁栏杆/台阶都不算掩体（会死�
 });
 
 describe('给 Lead 的接线清单（工具声明）', () => {
-    it('9 条工具、名字唯一、action 都有超时上限（不许再写 -1）', () => {
-        expect(endgameToolSpecs).toHaveLength(9);
+    it('8 条工具、名字唯一、action 都有超时上限（不许再写 -1）', () => {
+        expect(endgameToolSpecs).toHaveLength(8);
         const names = endgameToolSpecs.map((spec) => spec.name);
         expect(new Set(names).size).toBe(names.length);
         for (const spec of endgameToolSpecs) {

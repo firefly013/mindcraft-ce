@@ -265,39 +265,26 @@ export type AimPlan =
     | { kind: 'unreachable'; distance: number; heightDiff: number; velocity: number; gravity: number; maxRange: number };
 
 /**
- * 给一次投掷定朝向。
+ * 给一次投掷定朝向。目标坐标是必填的，这里不再有"按当前朝向平扔"的分支。
  *
- * - 抛物线类：有目标就解闭式弹道（低伸），没目标就按当前朝向平扔（回执会提醒"没抬高"）；
- * - 制导类（末影之眼）：**永远不做弹道解算**——有目标就朝目标的水平方向，没目标就按当前朝向，俯仰 0。
+ * - 抛物线类：解闭式弹道（低伸），打不到就返回 unreachable；
+ * - 制导类（末影之眼）：**不做弹道解算**，只朝目标的水平方向，俯仰 0。
  */
 export function planThrowAim(
     profile: ThrowProfile,
     from: FlatPosition,
-    currentYaw: number,
-    target: FlatPosition | null,
+    target: FlatPosition,
 ): AimPlan {
     if (profile.guided === true) {
         return {
             kind: 'guided',
-            yaw: target == null ? currentYaw : yawTo(from, target),
+            yaw: yawTo(from, target),
             pitch: 0,
-            note: target == null ? '按当前朝向' : '朝目标的水平方向',
+            note: '朝目标的水平方向',
         };
     }
     const velocity = profile.velocity ?? PARABOLIC_VELOCITY;
     const gravity = profile.gravity ?? PARABOLIC_GRAVITY;
-    if (target == null) {
-        return {
-            kind: 'ballistic',
-            yaw: currentYaw,
-            pitch: 0,
-            velocity,
-            gravity,
-            distance: 0,
-            heightDiff: 0,
-            predictedRange: null,
-        };
-    }
     const dx = target.x - from.x;
     const dy = target.y - from.y;
     const dz = target.z - from.z;
@@ -329,7 +316,6 @@ export function planThrowAim(
 
 export interface ThrowDeps {
     position?: (bot: any) => FlatPosition;
-    yaw?: (bot: any) => number | null;
     /** 背包里某个物品的数量；读不到 null。 */
     countOf?: (bot: any, item: string) => number | null;
     /** 背包里有没有这个物品（用来区分"没有"和"读不到"）。 */
@@ -428,7 +414,6 @@ export async function throwItemSkill(
     options: ThrowOptions = {},
 ): Promise<string> {
     const position = deps.position ?? defaultPosition;
-    const yawOf = deps.yaw ?? ((b: any) => (Number.isFinite(Number(b?.entity?.yaw)) ? Number(b.entity.yaw) : 0));
     const countOf = deps.countOf ?? ((b: any, item: string) => skills.inventoryCountOf(b, item));
     const hasItem = deps.hasItem ?? ((b: any, item: string) => {
         try {
@@ -487,22 +472,23 @@ export async function throwItemSkill(
     // ── 瞄准（抛物线解算 / 制导直扔） ──
     const targetRaw = [rawTargetX, rawTargetY, rawTargetZ];
     const given = targetRaw.filter((value) => value != null && value !== '');
-    let target: FlatPosition | null = null;
-    if (given.length !== 0 && given.length !== 3) {
+    if (given.length === 0) {
+        return finish(
+            'throwItem：必须给目标坐标（target_x/target_y/target_z），没有落点不扔。',
+        );
+    }
+    if (given.length !== 3) {
         return finish(
             `throwItem：目标坐标要么全给（target_x/target_y/target_z），要么都不给；现在给了 ${given.length} 个。`,
         );
     }
-    if (given.length === 3) {
-        const [x, y, z] = targetRaw.map((value) => Number(value));
-        if (![x, y, z].every((n) => Number.isFinite(n))) {
-            return finish(`throwItem：目标坐标读不出数字。`);
-        }
-        target = { x, y, z };
+    const [x, y, z] = targetRaw.map((value) => Number(value));
+    if (![x, y, z].every((n) => Number.isFinite(n))) {
+        return finish(`throwItem：目标坐标读不出数字。`);
     }
+    const target: FlatPosition = { x, y, z };
 
-    const currentYaw = yawOf(bot) ?? 0;
-    const aim = planThrowAim(profile, launch, currentYaw, target);
+    const aim = planThrowAim(profile, launch, target);
     if (aim.kind === 'unreachable') {
         return finish(
             `throwItem ${profile.item}：打不到（水平 ${aim.distance.toFixed(1)} 格、高差 ${aim.heightDiff.toFixed(1)} 格，` +
@@ -514,7 +500,7 @@ export async function throwItemSkill(
         lines.push(
             `throwItem ${profile.item}：瞄准水平 ${aim.distance.toFixed(1)} 格、高差 ${aim.heightDiff >= 0 ? '+' : ''}${aim.heightDiff.toFixed(1)} 格，抬头 ${pitchDeg.toFixed(1)}°。`,
         );
-        if (target != null && aim.predictedRange != null) {
+        if (aim.predictedRange != null) {
             notes.push(`预测射程 ${aim.predictedRange.toFixed(1)} 格。`);
         }
     } else {

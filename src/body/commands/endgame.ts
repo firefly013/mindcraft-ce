@@ -1,7 +1,7 @@
 /*
  * 末地通关命令：查询 `!endFightStatus` + 动作 `!enterEnd` / `!clearEndCrystals` /
  * `!bedBombDragon` / `!dodgeDragonBreath` / `!drinkPotion` /
- * `!recoverAfterDeath` / `!throwHeld`。
+ * `!recoverAfterDeath`。
  *
  * **本文件是自包含的**（和 `commands/survival.ts` 同一套路）：描述文本在下面
  * `ENDGAME_TOOL_TEXT`，动作包装在 `runEndgameAction`，不依赖对 `actions.ts` /
@@ -65,14 +65,6 @@ export const ENDGAME_TOOL_TEXT: Record<string, { description: string; params: Re
         description:
             '死亡回收：读死亡点记录，给你"东西还在不在 + 已经过了多久 + 从哪回去"的方案。掉落物 **5 分钟**后消失，但**只在区块被加载时才计时**（旁边没人 = 基本不会消失，另一个 bot 在旁边则是在跑的）；掉进虚空（Y<-60）的东西**当场消失**，不用去捡。' +
             '人已经在末地时会直接带你走到尸体坐标；在别的维度则给路线（有记过主世界传送门坐标就顺着它回去；跨维度那一段要自己走）。**死亡后的第一件事就是调它**，别在原地发呆等掉落物过期。',
-        params: {},
-    },
-    throwHeld: {
-        description:
-            '把手里的东西扔出去（**先 equip 要扔的东西**：ender_eye 末影之眼 / ender_pearl 末影珍珠 / 雪球 / 鸡蛋）。' +
-            '末影之眼**扔出去之后会盯它 1~2 秒量出飞行方向**（8 方位罗盘 + 方位角 + 飞了多远），并把最后看到的位置记进 Memory Bank（last_eye_of_ender）——' +
-            '眼睛只活 1~2 秒，不量就永远不知道要塞在哪。跟着这个方向走约 12 格再扔一颗，两次方向交叉就是要塞；眼睛开始往下钻就往下挖。' +
-            '没采到位置时它会**如实说"没看清"**、绝不编方向。末影珍珠是位移/免摔伤，**正在下坠时会自动往脚下扔**。',
         params: {},
     },
     reviveDragon: {
@@ -199,12 +191,6 @@ export const endgameActionList: AgentCommand[] = [
         perform: runEndgameAction('recoverAfterDeath', 10, (agent) =>
             logReceipt(agent, () => endgame.recoverAfterDeathSkill(agent)),
         ),
-    },
-    {
-        name: '!throwHeld',
-        description: DESCRIPTION('throwHeld'),
-        params: {},
-        perform: runEndgameAction('throwHeld', 1, (agent) => logReceipt(agent, () => endgame.throwHeldSkill(agent.bot, agent))),
     },
     {
         name: '!reviveDragon',

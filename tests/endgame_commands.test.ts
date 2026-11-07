@@ -27,7 +27,6 @@ const ENDGAME_TOOLS = [
     'dodgeDragonBreath',
     'drinkPotion',
     'recoverAfterDeath',
-    'throwHeld',
     'reviveDragon',
 ] as const;
 
@@ -212,13 +211,6 @@ describe('命令执行（假 agent）', () => {
         expect(text).toContain('现状');
     });
 
-    it('throwHeld：手里没东西时给明确指引，不许假装扔了', async () => {
-        const bot = makeFakeBot({});
-        await findCommand('throwHeld')?.perform(makeFakeAgent(bot));
-        expect(bot.output).toContain('手上是空的');
-        expect(bot.output).toContain('手上是空的');
-    });
-
     it('bedBombDragon 在非末地直接拒绝（不做任何危险动作）', async () => {
         const bot = makeFakeBot({ dimension: 'overworld' });
         await findCommand('bedBombDragon')?.perform(makeFakeAgent(bot));
@@ -334,6 +326,6 @@ describe('routine 里的几个计数器/技能', () => {
             bot.calls.push({ fn: 'activateItem' });
         };
         const receipt = await throwHeldSkill(bot);
-        expect(receipt).toContain('没做到 throwHeld，ender_pearl 没有扔出去。');
+        expect(receipt).toContain('ender_pearl 没有扔出去。');
     });
 });

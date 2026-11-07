@@ -262,7 +262,7 @@ describe('逐阶段：每个阶段都点名"缺什么 + 下一步做什么"', ()
     it('travel_stronghold：有 12 颗眼 → 掷眼；眼用光了要当场说', () => {
         const ok = step({ gearReady: true, blazeRods: 7, blazePowder: 0, enderPearls: 12, eyesOfEnder: 12 });
         expect(ok.phase).toBe('travel_stronghold');
-        expect(ok.tool).toBe('throwHeld');
+        expect(ok.tool).toBe('enterEnd');
         expect(ok.action).toContain('12 颗眼');
 
         const out = step({ gearReady: true, blazeRods: 7, blazePowder: 0, enderPearls: 12, eyesOfEnder: 0 });
@@ -437,7 +437,7 @@ describe('穷举状态组合：每个组合都必须给得出下一步', () => {
     it('材料链的信号缺失时**不介入**（读不到就不猜，回落到原有阶段）', () => {
         const advice = step({ gearReady: true, strongholdFound: false });
         expect(advice.phase).toBe('travel_stronghold');
-        expect(advice.tool).toBe('throwHeld');
+        expect(advice.tool).toBe('enterEnd');
     });
 });
 

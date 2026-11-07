@@ -1841,8 +1841,8 @@ export function nextEndgameStep(state: EndgameState): EndgameStepAdvice {
                 phase: 'travel_stronghold',
                 // 工具名必须是**注册表里真的存在**的：原来这里写 `locateStronghold`，
                 // 而 registry 里没有这条命令，模型照着调只会拿到"未知工具"。
-                action: `掷末影之眼找要塞${eyeText}：先 equip 把 ender_eye 拿到手上，再 throwHeld（它会量出眼睛的飞行方向）；跟着走，直到眼睛开始往下钻 → 往下挖到传送门房。`,
-                tool: 'throwHeld',
+                action: `掷末影之眼找要塞${eyeText}：先 equip 把 ender_eye 拿到手上，再调 enterEnd；附近没有空框架时它会替你掷一颗眼并量出飞行方向。跟着走，直到眼睛开始往下钻 → 往下挖到传送门房。`,
+                tool: 'enterEnd',
                 nextPhase: 'activate_portal',
                 reason: '还没定位要塞。末地传送门在要塞里。',
             };

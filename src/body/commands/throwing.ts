@@ -1,7 +1,7 @@
 /*
  * 通用投掷命令（`!throwItem`）：把 `library/throwing.ts` 的原语接到工具层。
  *
- * 参数只有四个，都是模型能直接给的：`item_name` + 可选的目标坐标三个。
+ * 参数只有四个，都是模型能直接给的：`item_name` + **必填**的目标坐标三个。
  * 不引新依赖、不做弹道表以外的计算——瞄准的几何全在库里（纯函数、已单测）。
  */
 
@@ -12,18 +12,18 @@ import type { AgentCommand, CommandPerform } from './actions.js';
 export const THROWING_TOOL_TEXT = {
     throwItem: {
         description:
-            '**通用投掷**：鸡蛋/雪球/末影珍珠/喷溅药水/经验瓶/箭/末影之眼都能扔，**按物品的轨迹类型分别处理**：' +
-            '① 抛物线类（egg/snowball/ender_pearl/splash_potion/lingering_potion/experience_bottle）——给目标坐标就解**低伸弹道**（回执里写清抬头多少度、用的 v/g），' +
-            '不给目标就按当前朝向平扔（远距离打不中）；② 箭矢类（arrow）——自动找弓、拉满 1000ms 再放箭；' +
-            '③ 制导类（eye_of_ender）——**不做弹道解算**，朝方向扔出去后**追踪它往哪飞（8 方位）**，别看落点。' +
+            '**通用投掷**：鸡蛋/雪球/末影珍珠/喷溅药水/经验瓶/箭/末影之眼都能扔，**必须给目标坐标**，按物品的轨迹类型分别处理：' +
+            '① 抛物线类（egg/snowball/ender_pearl/splash_potion/lingering_potion/experience_bottle）——解**低伸弹道**（回执里写清抬头多少度、用的 v/g）；' +
+            '② 箭矢类（arrow）——自动找弓、拉满 1000ms 再放箭；' +
+            '③ 制导类（eye_of_ender）——**不做弹道解算**，朝目标的水平方向扔出去后**追踪它往哪飞（8 方位）**，别看落点。' +
             '回执**只讲事实**：投前/投后数量（没少就是"没扔出去"）、观测到的投掷物实体飞了多久/在哪消失；' +
             '末影珍珠会等坐标跳变（跳了就报落点并提醒**固定吃 5 点伤害**，没跳就说没传送）；' +
             '距离超出射程时**如实说"打不到"并且不扔**，同时给一个走近坐标。',
         params: {
             item_name: '要扔的物品 id（英文）：egg / snowball / ender_pearl / splash_potion / lingering_potion / experience_bottle / arrow / eye_of_ender。也认俗称（ender_eye、xp_bottle）。',
-            target_x: '目标 X（可选；三个坐标要么都给要么都不给）。抛物线类用它解弹道；末影之眼只取水平方向。',
-            target_y: '目标 Y（可选）。抛物线类需要高差来算抬枪角度。',
-            target_z: '目标 Z（可选）。',
+            target_x: '目标 X（必填）。抛物线类用它解弹道；末影之眼只取水平方向。',
+            target_y: '目标 Y（必填）。抛物线类需要高差来算抬枪角度。',
+            target_z: '目标 Z（必填）。',
         },
     },
 };
@@ -70,17 +70,14 @@ export const throwingActionList: AgentCommand[] = [
             target_x: {
                 type: 'float',
                 description: THROWING_TOOL_TEXT.throwItem.params.target_x,
-                optional: true,
             },
             target_y: {
                 type: 'float',
                 description: THROWING_TOOL_TEXT.throwItem.params.target_y,
-                optional: true,
             },
             target_z: {
                 type: 'float',
                 description: THROWING_TOOL_TEXT.throwItem.params.target_z,
-                optional: true,
             },
         },
         perform: runThrowingAction(

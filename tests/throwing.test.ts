@@ -84,7 +84,6 @@ function harness(
 
     const deps = {
         position: () => ({ ...bot.entity.position }),
-        yaw: () => bot.entity.yaw,
         countOf: (_b: any, name: string) => items.filter((item) => item.name === name).reduce((sum, item) => sum + item.count, 0),
         hasItem: (_b: any, name: string) => items.some((item) => item.name === name && item.count > 0),
         equip: async (_b: any, name: string) => {
@@ -224,14 +223,14 @@ describe('抛物线瞄准：闭式低伸解', () => {
     it('**制导类永远不做弹道解算**：500 格外也返回 guided，而不是"打不到"', () => {
         const eye = throwProfileOf('eye_of_ender');
         expect(eye).not.toBeNull();
-        const plan = planThrowAim(eye as any, { x: 0, y: 70, z: 0 }, 0, { x: 0, y: 70, z: 500 });
+        const plan = planThrowAim(eye as any, { x: 0, y: 70, z: 0 }, { x: 0, y: 70, z: 500 });
         // 如果谁把末影之眼塞进抛物线表，这里会变成 kind='unreachable' → 测试红
         expect(plan.kind).toBe('guided');
         if (plan.kind !== 'guided') throw new Error('制导类必须返回 guided');
         expect(plan.pitch).toBe(0);
         // 同样的距离对抛物线类就是"打不到"
         const egg = throwProfileOf('egg');
-        expect(planThrowAim(egg as any, { x: 0, y: 70, z: 0 }, 0, { x: 0, y: 70, z: 500 }).kind).toBe('unreachable');
+        expect(planThrowAim(egg as any, { x: 0, y: 70, z: 0 }, { x: 0, y: 70, z: 500 }).kind).toBe('unreachable');
     });
 
     it('校准：改 v 会改解算角度，reset 回默认', () => {
@@ -313,7 +312,7 @@ describe('throwItem：投掷与核验', () => {
                 /* 服务端没采纳：什么都不做 */
             },
         });
-        const receipt = await throwItemSkill(h.bot, 'egg', undefined, undefined, undefined, h.deps, FAST);
+        const receipt = await throwItemSkill(h.bot, 'egg', 10, 70, 0, h.deps, FAST);
 
         expect(receipt).toContain('没扔出去');
         expect(receipt).toContain('egg 3 → 3');
@@ -329,15 +328,14 @@ describe('throwItem：投掷与核验', () => {
                 items[0].count -= 1;
             },
         });
-        const receipt = await throwItemSkill(h.bot, 'snowball', undefined, undefined, undefined, h.deps, FAST);
+        const receipt = await throwItemSkill(h.bot, 'snowball', 10, 70, 0, h.deps, FAST);
 
-        expect(receipt).toContain('throwItem snowball：瞄准水平 0.0 格、高差 +0.0');
-        expect(receipt).toContain('throwItem snowball：瞄准水平 0.0 格、高差 +0.0');
+        expect(receipt).toContain('throwItem snowball：瞄准水平 10.0 格、高差 +0.0');
     });
 
     it('物品不在背包 → 点名缺什么，并列出能扔的', async () => {
         const h = harness({ items: [{ name: 'egg', count: 2 }] });
-        const receipt = await throwItemSkill(h.bot, 'ender_pearl', undefined, undefined, undefined, h.deps, FAST);
+        const receipt = await throwItemSkill(h.bot, 'ender_pearl', 10, 70, 0, h.deps, FAST);
 
         expect(receipt).toContain('背包里没有 ender_pearl');
         expect(h.activated).toBe(0);
@@ -345,11 +343,19 @@ describe('throwItem：投掷与核验', () => {
 
     it('认不出的物品 → 拒绝并列出支持清单（不猜着扔）', async () => {
         const h = harness({ items: [{ name: 'diamond_sword', count: 1 }] });
-        const receipt = await throwItemSkill(h.bot, 'diamond_sword', undefined, undefined, undefined, h.deps, FAST);
+        const receipt = await throwItemSkill(h.bot, 'diamond_sword', 10, 70, 0, h.deps, FAST);
 
         expect(receipt).toContain('不认识 "diamond_sword"');
         for (const item of supportedThrowables()) expect(receipt).toContain(item);
         expect(h.activated).toBe(0);
+    });
+
+    it('完全没给目标坐标 → 拒绝，不按当前朝向瞎扔', async () => {
+        const h = harness({ items: [{ name: 'egg', count: 1 }] });
+        const receipt = await throwItemSkill(h.bot, 'egg', undefined, undefined, undefined, h.deps, FAST);
+        expect(receipt).toContain('必须给目标坐标');
+        expect(h.activated).toBe(0);
+        expect(h.count('egg')).toBe(1);
     });
 
     it('目标坐标只给一部分 → 拒绝，不瞎瞄', async () => {
@@ -415,13 +421,13 @@ describe('末影之眼：制导类', () => {
             // 眼睛"在原地"（被墙挡住/没飞起来）：采样够了但位移 < 0.75 格
             projectile: { name: 'eye_of_ender', id: 9, from: { x: 0, y: 70, z: 0 }, step: { x: 0, y: 0, z: 0 }, steps: 5 },
         });
-        const receipt = await throwItemSkill(h.bot, 'eye_of_ender', undefined, undefined, undefined, h.deps, FAST);
-        expect(receipt).toContain('throwItem eye_of_ender 是制导类投掷，按当前朝向，俯');
+        const receipt = await throwItemSkill(h.bot, 'eye_of_ender', 0, 70, 500, h.deps, FAST);
+        expect(receipt).toContain('throwItem eye_of_ender 是制导类投掷，朝目标的水平方向，俯仰角 0 度');
     });
 
     it('眼睛没有实体可看 → 说"没看到实体，拿不到方向"', async () => {
         const h = harness({ items: [{ name: 'eye_of_ender', count: 1 }] });
-        const receipt = await throwItemSkill(h.bot, 'eye_of_ender', undefined, undefined, undefined, h.deps, FAST);
+        const receipt = await throwItemSkill(h.bot, 'eye_of_ender', 0, 70, 500, h.deps, FAST);
         expect(receipt).toContain('没看到 eye_of_ender 实体');
     });
 });
@@ -475,8 +481,9 @@ describe('接线：registry 与 schema', () => {
             'target_y',
             'target_z',
         ]);
-        expect(throwingActionList[0].params?.item_name.optional).toBeUndefined(); // 必填
-        expect(throwingActionList[0].params?.target_x.optional).toBe(true);
+        for (const param of ['item_name', 'target_x', 'target_y', 'target_z']) {
+            expect(throwingActionList[0].params?.[param].optional).toBeUndefined(); // 全部必填
+        }
 
         const tools = getOpenAITools(toolDeclarations());
         const tool = tools.find((t) => t.function.name === 'throwItem');
