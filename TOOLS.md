@@ -99,7 +99,7 @@
 
 | 工具 | 类型 | 参数 | 说明 |
 | --- | --- | --- | --- |
-| throwItem | 动作 | slot, target_x, target_y, target_z | **通用投掷**：鸡蛋/雪球/末影珍珠/喷溅药水/滞留药水/三叉戟/箭/末影之眼都能扔，**必须给目标坐标**，按物品的轨迹类型分别处理：① 抛物线类（egg/snowball/ender_pearl/splash_potion/lingering_potion/trident）——重力、空气阻力、初速和路径遮挡… |
+| throwItem | 动作 | slot, entity_id, target_x, target_y, target_z | **通用投掷**：鸡蛋/雪球/末影珍珠/喷溅药水/滞留药水/三叉戟/箭/末影之眼都能扔，**必须给目标**：打活体给 entity_id，往某个落点扔给三个坐标，两种只能选一种。按物品的轨迹类型分别处理：① 抛物线类（egg/snowball/ender_pearl/splash_potion/lingering… |
 
 ### 黑曜石（1）
 

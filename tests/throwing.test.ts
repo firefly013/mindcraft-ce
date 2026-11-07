@@ -58,6 +58,8 @@ function harness(
         inWater?: boolean;
         /** 是不是在下雨（同上）。 */
         raining?: boolean;
+        /** 实体表（打活体目标时用）。 */
+        entities?: Record<string, any>;
     } = {},
 ) {
     const items: FakeItem[] = (options.items ?? []).map((item) => ({ ...item }));
@@ -70,6 +72,7 @@ function harness(
             isInWater: options.inWater === true,
         },
         isRaining: options.raining === true,
+        entities: options.entities ?? {},
         inventory: {
             items: () => items,
             findInventoryItem: (name: string) => items.find((item) => item.name === name && item.count > 0),
@@ -401,7 +404,7 @@ describe('throwItem：投掷与核验', () => {
     it('完全没给目标坐标 → 拒绝，不按当前朝向瞎扔', async () => {
         const h = harness({ items: [{ name: 'egg', count: 1 }] });
         const receipt = await throwItemSkill(h.bot, 'egg', undefined, undefined, undefined, h.deps, FAST);
-        expect(receipt).toContain('必须给目标坐标');
+        expect(receipt).toContain('要么给活体目标');
         expect(h.activated).toBe(0);
         expect(h.count('egg')).toBe(1);
     });
@@ -548,6 +551,46 @@ describe('激流三叉戟：水里/雨里是冲刺，不当作投掷', () => {
         expect(h.count('trident')).toBe(0);
     });
 });
+describe('活体目标：攻击时按实体瞄准', () => {
+    it('给 entity_id/实体对象就不需要落点坐标，并按实体位置投掷', async () => {
+        const target = {
+            id: 7,
+            name: 'zombie',
+            position: { x: 10, y: 70, z: 0 },
+            height: 1.8,
+            velocity: { x: 0, y: 0, z: 0 },
+            isValid: true,
+        };
+        const h = harness({ items: [{ name: 'trident', count: 1 }], entities: { 7: target } });
+        const receipt = await throwItemSkill(h.bot, 'trident', undefined, undefined, undefined, h.deps, {
+            ...FAST,
+            targetEntity: target,
+        });
+        expect(receipt).toContain('瞄准 #7 zombie');
+        expect(receipt).toContain('投出去了');
+        expect(h.activated).toBe(1);
+        expect(h.count('trident')).toBe(0);
+    });
+
+    it('目标已经不在实体表 ⇒ 明确拒绝，不扣物品', async () => {
+        const target = {
+            id: 9,
+            name: 'skeleton',
+            position: { x: 10, y: 70, z: 0 },
+            height: 1.8,
+            velocity: { x: 0, y: 0, z: 0 },
+            isValid: true,
+        };
+        const h = harness({ items: [{ name: 'trident', count: 1 }] });
+        const receipt = await throwItemSkill(h.bot, 'trident', undefined, undefined, undefined, h.deps, {
+            ...FAST,
+            targetEntity: target,
+        });
+        expect(receipt).toContain('已经不在世界里');
+        expect(h.activated).toBe(0);
+        expect(h.count('trident')).toBe(1);
+    });
+});
 // ───────────────────────── 六、接线 / 门禁 ─────────────────────────
 
 describe('接线：registry 与 schema', () => {
@@ -563,19 +606,21 @@ describe('接线：registry 与 schema', () => {
     it('参数顺序 = perform 的位置参数顺序；每个 schema 参数都有 TOOL_TEXT 说明', () => {
         expect(Object.keys(findCommand('throwItem')?.params ?? {})).toEqual([
             'slot',
+            'entity_id',
             'target_x',
             'target_y',
             'target_z',
         ]);
-        for (const param of ['slot', 'target_x', 'target_y', 'target_z']) {
-            expect(throwingActionList[0].params?.[param].optional).toBeUndefined(); // 全部必填
+        expect(throwingActionList[0].params?.slot.optional).toBeUndefined();
+        for (const param of ['entity_id', 'target_x', 'target_y', 'target_z']) {
+            expect(throwingActionList[0].params?.[param].optional).toBe(true);
         }
 
         const tools = getOpenAITools(toolDeclarations());
         const tool = tools.find((t) => t.function.name === 'throwItem');
         expect(tool).toBeDefined();
         const props = Object.keys((tool?.function.parameters as any).properties ?? {});
-        expect(props).toEqual(['slot', 'target_x', 'target_y', 'target_z']);
+        expect(props).toEqual(['slot', 'entity_id', 'target_x', 'target_y', 'target_z']);
         for (const param of props) {
             expect((TOOL_TEXT as any).throwItem?.params?.[param], `throwItem.${param} 缺 TOOL_TEXT 说明`).toBeTruthy();
         }

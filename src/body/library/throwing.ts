@@ -185,6 +185,7 @@ export function planThrowAim(
     profile: ThrowProfile,
     from: FlatPosition,
     target: FlatPosition,
+    targetSpeed?: FlatPosition,
 ): AimPlan {
     const dx = target.x - from.x;
     const dy = target.y - from.y;
@@ -210,9 +211,10 @@ export function planThrowAim(
     }
 
     try {
+        const speed = targetSpeed == null ? new Vec3(0, 0, 0) : new Vec3(targetSpeed.x, targetSpeed.y, targetSpeed.z);
         const result = hawk.getMasterGrade(
             { position: new Vec3(target.x, target.y, target.z), isValid: true },
-            new Vec3(0, 0, 0),
+            speed,
             profile.weapon as Weapons,
         );
         if (result == null) {
@@ -286,6 +288,8 @@ export interface ThrowOptions {
     teleportWaitMs?: number;
     /** 拉弓蓄力时长（箭）。 */
     chargeMs?: number;
+    /** 瞄一个活体目标（攻击）；给了它就不需要落点坐标。 */
+    targetEntity?: any;
 }
 
 export interface ProjectileSighting {
@@ -450,25 +454,51 @@ export async function throwItemSkill(
     }
 
     // ── 瞄准（弹道库解算 / 制导直扔） ──
-    const targetRaw = [rawTargetX, rawTargetY, rawTargetZ];
-    const given = targetRaw.filter((value) => value != null && value !== '');
-    if (given.length === 0) {
-        return finish(
-            'throwItem：必须给目标坐标（target_x/target_y/target_z），没有落点不扔。',
-        );
+    // 两种目标：坐标（珍珠/药水/眼睛/往某点扔）或活体实体（三叉戟/箭/雪球打怪）。
+    const entityTarget = options.targetEntity;
+    let target: FlatPosition;
+    let targetSpeed: FlatPosition | undefined;
+    let targetLabel = '';
+    if (entityTarget != null) {
+        if (entityTarget.isValid === false || (bot?.entities != null && bot.entities[entityTarget.id] == null)) {
+            return finish(`throwItem：目标实体 #${String(entityTarget.id ?? '?')} 已经不在世界里，没扔。`);
+        }
+        const p = entityTarget.position;
+        const px = Number(p?.x);
+        const py = Number(p?.y);
+        const pz = Number(p?.z);
+        if (![px, py, pz].every((n) => Number.isFinite(n))) {
+            return finish('throwItem：读不到目标实体的坐标，没扔。');
+        }
+        const height = Number(entityTarget.height);
+        target = { x: px, y: py + (Number.isFinite(height) && height > 0 ? height / 2 : 0.9), z: pz };
+        const v = entityTarget.velocity;
+        if (v != null && [v.x, v.y, v.z].every((n) => Number.isFinite(Number(n)))) {
+            targetSpeed = { x: Number(v.x), y: Number(v.y), z: Number(v.z) };
+        }
+        targetLabel = `#${String(entityTarget.id ?? '?')} ${String(entityTarget.name ?? entityTarget.username ?? '实体')}`;
+    } else {
+        const targetRaw = [rawTargetX, rawTargetY, rawTargetZ];
+        const given = targetRaw.filter((value) => value != null && value !== '');
+        if (given.length === 0) {
+            return finish(
+                'throwItem：要么给活体目标 entity_id，要么给目标坐标（target_x/target_y/target_z），没有目标不扔。',
+            );
+        }
+        if (given.length !== 3) {
+            return finish(
+                `throwItem：目标坐标要么全给（target_x/target_y/target_z），要么都不给；现在给了 ${given.length} 个。`,
+            );
+        }
+        const [x, y, z] = targetRaw.map((value) => Number(value));
+        if (![x, y, z].every((n) => Number.isFinite(n))) {
+            return finish(`throwItem：目标坐标读不出数字。`);
+        }
+        target = { x, y, z };
     }
-    if (given.length !== 3) {
-        return finish(
-            `throwItem：目标坐标要么全给（target_x/target_y/target_z），要么都不给；现在给了 ${given.length} 个。`,
-        );
-    }
-    const [x, y, z] = targetRaw.map((value) => Number(value));
-    if (![x, y, z].every((n) => Number.isFinite(n))) {
-        return finish(`throwItem：目标坐标读不出数字。`);
-    }
-    const target: FlatPosition = { x, y, z };
 
-    const aim = planThrowAim(bot, profile, launch, target);
+    if (targetLabel !== '') lines.push(`瞄准 ${targetLabel}。`);
+    const aim = planThrowAim(bot, profile, launch, target, targetSpeed);
     if (aim.kind === 'unreachable') {
         return finish(
             `throwItem ${profile.item}：打不到（水平 ${aim.distance.toFixed(1)} 格、高差 ${aim.heightDiff.toFixed(1)} 格，${aim.reason}）。没扔。`,
@@ -556,6 +586,16 @@ export async function throwItemSkill(
                 (flownBlocks == null ? '' : `，沿地面 ${flownBlocks.toFixed(1)} 格`) +
                 '。',
         );
+    }
+
+    // ── 活体目标：投完再看一眼还在不在（只报事实，不推断命中） ──
+    if (entityTarget != null) {
+        const live: any = bot?.entities?.[entityTarget.id] ?? null;
+        if (live == null) {
+            lines.push(`目标 #${String(entityTarget.id ?? '?')} 在投掷后已经从实体表消失。`);
+        } else if (Number.isFinite(Number(live.health))) {
+            lines.push(`目标 #${String(entityTarget.id ?? '?')} 现在血量 ${Number(live.health)}。`);
+        }
     }
 
     // ── 分类收尾 ──
