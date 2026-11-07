@@ -28,6 +28,7 @@ import Vec3 from 'vec3';
 import type { HawkEye, Weapons } from 'minecrafthawkeye';
 import * as skills from './skills.js';
 import { describeEyeDirection, trackEyeFlight, type EyeSample } from './endgame.js';
+import { enchantParts } from './item_variants.js';
 
 /** 一格/刻 → 格/秒（诊断用；1 刻 = 50ms）。 */
 export const TICKS_PER_SECOND = 20;
@@ -262,6 +263,10 @@ export interface ThrowDeps {
     equipExact?: (bot: any, item: any) => Promise<boolean>;
     /** 要扔的是哪一件；只对非箭矢类生效（箭矢类装备的是弓/弩）。 */
     exactItem?: any;
+    /** 现在是不是在水里（激流三叉戟会变成冲刺）。 */
+    inWater?: (bot: any) => boolean;
+    /** 现在是不是在下雨/雷雨（激流三叉戟同样会变成冲刺）。 */
+    raining?: (bot: any) => boolean;
     look?: (bot: any, yaw: number, pitch: number) => Promise<void>;
     activate?: (bot: any) => Promise<void>;
     deactivate?: (bot: any) => Promise<void>;
@@ -338,6 +343,15 @@ function snapshotProjectiles(entities: Record<string, any>, wanted: string): Map
     return out;
 }
 
+/** 这一件是不是带激流的三叉戟。读不到附魔就按“没有”处理，由投掷结果自己说话。 */
+function itemHasRiptide(item: any, registry: any): boolean {
+    try {
+        return enchantParts(item, registry).some((part) => /^riptide(\s|$)/i.test(String(part).trim()));
+    } catch {
+        return false;
+    }
+}
+
 /**
  * 投掷：瞄准 → 扔 → **用数量核对**"到底扔没扔" → 观察投掷物 → 分类收尾。
  *
@@ -370,6 +384,9 @@ export async function throwItemSkill(
     const healthOf = deps.health ?? ((b: any) => (Number.isFinite(Number(b?.health)) ? Number(b.health) : null));
     const sleep = deps.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
     const now = deps.now ?? Date.now;
+    const inWater = deps.inWater ?? ((b: any) => b?.entity?.isInWater === true);
+    const raining = deps.raining ?? ((b: any) =>
+        b?.isRaining === true || (Number(b?.rainState ?? 0) > 0) || (Number(b?.thunderState ?? 0) > 0));
 
     const observeMs = options.observeMs ?? 2500;
     const pollMs = options.pollMs ?? 100;
@@ -406,6 +423,30 @@ export async function throwItemSkill(
     }
     if (profile.klass === 'arrow' && held == null) {
         return finish(`throwItem：有箭，没有弓/弩。`);
+    }
+
+    // ── 激流三叉戟：水里/雨里右键是冲刺，不会生成投掷物 ──
+    // 原版机制：Riptide 在水里或雨中生效，玩家被向前推；不在这两种环境里才是普通投掷。
+    // 不提前拒绝的话，投出去会“数量没少”，回执只能报没扔成，模型会反复试。
+    if (profile.item === 'trident') {
+        const tridentItem: any =
+            deps.exactItem ??
+            (() => {
+                try {
+                    return bot?.inventory?.findInventoryItem?.(profile.item) ?? null;
+                } catch {
+                    return null;
+                }
+            })();
+        if (tridentItem != null && itemHasRiptide(tridentItem, bot?.registry ?? null)) {
+            const where = inWater(bot) ? '在水里' : raining(bot) ? '在下雨' : null;
+            if (where != null) {
+                return finish(
+                    `throwItem trident：这一把带激流，现在${where}，右键会冲刺而不是投掷。没扔。` +
+                        '要投掷请先离开水或等雨停，换一把没有激流的三叉戟也可以。',
+                );
+            }
+        }
     }
 
     // ── 瞄准（弹道库解算 / 制导直扔） ──

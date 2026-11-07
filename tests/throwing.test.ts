@@ -28,6 +28,7 @@ import { getOpenAITools } from '../src/brain/tools/advertise.js';
 interface FakeItem {
     name: string;
     count: number;
+    enchants?: Array<{ name: string; level: number }>;
 }
 
 interface ProjectilePlan {
@@ -53,13 +54,22 @@ function harness(
         teleportTo?: FlatPosition;
         /** 假弹道库返回什么；undefined = 默认的成功解，null = 算不出。 */
         grade?: any;
+        /** 身体是不是在水里（激流三叉戟会变冲刺）。 */
+        inWater?: boolean;
+        /** 是不是在下雨（同上）。 */
+        raining?: boolean;
     } = {},
 ) {
     const items: FakeItem[] = (options.items ?? []).map((item) => ({ ...item }));
     const bot: any = {
         interrupt_code: false,
         health: options.health ?? 20,
-        entity: { position: { ...(options.pos ?? { x: 0, y: 70, z: 0 }) }, yaw: options.yaw ?? 0 },
+        entity: {
+            position: { ...(options.pos ?? { x: 0, y: 70, z: 0 }) },
+            yaw: options.yaw ?? 0,
+            isInWater: options.inWater === true,
+        },
+        isRaining: options.raining === true,
         inventory: {
             items: () => items,
             findInventoryItem: (name: string) => items.find((item) => item.name === name && item.count > 0),
@@ -500,6 +510,44 @@ describe('箭矢类：弓 + 蓄力 + 核对箭数', () => {
     });
 });
 
+describe('激流三叉戟：水里/雨里是冲刺，不当作投掷', () => {
+    const riptideTrident = { name: 'trident', count: 1, enchants: [{ name: 'riptide', level: 2 }] };
+
+    it('在水里 ⇒ 直接拒绝并说明是冲刺，不扣物品', async () => {
+        const h = harness({ items: [riptideTrident], inWater: true });
+        const receipt = await throwItemSkill(h.bot, 'trident', 10, 70, 0, h.deps, FAST);
+        expect(receipt).toContain('激流');
+        expect(receipt).toContain('冲刺');
+        expect(receipt).toContain('没扔');
+        expect(h.activated).toBe(0);
+        expect(h.count('trident')).toBe(1);
+    });
+
+    it('在下雨 ⇒ 同样拒绝', async () => {
+        const h = harness({ items: [riptideTrident], raining: true });
+        const receipt = await throwItemSkill(h.bot, 'trident', 10, 70, 0, h.deps, FAST);
+        expect(receipt).toContain('激流');
+        expect(receipt).toContain('在下雨');
+        expect(h.activated).toBe(0);
+        expect(h.count('trident')).toBe(1);
+    });
+
+    it('干燥处 ⇒ 正常投掷，不误拦', async () => {
+        const h = harness({ items: [riptideTrident] });
+        const receipt = await throwItemSkill(h.bot, 'trident', 10, 70, 0, h.deps, FAST);
+        expect(receipt).not.toContain('冲刺');
+        expect(h.activated).toBe(1);
+        expect(h.count('trident')).toBe(0);
+    });
+
+    it('没有激流的三叉戟在水里也照常投掷', async () => {
+        const h = harness({ items: [{ name: 'trident', count: 1 }], inWater: true });
+        const receipt = await throwItemSkill(h.bot, 'trident', 10, 70, 0, h.deps, FAST);
+        expect(receipt).not.toContain('冲刺');
+        expect(h.activated).toBe(1);
+        expect(h.count('trident')).toBe(0);
+    });
+});
 // ───────────────────────── 六、接线 / 门禁 ─────────────────────────
 
 describe('接线：registry 与 schema', () => {
