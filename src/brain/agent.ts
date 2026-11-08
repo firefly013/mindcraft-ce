@@ -36,6 +36,7 @@ import { Task } from './tasks/tasks.js';
 import type { TaskData } from './tasks/tasks.js';
 import { MESSAGES } from '../shared/prompts.js';
 import { openBotWiring, type BotWiring } from './runtime/bot.js';
+import { openEvolution } from './runtime/evolution.js';
 import {
   createFeedbackTool,
   createGetPlacesTool,
@@ -45,6 +46,8 @@ import {
   createStopTool,
   createUpdateGoalTool,
 } from './tools/control_tools.js';
+import { createRestartAppTool } from './tools/evolution_tools.js';
+import { EVOLVE_RESTART_DELAY_MS, EVOLVE_RESTART_EXIT_CODE, isEvolutionMode } from '../shared/evolution.js';
 import { longRangeNudge, type ReceiptHint } from './tools/long_range_hint.js';
 import { EventIntake } from './runtime/events.js';
 import type { EventAction, GameEvent } from './runtime/events.js';
@@ -205,6 +208,14 @@ export class Agent {
      * 和它自己死的（事故）。只有后者才该触发退出。
      */
     private killing = false;
+
+    /**
+     * 自进化重启的定时器。`null` = 没有排过重启。
+     *
+     * 只排一次：模型重复调 restartApp，或者退出路径先跑起来，都返回 false，
+     * 不把退出时间往后推。
+     */
+    private evolutionRestartTimer: ReturnType<typeof setTimeout> | null = null;
 
     /** 进程入口用它把身体端口交进来（`start()` 之前调用）。 */
     setBodyPort(port: number): void {
@@ -824,12 +835,17 @@ export class Agent {
         }
         const baseDir = `./bots/${this.name}`;
         const sink = createRequestLogSink({ dir: `${baseDir}/logs`, tools: () => this.toolNames() });
+        // 自进化模式：文件与 shell 工具、一段系统提示词，以及 restartApp。
+        // 普通模式什么都不装——这些是"手"，不是默认能力。工作目录取大脑进程的
+        // cwd：`npm run evolve` 的守护进程从仓库根拉起应用，这里就是仓库根。
+        const evolution = isEvolutionMode() ? openEvolution(process.cwd()) : null;
         try {
             const wiring = await openBotWiring({
                 name: this.name,
                 profile,
                 intake: this.intake,
                 baseDir,
+                ...(evolution == null ? {} : { env: evolution.env }),
                 systemPrompt: () => systemPromptFromProfile(profile, this.name),
                 // 每轮现实采一份世界快照（在**身体侧**采），渲染成尾巴。
                 // 这就是 `settings.allow_vision` 那句注释一直承诺、却从没接线
@@ -877,6 +893,10 @@ export class Agent {
                                 content: JSON.stringify(entry.payload),
                             })),
                     }),
+                    // 自进化模式独有：重启整个应用（普通模式退出之后没人拉起来）。
+                    ...(evolution == null
+                        ? []
+                        : [createRestartAppTool({ schedule: () => this.scheduleAppRestart() })]),
                 ],
                 onSay: (text: string): void => {
                     this.routeResponse(this.currentSource, text);
@@ -918,6 +938,9 @@ export class Agent {
                         name: 'agent-log',
                         hooks: [providerLogHook(this.log), compactionLogHook(this.log)],
                     }),
+                    // 自进化模式的工具与提示词是同一个扩展：装上工具就一定会带上
+                    // "你能改自己的代码"那段说明，不会出现有手却不知道的情况。
+                    ...(evolution == null ? [] : [evolution.extension]),
                 ],
                 // 事件落点：write / steer / preempt / emergency。
                 // 与测试台共用同一个落点（CLI 事件流 + 等结果的 runner 任务）。
@@ -1532,6 +1555,23 @@ export class Agent {
     isIdle(): boolean {
         // 大脑这边没有"身体忙闲"的本地真相；模型动作是否在跑看调度器。
         return this.scheduler == null || this.scheduler.currentAction() == null;
+    }
+
+    /**
+     * 自进化重启：只排一次，等工具回执落盘之后再退出。
+     *
+     * 不能当场 `cleanKill`：工具结果是在 `execute` 返回之后才提交的，马上退出
+     * 会让这次调用在 durable 里变成"中断"，模型重启后就看不到自己这条回执。
+     * 留 `EVOLVE_RESTART_DELAY_MS` 之后走 `cleanKill`，它会停身体、在游戏里报
+     * 一句"重启中"，再带着退出码退出，交给主进程和守护进程收尾。
+     */
+    scheduleAppRestart(): boolean {
+        if (this.evolutionRestartTimer != null || this.killing) return false;
+        this.evolutionRestartTimer = setTimeout(() => {
+            this.evolutionRestartTimer = null;
+            this.cleanKill('自进化重启，退出当前进程让守护进程拉起新代码', EVOLVE_RESTART_EXIT_CODE);
+        }, EVOLVE_RESTART_DELAY_MS);
+        return true;
     }
 
     cleanKill(msg = 'Killing agent process...', code = 1): void {

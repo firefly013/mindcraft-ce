@@ -12,7 +12,7 @@
  * EventIntake(...) ─▶ 事件 → 处理（write / steer / abort+submit / 锁通道 + 反射）
  * ```
  */
-import type { EntryDraft, Extension, ToolRegistration } from '@earendil-works/pi-durable';
+import type { EntryDraft, Extension, HarnessOptions, ToolRegistration } from '@earendil-works/pi-durable';
 import { defineExtension } from '@earendil-works/pi-durable';
 import { compactionPolicyFromProfile } from './compaction.js';
 import { EventIntake, type EventAction, type GameEvent } from './events.js';
@@ -47,6 +47,11 @@ export interface BotWiringOptions {
   tools?: readonly ToolRegistration[];
   /** 额外扩展（如请求日志 hook）。 */
   extensions?: readonly Extension[];
+  /**
+   * 工具调用与提示词渲染共用的执行环境。自进化模式由 `agent.ts` 传入一个
+   * 工作目录钉在仓库根的环境；不传 = 文件与 shell 工具没有环境可用。
+   */
+  env?: NonNullable<HarnessOptions['env']>;
   /** Say 通道出口（游戏内聊天 / 前端）。 */
   onSay?: (text: string) => void;
   /**
@@ -146,6 +151,7 @@ export async function openBotWiring(options: BotWiringOptions): Promise<BotWirin
     compaction,
     ...(options.baseDir != null ? { baseDir: options.baseDir } : {}),
     ...(options.instanceId != null ? { instanceId: options.instanceId } : {}),
+    ...(options.env != null ? { env: options.env } : {}),
     systemPrompt: options.systemPrompt,
     liveTail: options.liveTail,
     ...(options.liveImage != null ? { liveImage: options.liveImage } : {}),

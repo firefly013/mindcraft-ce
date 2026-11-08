@@ -40,6 +40,24 @@ npm start -- --profiles ./profiles/deepseek.json --mc-port 51234
 
 ---
 
+## 自我进化模式
+
+`npm run evolve` 先起一个守护进程，再由它用 `node --import tsx main.ts` 起应用。
+
+```bash
+npm run evolve -- --profiles ./profiles/overnight-a.json --mc-port 51234
+```
+
+这个模式下模型多出 5 个工具，read、write、edit、restartApp 和 shell（Windows 上是 powershell，其他平台是 bash）。它能读自己的源码、改代码、用 shell 跑 `npm run typecheck` 和测试，改完再调 restartApp 重启应用让新代码生效。会话存在 SQLite 里，重启不丢。
+
+restartApp 让应用以退出码 75 退出，守护进程收到 75 后用新代码重新拉起整个应用。普通模式里的 restart 工具只重启机器人进程，也就是大脑和身体，改 main.ts 或 MindServer 的代码时它不生效。
+
+安全边界：这些工具没有沙箱，能读写整台机器、执行任意命令。守护进程只在子进程以 75 退出时重启，其他退出码会让守护进程跟着退出。启动 10 秒内连续 5 次快速重启就放弃。
+
+`npm start` 不装这些工具，进化模式需要显式用 `npm run evolve` 启动。
+
+---
+
 ## 网页控制台与 CLI
 
 `npm start` 后会自动打开 `http://localhost:8080`，和上游一样。

@@ -390,6 +390,10 @@ export const TOOL_TEXT: Record<string, { description: string; params: Record<str
     description: '把你遇到的不顺**立刻**反馈给我们：工具报错、报错看不懂、行为不符预期、反复被拒、缺某个能力、快照信息不对或过时。看到就写，不用攒到任务结束——测试期里这条比通关本身更重要。提完接着干活，不用等回复。',
     params: { title: '一句话概括，如「寻路过水反复卡住」。', body: '说清三件事：我当时想做什么、实际发生了什么（把工具原文贴上）、期望应该怎样。' },
   },
+  restartApp: {
+    description: '重启整个应用，让磁盘上的新代码生效。大脑、身体和 MindServer 都会换新进程，会话保存在 SQLite 里不会丢，重启期间游戏掉线几秒。只在 `npm run evolve` 启动的自进化模式里有这个工具。',
+    params: {},
+  },
   // 中段推进（`commands/progression.ts`）。更长的模型侧文案住在那个文件里；
   // 这里按 check:prompts 的要求留一份参数说明（参数名必须逐字对齐 schema）。
   exploreFor: {
@@ -472,6 +476,28 @@ export const MESSAGES = {
   exiting: '退出中。',
 };
 
+/**
+ * 自进化模式的系统提示词。
+ *
+ * 普通模式没有这些工具，所以不能进 `PROMPT_SETS`——那会教模型去调一个不存在的
+ * 工具。只有 `npm run evolve` 起的大脑会追加这段（见 `brain/runtime/evolution.ts`）。
+ *
+ * `workspace` 和 `shell` 由装配方与工具环境用同一份配置传入。提示词里的路径与
+ * 真实工作目录不一致时，模型会按提示词去读另一个地方，而且不会有人报错。
+ */
+export function EVOLUTION_PROMPT(workspace: string, shell: 'bash' | 'powershell'): string {
+  return [
+    '【自进化模式】你可以读写自己的源码，改完之后可以重启应用让新代码生效。',
+    `工作区是 ${workspace}。read、write、edit 和 ${shell} 都相对这个目录工作，列目录和搜代码用 ${shell}。仓库里大脑在 src/brain，身体在 src/body，两侧共享的契约在 src/shared，测试在 tests。`,
+    '改代码之前先读相关文件和测试，只动和当前问题有关的部分，保持现有写法。改完跑 npm run typecheck 和受影响的测试，命令的原始输出和退出码会原样回到你这里，以它为准。',
+    '确认改对了再调 restartApp 重启整个应用。进程会退出，守护进程用磁盘上的代码重新拉起，会话和记忆存在 SQLite 里，重启后接着跑，重启期间游戏会掉线几秒。',
+    '磁盘上的改动没有自动回滚，改坏了应用会起不来。大改之前先 git commit 一次，出问题用 git 回滚到上一个提交再重启。',
+    'restart 工具只重启机器人进程，也就是大脑和身体，改 main.ts 或 MindServer 的代码它不会生效，那种情况用 restartApp。',
+    'auth.json 里是凭据，不要读也不要改。bots/ 下是运行数据，不是代码。',
+    '这个项目的工具只给模型手脚，不做验证表演，回执和注释都只报事实。改代码时照这个来，不要加没有实际作用的校验层，也不要假报成功。',
+  ].join('\n');
+}
+
 /** 按 profile 选提示词集：`promptSet` 指定任务变体，`prompts.*` 逐条覆盖 */
 export function resolvePromptSet(profile: AgentProfile = {} as AgentProfile): PromptSet {
   const setKey = typeof profile.promptSet === 'string' ? profile.promptSet : undefined;
@@ -485,4 +511,4 @@ export function resolvePromptSet(profile: AgentProfile = {} as AgentProfile): Pr
   return merged;
 }
 
-export default { PROMPT_SETS, TOOL_TEXT, MESSAGES, td, tp, resolvePromptSet };
+export default { PROMPT_SETS, TOOL_TEXT, MESSAGES, td, tp, resolvePromptSet, EVOLUTION_PROMPT };

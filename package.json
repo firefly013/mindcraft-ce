@@ -44,6 +44,7 @@
     "scripts": {
         "postinstall": "patch-package",
         "start": "tsx main.ts",
+        "evolve": "node scripts/evolve.mjs",
         "cli": "tsx src/cli.ts",
         "start:build": "npm run build && node dist/main.js",
         "build": "tsc && node scripts/copy-static.mjs",

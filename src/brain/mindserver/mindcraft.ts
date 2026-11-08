@@ -4,6 +4,7 @@ import { getServer } from './mcserver.js';
 import open from 'open';
 import type { Server as HttpServer } from 'http';
 import type { Settings } from '../../shared/types/common.js';
+import { EVOLVE_RESTART_EXIT_CODE } from '../../shared/evolution.js';
 import { ConfigError, validateProfile } from '../../shared/config/load.js';
 import { resolveProvider } from '../runtime/provider.js';
 
@@ -17,6 +18,9 @@ let connected = false;
 const agent_processes: Record<string, AgentProcess> = {};
 let agent_count = 0;
 let mindserver_port: number | string = 8080;
+
+/** 请求整应用重启时，给各个 agent 收摊留的时间（毫秒）。 */
+const APP_RESTART_GRACE_MS = 1500;
 
 export function init(
     host_public = false,
@@ -89,7 +93,11 @@ export async function createAgent(incomingSettings: Settings): Promise<CreateAge
             console.warn(`Attempting to connect anyway...`);
         }
 
-        const agentProcess = new AgentProcess(agent_name, mindserver_port);
+        const agentProcess = new AgentProcess(agent_name, mindserver_port, {
+            // 自进化重启由主进程统一收摊：它知道所有 agent，而 AgentProcess
+            // 只管自己那一个子进程。
+            restartApp: () => requestAppRestart(),
+        });
         agentProcess.start(load_memory, init_message, agentIndex);
         agent_processes[agent_name] = agentProcess;
     } catch (error: unknown) {
@@ -130,6 +138,23 @@ export function destroyAgent(agentName: string): void {
         agent_processes[agentName]?.stop();
         Reflect.deleteProperty(agent_processes, agentName);
     }
+}
+
+/**
+ * 自进化重启：先让所有 agent 停手，再带着重启退出码退出主进程。
+ *
+ * 不能只 `process.exit`。那会把其它 bot 的大脑和身体留成孤儿进程，新起来的
+ * MindServer 会同时看到两套机器人。`AgentProcess.stop()` 发 SIGINT，大脑侧的
+ * 信号处理会走 `cleanKill`，把 Mineflayer 连接一起带走。
+ *
+ * 退出码是 `EVOLVE_RESTART_EXIT_CODE`，只有 `npm run evolve` 的守护进程认它。
+ */
+export function requestAppRestart(): void {
+    console.log('自进化重启：先停掉所有 agent，再退出主进程交给守护进程。');
+    for (const agentName in agent_processes) {
+        agent_processes[agentName]?.stop();
+    }
+    setTimeout(() => process.exit(EVOLVE_RESTART_EXIT_CODE), APP_RESTART_GRACE_MS);
 }
 
 export function shutdown(): void {

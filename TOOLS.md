@@ -2,7 +2,7 @@
 
 来源是当前 `develop` 工作区的工具注册表，名字就是模型调用时看到的名字。
 
-身体工具 54 个，大脑工具 7 个，合计 61 个。
+身体工具 54 个，大脑工具 7 个，合计 61 个。进化模式下会再加 5 个工具，即 read、write、edit、shell、restartApp，合计 66 个。
 
 ## 大脑工具
 
@@ -15,6 +15,18 @@
 | getPlaces | 无 | 列出你记住的地名和坐标（存在会话里，重启后还在）。存一个用 rememberHere，走回去用 goToRememberedPlace。 |
 | rememberHere | name | 把当前位置存个名字记住。 |
 | goToRememberedPlace | name | 走到一个记住的位置。 |
+
+## 进化模式工具
+
+这些工具只在 `npm run evolve` 下安装，`npm start` 不会装上它们。
+
+| 工具 | 参数 | 说明 |
+| --- | --- | --- |
+| read | path, offset, limit | 读文本文件，超过行数或字节上限会截断，回执里说明从哪一行继续。 |
+| write | path, content | 覆盖写一个文本文件，不存在就创建。 |
+| edit | path, edits | 按 edits 里的 oldText 和 newText 批量替换文本，回执带 diff。 |
+| shell（Windows 上是 powershell，其他平台是 bash） | command, timeout | 在工作目录执行一条命令，返回合并后的 stdout 和 stderr，超时以秒计。 |
+| restartApp | 无 | 重启整个应用，让改过的代码生效。进程以退出码 75 退出，由守护进程重新拉起。 |
 
 ## 身体工具
 

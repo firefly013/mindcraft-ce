@@ -35,16 +35,25 @@ for (const fp of COMMAND_FILES) {
 for (const name of CONTROL_TOOLS) used.set(name, new Set<string>());
 /**
  * **大脑侧工具**：它们不是"命令"，而是 pi-durable 的 `defineTool`（住在
- * `brain/tools/control_tools.ts`），所以命令文件里扫不到。地点三件套就是这类——
- * 真源在会话文档里，不该由身体回答（见 control_tools 里 PlacesDeps 的说明）。
+ * `brain/tools/control_tools.ts` 与 `evolution_tools.ts`），所以命令文件里扫不到。
+ * 地点三件套就是这类——真源在会话文档里，不该由身体回答（见 control_tools 里
+ * PlacesDeps 的说明）。`restartApp` 只在自进化模式下装配，但它的提示词同样
+ * 必须有 TOOL_TEXT，否则提示词与工具会各说各的。
  */
-const BRAIN_SIDE_TOOLS = ['getPlaces', 'rememberHere', 'goToRememberedPlace'];
-for (const m of readFileSync('./src/brain/tools/control_tools.ts', 'utf8').matchAll(/td\('([^']+)'\)/g)) {
-  used.set(m[1] as string, new Set<string>());
-}
-for (const m of readFileSync('./src/brain/tools/control_tools.ts', 'utf8').matchAll(/tp\('([^']+)',\s*'([^']+)'\)/g)) {
-  if (!used.has(m[1] as string)) used.set(m[1] as string, new Set<string>());
-  used.get(m[1] as string)?.add(m[2] as string);
+const BRAIN_SIDE_TOOL_FILES = [
+  './src/brain/tools/control_tools.ts',
+  './src/brain/tools/evolution_tools.ts',
+];
+const BRAIN_SIDE_TOOLS = ['getPlaces', 'rememberHere', 'goToRememberedPlace', 'restartApp'];
+for (const name of BRAIN_SIDE_TOOLS) used.set(name, new Set<string>());
+for (const file of BRAIN_SIDE_TOOL_FILES) {
+  for (const m of readFileSync(file, 'utf8').matchAll(/td\('([^']+)'\)/g)) {
+    used.set(m[1] as string, new Set<string>());
+  }
+  for (const m of readFileSync(file, 'utf8').matchAll(/tp\('([^']+)',\s*'([^']+)'\)/g)) {
+    if (!used.has(m[1] as string)) used.set(m[1] as string, new Set<string>());
+    used.get(m[1] as string)?.add(m[2] as string);
+  }
 }
 let fail = 0;
 for (const [key, params] of used) {

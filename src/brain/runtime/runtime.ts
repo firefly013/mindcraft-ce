@@ -14,6 +14,7 @@ import {
   type ConversationWatch,
   type EntryDraft,
   type Extension,
+  type HarnessOptions,
   type Submission,
   type SubmissionDraft,
   type ToolRegistration,
@@ -65,6 +66,11 @@ export interface BotRuntimeOptions {
   onSay?: (text: string) => void;
   /** 额外扩展（状态文档等，后续阶段接）。 */
   extensions?: readonly Extension[];
+  /**
+   * 工具调用与提示词渲染共用的执行环境（`HarnessOptions.env`）。不给就没有环境：
+   * 只有装进来的文件/shell 工具会受影响，游戏工具照走身体通道。
+   */
+  env?: NonNullable<HarnessOptions['env']>;
   /**
    * 空转护栏（模型只说话不调工具 → 按回去继续）。**默认不开**，由装配层决定。
    *
@@ -137,6 +143,7 @@ export async function openBotRuntime(options: BotRuntimeOptions): Promise<BotRun
     ...(options.compaction != null ? { compaction: options.compaction } : {}),
     baseDir: options.baseDir,
     instanceId: options.instanceId,
+    ...(options.env != null ? { env: options.env } : {}),
   });
 
   const conversation = session.conversation;

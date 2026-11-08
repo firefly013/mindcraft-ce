@@ -6,7 +6,7 @@
  *
  * 用 faux provider，不联网。
  */
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { composeLiveTail } from '../src/body/live_state.js';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -14,8 +14,9 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { BACKGROUND_CONTEXT } from '@earendil-works/chord/context';
 import { Type, createModels } from '@earendil-works/pi-ai';
 import { fauxAssistantMessage, fauxProvider, fauxToolCall } from '@earendil-works/pi-ai/providers/faux';
-import { defineTool } from '@earendil-works/pi-durable';
+import { defineTool, type Extension } from '@earendil-works/pi-durable';
 import { openBotWiring, type BotWiring } from '../src/brain/runtime/bot.js';
+import { openEvolution } from '../src/brain/runtime/evolution.js';
 import { SayEntry } from '../src/brain/runtime/entries.js';
 import { EventIntake } from '../src/brain/runtime/events.js';
 import type { GameEvent } from '../src/brain/runtime/events.js';
@@ -62,7 +63,13 @@ function ev(type: string, level: number, text: string): GameEvent {
   return { type, kind: 'World', level: level as GameEvent['level'], payload: {}, text, ts: Date.now(), reflex: null, completes: null };
 }
 
-async function openHarness(intake?: EventIntake): Promise<Harness> {
+/** 额外的装配项（只有自进化那条集成测试用）。 */
+interface ExtraWiring {
+  extensions?: Extension[];
+  env?: ReturnType<typeof openEvolution>['env'];
+}
+
+async function openHarness(intake?: EventIntake, extra?: ExtraWiring): Promise<Harness> {
   const faux = fauxProvider({ models: [{ id: 'mc-test' }] });
   const models = createModels();
   models.setProvider(faux.provider);
@@ -101,6 +108,8 @@ async function openHarness(intake?: EventIntake): Promise<Harness> {
     }),
     tools: [Look],
     onSay: (text) => said.push(text),
+    ...(extra?.extensions != null ? { extensions: extra.extensions } : {}),
+    ...(extra?.env != null ? { env: extra.env } : {}),
     // 这一组测的是**装配层语义**（尾巴、事件分流、Say 双通道），断言按
     // "几次请求 = 几次调用"来数。空转护栏会在 yield 之后追加请求，把计数
     // 搅乱，所以这里显式关掉；护栏本身的行为由 `runtime_stall_guard.test.ts`
@@ -238,6 +247,26 @@ describe('装配层全栈', () => {
     const page = await h.wiring.runtime.conversation.entries({}, 50, undefined, ctx);
     expect(page.items.some((entry) => entry.kind === 'pi.tool-result')).toBe(true);
     expect(JSON.stringify(page.items)).toContain('是平原。');
+    await h.wiring.close();
+  });
+
+  it('自进化扩展：read / write 真的读写仓库根下的文件', async () => {
+    const workspace = tempDir();
+    const evolution = openEvolution(workspace, 'linux');
+    const h = await openHarness(undefined, { extensions: [evolution.extension], env: evolution.env });
+    h.faux.setResponses([
+      fauxAssistantMessage([fauxToolCall('write', { path: 'notes.txt', content: '改完了' })], {
+        stopReason: 'toolUse',
+      }),
+      fauxAssistantMessage([fauxToolCall('read', { path: 'notes.txt' })], { stopReason: 'toolUse' }),
+      fauxAssistantMessage('读写完成。'),
+    ]);
+    await (await h.wiring.runtime.submit('改个文件')).wait(ctx);
+
+    // 文件真的落在装配时给的环境工作目录里，而不是进程的 cwd。
+    expect(readFileSync(join(workspace, 'notes.txt'), 'utf8')).toBe('改完了');
+    const page = await h.wiring.runtime.conversation.entries({}, 50, undefined, ctx);
+    expect(JSON.stringify(page.items)).toContain('改完了');
     await h.wiring.close();
   });
 

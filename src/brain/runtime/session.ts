@@ -15,6 +15,7 @@ import {
   Harness,
   type CompactionPolicy,
   type Conversation,
+  type HarnessOptions,
   type ModelRef,
   type RegistryReader,
   type ToolRegistration,
@@ -65,6 +66,13 @@ export interface BotSessionOptions<Tool extends ToolRegistration = ToolRegistrat
   baseDir?: string;
   /** 实例区分后缀，用于同名/同 profile 多开时避免撞同一个库文件。 */
   instanceId?: string;
+  /**
+   * 工具调用与提示词渲染共用的执行环境（`HarnessOptions.env`）。
+   *
+   * 不给 = 没有环境，装进来的文件与 shell 工具会返回普通错误结果。自进化模式
+   * 由装配层传入一个工作目录钉在仓库根的环境（见 `runtime/evolution.ts`）。
+   */
+  env?: NonNullable<HarnessOptions['env']>;
 }
 
 export interface BotSession {
@@ -88,6 +96,7 @@ export async function openBotSession<Tool extends ToolRegistration>(
       models: options.models,
       registry: options.registry,
       ...(options.compaction != null ? { settings: { compaction: options.compaction } } : {}),
+      ...(options.env != null ? { env: options.env } : {}),
     },
     BACKGROUND_CONTEXT,
   );

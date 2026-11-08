@@ -43,6 +43,15 @@ await (async () => {
         const agent = new Agent();
         agent.setBodyPort(bodyPort);
         serverProxy.setAgent(agent);
+        // `AgentProcess.stop()` 用 SIGINT 停 agent。走 `cleanKill` 才会把身体
+        // （Mineflayer 连接）一起带走——默认的信号处理只杀大脑，身体会留在
+        // 服务器里变成没人管的连接。退出码保持 1，主进程那边因为 stopRequested
+        // 不会把它当崩溃重启。
+        const stopOnSignal = (): void => {
+            agent.cleanKill('收到退出信号，正在关闭', 1);
+        };
+        process.on('SIGINT', stopOnSignal);
+        process.on('SIGTERM', stopOnSignal);
         await agent.start(argv.load_memory, argv.init_message ?? null, argv.count_id);
     } catch (error: unknown) {
         console.error('Failed to start agent process:');

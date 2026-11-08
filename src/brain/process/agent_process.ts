@@ -2,6 +2,7 @@ import { spawn, type ChildProcess } from 'child_process';
 import { existsSync } from 'fs';
 import { fileURLToPath } from 'url';
 import { logoutAgent } from '../mindserver/mindserver.js';
+import { EVOLVE_RESTART_EXIT_CODE } from '../../shared/evolution.js';
 import { BODY_PORT_BASE } from './body_launcher.js';
 
 /**
@@ -72,6 +73,11 @@ export interface AgentProcessDependencies {
     setTimer: (callback: () => void, delayMs: number) => ReturnType<typeof setTimeout>;
     clearTimer: (timer: ReturnType<typeof setTimeout>) => void;
     exit: (code: number) => void;
+    /**
+     * 自进化重启：agent 以 `EVOLVE_RESTART_EXIT_CODE` 退出时调用。主进程知道
+     * 其它 agent 的存在，只有它能先让所有人收摊再退出；没有注入时退回直接退出。
+     */
+    restartApp: (code: number) => void;
     log: (message: string) => void;
     warn: (message: string) => void;
     error: (message: string | Error) => void;
@@ -83,6 +89,7 @@ const defaultDependencies: AgentProcessDependencies = {
     setTimer: (callback, delayMs) => setTimeout(callback, delayMs),
     clearTimer: (timer) => clearTimeout(timer),
     exit: (code) => process.exit(code),
+    restartApp: (code) => process.exit(code),
     log: (message) => console.log(message),
     warn: (message) => console.warn(message),
     error: (message) => console.error(message),
@@ -184,6 +191,19 @@ export class AgentProcess {
             'Agent ' + this.name + ' exited after ' + runtimeMs + 'ms ' +
             '(code=' + (code ?? 'null') + ', signal=' + (signal ?? 'null') + ').',
         );
+
+        // 自进化重启：模型要求换掉整个应用（包括 main.ts / MindServer 的代码）。
+        // 它和"任务失败"共用 code > 1 的区间，但语义相反——**要**重启，只是
+        // 重启的发起者得换成主进程：主进程先让所有 agent 收摊，再带着同一个
+        // 退出码退出，由外面的守护进程用新代码重新拉起整棵树。
+        if (code === EVOLVE_RESTART_EXIT_CODE) {
+            this.clearRestartTimer();
+            this.deps.log(
+                'Agent ' + this.name + ' requested an app restart; restarting the whole app.',
+            );
+            this.deps.restartApp(code);
+            return;
+        }
 
         // 保留语义：code > 1 是任务级失败，结束整个主进程，不自动重启。
         if (code !== null && code > 1) {

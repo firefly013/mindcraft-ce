@@ -7,6 +7,7 @@ import {
     QUICK_EXIT_WINDOW_MS,
     quickRestartBackoffMs,
 } from '../src/brain/process/agent_process.js';
+import { EVOLVE_RESTART_EXIT_CODE } from '../src/shared/evolution.js';
 
 vi.mock('../src/brain/mindserver/mindserver.js', () => ({
     logoutAgent: vi.fn(),
@@ -29,7 +30,15 @@ interface Harness {
     warns: string[];
     errors: string[];
     exitCodes: number[];
+    restartCodes: number[];
     spawnCalls: () => number;
+}
+
+/** 第 index 次派生的假子进程。下标写错就当场报错，别伪装成通过。 */
+function child(h: Harness, index: number): FakeChild {
+    const spawned = h.children[index];
+    if (spawned == null) throw new Error(`没有第 ${index} 个子进程`);
+    return spawned;
 }
 
 function makeHarness(): Harness {
@@ -38,6 +47,7 @@ function makeHarness(): Harness {
     const warns: string[] = [];
     const errors: string[] = [];
     const exitCodes: number[] = [];
+    const restartCodes: number[] = [];
     const spawn = vi.fn(() => {
         const child = new FakeChild();
         children.push(child);
@@ -46,13 +56,14 @@ function makeHarness(): Harness {
     const agent = new AgentProcess('overnight_a', 8080, {
         spawn,
         exit: (code) => { exitCodes.push(code); },
+        restartApp: (code) => { restartCodes.push(code); },
         log: (message) => { logs.push(message); },
         warn: (message) => { warns.push(message); },
         error: (message) => {
             errors.push(typeof message === 'string' ? message : message.message);
         },
     });
-    return { agent, children, logs, warns, errors, exitCodes, spawnCalls: () => spawn.mock.calls.length };
+    return { agent, children, logs, warns, errors, exitCodes, restartCodes, spawnCalls: () => spawn.mock.calls.length };
 }
 
 describe('AgentProcess 启动自愈', () => {
@@ -64,7 +75,7 @@ describe('AgentProcess 启动自愈', () => {
         h.agent.start(false, null, 0);
         expect(h.spawnCalls()).toBe(1);
 
-        h.children[0]!.emit('exit', 1, null);
+        child(h, 0).emit('exit', 1, null);
         expect(h.spawnCalls()).toBe(1);
         expect(h.warns.join('\n')).toContain('quick crash 1/' + MAX_QUICK_RESTARTS);
         expect(h.warns.join('\n')).toContain('Restart #1 scheduled in 1000ms');
@@ -72,7 +83,7 @@ describe('AgentProcess 启动自愈', () => {
         vi.advanceTimersByTime(1000);
         expect(h.spawnCalls()).toBe(2);
 
-        h.children[1]!.emit('exit', 1, null);
+        child(h, 1).emit('exit', 1, null);
         expect(h.warns.join('\n')).toContain('Restart #2 scheduled in 2000ms');
         vi.advanceTimersByTime(2000);
         expect(h.spawnCalls()).toBe(3);
@@ -83,12 +94,12 @@ describe('AgentProcess 启动自愈', () => {
         h.agent.start(false, null, 0);
 
         for (let attempt = 1; attempt <= MAX_QUICK_RESTARTS; attempt += 1) {
-            h.children[attempt - 1]!.emit('exit', 1, null);
+            child(h, attempt - 1).emit('exit', 1, null);
             vi.advanceTimersByTime(quickRestartBackoffMs(attempt));
         }
         expect(h.spawnCalls()).toBe(1 + MAX_QUICK_RESTARTS);
 
-        h.children[MAX_QUICK_RESTARTS]!.emit('exit', 1, null);
+        child(h, MAX_QUICK_RESTARTS).emit('exit', 1, null);
         vi.advanceTimersByTime(10 * 60 * 1000);
         expect(h.spawnCalls()).toBe(1 + MAX_QUICK_RESTARTS);
         expect(h.errors.join('\n')).toContain('limit of ' + MAX_QUICK_RESTARTS);
@@ -100,11 +111,11 @@ describe('AgentProcess 启动自愈', () => {
         h.agent.start(false, null, 0);
 
         vi.advanceTimersByTime(QUICK_EXIT_WINDOW_MS + 1);
-        h.children[0]!.emit('exit', 1, null);
+        child(h, 0).emit('exit', 1, null);
         expect(h.spawnCalls()).toBe(2);
         expect(h.logs.join('\n')).toContain('restart #1 starting immediately');
 
-        h.children[1]!.emit('exit', 1, null);
+        child(h, 1).emit('exit', 1, null);
         expect(h.warns.join('\n')).toContain('quick crash 1/' + MAX_QUICK_RESTARTS);
         expect(h.warns.join('\n')).toContain('Restart #2 scheduled in 1000ms');
         vi.advanceTimersByTime(1000);
@@ -114,16 +125,29 @@ describe('AgentProcess 启动自愈', () => {
     it('code > 1 保留结束任务语义：退出整个进程且不重启', () => {
         const h = makeHarness();
         h.agent.start(false, null, 0);
-        h.children[0]!.emit('exit', 2, null);
+        child(h, 0).emit('exit', 2, null);
         expect(h.exitCodes).toEqual([2]);
+        expect(h.restartCodes).toEqual([]);
         expect(h.spawnCalls()).toBe(1);
         expect(h.logs.join('\n')).toContain('ended the task with exit code 2');
+    });
+
+    it('重启退出码交给主进程收摊，不直接退出也不自动重启', () => {
+        const h = makeHarness();
+        h.agent.start(false, null, 0);
+        child(h, 0).emit('exit', EVOLVE_RESTART_EXIT_CODE, null);
+        expect(h.restartCodes).toEqual([EVOLVE_RESTART_EXIT_CODE]);
+        // 不是任务失败：这条路径不能让 AgentProcess 自己 process.exit。
+        expect(h.exitCodes).toEqual([]);
+        expect(h.logs.join('\n')).toContain('requested an app restart');
+        vi.advanceTimersByTime(60_000);
+        expect(h.spawnCalls()).toBe(1);
     });
 
     it('code 0 正常退出不重启', () => {
         const h = makeHarness();
         h.agent.start(false, null, 0);
-        h.children[0]!.emit('exit', 0, null);
+        child(h, 0).emit('exit', 0, null);
         vi.advanceTimersByTime(60_000);
         expect(h.spawnCalls()).toBe(1);
     });
@@ -131,7 +155,7 @@ describe('AgentProcess 启动自愈', () => {
     it('stop() 会取消等待中的退避重启', () => {
         const h = makeHarness();
         h.agent.start(false, null, 0);
-        h.children[0]!.emit('exit', 1, null);
+        child(h, 0).emit('exit', 1, null);
         expect(h.warns.join('\n')).toContain('scheduled in 1000ms');
 
         h.agent.stop();
